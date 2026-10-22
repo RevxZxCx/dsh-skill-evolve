@@ -48,16 +48,31 @@ Set `triggers: []` to disable both, `['turn']` or `['repeat']` to keep one.
 
 The detector sees **tool names only**, never arguments. A `read` of `a.txt` and a `read` of `b.txt` are the same step.
 
-Four rules, each of which exists because the naive version misfired on a real transcript:
+That is not enough on its own, and the failure is not subtle. On a real 6,145-call session — six days of driving an Android emulator — 85% of the calls were `bash`, so the detector saw `bash, bash, bash` and reported nothing. The most valuable workflow in that session (screenshot → parse the UI dump → look at the image → tap → screenshot again) was structurally invisible.
+
+So a shell call is expanded into the commands it runs before it joins the history:
+
+| Command | Recorded as |
+|---|---|
+| `cd /f/bot && pnpm test && git diff --stat` | `pkg test`, `git diff` |
+| `adb -s emulator-5554 shell input tap 100 200` | `adb shell` |
+| `python parse_ui.py s.png` | `py` |
+| `npx tsc --noEmit` | `build` |
+
+Four rules then apply, each of which exists because the naive version misfired on a real transcript:
 
 | Rule | Why |
 |---|---|
 | Non-overlapping occurrence counting | `a,b,c,a,b,c` is two procedures, not four overlapping windows |
-| At least 3 distinct tool names | A real 487-call session spent its entire hint budget on `bash × 5 → todo_write`, which is "I ran commands and ticked a box" |
-| No single tool filling half the window | Same habit, longer lens |
-| The same habit is announced once | `read,edit,bash` and later `read,edit,bash,grep` are one workflow, not two |
+| At least 3 distinct steps | A real 487-call session spent its entire hint budget on `bash × 5 → todo_write`, which is "I ran commands and ticked a box" |
+| No single step filling half the window | Same habit, longer lens |
+| The same habit is announced once | `read,edit,bash` and later `read,edit,bash,grep` are one workflow; so are the rotations `read,edit,bash` and `bash,read,edit` |
 
-Replaying a real 487-call coding session through the final rules publishes **0 hints** — correctly, because that session repeated habits rather than workflows. A synthetic session containing a genuine inspect→patch→verify loop publishes **1**.
+The command expansion is deliberately coarse. `npm test` and `pnpm test` are the same step, because the question a procedure answers is "what did the work", not "which binary was on PATH". Programming-language payloads stay opaque: `python x.py` is one `py` step, never the forty lines inside it. Heredocs and inline scripts are stripped before splitting, because a real session turned `node -e "..."` into steps named `n.cd` and `['+n.cd+']')).slice(0,54).padEnd(56)` before that was fixed. Set `commandSignature: false` for the older name-only behaviour.
+
+Replaying a real 487-call coding session through the final rules publishes **0 hints** — correctly, because that session repeated habits rather than workflows. A synthetic session containing a genuine inspect→patch→verify loop publishes **1**. Replaying the 6,145-call emulator session at `minRepeatCount: 3` publishes 1 hint from tool names and 4 from commands, and one of those four is the screenshot loop that name-level detection could not see at all.
+
+Threshold 2 is available but noisy on long sessions: the same 6,145-call transcript publishes four hints at threshold 3 and spends its whole budget of four at threshold 2, one of them on `bash,bash,todo_write,read`. Threshold 3 is the recommended setting on long sessions; the default is left at 2 because a short session may not produce three clean repetitions of anything.
 
 ### The hint
 
@@ -214,6 +229,7 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `reflectionMinToolCalls` | `4` | Tool calls a turn needs before reflecting on it |
 | `maxReflectionsPerSession` | `2` | Hard cap on turn-end reflections |
 | `minRepeatCount` | `2` | Occurrences before a procedure is reported |
+| `commandSignature` | `true` | Expand shell calls into their commands (`pnpm test && git diff` → two steps) instead of recording one `bash` |
 | `repeatWindowMax` | `6` | Widest window treated as one procedure |
 | `minWindow` | `3` | Narrowest window considered |
 | `maxHintsPerSession` | `4` | Hint budget per session |

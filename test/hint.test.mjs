@@ -9,7 +9,7 @@
  * 2. spending its budget on procedures nobody asked about.
  */
 
-import { HintChannel, isSubRun, renderHint } from '../lib/hint.js'
+import { HintChannel, isSameHabit, isSubRun, renderHint } from '../lib/hint.js'
 
 let pass = 0
 let fail = 0
@@ -35,6 +35,23 @@ check('a longer run is not inside a shorter one', !isSubRun(['a', 'b', 'c'], ['a
 check('a non-contiguous match is not a sub-run', !isSubRun(['a', 'c'], ['a', 'b', 'c']))
 check('identical runs match', isSubRun(['a', 'b'], ['a', 'b']))
 check('an empty needle never matches', !isSubRun([], ['a']))
+
+// ---- isSameHabit ----------------------------------------------------------
+//
+// These cases come from a real 6,145-call transcript: the same screenshot loop
+// was announced twice because the detector observed it starting at different
+// offsets, and the channel only compared contiguous runs.
+check('equal sequences are one habit', isSameHabit(['a', 'b', 'c'], ['a', 'b', 'c']))
+check('a run inside a longer one is one habit', isSameHabit(['a', 'b'], ['a', 'b', 'c']))
+check('a rotation is one habit', isSameHabit(['a', 'b', 'c'], ['b', 'c', 'a']))
+check('a rotation the other way is one habit', isSameHabit(['a', 'b', 'c'], ['c', 'a', 'b']))
+check('a cycle seen through a shifted window is one habit', isSameHabit(['adb', 'py', 'read_image'], ['read_image', 'adb', 'py']))
+check(
+  'diverging after a shared prefix is two habits',
+  !isSameHabit(['read', 'edit', 'bash'], ['read', 'edit', 'grep'])
+)
+check('unrelated procedures are two habits', !isSameHabit(['read', 'edit', 'bash'], ['adb', 'py', 'read_image']))
+check('an empty sequence is never a habit', !isSameHabit([], ['a']))
 
 // ---- dedupe ---------------------------------------------------------------
 {
