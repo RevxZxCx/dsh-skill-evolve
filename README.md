@@ -108,13 +108,23 @@ Host-injected context (runtime reminders, skill catalogs, the system prompt) lan
 
 ### Lifecycle
 
-Four stages, driven by feedback rather than by a timer:
+Four stages, driven by evidence rather than by a timer:
 
 ```
-unverified --(promoteAfterUses helpful reports)--> active
-active     --(staleAfterDays without validation)--> stale
+unverified --(promoteAfterUses loads)--> active
+active     --(staleAfterDays without a load)--> stale
 any        --(invertAfterHarmful harmful reports)--> inverted
 ```
+
+**A load counts as a use.** When the model calls the host's `skill` tool with the name of a skill this plugin wrote, that is the one reliable signal that the skill was actually read — the catalog is served from memory, so nothing else fires. Each load increments `uses`, appends a `skill_used` line to the ledger, and refreshes `validated`. Counting is skipped for any name whose file does not exist or is not ours, so a model cannot inflate a counter by naming somebody else's skill.
+
+Counting happens at dispatch rather than at result. Pairing a call with its result means holding a `callId → name` map and hoping the result always arrives; an interrupted call would silently drop a use, and an under-count is the failure that matters — it keeps a good skill `unverified` forever. The ownership check already rules out the common false load, so the residual error leans toward counting one that went on to fail.
+
+This is *not* gated on `mode`. `mode` governs detection and creation; bookkeeping of skills that already exist is a separate question, and turning hints off does not mean the approved skills stopped being used.
+
+`skill_feedback` remains the explicit signal — a person or the model saying "this helped" or "this hurt" — and it alone can raise `helpful` or `harmful`. Usage says a skill was *reached*; only feedback says it *worked*.
+
+Counters live in two places on purpose: `registry.json` is the read path, and the skill file's frontmatter is the durable copy. If the registry is lost, the next load rebuilds the entry from the file — which is why every load rewrites the file rather than only rewriting it when the stage moves.
 
 `inverted` is terminal until rewritten: the file gains a `PITFALL` section at the top and keeps the original procedure underneath, because a warning is only trustworthy if a reader can see what it warns about.
 
