@@ -50,6 +50,13 @@ function fakeHost() {
       effects.push({ dispose: result, label })
       return result
     },
+    // Mirrors cordis: the callback runs once every named service resolves, in
+    // a child context. The fake host has all of them at mount time.
+    inject(names, callback) {
+      const missing = names.filter((name) => ctx[name] === undefined)
+      if (missing.length > 0) return undefined
+      return callback(ctx)
+    },
     tools: {
       register(tool) {
         tools.set(tool.name, tool)
@@ -140,7 +147,7 @@ try {
   const agent = fakeAgent('session-abc', 'F:/some/project')
   host.agents.set(agent.id, agent)
   // The transcript the evidence gate will search.
-  agent.push({ type: 'user/message', seq: 1, data: { message: { role: 'user', content: [{ type: 'text', text: 'The PDF has no text layer, so pdftotext returns nothing. Use OCR instead.' }] } } })
+  agent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'The PDF has no text layer, so pdftotext returns nothing. Use OCR instead.' }], source: { kind: 'user' } } })
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
   check('three tools registered', host.tools.size === 3, [...host.tools.keys()].join(','))
@@ -300,6 +307,15 @@ try {
   check('the inverted file keeps the original instructions', inverted.includes('Run OCR at 300 dpi'))
   check('the inverted file states the harmful count', inverted.includes('3 times'))
 
+  // Every feedback report rewrote the same file. A `FileHandle` keeps its
+  // offset after a read and `truncate(0)` does not rewind it, so writing the
+  // new text used to leave `oldLength` NUL bytes in front of the frontmatter.
+  // The file still parsed — the frontmatter scan starts at the first `---` —
+  // which is exactly why this needs its own assertion instead of a parse check.
+  const rawBytes = await readFile(join(skillsRoot, 'scanned-pdf-tables', 'SKILL.md'))
+  check('rewriting a skill does not leave NUL padding', rawBytes.includes(0) === false, `first NUL at ${rawBytes.indexOf(0)}`)
+  check('the rewritten file still starts with its frontmatter', rawBytes.subarray(0, 3).toString('utf8') === '---', rawBytes.subarray(0, 12).toString('utf8'))
+
   const stats = await host.commands.get('skill-stats').handler({ rawInput: '', agent })
   check('stats lists the managed skill', stats.kind === 'success' && stats.text.includes('scanned-pdf-tables'))
   check('stats shows the inverted stage', stats.text.includes('inverted'), stats.text)
@@ -324,7 +340,7 @@ try {
   const autoHost = fakeHost()
   apply(autoHost.ctx, Config({ mode: 'auto' }))
   const autoAgent = fakeAgent('session-auto', 'F:/p')
-  autoAgent.push({ type: 'user/message', seq: 1, data: { message: { role: 'user', content: [{ type: 'text', text: 'Always run the linter before committing here.' }] } } })
+  autoAgent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'Always run the linter before committing here.' }], source: { kind: 'user' } } })
   const autoResult = await autoHost.tools.get('skill_candidate_submit').execute({
     name: 'lint-before-commit',
     description: 'Run the linter before committing.',

@@ -59,6 +59,11 @@ function fakeHost(options = {}) {
     effect(register) {
       return register()
     },
+    inject(names, callback) {
+      const missing = names.filter((name) => ctx[name] === undefined)
+      if (missing.length > 0) return undefined
+      return callback(ctx)
+    },
     tools: {
       register(tool) {
         tools.set(tool.name, tool)
@@ -133,7 +138,7 @@ try {
   apply(host.ctx, Config({ mode: 'suggest' }))
   const agent = fakeAgent('session-one', 'F:/project')
   host.agents.set(agent.id, agent)
-  agent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { text: evidence[0].quote } })
+  agent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: evidence[0].quote }] } })
   agent.push({ type: 'tool/call', seq: 2, time: Date.now(), data: { turn: 1, step: 1, callId: 'c1', name: 'bash', arguments: '{"command":"pdftotext scanned.pdf"}' } })
 
   const submit = host.tools.get('skill_candidate_submit')
@@ -213,7 +218,7 @@ try {
   apply(staleHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true }))
   const staleAgent = fakeAgent('session-two', 'F:/project')
   staleHost.agents.set(staleAgent.id, staleAgent)
-  staleAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { text: 'use 300 dpi and check the log' } })
+  staleAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
 
   // A candidate whose session still exists can be approved.
   await staleHost.tools.get('skill_candidate_submit').execute({
@@ -297,7 +302,7 @@ try {
   apply(directHost.ctx, Config({ mode: 'suggest', approvalMode: 'direct' }))
   const directAgent = fakeAgent('session-three', 'F:/project')
   directHost.agents.set(directAgent.id, directAgent)
-  directAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { text: 'always run the tests before committing here' } })
+  directAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'always run the tests before committing here' }] } })
 
   await directHost.tools.get('skill_candidate_submit').execute({
     name: 'direct-write', description: 'a skill approved in one step', body: 'b', evidence: [{ class: 'user', quote: 'always run the tests before committing here' }]

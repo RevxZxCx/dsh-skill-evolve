@@ -19,7 +19,7 @@ Five findings from the research in `docs/` shaped every decision here. They are 
 
 **Prompt injection must be static.** The host re-assembles dynamic contexts every step, so any change to the injected text invalidates the prefix cache for the whole conversation. Hermes freezes its memory snapshot at session start for exactly this reason, and `hermes-agent-self-evolution` lists "no mid-conversation changes" as a hard guardrail. This plugin renders one hint string that stays byte-identical until a new procedure is worth mentioning, and renders `''` — fully absent, zero tokens — otherwise.
 
-**Evidence gates beat prompt instructions.** `distill-kura` found that telling an agent "don't hallucinate" does not work; a deterministic check does. Every evidence quote submitted here is searched for character-for-character in the session transcript. Fabricated quotes are rejected and echoed back so the model can see what it invented.
+**Evidence gates beat prompt instructions.** `distill-kura` found that telling an agent "don't hallucinate" does not work; a deterministic check does. Every evidence quote submitted here is searched for character-for-character in the session transcript — but only in the lane its class claims, because a flat corpus lets the model quote itself and call it a tool result. Fabricated quotes are rejected and echoed back so the model can see what it invented.
 
 **A skill that hurt should become a warning, not disappear.** `cass-memory` inverts repeatedly-harmful rules into `PITFALL:` anti-patterns: "Bad rules don't just get deleted — they become warnings." The same rule applies here at `invertAfterHarmful`.
 
@@ -87,6 +87,24 @@ Four classes of evidence, each with different authority:
 | `self` | The model's own narration | first-person judgement only, never a bare fact |
 
 A submission survives only if at least one quote verifies **and** at least one `user` or `tool` quote survives. Self-narration alone is rejected with an explanation, because a skill is authoritative for future sessions.
+
+Each class is checked against **its own lane** of the session, not against one concatenated blob:
+
+| Lane | Built from |
+|---|---|
+| `user` | `user/message` authored by the human (`source.kind === "user"`) |
+| `tool` | `tool/result` payloads — machine output |
+| `action` | `tool/call` records: the name and the arguments the host dispatched |
+| `self` | assistant prose only |
+
+The revision that introduced lanes exists because a single corpus does not work. The model's reasoning, its tool calls and the machine's output all land in the same string, so it could quote itself and label the quote `tool` — a check that passes while proving nothing, which is the exact failure the gate is supposed to prevent.
+
+Two details that look like nits and are not:
+
+- **Tool arguments go in `action`, not `self`.** The text is a name and the arguments the host logged when it dispatched the call. That proves the call was made; it does not prove it succeeded, which is why `action` is not authoritative. Putting arguments in `self` instead would leave only tool names in `action` — `bash` is four characters, below the minimum quotable length, so the class would be unusable and the model would relabel the same fact as `tool`.
+- **The model's `tool-call` block is not collected anywhere.** It is the model's *draft* of the call and exists whether or not dispatch ever happened. Admitting it would let a hallucinated call manufacture its own evidence.
+
+Host-injected context (runtime reminders, skill catalogs, the system prompt) lands in a `system` lane that no evidence class may cite.
 
 ### Lifecycle
 
@@ -291,7 +309,7 @@ node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-333 assertions across nine suites. They are plain Node scripts with no test framework, so they also double as executable documentation.
+335 assertions across nine suites. They are plain Node scripts with no test framework, so they also double as executable documentation.
 
 | Suite | Covers |
 |---|---|
@@ -357,6 +375,8 @@ Each of these was considered and rejected, with the reason:
 - **Quality cannot be verified on a single machine.** `SkillClaw` needs multiple clients voting to eliminate self-assessment bias. A one-person installation can track whether a skill was used and whether it was reported harmful, but cannot independently confirm it works. Treat `active` as "reported used", not "proven correct".
 - **Decay is time-based, not evidence-based.** 90 days is a guess borrowed from `cass-memory`. It will be wrong for some people in both directions.
 - **A revision can overwrite a good edit.** It is refused when the base hash changed, which catches the common case. It does not catch a concurrent edit that lands between the check and the write — the window is milliseconds, but it exists.
+- **Writes are serialised in one process, not across hosts.** The candidate queue, the registry and the ledger each take a lock, so two sessions in the same host cannot erase each other's work. Two DSH hosts sharing one `DSH_HOME` at the same time are not covered; the failure mode is a lost candidate (recoverable) rather than a corrupt skill (not recoverable).
+- **A tool is not a result.** `action` evidence proves the call was dispatched, never that it worked. A skill citing only `action` quotes is not authoritative, and a submission built only from them is rejected.
 - **Prompt cache cost is real but bounded.** Each hint is a single stable string, cleared as soon as it is acted on, and a session may see at most `maxReflectionsPerSession + maxHintsPerSession` of them. The costs that are *not* bounded: every hint invalidates the prefix cache once when it appears and once when it clears, and a hint that arrives while the model is mid-response is paid for by every remaining step until cleared.
 
 ---
