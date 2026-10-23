@@ -406,7 +406,7 @@ try {
   endTurn()
   check('the third real turn fires a reflection', turnHint().includes('[skill-evolve]'))
   check('the reflection asks the three questions', turnHint().includes('Did the person correct me'))
-  check('the reflection is not the repetition hint', turnHint().includes('repeated this session') === false)
+  check('the reflection is not the repetition hint', turnHint().includes('repeated in this conversation') === false)
 
   // Acting on the hint clears the visible text.
   turnHost.emit('session/event', turnAgent.session, toolCall('skill_candidate_list', 'clear_turn'))
@@ -432,6 +432,84 @@ try {
   check('the reflection budget stops further checkpoints', turnHint() === '')
 
   await rm(turnRoot, { recursive: true, force: true })
+
+  // ---- a reflection holds the channel ---------------------------------------
+  //
+  // Both triggers write into one slot, so a repeat hint firing right after a
+  // reflection used to replace it silently. This is the end-to-end shape of
+  // that bug: reflect, then repeat something, and check the reflection survives.
+  //
+  // The retry half matters just as much, and this is the part a naive test
+  // misses. `createDetector` keeps only `repeatWindowMax * (minRepeatCount + 2)`
+  // entries (24 by default), so a procedure deferred for 8 model steps is
+  // evicted from the window long before the hold ends — it has to be held as a
+  // rendered hint, not re-derived on release.
+  //
+  // A step therefore has to carry real tool calls. An `assistant/message` on its
+  // own emits no `tool/call`, the detector's history freezes, and a
+  // "re-derive on release" implementation would pass this test while being
+  // wrong in production. Three calls per step is what a real session does, and
+  // it is what fills the 24-entry window inside the hold.
+  const holdRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-hold-'))
+  process.env.DSH_HOME = holdRoot
+  const holdHost = fakeHost()
+  apply(holdHost.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
+  const holdAgent = fakeAgent('session-hold', 'F:/p3')
+  holdHost.agents.set(holdAgent.id, holdAgent)
+  const holdHint = () => holdHost.contexts.get('skill-evolve:hint').text({ agent: holdAgent })
+
+  let filler = 0
+  /** One model step: the assembled message, the ageing tick, and the work it did. */
+  const step = () => {
+    holdHost.emit('session/event', holdAgent.session, {
+      type: 'assistant/message', seq: 9, time: Date.now(), data: { turn: 1, step: 1 }
+    })
+    // Unrelated work, one distinct tool name per call so it can never itself
+    // look like a procedure — but it does push the deferred one out of the window.
+    for (let i = 0; i < 3; i += 1) {
+      filler += 1
+      holdHost.emit('session/event', holdAgent.session, toolCall(`filler_${filler}`, `fill_${filler}`))
+    }
+  }
+
+  // Reach the first reflection (cadence 3, five calls per turn).
+  for (let t = 0; t < 3; t += 1) {
+    holdHost.emit('session/event', holdAgent.session, {
+      type: 'user/message', seq: 1, time: Date.now(), data: { source: { kind: 'user' } }
+    })
+    for (let i = 0; i < 5; i += 1) {
+      holdHost.emit('session/event', holdAgent.session, toolCall('bash', `hold_${t}_${i}`))
+    }
+    holdHost.emit('session/event', holdAgent.session, {
+      type: 'turn/end', seq: 2, time: Date.now(), data: { turn: t + 1, reason: { kind: 'completed' } }
+    })
+  }
+  check('the hold fixture reaches a reflection', holdHint().includes('[skill-evolve]'))
+
+  // Now a repeated procedure arrives while the reflection is still fresh.
+  const holdProcedure = ['read', 'edit', 'grep', 'read', 'edit', 'grep']
+  for (const [index, toolName] of holdProcedure.entries()) {
+    holdHost.emit('session/event', holdAgent.session, toolCall(toolName, `held_${index}`))
+  }
+  check('the repeat hint is deferred while the reflection holds', holdHint().includes('repeated in this conversation') === false, holdHint().slice(0, 60))
+  check('the deferral is logged, not silent', holdHost.logs.some((line) => line.includes('hint deferred')), holdHost.logs.slice(-3).join(' | '))
+
+  // Age past the hold. The retry runs on the same tick that releases it.
+  // Eight steps x three calls = 24 entries, which is the whole detector window:
+  // by the last step `detect()` can no longer see `read → edit → grep` at all,
+  // so a re-derive-on-release implementation fails right here.
+  for (let i = 0; i < 7; i += 1) step()
+  check('the repeat hint is still held seven steps in', holdHint().includes('repeated in this conversation') === false, holdHint().slice(0, 60))
+  step()
+  check('the deferred hint is published once the hold expires', holdHint().includes('repeated in this conversation'), holdHint().slice(0, 60))
+  check('the deferred publish is logged as such', holdHost.logs.some((line) => line.includes('deferred hint published')), holdHost.logs.slice(-3).join(' | '))
+  check('the deferred hint names the procedure', holdHint().includes('read → edit → grep'), holdHint())
+
+  // A procedure the model already acted on must not be resurrected.
+  holdHost.emit('session/event', holdAgent.session, toolCall('skill_candidate_list', 'clear_hold'))
+  check('acting on the deferred hint clears it', holdHint() === '')
+
+  await rm(holdRoot, { recursive: true, force: true })
 
   // ---- both triggers together ---------------------------------------------
   //

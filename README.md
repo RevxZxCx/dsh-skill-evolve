@@ -103,6 +103,18 @@ The unit is the assistant message, not the tool call: one message is one time th
 
 Both triggers write into this one channel, so the prompt sees a single stable string rather than two competing ones. The turn reflection bypasses the procedure-dedup check (`distinct: true` in `hint.publish`): that check exists to stop one growing procedure being announced twice, and a reflection has no steps of its own to compare, so it would collide with the previous reflection on nothing but a placeholder marker. Its own throttle is the pacer's budget, which is the better fit.
 
+Sharing one channel has a cost that only shows up in the data. On a real session the pacer ruled two reflections due, the first reached the model, and the second was overwritten by a repeat hint one step later — every snapshot after it carried the repeat hint instead. A reflection is rationed to two per session and is the only path that can see non-structural lessons (which approach was abandoned, which API answered with nothing); losing one to a repeat hint spends the scarce resource on the abundant one.
+
+So a reflection holds the channel briefly:
+
+| Option | Default | Effect |
+|---|---|---|
+| `reflectionHoldSteps` | `8` | Model steps a reflection keeps the channel to itself; repeat hints are deferred until it lets go |
+
+Briefly, not permanently: a permanent reservation would starve the repeat detector instead, and that detector is what notices work the model is doing right now.
+
+A deferred repeat hint is **not** simply re-derived later. The detector's history is bounded — `repeatWindowMax * (minRepeatCount + 2)`, 24 entries by default — and a held procedure is by definition one the model has stopped repeating, so the window evicts it long before an 8-step hold ends. The rendered hint is therefore kept in a per-agent slot and retried on the tick that releases the hold; it is re-checked against `alreadyShown` first, so a stale copy cannot resurrect a procedure the model has since acted on. `hint.publish` returns `'held'` for the deferral (distinct from `'duplicate'` and `'exhausted'`), and both the deferral and the eventual retry are logged, so "the detector went quiet" stays distinguishable from "the detector found nothing".
+
 When a reflection fires, the detector's findings ride along in the same message as supporting evidence — "you repeated these three steps" is a much stronger prompt next to "what did this turn teach you".
 
 ### The evidence gate
@@ -256,7 +268,8 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `promoteAfterUses` | `3` | Helpful reports needed for `unverified` → `active` |
 | `invertAfterHarmful` | `3` | Harmful reports needed to invert into a warning |
 | `staleAfterDays` | `90` | Days without validation before `active` → `stale` |
-| `hintExpiresAfterSteps` | `8` | Model steps a hint stays visible before it retires on its own; `0` disables |
+| `hintExpiresAfterSteps` | `0` | Model steps a hint stays visible before it retires on its own; `0` disables |
+| `reflectionHoldSteps` | `8` | Model steps a reflection keeps the hint channel to itself before a repeat hint may replace it; `0` disables |
 | `hintRequired` | `false` | Make the hint a `required` context (survives suppression) |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.

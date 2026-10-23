@@ -188,17 +188,21 @@ check('an empty sequence is never a habit', !isSameHabit([], ['a']))
 }
 {
   // `0` is the documented off switch for each stage independently. A session
-  // with both off must not start accumulating ages it will never use.
-  const off = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 0 })
+  // with all of them off must not start accumulating ages it will never use.
+  //
+  // All three, not two: the reflection hold is expressed in the same unit, and
+  // leaving it at its default while turning the other two off would keep the
+  // counter running for a stage the caller believes is inactive.
+  const off = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 0, reflectionHoldSteps: 0 })
   off.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever', pointer: 'ptr' })
   for (let i = 0; i < 50; i += 1) off.tick('s')
-  check('zero disables both stages', off.textFor('s') === 'forever')
+  check('zero disables all three stages', off.textFor('s') === 'forever')
   check('a disabled channel does not accumulate age', off.state.get('s').age === 0)
 
-  const undef = channel()
+  const undef = channel({ reflectionHoldSteps: 0 })
   undef.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever', pointer: 'ptr' })
   for (let i = 0; i < 50; i += 1) undef.tick('s')
-  check('omitted deadlines also disable both stages', undef.textFor('s') === 'forever')
+  check('omitted shrink and expire keep the full text', undef.textFor('s') === 'forever')
 
   const idle = channel({ shrinkAfterSteps: 3 })
   for (let i = 0; i < 10; i += 1) idle.tick('s')
@@ -222,6 +226,87 @@ check('an empty sequence is never a habit', !isSameHabit([], ['a']))
   hints.tick('new')
   check('the second hint retires on its own messages', hints.textFor('new') === '')
   check('ticking an unknown agent is harmless', (hints.tick('nobody'), hints.textFor('nobody') === ''))
+}
+
+// ---- reflection hold ------------------------------------------------------
+//
+// Both triggers write into one slot. A repeat hint firing one step after a
+// reflection used to replace it silently: the model read the repeat hint and
+// never saw the checkpoint. On a real session the pacer ruled two reflections
+// due, the first reached the model, the second was overwritten before it was
+// ever assembled.
+{
+  const hints = channel({ reflectionHoldSteps: 3 })
+  const reflect = (agentId, turns) => hints.publish({
+    agentId,
+    signature: `turn#${turns}`,
+    steps: [`__reflection_${turns}__`],
+    text: 'REFLECT',
+    pointer: 'R-PTR',
+    distinct: true,
+    kind: 'reflection'
+  })
+  const repeat = (agentId) => hints.publish({
+    agentId,
+    signature: 'sig',
+    steps: ['read', 'edit'],
+    text: 'REPEAT',
+    pointer: 'P-PTR',
+    kind: 'repeat'
+  })
+
+  check('a reflection publishes', reflect('held', 3) === 'published')
+  check('a repeat hint is turned away during the hold', repeat('held') === 'held')
+  check('the reflection stays visible instead', hints.textFor('held') === 'REFLECT')
+
+  hints.tick('held')
+  check('one step in, the repeat hint is still held', repeat('held') === 'held')
+  hints.tick('held')
+  check('two steps in, still held', repeat('held') === 'held')
+  hints.tick('held')
+  check('the hold releases on the third step', repeat('held') === 'published')
+  check('the repeat hint is now what the model reads', hints.textFor('held') === 'REPEAT')
+
+  check('a held repeat hint does not spend the budget', (() => {
+    const fresh = channel({ reflectionHoldSteps: 5 })
+    fresh.publish({ agentId: 'b', signature: 't', steps: ['__r__'], text: 'R', distinct: true, kind: 'reflection' })
+    fresh.publish({ agentId: 'b', signature: 's', steps: ['read', 'edit'], text: 'REP', kind: 'repeat' })
+    return fresh.channel('b').emitted === 1
+  })())
+
+  check('a reflection may replace a reflection', (() => {
+    const fresh = channel({ reflectionHoldSteps: 5 })
+    fresh.publish({ agentId: 'c', signature: 't3', steps: ['__r1__'], text: 'R1', distinct: true, kind: 'reflection' })
+    return fresh.publish({ agentId: 'c', signature: 't6', steps: ['__r2__'], text: 'R2', distinct: true, kind: 'reflection' }) === 'published'
+  })())
+
+  check('clearing the hint releases the hold', (() => {
+    const fresh = channel({ reflectionHoldSteps: 5 })
+    fresh.publish({ agentId: 'd', signature: 't', steps: ['__r__'], text: 'R', distinct: true, kind: 'reflection' })
+    fresh.clear('d')
+    return fresh.publish({ agentId: 'd', signature: 's', steps: ['read', 'edit'], text: 'REP', kind: 'repeat' }) === 'published'
+  })())
+
+  check('hold 0 lets either kind replace the other', (() => {
+    const fresh = channel({ reflectionHoldSteps: 0 })
+    fresh.publish({ agentId: 'e', signature: 't', steps: ['__r__'], text: 'R', distinct: true, kind: 'reflection' })
+    return fresh.publish({ agentId: 'e', signature: 's', steps: ['read', 'edit'], text: 'REP', kind: 'repeat' }) === 'published'
+  })())
+
+  check('another agent stepping does not release the hold', (() => {
+    const fresh = channel({ reflectionHoldSteps: 3 })
+    fresh.publish({ agentId: 'f', signature: 't', steps: ['__r__'], text: 'R', distinct: true, kind: 'reflection' })
+    fresh.tick('other')
+    return fresh.publish({ agentId: 'f', signature: 's', steps: ['read', 'edit'], text: 'REP', kind: 'repeat' }) === 'held'
+  })())
+
+  check('the hold ages even with shrink and retire off', (() => {
+    const fresh = channel({ reflectionHoldSteps: 2, shrinkAfterSteps: 0, expiresAfterSteps: 0 })
+    fresh.publish({ agentId: 'g', signature: 't', steps: ['__r__'], text: 'R', distinct: true, kind: 'reflection' })
+    fresh.tick('g')
+    fresh.tick('g')
+    return fresh.publish({ agentId: 'g', signature: 's', steps: ['read', 'edit'], text: 'REP', kind: 'repeat' }) === 'published'
+  })())
 }
 
 // ---- rendering ------------------------------------------------------------
