@@ -475,6 +475,67 @@ try {
   offHost.emit('session/event', offAgent.session, { type: 'turn/end', seq: 2, data: { turn: 1, reason: { kind: 'completed' } } })
   check('triggers:[repeat] disables the turn reflection', offHint() === '')
   await rm(offRoot, { recursive: true, force: true })
+
+  // ---- a hint retires when the model reads it and stays silent -------------
+  //
+  // This is the fate the channel originally had no answer for. The model
+  // neither submits nor dismisses, so nothing called `clear` and the text rode
+  // along in every snapshot. On a real transcript one hint survived 85 model
+  // steps and the session re-sent 67,212 characters of hint text for zero
+  // submissions.
+  const expRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-expiry-'))
+  process.env.DSH_HOME = expRoot
+  const expHost = fakeHost()
+  apply(expHost.ctx, Config({ mode: 'suggest', minRepeatCount: 2, minWindow: 3, hintExpiresAfterSteps: 3 }))
+  const expAgent = fakeAgent('session-exp', 'F:/p5')
+  expHost.agents.set(expAgent.id, expAgent)
+  const expHint = () => expHost.contexts.get('skill-evolve:hint').text({ agent: expAgent })
+  const expSend = (name, id) => expHost.emit('session/event', expAgent.session, toolCall(name, id))
+  // One assistant message is one step of the model reading the prompt.
+  const modelStep = () => expHost.emit('session/event', expAgent.session, {
+    type: 'assistant/message',
+    seq: 99,
+    data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] } }
+  })
+
+  for (const name of ['bash', 'read', 'edit', 'bash', 'read', 'edit']) expSend(name, `e_${Math.random()}`)
+  check('the expiry fixture published a hint', expHint().length > 0, expHint().slice(0, 60))
+
+  modelStep()
+  modelStep()
+  check('a hint survives below its deadline', expHint().length > 0)
+  modelStep()
+  check('a silent hint retires at its deadline', expHint() === '')
+  check('retiring a hint spends no extra budget', expHost.logs.filter((line) => line.includes('hint published')).length === 1)
+
+  // The tool stays available after expiry, and the procedure is not offered a
+  // second time: expiry is a cost control, not a capability loss.
+  for (const name of ['bash', 'read', 'edit', 'bash', 'read', 'edit']) expSend(name, `again_${Math.random()}`)
+  check('an expired procedure is not re-offered', expHint() === '')
+  check('expiry did not unregister the submit tool', expHost.tools.has('skill_candidate_submit'))
+  await rm(expRoot, { recursive: true, force: true })
+
+  // Expiry must be switchable off: the deadline only controls re-sending, and
+  // an operator may prefer the older behaviour.
+  const keepRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-keep-'))
+  process.env.DSH_HOME = keepRoot
+  const keepHost = fakeHost()
+  apply(keepHost.ctx, Config({ mode: 'suggest', minRepeatCount: 2, minWindow: 3, hintExpiresAfterSteps: 0 }))
+  const keepAgent = fakeAgent('session-keep', 'F:/p6')
+  keepHost.agents.set(keepAgent.id, keepAgent)
+  const keepHint = () => keepHost.contexts.get('skill-evolve:hint').text({ agent: keepAgent })
+  for (const name of ['bash', 'read', 'edit', 'bash', 'read', 'edit']) {
+    keepHost.emit('session/event', keepAgent.session, toolCall(name, `k_${Math.random()}`))
+  }
+  for (let i = 0; i < 20; i += 1) {
+    keepHost.emit('session/event', keepAgent.session, {
+      type: 'assistant/message',
+      seq: 99,
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [] } }
+    })
+  }
+  check('hintExpiresAfterSteps:0 keeps the hint forever', keepHint().length > 0)
+  await rm(keepRoot, { recursive: true, force: true })
 } finally {
   await rm(root, { recursive: true, force: true })
 }

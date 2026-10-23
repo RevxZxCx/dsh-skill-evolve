@@ -86,6 +86,8 @@ That last line is the one that matters most. `self-learning-skills` puts it plai
 
 The hint is cleared the moment the model calls one of this plugin's own tools, so the next steps stop paying for text that has already been read.
 
+A hint also retires on its own after `hintExpiresAfterSteps` (default 8) model steps. A hint has two fates and only one of them is loud: the model either acts on it, or it reads it, decides the procedure is not worth keeping, and carries on. Nothing announces the second decision, so a channel that only cleared on tool calls kept the text in every subsequent snapshot. On a real transcript one hint rode along for 85 consecutive steps and the session re-sent 67,212 characters (~16.8K tokens) of hint text for zero submissions. Expiry cuts that to 15,205 characters (~3.8K tokens) — 77% less — without losing anything: `skill_candidate_submit` stays available, and the procedure stays marked "already shown" so it is never offered twice. The unit is the assistant message, not the tool call: one message is one time the model read the prompt, whether it carried one tool call or four.
+
 Both triggers write into this one channel, so the prompt sees a single stable string rather than two competing ones. The turn reflection bypasses the procedure-dedup check (`distinct: true` in `hint.publish`): that check exists to stop one growing procedure being announced twice, and a reflection has no steps of its own to compare, so it would collide with the previous reflection on nothing but a placeholder marker. Its own throttle is the pacer's budget, which is the better fit.
 
 When a reflection fires, the detector's findings ride along in the same message as supporting evidence — "you repeated these three steps" is a much stronger prompt next to "what did this turn teach you".
@@ -241,6 +243,7 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `promoteAfterUses` | `3` | Helpful reports needed for `unverified` → `active` |
 | `invertAfterHarmful` | `3` | Harmful reports needed to invert into a warning |
 | `staleAfterDays` | `90` | Days without validation before `active` → `stale` |
+| `hintExpiresAfterSteps` | `8` | Model steps a hint stays visible before it retires on its own; `0` disables |
 | `hintRequired` | `false` | Make the hint a `required` context (survives suppression) |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.
@@ -405,7 +408,8 @@ Each of these was considered and rejected, with the reason:
 - **A tool is not a result.** `action` evidence proves the call was dispatched, never that it worked. A skill citing only `action` quotes is not authoritative, and a submission built only from them is rejected.
 - **Reading an undeclared service throws, and the throw is silent.** Cordis resolves `ctx.someService` through a proxy that raises `cannot get property "someService" without inject` unless the name is listed in `inject`. Optional chaining does not help — the throw happens on the property read, before `?.` is reached. This plugin shipped a version that read `ctx.agents?.get?.(agentId)` on every `tool/call`; the exception was swallowed by the handler guard, so the detector never saw a single call. It loaded, its tools answered, and nothing ever triggered — for a full session, while 412 assertions passed. The fix is `ctx.get(name)`, which returns `undefined` for an unprovided name instead of throwing. `test/real-mount.test.mjs` now mounts the plugin on the real cordis with `agents` absent, which is the only shape of test that could have caught it: a hand-built fake context defines `agents` as a plain property and never throws.
 
-- **Prompt cache cost is real but bounded.** Each hint is a single stable string, cleared as soon as it is acted on, and a session may see at most `maxReflectionsPerSession + maxHintsPerSession` of them. The costs that are *not* bounded: every hint invalidates the prefix cache once when it appears and once when it clears, and a hint that arrives while the model is mid-response is paid for by every remaining step until cleared.
+- **Prompt cache cost is real but bounded.** Each hint is a single stable string, cleared as soon as it is acted on or retired by `hintExpiresAfterSteps`, and a session may see at most `maxReflectionsPerSession + maxHintsPerSession` of them. The costs that are *not* bounded: every hint invalidates the prefix cache once when it appears and once when it clears, and a hint that arrives while the model is mid-response is paid for by every step until it expires — at most 8 of them by default, which is the whole point of the deadline.
+- **A hint that was read but not acted on is indistinguishable from one that was never read.** Expiry is a cost control, not evidence. The plugin does not know whether the model ignored the hint, judged the procedure worthless, or simply had other work; it only knows the text has been in front of the model long enough. Treat a retired hint as "no answer", not as "rejected".
 
 ---
 

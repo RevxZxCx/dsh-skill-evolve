@@ -127,5 +127,19 @@ const hint = systemPrompt?.contexts.get('skill-evolve:hint')
 const rendered = hint === undefined ? '' : hint.text({ agent: { id: 'session-real-1' } })
 check('detection publishes a hint without an agents service', rendered.length > 0, 'rendered ' + rendered.length + ' chars')
 
+// Expiry under the real event bus. `assistant/message` is a plain event, so the
+// plugin has to be listening on the same bus the host emits on — the fake host
+// in index.test.mjs can only prove the handler body works, not that it is
+// wired to the bus the host actually uses.
+const message = (index) => ({
+  type: 'assistant/message',
+  seq: index,
+  time: Date.now(),
+  data: { turn: 1, step: index, message: { role: 'assistant', content: [] } }
+})
+for (let index = 0; index < 8; index += 1) root.emit('session/event', session, message(100 + index))
+const afterExpiry = hint === undefined ? '' : hint.text({ agent: { id: 'session-real-1' } })
+check('a silent hint retires under the real event bus', afterExpiry === '', 'rendered ' + afterExpiry.length + ' chars')
+
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 if (failed > 0) process.exitCode = 1
