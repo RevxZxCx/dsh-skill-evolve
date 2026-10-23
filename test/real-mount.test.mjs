@@ -94,7 +94,13 @@ root.plugin({
   name: 'skill-evolve',
   inject,
   apply(ctx) {
-    apply(ctx, Config({ mode: 'suggest', minRepeatCount: 2, minWindow: 3 }))
+    apply(ctx, Config({
+      mode: 'suggest',
+      minRepeatCount: 2,
+      minWindow: 3,
+      hintShrinkAfterSteps: 2,
+      hintExpiresAfterSteps: 6
+    }))
   }
 })
 
@@ -127,7 +133,7 @@ const hint = systemPrompt?.contexts.get('skill-evolve:hint')
 const rendered = hint === undefined ? '' : hint.text({ agent: { id: 'session-real-1' } })
 check('detection publishes a hint without an agents service', rendered.length > 0, 'rendered ' + rendered.length + ' chars')
 
-// Expiry under the real event bus. `assistant/message` is a plain event, so the
+// Ageing under the real event bus. `assistant/message` is a plain event, so the
 // plugin has to be listening on the same bus the host emits on — the fake host
 // in index.test.mjs can only prove the handler body works, not that it is
 // wired to the bus the host actually uses.
@@ -137,9 +143,15 @@ const message = (index) => ({
   time: Date.now(),
   data: { turn: 1, step: index, message: { role: 'assistant', content: [] } }
 })
-for (let index = 0; index < 8; index += 1) root.emit('session/event', session, message(100 + index))
-const afterExpiry = hint === undefined ? '' : hint.text({ agent: { id: 'session-real-1' } })
-check('a silent hint retires under the real event bus', afterExpiry === '', 'rendered ' + afterExpiry.length + ' chars')
+const render = () => (hint === undefined ? '' : hint.text({ agent: { id: 'session-real-1' } }))
+for (let index = 0; index < 2; index += 1) root.emit('session/event', session, message(100 + index))
+const afterShrink = render()
+check('a silent hint degrades to a pointer under the real event bus',
+  afterShrink.length > 0 && afterShrink.length < rendered.length / 3,
+  rendered.length + ' -> ' + afterShrink.length + ' chars')
+check('the pointer still names the submit tool', afterShrink.includes('skill_candidate_submit'))
+for (let index = 0; index < 4; index += 1) root.emit('session/event', session, message(200 + index))
+check('a silent hint retires under the real event bus', render() === '', 'rendered ' + render().length + ' chars')
 
 console.log('\n' + passed + ' passed, ' + failed + ' failed')
 if (failed > 0) process.exitCode = 1

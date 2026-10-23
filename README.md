@@ -86,7 +86,20 @@ That last line is the one that matters most. `self-learning-skills` puts it plai
 
 The hint is cleared the moment the model calls one of this plugin's own tools, so the next steps stop paying for text that has already been read.
 
-A hint also retires on its own after `hintExpiresAfterSteps` (default 8) model steps. A hint has two fates and only one of them is loud: the model either acts on it, or it reads it, decides the procedure is not worth keeping, and carries on. Nothing announces the second decision, so a channel that only cleared on tool calls kept the text in every subsequent snapshot. On a real transcript one hint rode along for 85 consecutive steps and the session re-sent 67,212 characters (~16.8K tokens) of hint text for zero submissions. Expiry cuts that to 15,205 characters (~3.8K tokens) — 77% less — without losing anything: `skill_candidate_submit` stays available, and the procedure stays marked "already shown" so it is never offered twice. The unit is the assistant message, not the tool call: one message is one time the model read the prompt, whether it carried one tool call or four.
+A hint has two fates and only one of them is loud: the model either acts on it, or it reads it, decides the procedure is not worth keeping, and carries on. Nothing announces the second decision, so a channel that only cleared on tool calls kept the text in every subsequent snapshot. On a complete real transcript that was 132 snapshots and 79,896 characters (~20K tokens) of hint text re-sent, with one hint riding along for 106 consecutive steps.
+
+The obvious fix — delete the text after N steps — is wrong, and the same transcript is the proof. That session did eventually submit a skill, and it did so **412 model steps after the hint first appeared**, from a model that re-read the still-present text (`Should I also consider submitting a skill candidate? The reminder suggests it.`). A hard deadline would have deleted the one hint that worked.
+
+So ageing happens in two stages, each independently switchable:
+
+| Option | Default | Effect |
+|---|---|---|
+| `hintShrinkAfterSteps` | `8` | The full text becomes a one-line pointer that still names the procedure and `skill_candidate_submit` |
+| `hintExpiresAfterSteps` | `0` (off) | After this many steps the pointer is removed entirely |
+
+Shrinking keeps everything that matters: the procedure stays marked "already shown" so it is never offered twice, the budget is not charged again, and `skill_candidate_submit` remains callable. On the same transcript the default cuts re-sent hint text from 79,896 to 24,407 characters — **69% less** — while every one of the 132 snapshots still carries a hint. Retirement is off by default because nothing measured supports a deadline: the longest observed life was 106 steps, so `hintExpiresAfterSteps` values of 120 or 200 saved nothing at all, and the conversion at step 412 is evidence that long life is sometimes the point.
+
+The unit is the assistant message, not the tool call: one message is one time the model read the prompt, whether it carried one tool call or four. Ageing is tracked per agent, so one session's messages never age another session's hint.
 
 Both triggers write into this one channel, so the prompt sees a single stable string rather than two competing ones. The turn reflection bypasses the procedure-dedup check (`distinct: true` in `hint.publish`): that check exists to stop one growing procedure being announced twice, and a reflection has no steps of its own to compare, so it would collide with the previous reflection on nothing but a placeholder marker. Its own throttle is the pacer's budget, which is the better fit.
 

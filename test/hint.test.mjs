@@ -109,34 +109,54 @@ check('an empty sequence is never a habit', !isSameHabit([], ['a']))
   check('forgetting allows the hint again', !hints.alreadyShown('s', ['a', 'b', 'c']))
 }
 
-// ---- expiry ---------------------------------------------------------------
+// ---- two-stage ageing -----------------------------------------------------
 //
 // A hint has two fates and only one of them is loud. When the model ignores a
 // hint instead of acting on it, nothing clears the text, so without a deadline
-// it rides along in every snapshot. On a real transcript that was 85 steps and
-// 67,212 characters re-sent for zero submissions.
+// it rides along in every snapshot. Measured on a complete transcript that was
+// 132 snapshots and 79,896 characters of hint text.
+//
+// The first fix — delete the text after N steps — was wrong, and the same
+// transcript showed why: the session eventually submitted a skill 412 steps
+// after the hint appeared, from a model that re-read the still-present text.
+// So the text degrades to a pointer first and only retires as a separate,
+// opt-in stage.
 {
-  const hints = channel({ expiresAfterSteps: 3 })
-  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'hello' })
-  check('a fresh hint is visible', hints.textFor('s') === 'hello')
+  const hints = channel({ shrinkAfterSteps: 2, expiresAfterSteps: 0 })
+  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'the full hint', pointer: 'ptr' })
+  check('a fresh hint shows its full text', hints.textFor('s') === 'the full hint')
   hints.tick('s')
+  check('a hint below its shrink deadline keeps full text', hints.textFor('s') === 'the full hint')
   hints.tick('s')
-  check('a hint survives below its deadline', hints.textFor('s') === 'hello')
+  check('a hint shrinks to its pointer at the deadline', hints.textFor('s') === 'ptr')
+  for (let i = 0; i < 100; i += 1) hints.tick('s')
+  check('a shrunk hint never retires when retirement is off', hints.textFor('s') === 'ptr')
+  check('shrinking keeps the procedure "already shown"', hints.alreadyShown('s', ['a', 'b', 'c']))
+  check('shrinking spends no extra budget', hints.state.get('s').emitted === 1)
+}
+{
+  // Retirement is a second, independent stage counted from publication.
+  const hints = channel({ shrinkAfterSteps: 1, expiresAfterSteps: 3 })
+  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'full', pointer: 'ptr' })
   hints.tick('s')
-  check('a hint retires at its deadline', hints.textFor('s') === '')
-  check('an expired hint stays "already shown"', hints.alreadyShown('s', ['a', 'b', 'c']))
-  check('an expired hint still counts against the budget', hints.state.get('s').emitted === 1)
+  check('stage one: the pointer', hints.textFor('s') === 'ptr')
+  hints.tick('s')
+  check('stage one persists', hints.textFor('s') === 'ptr')
+  hints.tick('s')
+  check('stage two: retired at the retirement deadline', hints.textFor('s') === '')
+  check('a retired hint stays "already shown"', hints.alreadyShown('s', ['a', 'b', 'c']))
+  check('a retired hint still counts against the budget', hints.state.get('s').emitted === 1)
   check('a retired channel does not keep ageing', hints.state.get('s').age === 0)
 }
 {
   // The bug this guards: a channel that keeps ageing after retirement would
   // make every later hint born already expired.
-  const hints = channel({ expiresAfterSteps: 2 })
-  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'first' })
+  const hints = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 2 })
+  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'first', pointer: 'p1' })
   hints.tick('s')
   hints.tick('s')
-  check('the first hint expired', hints.textFor('s') === '')
-  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'second' })
+  check('the first hint retired', hints.textFor('s') === '')
+  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'second', pointer: 'p2' })
   check('a later hint starts a fresh window', hints.textFor('s') === 'second')
   hints.tick('s')
   check('the fresh window has its own budget', hints.textFor('s') === 'second')
@@ -146,40 +166,41 @@ check('an empty sequence is never a habit', !isSameHabit([], ['a']))
   // publish a replacement while the previous text is still in the channel, and
   // assembly may not have rendered it in between. Only `publish` resetting the
   // age saves this path, so the assertion must not touch `textFor` first.
-  const hints = channel({ expiresAfterSteps: 2 })
-  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'first' })
+  const hints = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 2 })
+  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'first', pointer: 'p1' })
   hints.tick('s')
   hints.tick('s')
-  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'second' })
+  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'second', pointer: 'p2' })
   check('publishing over a stale age resets it', hints.state.get('s').age === 0)
   check('the replacement is visible on the first render', hints.textFor('s') === 'second')
   hints.tick('s')
   check('the replacement is not born expired', hints.textFor('s') === 'second')
 }
 {
-  const hints = channel({ expiresAfterSteps: 2 })
-  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'hello' })
+  const hints = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 2 })
+  hints.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'hello', pointer: 'ptr' })
   hints.tick('s')
   hints.clear('s')
   check('clearing resets the age', hints.state.get('s').age === 0)
-  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'again' })
+  hints.publish({ agentId: 's', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'again', pointer: 'p2' })
   hints.tick('s')
   check('a cleared channel does not shorten the next hint', hints.textFor('s') === 'again')
 }
 {
-  // `0` is the documented off switch. A session with no hints must not start
-  // accumulating ages it will never use, either.
-  const off = channel({ expiresAfterSteps: 0 })
-  off.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever' })
+  // `0` is the documented off switch for each stage independently. A session
+  // with both off must not start accumulating ages it will never use.
+  const off = channel({ shrinkAfterSteps: 0, expiresAfterSteps: 0 })
+  off.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever', pointer: 'ptr' })
   for (let i = 0; i < 50; i += 1) off.tick('s')
-  check('zero disables expiry', off.textFor('s') === 'forever')
+  check('zero disables both stages', off.textFor('s') === 'forever')
+  check('a disabled channel does not accumulate age', off.state.get('s').age === 0)
 
   const undef = channel()
-  undef.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever' })
+  undef.publish({ agentId: 's', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'forever', pointer: 'ptr' })
   for (let i = 0; i < 50; i += 1) undef.tick('s')
-  check('an omitted deadline also disables expiry', undef.textFor('s') === 'forever')
+  check('omitted deadlines also disable both stages', undef.textFor('s') === 'forever')
 
-  const idle = channel({ expiresAfterSteps: 3 })
+  const idle = channel({ shrinkAfterSteps: 3 })
   for (let i = 0; i < 10; i += 1) idle.tick('s')
   check('ticking without a hint is harmless', idle.textFor('s') === '')
 }
@@ -187,16 +208,19 @@ check('an empty sequence is never a habit', !isSameHabit([], ['a']))
   // Two agents must age independently. A host runs several sessions at once,
   // and a global counter would let one session's messages age another session's
   // hint out from under a model that had not read it yet.
-  const hints = channel({ expiresAfterSteps: 2 })
-  hints.publish({ agentId: 'old', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'old text' })
-  hints.publish({ agentId: 'new', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'new text' })
+  const hints = channel({ shrinkAfterSteps: 2, expiresAfterSteps: 4 })
+  hints.publish({ agentId: 'old', signature: 'a>b>c', steps: ['a', 'b', 'c'], text: 'old text', pointer: 'old ptr' })
+  hints.publish({ agentId: 'new', signature: 'd>e>f', steps: ['d', 'e', 'f'], text: 'new text', pointer: 'new ptr' })
   hints.tick('old')
   hints.tick('old')
-  check('an expired hint is gone', hints.textFor('old') === '')
+  check('an aged hint is a pointer', hints.textFor('old') === 'old ptr')
   check('another session\'s messages do not age this hint', hints.textFor('new') === 'new text')
   hints.tick('new')
   hints.tick('new')
-  check('the second hint expires on its own messages', hints.textFor('new') === '')
+  check('the second hint shrinks on its own messages', hints.textFor('new') === 'new ptr')
+  hints.tick('new')
+  hints.tick('new')
+  check('the second hint retires on its own messages', hints.textFor('new') === '')
   check('ticking an unknown agent is harmless', (hints.tick('nobody'), hints.textFor('nobody') === ''))
 }
 
