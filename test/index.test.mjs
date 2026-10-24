@@ -505,11 +505,176 @@ try {
   check('the deferred publish is logged as such', holdHost.logs.some((line) => line.includes('deferred hint published')), holdHost.logs.slice(-3).join(' | '))
   check('the deferred hint names the procedure', holdHint().includes('read → edit → grep'), holdHint())
 
-  // A procedure the model already acted on must not be resurrected.
+  // Acting on the hint clears the channel.
+  //
+  // This is a regression guard on `clear()` itself, not on the deferred slot: by
+  // now the deferral has already been retried and published, so there is nothing
+  // pending to resurrect and the extra step below cannot fail for the reason it
+  // reads like. The resurrection case needs a deferral that is still pending --
+  // that is the `session-drop` fixture further down, and it is the only place
+  // the drop-on-action behaviour is actually pinned.
   holdHost.emit('session/event', holdAgent.session, toolCall('skill_candidate_list', 'clear_hold'))
   check('acting on the deferred hint clears it', holdHint() === '')
+  step()
+  check('a cleared hint stays cleared on the next step', holdHint() === '', holdHint().slice(0, 80))
 
   await rm(holdRoot, { recursive: true, force: true })
+
+  // ---- a pending deferral is dropped when the model acts -------------------
+  //
+  // The case above cannot catch the resurrection: by the time it acts, the
+  // deferred entry has already been retried and published, so there is nothing
+  // left to resurrect. The bug needs a deferral that is *still pending* when the
+  // model acts -- reflect, get deferred, act immediately, then step.
+  {
+    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-drop-'))
+    process.env.DSH_HOME = root
+    const host = fakeHost()
+    apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
+    const agent = fakeAgent('session-drop', 'F:/p4')
+    host.agents.set(agent.id, agent)
+    const text = () => host.contexts.get('skill-evolve:hint').text({ agent })
+    const tick = () => host.emit('session/event', agent.session, {
+      type: 'assistant/message', seq: 9, time: Date.now(), data: { turn: 1, step: 1 }
+    })
+
+    for (let t = 0; t < 3; t += 1) {
+      host.emit('session/event', agent.session, {
+        type: 'user/message', seq: 1, time: Date.now(), data: { source: { kind: 'user' } }
+      })
+      for (let i = 0; i < 5; i += 1) host.emit('session/event', agent.session, toolCall('bash', `drop_${t}_${i}`))
+      host.emit('session/event', agent.session, {
+        type: 'turn/end', seq: 2, time: Date.now(), data: { turn: t + 1, reason: { kind: 'completed' } }
+      })
+    }
+    check('the drop fixture reaches a reflection', text().includes('[skill-evolve]'))
+
+    for (const [index, name] of ['read', 'edit', 'grep', 'read', 'edit', 'grep'].entries()) {
+      host.emit('session/event', agent.session, toolCall(name, `d_${index}`))
+    }
+    check('the drop fixture defers the repeat hint', host.logs.some((line) => line.includes('hint deferred')), host.logs.slice(-2).join(' | '))
+    check('the deferred hint is not visible yet', text().includes('repeated in this conversation') === false)
+
+    // Act while the deferral is still pending.
+    host.emit('session/event', agent.session, toolCall('skill_candidate_submit', 'act_now'))
+    check('acting clears the channel', text() === '')
+    tick()
+    check('the pending deferral is dropped, not resurrected', text() === '', text().slice(0, 80))
+    check('the dropped deferral is never logged as published', host.logs.some((line) => line.includes('deferred hint published')) === false, host.logs.slice(-3).join(' | '))
+
+    await rm(root, { recursive: true, force: true })
+  }
+
+  // ---- a second reflection discards a deferral from the first -------------
+  //
+  // Only one hint ever occupies the channel, so a reflection that publishes while
+  // a repeat hint is deferred takes the slot away. The retry then fires when the
+  // *second* hold ends, which is two holds after the procedure was last seen --
+  // by then it is stale, and publishing it costs a budget unit to say something
+  // the model has moved past. Whoever takes the channel discards what was
+  // waiting for it.
+  {
+    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-rehold-'))
+    process.env.DSH_HOME = root
+    const host = fakeHost()
+    apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
+    const agent = fakeAgent('session-rehold', 'F:/p5')
+    host.agents.set(agent.id, agent)
+    const text = () => host.contexts.get('skill-evolve:hint').text({ agent })
+    const turn = (index, calls) => {
+      host.emit('session/event', agent.session, {
+        type: 'user/message', seq: 1, time: Date.now(), data: { source: { kind: 'user' } }
+      })
+      for (let i = 0; i < calls; i += 1) host.emit('session/event', agent.session, toolCall('bash', `rh_${index}_${i}`))
+      host.emit('session/event', agent.session, {
+        type: 'turn/end', seq: 2, time: Date.now(), data: { turn: index, reason: { kind: 'completed' } }
+      })
+    }
+
+    turn(1, 5); turn(2, 5); turn(3, 5)
+    check('the first reflection publishes', host.logs.some((line) => line.includes('reflection offered')), host.logs.slice(-2).join(' | '))
+
+    for (const [index, name] of ['read', 'edit', 'grep', 'read', 'edit', 'grep'].entries()) {
+      host.emit('session/event', agent.session, toolCall(name, `rh_d_${index}`))
+    }
+    check('the repeat hint is deferred behind it', host.logs.some((line) => line.includes('hint deferred')), host.logs.slice(-2).join(' | '))
+
+    // Enough turns to pass the pacer's doubled back-off and fire a second
+    // reflection, which takes the channel while the deferral is still pending.
+    for (let t = 4; t <= 10; t += 1) turn(t, 5)
+    check('a second reflection publishes', host.logs.filter((line) => line.includes('reflection offered')).length === 2, host.logs.filter((line) => line.includes('reflection offered')).join(' | '))
+
+    // Walk past the second hold. The stale deferral must not come back.
+    for (let i = 0; i < 9; i += 1) {
+      host.emit('session/event', agent.session, { type: 'assistant/message', seq: 9, time: Date.now(), data: { turn: 1, step: 1 } })
+    }
+    check('the first deferral does not survive the second hold', host.logs.some((line) => line.includes('deferred hint published')) === false, host.logs.slice(-3).join(' | '))
+    // The channel still carries the second reflection (shrunk to its pointer by
+    // now); what must be gone is the repeat hint that was waiting behind the
+    // first one.
+    check('the stale repeat hint never reaches the channel', text().includes('repeated in this conversation') === false, text().slice(0, 80))
+
+    await rm(root, { recursive: true, force: true })
+  }
+
+  // ---- a deferral survives turns that do not take the channel -------------
+  //
+  // The fixture above proves a deferral is dropped when a reflection takes the
+  // channel, but "dropped" is satisfied by any implementation that drops it too
+  // eagerly -- dropping on every `turn/end`, or before the reflection's own
+  // publish (which fires even when the pacer is out of budget), passes all of
+  // those assertions because a missing hint is indistinguishable from a
+  // correctly discarded one.
+  //
+  // This is the other half: a turn that ends without publishing anything must
+  // leave the deferral alone, and it must still be published when the hold
+  // expires. Without this pair the drop rule is only pinned from one side.
+  {
+    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-keep-'))
+    process.env.DSH_HOME = root
+    const host = fakeHost()
+    apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
+    const agent = fakeAgent('session-keep', 'F:/p6')
+    host.agents.set(agent.id, agent)
+    const text = () => host.contexts.get('skill-evolve:hint').text({ agent })
+    const turn = (index, calls) => {
+      host.emit('session/event', agent.session, {
+        type: 'user/message', seq: 1, time: Date.now(), data: { source: { kind: 'user' } }
+      })
+      for (let i = 0; i < calls; i += 1) host.emit('session/event', agent.session, toolCall('bash', `kp_${index}_${i}`))
+      host.emit('session/event', agent.session, {
+        type: 'turn/end', seq: 2, time: Date.now(), data: { turn: index, reason: { kind: 'completed' } }
+      })
+    }
+    // Deliberately no tool calls here. A tool call would let the detector
+    // re-find the procedure and defer it again, which would mask exactly the
+    // mistake this fixture exists to catch: an implementation that drops the
+    // pending entry on every turn end would be refilled on the next tool call
+    // and still publish. Only `assistant/message` is needed, because that is
+    // what advances the hold.
+    const step = () => {
+      host.emit('session/event', agent.session, { type: 'assistant/message', seq: 9, time: Date.now(), data: { turn: 1, step: 1 } })
+    }
+
+    turn(1, 5); turn(2, 5); turn(3, 5)
+    check('the keep fixture reaches a reflection', host.logs.some((line) => line.includes('reflection offered')), host.logs.slice(-2).join(' | '))
+
+    for (const [index, name] of ['read', 'edit', 'grep', 'read', 'edit', 'grep'].entries()) {
+      host.emit('session/event', agent.session, toolCall(name, `kp_d_${index}`))
+    }
+    check('the keep fixture defers the repeat hint', host.logs.some((line) => line.includes('hint deferred')), host.logs.slice(-2).join(' | '))
+
+    // Turn 4 ends well before the pacer's doubled back-off (6) is satisfied, so
+    // nothing publishes and the deferral must survive.
+    turn(4, 5)
+    check('a turn that publishes nothing does not publish the deferral', host.logs.some((line) => line.includes('deferred hint published')) === false, host.logs.slice(-2).join(' | '))
+
+    for (let i = 0; i < 8; i += 1) step()
+    check('the deferral is still published once the hold expires', host.logs.some((line) => line.includes('deferred hint published')), host.logs.slice(-3).join(' | '))
+    check('the deferred repeat hint reaches the channel', text().includes('repeated in this conversation'), text().slice(0, 80))
+
+    await rm(root, { recursive: true, force: true })
+  }
 
   // ---- both triggers together ---------------------------------------------
   //
