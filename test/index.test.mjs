@@ -9,7 +9,7 @@
  */
 
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
-import { rmSync } from 'node:fs'
+import { existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, Config } from '../lib/index.js'
@@ -1455,6 +1455,91 @@ try {
   // not fall back to downloading on its own.
   const ungated = await installTool.execute({ id: 'a/b/never' }, { name: 'skill_market_install', callId: 'call-never', agent: installAgent })
   check('an install without an approval is refused', ungated.ok === false, JSON.stringify(ungated))
+
+  // ---- approving from a later session ---------------------------------------
+  // Evidence is a fact about the session a skill was distilled from. Approval
+  // usually happens in a *different* session — often days later, after the
+  // original has been trimmed away. Re-running the gate at approval time asks
+  // the current session whether it once said these words, which is both the
+  // wrong question and a question with a guaranteed "no": the quotes live in
+  // the source session, not this one. This block pins the order: verified on
+  // submit, carried by the queue, never re-verified on write.
+  {
+    const laterRoot = await makeTempRoot('skill-evolve-later-')
+    // The queue lives under DSH_HOME, not under skillRoot. Without this line the
+    // candidate would be written into whichever temporary directory the
+    // previous fixture happened to leave in place — passing while depending on
+    // an execution order it does not declare.
+    process.env.DSH_HOME = laterRoot
+    const sourceAgent = fakeAgent('session-source', 'F:/src')
+    sourceAgent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'Zip the build with 7z, then verify the archive lists every file.' }], source: { kind: 'user' } } })
+    sourceAgent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: '7z a build.7z ./dist -> Everything is Ok, 2 files, 4096 bytes' }] } } })
+
+    const laterHost = fakeHost()
+    laterHost.agents.set(sourceAgent.id, sourceAgent)
+    apply(laterHost.ctx, Config({ mode: 'suggest', skillRoot: join(laterRoot, 'skills') }))
+    const submitTool = laterHost.tools.get('skill_candidate_submit')
+
+    const proposal = await submitTool.execute({
+      name: 'zip-build-with-7z',
+      description: 'Archive a build with 7z and verify the listing.',
+      body: '## Procedure 1. 7z a build.7z ./dist 2. 7z l build.7z',
+      evidence: [
+        { class: 'user', quote: 'Zip the build with 7z, then verify the archive lists every file.' },
+        { class: 'tool', quote: 'Everything is Ok' }
+      ]
+    }, { agent: sourceAgent })
+    check('cross-session setup: the candidate is queued', proposal.ok === true, JSON.stringify(proposal).slice(0, 200))
+    // Assert the queue really lives in this block's temp root. Without this the
+    // block silently borrows whatever DSH_HOME the previous fixture left behind,
+    // and removing its own isolation would not fail anything.
+    check('cross-session setup: the queue is written under this blocks temp root', existsSync(join(laterRoot, 'plugin-data', 'skill-evolve', 'candidates.json')), laterRoot)
+    // Use the path the tool itself reports. Hard-coding `plugin-data` here
+    // would pass while the real queue lived somewhere else, which is exactly
+    // the class of bug the reported-path check above exists to catch.
+    const queuedRecord = await readFile(proposal.path, 'utf8')
+    check('cross-session setup: verification provenance is recorded', queuedRecord.includes('verifiedInSession') && queuedRecord.includes('session-source'))
+
+    // A brand-new agent with an empty transcript: the same person, a later day.
+    const laterAgent = fakeAgent('session-later', 'F:/src')
+    laterHost.agents.set(laterAgent.id, laterAgent)
+    check('cross-session: the later session says nothing the candidate quotes', laterAgent.session.ownEvents().length === 0)
+
+    // Writing the field is only half of "a human can see where this came from".
+    // Both surfaces that list the queue must render it, or the comment on the
+    // record describes a capability that does not exist. Asserted while the
+    // candidate is still queued, because approval removes it from the list.
+    const listedByCommand = await laterHost.commands.get('skill-review').handler({ rawInput: '', agent: laterAgent })
+    check('the review list shows which session verified the quotes', listedByCommand.text.includes('session-source'), listedByCommand.text.slice(0, 400))
+    const listedByTool = await laterHost.tools.get('skill_candidate_list').execute({}, { agent: laterAgent })
+    check('the list tool shows which session verified the quotes', listedByTool.text.includes('session-source'), listedByTool.text.slice(0, 400))
+
+    const approveLater = await laterHost.commands.get('skill-capture').handler({ rawInput: 'zip-build-with-7z', agent: laterAgent })
+    check('cross-session: approval from a later session is accepted', approveLater.kind === 'success', JSON.stringify(approveLater).slice(0, 200))
+
+    // Deliberately no evidence array here. The approving session is not the one
+    // those quotes came from, so asking for them again asks the model to invent
+    // them - and the honest answer is "I cannot", which used to abort the write.
+    const finalLater = await submitTool.execute({
+      name: 'zip-build-with-7z',
+      description: 'Archive a build with 7z and verify the listing.',
+      body: '## Procedure 1. 7z a build.7z ./dist 2. 7z l build.7z',
+      final: true
+    }, { agent: laterAgent })
+    check('cross-session: the final write is not blocked by the evidence gate', finalLater.ok === true, JSON.stringify(finalLater).slice(0, 240))
+    check('cross-session: the file really landed', await fileExists(join(laterRoot, 'skills', 'zip-build-with-7z', 'SKILL.md')))
+    check('cross-session: the write reports how many quotes were accepted', finalLater.survived === 2, String(finalLater.survived))
+    check('cross-session: the body is the approved draft', (await readFile(join(laterRoot, 'skills', 'zip-build-with-7z', 'SKILL.md'), 'utf8')).includes('7z l build.7z'))
+
+    // The parameter schema is the only contract the model reads. Leaving
+    // `evidence` in `required` while the code accepts its absence is how the
+    // original bug would come back: a model obeying the schema would invent a
+    // quote for a session it is not in, or refuse to finish the write.
+    const schema = submitTool.parameters
+    check('the schema does not require evidence', !schema.required.includes('evidence'), JSON.stringify(schema.required))
+    check('the schema still requires the three text fields', ['name', 'description', 'body'].every((f) => schema.required.includes(f)), JSON.stringify(schema.required))
+    check('the schema says evidence is for proposals', /final: true/.test(schema.properties.evidence.description))
+  }
 
   } finally {
     globalThis.fetch = realFetch

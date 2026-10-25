@@ -225,6 +225,8 @@ Four classes of evidence, each with different authority:
 
 A submission survives only if at least one quote verifies **and** at least one `user` or `tool` quote survives. Self-narration alone is rejected with an explanation, because a skill is authoritative for future sessions.
 
+This check runs at proposal time and its verdict is stored with the candidate — see [Evidence is checked once, at submission](#evidence-is-checked-once-at-submission). Running it again at write time would ask the approving session to reproduce quotes from a different session.
+
 Each class is checked against **its own lane** of the session, not against one concatenated blob:
 
 | Lane | Built from |
@@ -297,7 +299,23 @@ Stale entries are **reported, never deleted**: they hold the evidence and the bo
 
 This is Qoder's behaviour and its wording: "task creation does not mean the Skill has already changed." The point is that a draft can age between being proposed and being approved, and the model is the only party who can notice.
 
-`approvalMode: 'direct'` writes the queued body at once, which is what earlier versions of this plugin did. Both modes route through the same evidence gate: approval is permission to write *this draft*, not permission to write anything.
+`approvalMode: 'direct'` writes the queued body at once, which is what earlier versions of this plugin did.
+
+Approval is permission to write *this draft*, not permission to write anything: the ownership fence still applies, and a draft whose base changed since it was queued is refused rather than merged.
+
+### Evidence is checked once, at submission
+
+The evidence gate runs when a skill is **proposed**, not when it is approved. This is not an optimisation; running it at approval time makes approval impossible in the situation approval actually happens in.
+
+Evidence is a fact about the session a skill was distilled from: "this transcript contains the sentence *Zip the build with 7z*". Approval usually happens in a *different* session — often days later, after the original has been trimmed away. Re-running the gate there asks the current session whether it once said those words, which is the wrong question and has a guaranteed answer of "no". The quotes live in the source session; the approving session has an empty transcript and cannot reproduce them.
+
+So the order is:
+
+1. `skill_candidate_submit` (propose) verifies every quote against the live transcript and records `verifiedAt` and `verifiedInSession` on the candidate.
+2. `/skill-capture` records the human's yes. The candidate's stored quotes carry forward; nothing is re-verified.
+3. `skill_candidate_submit` with `final: true` writes the draft. It does **not** require an `evidence` argument — asking for one would ask the model to restate quotes from a session it is not in, and the honest reply is "I cannot". The count it reports (`survived`) is the number of quotes already accepted for that candidate.
+
+Two consequences worth stating plainly. A candidate that passed the gate once keeps that verdict for its lifetime; there is no re-check at write time. And `/skill-capture` on a candidate that predates this field will still work — its stored quotes are used as-is.
 
 ### The ownership fence
 
@@ -409,7 +427,7 @@ The plugin adds seven model-facing tools and five slash commands.
 
 | Tool | Purpose |
 |---|---|
-| `skill_candidate_submit` | Propose a skill. Validates name, description, body, and evidence; queues it (or writes it in `auto` mode). Set `final: true` to write the approved final version. |
+| `skill_candidate_submit` | Propose a skill. Validates name, description, body, and evidence; queues it (or writes it in `auto` mode). Set `final: true` to write the approved final version — that call needs no `evidence`, because the quotes were verified when it was queued. |
 | `skill_candidate_list` | Show what is waiting for approval, including entries that went stale. |
 | `skill_feedback` | Record that a managed skill helped or hurt. Drives the lifecycle. |
 | `skill_search` | Find an installed skill by keyword, including ones whose description the catalog shrank. |
