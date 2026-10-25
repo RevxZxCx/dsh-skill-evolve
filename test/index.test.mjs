@@ -119,6 +119,14 @@ function fakeHost() {
     agents: {
       roots: () => [...agents.values()].filter((agent) => agent.parent === undefined),
       get: (id) => agents.get(id)
+    },
+    // Cordis resolves a service through `ctx.get(name)`; the plugin reads
+    // `approval` that way to learn the session policy before downloading.
+    // Falling back to `ctx[name]` keeps the services this fixture already
+    // declares reachable through the same seam.
+    services: new Map(),
+    get(name) {
+      return ctx.services.has(name) ? ctx.services.get(name) : ctx[name]
     }
   }
 
@@ -187,7 +195,7 @@ try {
   agent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'The PDF has no text layer, so pdftotext returns nothing. Use OCR instead.' }], source: { kind: 'user' } } })
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
-  check('four tools registered', host.tools.size === 4, [...host.tools.keys()].join(','))
+  check('seven tools registered', host.tools.size === 7, [...host.tools.keys()].join(','))
   check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))
   check('hint context order is 121', host.contexts.get('skill-evolve:hint')?.order === 121)
@@ -1228,6 +1236,262 @@ try {
     'catalogEnabled:false registers no pre-step handler',
     (catOffHost.handlers.get('agent/pre-step') ?? []).length === 0,
     String((catOffHost.handlers.get('agent/pre-step') ?? []).length)
+  )
+  process.env.DSH_HOME = root
+
+  // ---- market install approval (tools/pre-execute) -------------------------
+  // The gate's real contract is what it returns, not that its source contains
+  // the word "ask". Driving the chain the way cordis' waterfall does means a
+  // handler that allows the install, or that forgets to call `next()` for other
+  // tools, fails here instead of in production.
+  const gateRoot = await makeTempRoot('skill-evolve-gate-')
+  process.env.DSH_HOME = gateRoot
+  const gateHost = fakeHost()
+  apply(gateHost.ctx, Config({ mode: 'suggest' }))
+  const gateChain = gateHost.handlers.get('tools/pre-execute') ?? []
+  check('the install gate is registered on tools/pre-execute', gateChain.length === 1, String(gateChain.length))
+
+  /**
+   * Serve a fixed bundle from a stubbed global fetch.
+   *
+   * The gate now downloads before asking, so every install path needs a market
+   * to talk to. Stubbing the global (rather than injecting a dependency) is what
+   * the gate itself reads, so this also proves it goes through the same fetch as
+   * the tools instead of holding a private copy.
+   */
+  const realFetch = globalThis.fetch
+  // Everything down to the restore below runs with the market stubbed out, and
+  // the block contains a `readFile` on the installed skill. Today a throw there
+  // is already fatal — this file's top-level catch exits the process — so the
+  // guarantee here is only for a future refactor that turns that catch into a
+  // per-section one. Measured, not assumed: forcing an ENOENT inside the block
+  // leaves the later checks unrun with or without this wrapper. The indentation
+  // below is left flat on purpose; re-indenting 190 lines of assertions would
+  // make the diff unreviewable.
+  try {
+  const bundleFiles = [
+    { path: 'SKILL.md', contents: '---\nname: c\n---\n\nDo it.' },
+    { path: 'scripts/run.py', contents: 'print(1)' }
+  ]
+  const installFetch = async (url) => {
+    if (String(url).includes('/api/download/')) {
+      return {
+        ok: true,
+        status: 200,
+        body: undefined,
+        text: async () => JSON.stringify({ files: bundleFiles, hash: 'h1' })
+      }
+    }
+    return { ok: false, status: 404, body: undefined, text: async () => '{}' }
+  }
+  globalThis.fetch = installFetch
+
+  /** Drive the pre-execute chain for one tool call. */
+  const runPreExecute = async (exec) => {
+    let index = 0
+    const next = async () => {
+      const handler = gateChain[index]
+      index += 1
+      return handler === undefined ? { kind: 'allow' } : handler(exec, next)
+    }
+    return next()
+  }
+
+  const gateDecision = await runPreExecute({ name: 'skill_market_install', arguments: { id: 'a/b/c' }, callId: 'call-1' })
+  check('an install is asked about, not allowed', gateDecision.kind === 'ask', JSON.stringify(gateDecision))
+  check(
+    'the ask names the skill being installed',
+    typeof gateDecision.reason === 'string' && gateDecision.reason.includes('a/b/c'),
+    gateDecision.reason
+  )
+  check(
+    'the ask warns that scripts may be written',
+    typeof gateDecision.displayReason === 'string' && gateDecision.displayReason.includes('executable'),
+    gateDecision.displayReason
+  )
+  // The whole point of downloading before asking: the person is shown the files
+  // they are about to accept, not just an id they have to trust.
+  check(
+    'the ask lists the files that will be written',
+    typeof gateDecision.displayReason === 'string' &&
+      gateDecision.displayReason.includes('SKILL.md') &&
+      gateDecision.displayReason.includes('scripts/run.py'),
+    gateDecision.displayReason
+  )
+
+  // A gate that swallowed every tool would also "ask" correctly. The other two
+  // market tools must pass straight through: gating a read-only lookup trains
+  // the person to approve without reading.
+  for (const name of ['skill_market_search', 'skill_market_preview']) {
+    const decision = await runPreExecute({ name, arguments: { query: 'pdf' } })
+    check(`"${name}" is not gated`, decision.kind === 'allow', JSON.stringify(decision))
+  }
+  const unrelated = await runPreExecute({ name: 'bash', arguments: { command: 'ls' } })
+  check('an unrelated tool is not gated', unrelated.kind === 'allow', JSON.stringify(unrelated))
+
+  // A malformed call must not bypass the gate, and must not produce a question
+  // that cannot be answered: there is no id to install, so the only honest
+  // outcome is a denial that says so.
+  const noArgs = await runPreExecute({ name: 'skill_market_install' })
+  check('an install with no arguments is denied rather than asked', noArgs.kind === 'deny', JSON.stringify(noArgs))
+  check(
+    'a missing id is described rather than crashing',
+    typeof noArgs.reason === 'string' && noArgs.reason.includes('(no id)'),
+    noArgs.reason
+  )
+
+  // An id that is not `owner/repo/skill` becomes a URL path segment, so it is
+  // rejected before any request is made. Driving it through the gate proves the
+  // validation runs there rather than only inside the tool body.
+  let requestedBadId = false
+  globalThis.fetch = async (url) => {
+    requestedBadId = true
+    return { ok: false, status: 404, body: undefined, text: async () => '{}' }
+  }
+  const badId = await runPreExecute({ name: 'skill_market_install', arguments: { id: '../etc/passwd' } })
+  check('an install with an unsafe id is denied', badId.kind === 'deny', JSON.stringify(badId))
+  check('an unsafe id never reaches the network', requestedBadId === false, String(requestedBadId))
+
+  // A bundle that cannot be downloaded cannot be approved: asking would let a
+  // person approve an install that is guaranteed to fail afterwards.
+  globalThis.fetch = async () => ({ ok: false, status: 500, body: undefined, text: async () => '{}' })
+  const failedDownload = await runPreExecute({ name: 'skill_market_install', arguments: { id: 'a/b/c' } })
+  check('a failed download is denied, not asked', failedDownload.kind === 'deny', JSON.stringify(failedDownload))
+
+  // The name is derivable from the id, so a call that cannot install must not
+  // cost a megabyte of network first. The bundle above would download fine;
+  // this asserts the name is checked before that fetch, not after it.
+  let requestedBadName = false
+  globalThis.fetch = async (url) => {
+    requestedBadName = true
+    return { ok: false, status: 404, body: undefined, text: async () => '{}' }
+  }
+  const rejectedName = await runPreExecute({
+    name: 'skill_market_install',
+    arguments: { id: 'a/b/c', name: 'Not Kebab Case' }
+  })
+  check('an install with an invalid name is denied', rejectedName.kind === 'deny', JSON.stringify(rejectedName))
+  check('an invalid name never reaches the network', requestedBadName === false, String(requestedBadName))
+
+  // Under the "never" policy the host rejects every request without consulting
+  // anyone, so downloading first would spend a real request and cache a
+  // megabyte that is discarded for certain.
+  let requestedUnderNever = false
+  globalThis.fetch = async (url) => {
+    requestedUnderNever = true
+    return { ok: false, status: 404, body: undefined, text: async () => '{}' }
+  }
+  gateHost.ctx.services.set('approval', { effectivePolicy: () => 'never' })
+  const neverPolicy = await runPreExecute({ name: 'skill_market_install', arguments: { id: 'a/b/c' } })
+  check('an install under the never policy is denied', neverPolicy.kind === 'deny', JSON.stringify(neverPolicy))
+  check(
+    'the denial names the disabled approval prompts',
+    typeof neverPolicy.reason === 'string' && neverPolicy.reason.includes('disabled'),
+    neverPolicy.reason
+  )
+  check('the never policy never reaches the network', requestedUnderNever === false, String(requestedUnderNever))
+  gateHost.ctx.services.delete('approval')
+
+  // ---- the approved bundle is the bundle that gets written ----------------
+  // The P1 this replaced: the gate showed one fetch and `execute` performed
+  // another, so an approval could apply to bytes nobody saw. Here the market
+  // serves a different bundle on every request, and the file that lands on disk
+  // must be the one from the first (approved) fetch.
+  const wireRoot = await makeTempRoot('skill-evolve-install-wire-')
+  process.env.DSH_HOME = wireRoot
+  let fetchCount = 0
+  globalThis.fetch = async (url) => {
+    if (!String(url).includes('/api/download/')) {
+      return { ok: false, status: 404, body: undefined, text: async () => '{}' }
+    }
+    fetchCount += 1
+    const version = fetchCount
+    return {
+      ok: true,
+      status: 200,
+      body: undefined,
+      text: async () =>
+        JSON.stringify({
+          files: [{ path: 'SKILL.md', contents: `---\nname: served\n---\n\nversion ${version}` }],
+          hash: `h${version}`
+        })
+    }
+  }
+  const installHost = fakeHost()
+  apply(installHost.ctx, Config({ mode: 'suggest' }))
+  const installAgent = fakeAgent('session-install-wire', 'F:/p8')
+  installHost.agents.set(installAgent.id, installAgent)
+  const installTool = installHost.tools.get('skill_market_install')
+  const installChain = installHost.handlers.get('tools/pre-execute') ?? []
+  const driveInstall = async (exec) => {
+    let index = 0
+    const next = async () => {
+      const handler = installChain[index]
+      index += 1
+      return handler === undefined ? { kind: 'allow' } : handler(exec, next)
+    }
+    return next()
+  }
+  const installExec = { name: 'skill_market_install', arguments: { id: 'a/b/served' }, callId: 'call-approved', agent: installAgent }
+  const approval = await driveInstall(installExec)
+  check('the install gate asked for the wired call', approval.kind === 'ask', JSON.stringify(approval))
+  const installOutcome = await installTool.execute({ id: 'a/b/served' }, installExec)
+  check('the approved install succeeded', installOutcome.ok === true, JSON.stringify(installOutcome))
+  check('the market was fetched exactly once, by the gate', fetchCount === 1, String(fetchCount))
+  const onDisk = await readFile(join(wireRoot, 'skills', 'served', 'SKILL.md'), 'utf8')
+  check(
+    'the bytes on disk are the bytes the gate approved',
+    onDisk.includes('version 1') && !onDisk.includes('version 2'),
+    onDisk
+  )
+
+  // The approval is single-use: taking the entry out means a second write from
+  // the same call cannot reuse bytes a person approved once.
+  const replay = await installTool.execute({ id: 'a/b/served', name: 'served-again' }, installExec)
+  check('an approval cannot be replayed', replay.ok === false, JSON.stringify(replay))
+  check('a replayed install does not re-download', fetchCount === 1, String(fetchCount))
+
+  // An install that never went through the gate has no bundle waiting, and must
+  // not fall back to downloading on its own.
+  const ungated = await installTool.execute({ id: 'a/b/never' }, { name: 'skill_market_install', callId: 'call-never', agent: installAgent })
+  check('an install without an approval is refused', ungated.ok === false, JSON.stringify(ungated))
+
+  } finally {
+    globalThis.fetch = realFetch
+    process.env.DSH_HOME = root
+  }
+
+  // ---- skill_search reaches the host catalog through `service` ------------
+  // `createTools` defaults its `service` dependency to a function returning
+  // `undefined`, so dropping the wiring line in `lib/index.js` does not throw:
+  // the tool stays registered and answers "the host does not expose a skill
+  // catalog" on every call. Unit tests inject the dependency, so only driving
+  // `apply` and then the registered tool can see the difference. This check
+  // failed exactly that way before the wiring was added.
+  const searchHost = fakeHost()
+  apply(searchHost.ctx, Config({ mode: 'suggest' }))
+  const searchAgent = fakeAgent('session-search-wire', 'F:/p7')
+  searchHost.agents.set(searchAgent.id, searchAgent)
+  const snapshotCalls = []
+  searchHost.ctx.skills = {
+    snapshot: async (options) => {
+      snapshotCalls.push(options)
+      return { skills: [{ name: 'pdf-filler', description: 'Fill PDF forms', invocation: 'model' }], complete: true }
+    },
+    get: async () => ({ name: 'pdf-filler', description: 'Fill PDF forms', content: 'Fill a PDF form.' })
+  }
+  const wiredSearch = searchHost.tools.get('skill_search')
+  check('skill_search is registered through apply', wiredSearch !== undefined, String(wiredSearch))
+  const wiredOutcome = await wiredSearch.execute({ query: 'pdf' }, { agent: searchAgent })
+  check(
+    'skill_search finds a skill instead of claiming no catalog exists',
+    wiredOutcome.ok === true && Array.isArray(wiredOutcome.results) && wiredOutcome.results.length === 1,
+    JSON.stringify(wiredOutcome)
+  )
+  check(
+    'skill_search asked the host for a snapshot scoped to the agent',
+    snapshotCalls.length === 1 && snapshotCalls[0]?.scope === searchAgent,
+    JSON.stringify(snapshotCalls.map((call) => Object.keys(call ?? {})))
   )
   process.env.DSH_HOME = root
 } catch (error) {

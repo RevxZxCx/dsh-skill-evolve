@@ -177,6 +177,31 @@ Measured on a real 13-skill catalog: `pdf` returns `office-export-pdf` first (na
 
 **The honest limit:** this is lexical, not semantic. A query in Chinese will not find a skill whose description is in English, and a synonym the description does not contain will not match. On the real catalog, `记忆 memory` returned nothing while `browser` returned the right skill — the first is a vocabulary gap, the second is the system working. Semantic search would close the first and needs a vector store, an embedding model, and a threshold nobody can tune; at a few hundred skills the keyword version is cheaper and, when it fails, fails visibly rather than plausibly.
 
+### The market, and why installing asks
+
+`skill_search` answers "what do I already have". It cannot answer "has someone already solved this", which is the question that matters when the library is small and the problem is not.
+
+Three tools cover skills.sh: `search`, `preview`, `install`. Only install is gated, because only install writes. Search and preview are read-only network calls, and asking permission to look something up would train the person to approve without reading — exactly the reflex the gate exists to prevent.
+
+**The download happens before the question, not after it.** An approval that names only an id asks the person to trust a bundle they have not seen; the file list and the executable warning would be empty. So the gate fetches once, renders what it found into the question, caches the bytes under the tool call's id, and hands that same bundle to `execute`. If the cache entry is missing, the install is refused rather than re-downloaded: the whole point is that the person approved *those* bytes, and a second fetch could serve different ones.
+
+The cache entry is removed on take, so one approval covers one write. It is also bounded: a person who denies several installs in a row must not accumulate megabytes of bundles nobody will use.
+
+Two checks run **before** the download rather than after, because both are decidable from the arguments alone and a rejection must not cost a request:
+
+- the id must be `owner/repo/skill`, since it becomes a URL path segment;
+- the target name must be kebab-case, and it is derived from the id when the caller does not supply one.
+
+A third short-circuit exists because of a measured host behaviour: under the `never` approval policy the host rejects every request without consulting anyone, so downloading first would spend a real request and cache a megabyte that is discarded for certain. The gate reads the session policy through the `approval` service and denies immediately in that case.
+
+What arrives is a **complete file tree**, not a markdown file. `anthropics/skills/pdf` alone ships twelve files including seven Python scripts. That is why the preview lists every path with its size, calls out executables separately, and truncates only the `SKILL.md` body — the list is what the decision rests on, the body is a convenience.
+
+Paths are validated before anything is written: alphanumerics, dots, underscores, hyphens, and single forward slashes only. The character set is what refuses absolute paths and drive letters; `..` is the one case the set cannot express, so it is checked separately. Files that fail are reported as skipped rather than silently dropped — a bundle that quietly installs 9 of 12 files is worse than one that refuses.
+
+A bundle without a `SKILL.md` is refused outright: the host discovers skills at `<root>/<name>/SKILL.md`, so installing anything else produces files that no session will ever load.
+
+**Known limit:** the market is third-party code with no review step. The gate tells you what will be written and whether it is executable; it cannot tell you whether running it is safe.
+
 ### The evidence gate
 
 Four classes of evidence, each with different authority:
@@ -368,7 +393,7 @@ All four were observed in a real session log. Counting the injected ones would m
 
 ## Use
 
-The plugin adds four model-facing tools and five slash commands.
+The plugin adds seven model-facing tools and five slash commands.
 
 ### Tools
 
@@ -378,6 +403,9 @@ The plugin adds four model-facing tools and five slash commands.
 | `skill_candidate_list` | Show what is waiting for approval, including entries that went stale. |
 | `skill_feedback` | Record that a managed skill helped or hurt. Drives the lifecycle. |
 | `skill_search` | Find an installed skill by keyword, including ones whose description the catalog shrank. |
+| `skill_market_search` | Search skills.sh for a published skill. Returns id, source, and install count only — nothing is downloaded. |
+| `skill_market_preview` | Show a market skill's file list and the head of its `SKILL.md` before deciding. |
+| `skill_market_install` | Install a market skill. **Always asks the person first**, and the question lists the bytes it would write. |
 
 ### Commands
 
@@ -482,7 +510,7 @@ Each of these was considered and rejected, with the reason:
 | Write a skill without approval | The default is `suggest`; `auto` exists but is opt-in |
 | Delete unused skills | Zero uses is absence of evidence, not proof of uselessness; worst case is `inverted` |
 | Semantic (embedding) deduplication | Needs a vector store and a threshold nobody can tune; the catalog itself is the dedupe surface |
-| Search external skill marketplaces | Out of scope for stages 1–2; stage 3 adds a search/preview/install path against skills.sh |
+| Search external skill marketplaces | `skill_market_search` / `_preview` / `_install` against skills.sh. Not wired to ClawHub: its search API did not answer from this host |
 | Edit `AGENTS.md` | A different, more invasive surface; this plugin only writes SKILL.md files it owns |
 | Session-scoped temporary skills | Not needed: writing to disk and letting the existing `dsh-skill-filesystem` provider discover it is simpler and survives restarts |
 | Open a new conversation to confirm a skill | Qoder does this because a skill is authoritative. This plugin splits approval in two (approve, then write with the catalog in view) but keeps it inside the running conversation — a fresh context would cost a whole prompt cache for a step the model can take anyway |
