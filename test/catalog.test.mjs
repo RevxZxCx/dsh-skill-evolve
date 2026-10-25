@@ -21,7 +21,8 @@ import {
   findCatalogMessages,
   describeEntry,
   sortRows,
-  shrinkCatalog
+  shrinkCatalog,
+  CATALOG_NOTE
 } from '../lib/catalog.js'
 import { Store } from '../lib/store.js'
 
@@ -280,6 +281,154 @@ check(
 check(
   'shrinkCatalog keeps every skill name',
   ['alpha', 'beta', 'gamma', 'delta'].every((name) => shrunk.message.content[0].text.includes(`\`${name}\``))
+)
+
+// The note is the only thing telling the model that a shortened line still has
+// a description behind it. Without it, names-only rendering reads as "these
+// skills are names", and the search tool that could recover the text is never
+// called. Its presence and its position both matter.
+check(
+  'a shortened catalog points at skill_search',
+  shrunk.message.content[0].text.includes('skill_search')
+)
+check(
+  'the note sits after the block and before the host closing prose',
+  (() => {
+    const text = shrunk.message.content[0].text
+    const close = text.indexOf('</available_skills>')
+    const note = text.indexOf('skill_search')
+    const closing = text.indexOf('Use only names in this replacement catalog.')
+    return close !== -1 && note > close && closing !== -1 && note < closing
+  })()
+)
+check(
+  'names-only mode also points at skill_search',
+  (() => {
+    const out = shrinkCatalog({
+      message: catalogMessage(manySkills(40)),
+      options: { ...OPTS, fullListBelow: 10 }
+    })
+    return out !== undefined && out.message.content[0].text.includes('skill_search')
+  })()
+)
+
+// The caption is appended after the block, so feeding a rewritten message back
+// in must not append a second one. The host persists and replays what
+// `agent/pre-step` returns, and a resumed or forked session seeds a message that
+// already went through this rewrite — so a second pass is a real path, not a
+// hypothetical. Before the fix this measured 282 → 393 → 504 characters.
+const NOTE_TEXT = 'Descriptions above were shortened'
+check(
+  'a second pass does not add a second caption',
+  (() => {
+    const first = shrinkCatalog({ message: catalogMessage(manySkills(6)), options: OPTS })
+    const second = shrinkCatalog({ message: first.message, options: OPTS })
+    const count = (first.message.content[0].text.split(NOTE_TEXT).length - 1)
+    const again = second === undefined ? first.message.content[0].text : second.message.content[0].text
+    return count === 1 && (again.split(NOTE_TEXT).length - 1) === 1
+  })()
+)
+// The pass above can be turned away by the net-saving guard before the caption
+// is ever appended, which would hide a stacking bug instead of proving its
+// absence. This one forces a real rewrite on top of an already-captioned
+// message: the library grew, so the body changes and the rewrite is unavoidable.
+check(
+  'a rewrite on top of a captioned message keeps exactly one caption',
+  (() => {
+    const first = shrinkCatalog({ message: catalogMessage(manySkills(6)), options: OPTS })
+    const grown = {
+      ...first.message,
+      source: {
+        ...first.message.source,
+        entries: [...first.message.source.entries, { name: 'zz-late', description: 'e'.repeat(300) }]
+      }
+    }
+    const second = shrinkCatalog({ message: grown, options: OPTS })
+    return second !== undefined &&
+      (second.message.content[0].text.split(NOTE_TEXT).length - 1) === 1 &&
+      second.message.content[0].text.includes('`zz-late`')
+  })()
+)
+
+// The caption is a fixed 111 characters while the saving grows with the library.
+// On a library whose descriptions sit just over the budget it must not turn a
+// saving into an enlargement, and the rewrite must never be larger than what the
+// host already wrote — the log line compares before against after, so growth
+// would be reported as a saving.
+check(
+  'a small library whose descriptions barely overflow still shrinks',
+  (() => {
+    const entries = Array.from({ length: 3 }, (_, i) => ({ name: `s${i}`, description: 'd'.repeat(100) }))
+    const message = catalogMessage(entries)
+    const before = message.content[0].text.length
+    const out = shrinkCatalog({ message, options: OPTS })
+    return out !== undefined && out.message.content[0].text.length < before
+  })()
+)
+check(
+  'the caption is dropped rather than paid for when the saving cannot cover it',
+  (() => {
+    const entries = Array.from({ length: 2 }, (_, i) => ({ name: `s${i}`, description: 'd'.repeat(100) }))
+    const out = shrinkCatalog({ message: catalogMessage(entries), options: OPTS })
+    return out !== undefined &&
+      out.message.content[0].text.includes(NOTE_TEXT) === false &&
+      out.message.content[0].text.includes('`s0`')
+  })()
+)
+
+// Removing an earlier caption must be surgical. Two ways to get it wrong both
+// pass a "caption appears once" assertion: collapsing blank lines while
+// filtering, or deleting the sentence as a substring anywhere it occurs. The
+// second is the dangerous one — host prose that merely contains the sentence
+// would be eaten, and the message would silently lose a line the host wrote.
+check(
+  'stripping an earlier caption leaves host prose and blank lines intact',
+  (() => {
+    const first = shrinkCatalog({ message: catalogMessage(manySkills(6)), options: OPTS })
+    const text = first.message.content[0].text
+    // Insert a host-owned line that CONTAINS the whole caption, right after the
+    // real caption. Two mutants have to die here and a naive fixture kills
+    // neither: a substring delete (`includes`) only dies if the host line
+    // carries the full caption text, and a blank-collapsing filter only dies if
+    // the blank count is asserted. `replace` on the caption alone would destroy
+    // the exact line and leave `stripNote` nothing to remove, so the fixture has
+    // to hold both the exact caption and a host line quoting it.
+    const hostileLine = `${CATALOG_NOTE} (this sentence is quoted inside host prose)`
+    const hostile = text.replace(
+      `\n${CATALOG_NOTE}\n`,
+      `\n${CATALOG_NOTE}\n${hostileLine}\n`
+    )
+    const blanks = hostile.split('\n').filter((line) => line.trim() === '').length
+    const grown = {
+      ...first.message,
+      content: [{ ...first.message.content[0], text: hostile }],
+      source: {
+        ...first.message.source,
+        entries: [...first.message.source.entries, { name: 'zz-late', description: 'e'.repeat(300) }]
+      }
+    }
+    const second = shrinkCatalog({ message: grown, options: OPTS })
+    if (second === undefined) return false
+    const after = second.message.content[0].text
+    const captionLines = after.split('\n').filter((line) => line.trim() === CATALOG_NOTE).length
+    return after.includes(hostileLine) &&
+      after.split('\n').filter((line) => line.trim() === '').length === blanks &&
+      captionLines === 1
+  })()
+)
+// A library where every entry is pinned hides nothing even in names-only mode,
+// so there is nothing to rewrite: `shrinkCatalog` must hand back `undefined`
+// rather than pay 111 characters to caption a catalog that lost no text. Pins
+// are the user saying "keep this", and the cutoff deliberately exempts them.
+check(
+  'a names-only catalog of only pinned skills is not rewritten at all',
+  (() => {
+    const entries = manySkills(40)
+    const registry = {}
+    for (const entry of entries) registry[entry.name] = { pinned: true }
+    const out = shrinkCatalog({ message: catalogMessage(entries), registry, options: { ...OPTS, fullListBelow: 10 } })
+    return out === undefined
+  })()
 )
 
 const noChange = shrinkCatalog({

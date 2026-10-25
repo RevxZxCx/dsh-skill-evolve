@@ -141,16 +141,26 @@ A pin outranks a demote, so marking something important cannot silently suppress
 
 What this actually saves depends on how long the descriptions are, and the honest answer for a small library is "some". On the same 13-skill session:
 
-| `catalogShrinkChars` | Characters | Saved |
-|---|---|---|
-| 500 (no shrink) | 3,390 | — |
-| 200 | 2,531 | 25% |
-| 120 | 2,061 | 39% |
-| **80 (default)** | **1,776** | **48%** |
-| 40 | 1,307 | 61% |
-| 80 + `catalogFullListBelow: 10` | 767 | 77% |
+| `catalogShrinkChars` | Shrink only | Saved | As shipped (with the caption) | Saved |
+|---|---|---|---|---|
+| 500 (no shrink) | 3,390 | — | 3,390 | — |
+| 200 | 2,531 | 25% | 2,642 | 22% |
+| 120 | 2,061 | 39% | 2,172 | 36% |
+| **80 (default)** | **1,776** | **48%** | **1,887** | **44%** |
+| 40 | 1,307 | 61% | 1,418 | 58% |
+| 80 + `catalogFullListBelow: 10` | 767 | 77% | 878 | 74% |
+
+The caption costs 111 characters once, so it takes about 3 points off every row above. That is the price of the hidden descriptions staying reachable; a bigger shrink still wins, because the caption does not grow with the library while the descriptions do.
 
 The saving grows with the library, because the fixed frame and the skill names are what remain. Above `catalogFullListBelow` skills the descriptions are dropped entirely and the list degrades to names, on the theory that a model facing 200 skills should search rather than read.
+
+Whenever a line lost text — truncated at the budget, or reduced to a bare name — and the saving is large enough to pay for it, the block gets one caption after it:
+
+> Descriptions above were shortened; call `skill_search` with keywords to read one in full before ruling it out.
+
+That caption is not decoration. A list of bare names says "these skills are names"; nothing in the host's frame tells the model there is a description behind them, and a model that has already decided a name does not apply has no reason to go looking. The tool description alone is not enough for the same reason. It is one sentence on purpose: this text is re-sent on every step for the life of the catalog, so at the default 80-character budget it costs about 7% of what shrinking saves, and a longer version with a count would cost twice that to convey a number nothing acts on.
+
+Two cases emit no caption at all. On a library where every description fits, there is nothing hidden, and pointing at a search that would return what is already on screen is pure overhead. On a small library whose descriptions sit just over the budget, the 111 characters can cost more than the truncation recovered — the text is still shortened and still searchable, the model is simply not told so until the shrink is worth advertising.
 
 One cost is real and worth stating: tier `session` makes the catalog text change mid-session, which invalidates the prompt cache prefix once per new skill used. Set `catalogSessionAware: false` to trade that back for a catalog that only changes when the skill library does.
 
@@ -415,7 +425,7 @@ The plugin adds seven model-facing tools and five slash commands.
 | `/skill-capture <name> [--preview\|--discard]` | Approve, preview, or drop a candidate |
 | `/skill-feedback <name> <helpful\|harmful> [note]` | Record an outcome |
 | `/skill-stats` | Show stage, confidence, and use counts for every managed skill |
-| `/skill-rank <name> [pin\|demote\|clear]` | Mark a skill as always-visible or always-last in the catalog |
+| `/skill-rank <name> <pin\|unpin\|demote\|undemote>` | Mark a skill as always-visible or always-last in the catalog; `unpin` / `undemote` remove one flag and leave the other alone |
 
 A typical cycle:
 
