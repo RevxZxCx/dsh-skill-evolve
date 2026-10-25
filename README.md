@@ -154,6 +154,29 @@ The saving grows with the library, because the fixed frame and the skill names a
 
 One cost is real and worth stating: tier `session` makes the catalog text change mid-session, which invalidates the prompt cache prefix once per new skill used. Set `catalogSessionAware: false` to trade that back for a catalog that only changes when the skill library does.
 
+### Searching what was shrunk
+
+Shrinking the catalog without a way to search it would be strictly worse than not shrinking: the catalog gets cheap and the skills become invisible. `skill_search` closes that loop.
+
+It searches `ctx.skills.snapshot()` rather than walking the skill directory. The host already merges every provider — project `.dsh/skills`, project `.agents/skills`, custom directories, `$DSH_HOME/skills`, `~/.agents/skills`, bundled — and resolves shadowing between them. A search that disagreed with what the `skill` tool can actually load would be worse than no search at all.
+
+Ranking is keyword-based, in this order of authority:
+
+| Signal | Weight | Why |
+|---|---|---|
+| name | 10 | the person typed the name |
+| `whenToUse` | 4 | written for routing |
+| description | 3 | written for humans |
+| body | 1 | the longest and least specific field |
+
+Coverage is **squared**, not added: matching every query term in weak fields beats matching one term in a strong field. That is what "find me something that does this" means. Counting distinct terms rather than occurrences matters too — a body that says "pdf" forty times is not forty times more relevant, and occurrence counts make long documents win by length alone.
+
+Bodies are the expensive part, so at most 20 are read per search: matched summaries first, then unmatched ones with whatever budget is left. That second half is the point. A skill stage 1 reduced to a bare name matches nothing on its summary, and its body is the only place its words survive — so probing the unmatched skills is exactly what makes the shrink recoverable. Loading all of them would mean one file read per skill in the library.
+
+Measured on a real 13-skill catalog: `pdf` returns `office-export-pdf` first (name, description, and body all hit), then `office` (description only). `browser` returns `browser-skill` alone.
+
+**The honest limit:** this is lexical, not semantic. A query in Chinese will not find a skill whose description is in English, and a synonym the description does not contain will not match. On the real catalog, `记忆 memory` returned nothing while `browser` returned the right skill — the first is a vocabulary gap, the second is the system working. Semantic search would close the first and needs a vector store, an embedding model, and a threshold nobody can tune; at a few hundred skills the keyword version is cheaper and, when it fails, fails visibly rather than plausibly.
+
 ### The evidence gate
 
 Four classes of evidence, each with different authority:
@@ -345,7 +368,7 @@ All four were observed in a real session log. Counting the injected ones would m
 
 ## Use
 
-The plugin adds three model-facing tools and four slash commands.
+The plugin adds four model-facing tools and five slash commands.
 
 ### Tools
 
@@ -354,6 +377,7 @@ The plugin adds three model-facing tools and four slash commands.
 | `skill_candidate_submit` | Propose a skill. Validates name, description, body, and evidence; queues it (or writes it in `auto` mode). Set `final: true` to write the approved final version. |
 | `skill_candidate_list` | Show what is waiting for approval, including entries that went stale. |
 | `skill_feedback` | Record that a managed skill helped or hurt. Drives the lifecycle. |
+| `skill_search` | Find an installed skill by keyword, including ones whose description the catalog shrank. |
 
 ### Commands
 
