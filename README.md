@@ -119,6 +119,41 @@ The slot is dropped the moment the model calls any `skill_candidate*` tool. That
 
 When a reflection fires, the detector's findings ride along in the same message as supporting evidence — "you repeated these three steps" is a much stronger prompt next to "what did this turn teach you".
 
+### The catalog budget
+
+The host re-sends every visible skill's name and description on **every pre-step**, and its own cap on a description is 500 characters. That is fine at ten skills and ruinous at three hundred: the catalog is a fixed cost paid per step, whether or not any of it is used.
+
+Measured on a real session with 13 skills: 3,390 characters per snapshot. Extrapolating with the same average description length, 200 skills cost about 12.9k tokens and 500 about 31.6k — per step.
+
+A prepended `agent/pre-step` handler rewrites the catalog message down to the shortest form that still routes. It changes only `content[0].text` and leaves `source.entries` untouched, because the host digests `[name, description]` pairs to decide whether the catalog changed. Rewriting the entries would make the host conclude it changed on every step and append a new catalog message each time.
+
+Lines are ordered by evidence, then by user override:
+
+| Tier | Gets | Source |
+|---|---|---|
+| `pinned` | full description, first | `/skill-rank <name> pin` |
+| `session` | full description | a `skill` call in this session |
+| `frequent` | full description | `uses >= catalogFrequentUses` globally |
+| `other` | truncated to `catalogShrinkChars` | — |
+| `demoted` | truncated, last | `/skill-rank <name> demote` |
+
+A pin outranks a demote, so marking something important cannot silently suppress it. Ties break on name, which keeps the table stable across steps — only skills that changed tier move.
+
+What this actually saves depends on how long the descriptions are, and the honest answer for a small library is "some". On the same 13-skill session:
+
+| `catalogShrinkChars` | Characters | Saved |
+|---|---|---|
+| 500 (no shrink) | 3,390 | — |
+| 200 | 2,531 | 25% |
+| 120 | 2,061 | 39% |
+| **80 (default)** | **1,776** | **48%** |
+| 40 | 1,307 | 61% |
+| 80 + `catalogFullListBelow: 10` | 767 | 77% |
+
+The saving grows with the library, because the fixed frame and the skill names are what remain. Above `catalogFullListBelow` skills the descriptions are dropped entirely and the list degrades to names, on the theory that a model facing 200 skills should search rather than read.
+
+One cost is real and worth stating: tier `session` makes the catalog text change mid-session, which invalidates the prompt cache prefix once per new skill used. Set `catalogSessionAware: false` to trade that back for a catalog that only changes when the skill library does.
+
 ### The evidence gate
 
 Four classes of evidence, each with different authority:
@@ -273,6 +308,11 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `hintExpiresAfterSteps` | `0` | Model steps a hint stays visible before it retires on its own; `0` disables |
 | `reflectionHoldSteps` | `8` | Model steps a reflection keeps the hint channel to itself before a repeat hint may replace it; `0` disables |
 | `hintRequired` | `false` | Make the hint a `required` context (survives suppression) |
+| `catalogEnabled` | `true` | Rewrite the host's skill catalog to the shortest form that still routes |
+| `catalogShrinkChars` | `80` | Character budget for a skill nobody pinned, used, or promoted |
+| `catalogFullListBelow` | `40` | At or above this many skills, list names only; `0` disables |
+| `catalogFrequentUses` | `3` | Global use count that earns a full description |
+| `catalogSessionAware` | `true` | Give a full description to skills already used in this session |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.
 
@@ -323,6 +363,7 @@ The plugin adds three model-facing tools and four slash commands.
 | `/skill-capture <name> [--preview\|--discard]` | Approve, preview, or drop a candidate |
 | `/skill-feedback <name> <helpful\|harmful> [note]` | Record an outcome |
 | `/skill-stats` | Show stage, confidence, and use counts for every managed skill |
+| `/skill-rank <name> [pin\|demote\|clear]` | Mark a skill as always-visible or always-last in the catalog |
 
 A typical cycle:
 
@@ -417,7 +458,7 @@ Each of these was considered and rejected, with the reason:
 | Write a skill without approval | The default is `suggest`; `auto` exists but is opt-in |
 | Delete unused skills | Zero uses is absence of evidence, not proof of uselessness; worst case is `inverted` |
 | Semantic (embedding) deduplication | Needs a vector store and a threshold nobody can tune; the catalog itself is the dedupe surface |
-| Search external skill marketplaces | Out of scope — install `dsh-skill-hub` for that |
+| Search external skill marketplaces | Out of scope for stages 1–2; stage 3 adds a search/preview/install path against skills.sh |
 | Edit `AGENTS.md` | A different, more invasive surface; this plugin only writes SKILL.md files it owns |
 | Session-scoped temporary skills | Not needed: writing to disk and letting the existing `dsh-skill-filesystem` provider discover it is simpler and survives restarts |
 | Open a new conversation to confirm a skill | Qoder does this because a skill is authoritative. This plugin splits approval in two (approve, then write with the catalog in view) but keeps it inside the running conversation — a fresh context would cost a whole prompt cache for a step the model can take anyway |
@@ -438,6 +479,8 @@ Each of these was considered and rejected, with the reason:
 
 - **Prompt cache cost is real but bounded.** Each hint is a single stable string, cleared as soon as it is acted on or retired by `hintExpiresAfterSteps`, and a session may see at most `maxReflectionsPerSession + maxHintsPerSession` of them. The costs that are *not* bounded: every hint invalidates the prefix cache once when it appears and once when it clears, and a hint that arrives while the model is mid-response is paid for by every step until it expires — at most 8 of them by default, which is the whole point of the deadline.
 - **A hint that was read but not acted on is indistinguishable from one that was never read.** Expiry is a cost control, not evidence. The plugin does not know whether the model ignored the hint, judged the procedure worthless, or simply had other work; it only knows the text has been in front of the model long enough. Treat a retired hint as "no answer", not as "rejected".
+- **The catalog shrink is a heuristic about descriptions, not a measurement of routing.** The tiers assume a truncated description still carries enough signal for the model to pick the right skill. That holds for "fills PDF forms" and fails for anything whose distinguishing detail is at the end of the sentence. A pinned skill is the escape hatch, and a model that cannot tell two skills apart can still search once stage 2 lands.
+- **The catalog rewrite is coupled to a host implementation detail.** It works because the host digests `[name, description]` pairs rather than the rendered text, so changing `content[0].text` is invisible to its change detection. A host version that digests the rendered message instead would make this handler append a catalog on every step. `test/catalog.test.mjs` pins the assumption; it cannot make the host keep it.
 
 ---
 
