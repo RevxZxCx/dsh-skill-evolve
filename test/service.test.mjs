@@ -12,12 +12,24 @@
  * This test builds the hostile shape instead: a context that throws on any
  * undeclared property, exactly as cordis does.
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const root = mkdtempSync(join(tmpdir(), 'skill-evolve-svc-'))
 process.env.DSH_HOME = root
+// Scheduled at creation, not at the end of the file. This test drives the
+// plugin's handlers directly, so a throw can come from anywhere below; an exit
+// hook covers every one of those lines. Review round 10 measured the earlier
+// `try/finally` version: the `try` wrapped only the final `console.log`, so a
+// handler throw still leaked the directory.
+process.on('exit', () => {
+  try {
+    rmSync(root, { recursive: true, force: true })
+  } catch {
+    // Leaving a directory behind is better than hiding the real failure.
+  }
+})
 
 const { Config } = await import('../lib/config.js')
 const { apply } = await import('../lib/index.js')

@@ -9,6 +9,7 @@
  */
 
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
+import { rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, Config } from '../lib/index.js'
@@ -26,6 +27,35 @@ function check(name, condition, detail = '') {
 }
 
 /**
+ * Every temporary DSH_HOME this file creates.
+ *
+ * Cleanup runs from an `exit` hook rather than from `finally` blocks. Review
+ * round 10 measured why: a `try/finally` only covers the statements inside its
+ * own `try`, so the fourteen `mkdtemp` sites here each needed their own, and a
+ * throw between two of them leaked. Registering at creation time means a root is
+ * scheduled for removal the moment it exists, whichever line later throws.
+ */
+const tempRoots = []
+process.on('exit', () => {
+  // Best effort, one at a time: a locked directory on Windows would otherwise
+  // replace the assertion failure that actually explains the run with an EPERM.
+  for (const dir of tempRoots) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Leaving a directory behind is better than hiding the real failure.
+    }
+  }
+})
+
+/** Create a temporary root and schedule its removal. */
+async function makeTempRoot(prefix) {
+  const dir = await mkdtemp(join(tmpdir(), prefix))
+  tempRoots.push(dir)
+  return dir
+}
+
+/**
  * Build a fake Cordis context with the surface this plugin touches.
  */
 function fakeHost() {
@@ -39,9 +69,16 @@ function fakeHost() {
 
   const ctx = {
     logger: { info: (line) => logs.push(line) },
-    on(event, handler) {
+    // Mirrors cordis: `{ prepend: true }` unshifts, anything else pushes. The
+    // third parameter used to be missing here, so the option was silently
+    // dropped and a `prepend: false` regression passed every test. The catalog
+    // handler depends on running before the host's own pre-step listener: the
+    // host appends its catalog message inside its handler, so a plugin listener
+    // that runs after it rewrites nothing.
+    on(event, handler, options) {
       const list = handlers.get(event) ?? []
-      list.push(handler)
+      if (options?.prepend === true) list.unshift(handler)
+      else list.push(handler)
       handlers.set(event, list)
       return () => {}
     },
@@ -133,7 +170,7 @@ function toolCall(toolName, callId) {
   }
 }
 
-const root = await mkdtemp(join(tmpdir(), 'skill-evolve-e2e-'))
+const root = await makeTempRoot('skill-evolve-e2e-')
 process.env.DSH_HOME = root
 const skillsRoot = join(root, 'skills')
 
@@ -151,7 +188,7 @@ try {
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
   check('three tools registered', host.tools.size === 3, [...host.tools.keys()].join(','))
-  check('four commands registered', host.commands.size === 4, [...host.commands.keys()].join(','))
+  check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))
   check('hint context order is 121', host.contexts.get('skill-evolve:hint')?.order === 121)
   check('hint starts empty', host.contexts.get('skill-evolve:hint').text({ agent }) === '')
@@ -335,7 +372,7 @@ try {
   check('stats is always a valid result', emptyStats.kind === 'success')
 
   // ---- auto mode -----------------------------------------------------------
-  const autoRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-auto-'))
+  const autoRoot = await makeTempRoot('skill-evolve-auto-')
   process.env.DSH_HOME = autoRoot
   const autoHost = fakeHost()
   apply(autoHost.ctx, Config({ mode: 'auto' }))
@@ -356,7 +393,7 @@ try {
   // This is the Qoder-shaped half of the design: reflect at the end of a real
   // conversation turn, so that semantic lessons (a correction, a library
   // pitfall) can be captured even when no tool sequence ever repeats.
-  const turnRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-turn-'))
+  const turnRoot = await makeTempRoot('skill-evolve-turn-')
   process.env.DSH_HOME = turnRoot
   const turnHost = fakeHost()
   apply(turnHost.ctx, Config({ mode: 'suggest' }))
@@ -450,7 +487,7 @@ try {
   // "re-derive on release" implementation would pass this test while being
   // wrong in production. Three calls per step is what a real session does, and
   // it is what fills the 24-entry window inside the hold.
-  const holdRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-hold-'))
+  const holdRoot = await makeTempRoot('skill-evolve-hold-')
   process.env.DSH_HOME = holdRoot
   const holdHost = fakeHost()
   apply(holdHost.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
@@ -527,7 +564,7 @@ try {
   // left to resurrect. The bug needs a deferral that is *still pending* when the
   // model acts -- reflect, get deferred, act immediately, then step.
   {
-    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-drop-'))
+    const root = await makeTempRoot('skill-evolve-drop-')
     process.env.DSH_HOME = root
     const host = fakeHost()
     apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
@@ -574,7 +611,7 @@ try {
   // the model has moved past. Whoever takes the channel discards what was
   // waiting for it.
   {
-    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-rehold-'))
+    const root = await makeTempRoot('skill-evolve-rehold-')
     process.env.DSH_HOME = root
     const host = fakeHost()
     apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
@@ -630,7 +667,7 @@ try {
   // leave the deferral alone, and it must still be published when the hold
   // expires. Without this pair the drop rule is only pinned from one side.
   {
-    const root = await mkdtemp(join(tmpdir(), 'skill-evolve-keep-'))
+    const root = await makeTempRoot('skill-evolve-keep-')
     process.env.DSH_HOME = root
     const host = fakeHost()
     apply(host.ctx, Config({ mode: 'suggest', reflectionHoldSteps: 8 }))
@@ -681,7 +718,7 @@ try {
   // The two triggers see different things, so enabling both must not make
   // either one fire twice as often. Each has its own throttle: the detector
   // dedups by procedure shape, the pacer by turn budget.
-  const bothRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-both-'))
+  const bothRoot = await makeTempRoot('skill-evolve-both-')
   process.env.DSH_HOME = bothRoot
   const bothHost = fakeHost()
   apply(bothHost.ctx, Config({ mode: 'suggest', triggers: ['turn', 'repeat'] }))
@@ -706,7 +743,7 @@ try {
   await rm(bothRoot, { recursive: true, force: true })
 
   // ---- triggers can be turned off individually -----------------------------
-  const offRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-off-'))
+  const offRoot = await makeTempRoot('skill-evolve-off-')
   process.env.DSH_HOME = offRoot
   const offHost = fakeHost()
   apply(offHost.ctx, Config({ mode: 'suggest', triggers: ['repeat'] }))
@@ -731,7 +768,7 @@ try {
   // same session eventually submitted a skill 412 steps in, from a model that
   // re-read the still-present hint. So the text degrades to a pointer that
   // still names the procedure, and retirement is a separate opt-in stage.
-  const expRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-expiry-'))
+  const expRoot = await makeTempRoot('skill-evolve-expiry-')
   process.env.DSH_HOME = expRoot
   const expHost = fakeHost()
   apply(expHost.ctx, Config({
@@ -784,7 +821,7 @@ try {
   // Shrinking must be switchable off on its own: the two stages are
   // independent knobs, and an operator may want the full text for the hint's
   // whole life without ever retiring it.
-  const keepRoot = await mkdtemp(join(tmpdir(), 'skill-evolve-keep-'))
+  const keepRoot = await makeTempRoot('skill-evolve-keep-')
   process.env.DSH_HOME = keepRoot
   const keepHost = fakeHost()
   apply(keepHost.ctx, Config({
@@ -810,8 +847,394 @@ try {
   }
   check('both deadlines off keeps the full text forever', keepHint() === kept && kept.length > 0)
   await rm(keepRoot, { recursive: true, force: true })
-} finally {
-  await rm(root, { recursive: true, force: true })
+
+  // ---- catalog rewriting (agent/pre-step) ----------------------------------
+  // The pure functions in catalog.js have their own test file. This section
+  // covers the wiring instead: whether the handler is registered at all, whether
+  // it runs the host's `next()` first, and whether it rewrites every catalog
+  // message rather than only the first. `findCatalogMessage` returning one
+  // message was correct against the host's own lookup but wrong here, because a
+  // second catalog message would then stay at full length forever.
+  const catRoot = await makeTempRoot('skill-evolve-catalog-')
+  process.env.DSH_HOME = catRoot
+  const catHost = fakeHost()
+  // `catalogFullListBelow: 3` rather than 0, and the two catalog messages below
+  // deliberately carry a different number of entries (3 and 2). With the cutoff
+  // disabled `namesOnly` is always false, so the `totals.namesOnly` aggregation
+  // would have no observable effect; with both messages over the cutoff the
+  // aggregation is indistinguishable from plain assignment. One over and one
+  // under is the only arrangement where `||` and `=` disagree.
+  const catConfig = Config({ mode: 'suggest', catalogShrinkChars: 40, catalogFullListBelow: 3 })
+
+  // Register a stand-in for the host's own catalog listener *before* mounting the
+  // plugin, the way load order works in a real host: the host registers its
+  // listener at boot, the plugin is mounted after. The plugin must land ahead of
+  // it via `prepend`, so this one runs last.
+  const hostListenerRuns = []
+  const hostStandIn = async (payload, next) => {
+    const decision = await next()
+    hostListenerRuns.push(decision)
+    return decision
+  }
+  catHost.ctx.on('agent/pre-step', hostStandIn)
+
+  apply(catHost.ctx, catConfig)
+  const catAgent = fakeAgent('session-cat', 'F:/p7')
+  catHost.agents.set(catAgent.id, catAgent)
+
+  const preSteps = catHost.handlers.get('agent/pre-step') ?? []
+  check('catalog handler is registered on agent/pre-step', preSteps.length === 2, String(preSteps.length))
+  // Positional, so a future host that also registers with `prepend` fails here
+  // with an ordering message instead of surfacing later as a confusing
+  // `hostListenerRuns` mismatch.
+  check(
+    'the plugin handler is prepended ahead of the host listener',
+    preSteps.length === 2 && preSteps[0] !== hostStandIn && preSteps[1] === hostStandIn,
+    'prepend did not put the plugin first'
+  )
+
+  /** Build a host-shaped catalog message. */
+  const catalogMsg = (entries, id) => ({
+    id,
+    role: 'user',
+    content: [{
+      type: 'text',
+      text: `The available skill catalog changed. This complete catalog replaces every earlier available-skills list in this session:\n\n<available_skills>\n${entries.map((e) => `- \`${e.name}\`: ${e.description}`).join('\n')}\n</available_skills>`
+    }],
+    source: { kind: 'skill-catalog', form: 'catalog', entries, update: true }
+  })
+
+  const longEntries = [
+    { name: 'alpha', description: 'x'.repeat(200) },
+    { name: 'beta', description: 'y'.repeat(200) },
+    { name: 'gamma', description: 'z'.repeat(200) }
+  ]
+  const first = catalogMsg(longEntries, 'cat-1')
+  // Deliberately shorter than the cutoff while the first is at it: the two
+  // messages then disagree about `namesOnly`, which is the only way the
+  // "any message is names-only" aggregation differs from "the last one is".
+  const second = catalogMsg(longEntries.slice(0, 2), 'cat-2')
+  const decision = { kind: 'enter', messages: [first, second] }
+  // Snapshot before the step runs. Comparing against `first.source.entries` at
+  // assertion time compares an object to itself: `shrinkCatalog` spreads the
+  // message, so `source` is shared by reference, and an in-place edit would move
+  // both sides together and never fail.
+  const entriesSnapshot = JSON.stringify(first.source.entries)
+  const logsBefore = catHost.logs.length
+
+  /**
+   * Drive the whole `agent/pre-step` chain the way cordis' waterfall does.
+   *
+   * Calling `preSteps[0]` directly would test the plugin in isolation and prove
+   * nothing about ordering. Running the chain means a handler registered in the
+   * wrong position actually gets observed: the host stand-in runs last, so if the
+   * plugin were pushed to the end it would see the decision *after* the stand-in
+   * and the assertions below would fail.
+   *
+   * @param {object} decision - the decision the innermost listener produces.
+   * @returns {Promise<object>} the final decision.
+   */
+  const runPreStep = async (decision) => {
+    const chain = catHost.handlers.get('agent/pre-step') ?? []
+    let index = 0
+    const next = async () => {
+      const handler = chain[index]
+      index += 1
+      return handler === undefined ? decision : handler({ agent: catAgent }, next)
+    }
+    return next()
+  }
+
+  const rewritten = await runPreStep(decision)
+
+  check('pre-step leaves the host decision shape intact', rewritten.kind === 'enter' && Array.isArray(rewritten.messages))
+  check('pre-step rewrites the first catalog message', rewritten.messages[0] !== first)
+  check(
+    'pre-step rewrites a second catalog message too',
+    rewritten.messages[1] !== second,
+    'a second catalog message survived at full length'
+  )
+  check(
+    'rewriting shortens every catalog message',
+    rewritten.messages[0].content[0].text.length < first.content[0].text.length
+      && rewritten.messages[1].content[0].text.length < second.content[0].text.length
+  )
+  check(
+    'the rewritten text still names the skills',
+    rewritten.messages[0].content[0].text.includes('`alpha`') && rewritten.messages[0].content[0].text.includes('`beta`')
+  )
+  check(
+    'source.entries keeps its content',
+    JSON.stringify(rewritten.messages[0].source.entries) === entriesSnapshot,
+    'touching source.entries would make the host re-append a catalog every step'
+  )
+  // The aggregation itself: 3 entries in the first message plus 2 in the second
+  // is 5, which matches neither message's own count — so reverting `+=` to `=`
+  // fails here. `namesOnly` is true for the first message only, which is what
+  // makes `||` distinguishable from plain assignment.
+  check(
+    'the catalog log line sums every message',
+    catHost.logs.slice(logsBefore).some((line) => line.includes('5 skill(s)')),
+    catHost.logs.slice(logsBefore).join(' | ')
+  )
+  check(
+    'the catalog log line reports names-only mode',
+    catHost.logs.slice(logsBefore).some((line) => line.includes('(names only)')),
+    catHost.logs.slice(logsBefore).join(' | ')
+  )
+  // The character totals. Parsed out of the log line rather than asserted as a
+  // magic number, so the test states the invariant instead of a snapshot: the
+  // reported "before" is the sum of both messages' original lengths, and the
+  // reported "after" is the sum of both rewritten lengths. Reverting either `+=`
+  // to `=` reports one message's length and fails.
+  const charLine = catHost.logs.slice(logsBefore).find((line) => line.includes('chars'))
+  const charMatch = /(\d+) → (\d+) chars/.exec(charLine ?? '')
+  check('the catalog log line reports both character totals', charMatch !== null, charLine)
+  if (charMatch !== null) {
+    const beforeSum = first.content[0].text.length + second.content[0].text.length
+    const afterSum = rewritten.messages[0].content[0].text.length + rewritten.messages[1].content[0].text.length
+    check(
+      'the reported "before" sums every message',
+      Number(charMatch[1]) === beforeSum,
+      `logged ${charMatch[1]}, messages sum to ${beforeSum}`
+    )
+    check(
+      'the reported "after" sums every message',
+      Number(charMatch[2]) === afterSum,
+      `logged ${charMatch[2]}, messages sum to ${afterSum}`
+    )
+  }
+  // Discriminates the two possible orders. With the plugin upstream (prepend),
+  // the host listener sits downstream and observes the *original* decision,
+  // because the plugin rewrites only after `next()` returns. With the plugin
+  // pushed to the end, the host listener runs first and observes the final
+  // rewritten decision instead. So this assertion fails exactly when `prepend`
+  // is lost, which is what the earlier version of this test could not catch.
+  check(
+    'the host listener ran downstream of the plugin',
+    hostListenerRuns.length === 1 && hostListenerRuns[0] === decision,
+    'the plugin handler did not run before the host listener'
+  )
+  check(
+    'the host frame wording is preserved',
+    rewritten.messages[0].content[0].text.startsWith('The available skill catalog changed.'),
+    rewritten.messages[0].content[0].text.slice(0, 40)
+  )
+
+  const plainDecision = { kind: 'enter', messages: [{ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }] }] }
+  const untouched = await runPreStep(plainDecision)
+  check('pre-step leaves a catalog-free step alone', untouched === plainDecision)
+
+  const rejectDecision = { kind: 'reject' }
+  const rejected = await runPreStep(rejectDecision)
+  check('pre-step passes a reject through unchanged', rejected === rejectDecision)
+
+  // ---- catalog: session-aware tier wiring ----------------------------------
+  // `catalog.test.mjs` covers `describeEntry`'s session tier as a unit. What it
+  // cannot see is the chain that feeds it: the `skill` tool call is recorded by
+  // the usage listener, the pre-step handler reads it back, and it reaches
+  // `shrinkCatalog`. Three separate wirings, none observable from the unit test.
+  const sessionEntries = [
+    { name: 'loaded-here', description: 'L'.repeat(200) },
+    { name: 'never-loaded', description: 'N'.repeat(200) }
+  ]
+  const sessionCatalog = catalogMsg(sessionEntries, 'cat-session')
+  const beforeSessionUse = await runPreStep({ kind: 'enter', messages: [sessionCatalog] })
+  const textBefore = beforeSessionUse.messages[0].content[0].text
+
+  catHost.emit('session/event', catAgent.session, {
+    type: 'tool/call',
+    seq: 5,
+    data: { turn: 1, step: 1, callId: 'c1', name: 'skill', arguments: JSON.stringify({ name: 'loaded-here' }) }
+  })
+  const afterSessionUse = await runPreStep({ kind: 'enter', messages: [sessionCatalog] })
+  const textAfter = afterSessionUse.messages[0].content[0].text
+
+  check(
+    'a skill loaded this session keeps its full description in the catalog',
+    textAfter.length > textBefore.length,
+    `${textBefore.length} → ${textAfter.length}`
+  )
+  check(
+    'the session-loaded skill is not truncated',
+    textAfter.includes('L'.repeat(50)),
+    'session tier did not reach shrinkCatalog'
+  )
+  check(
+    'the never-loaded skill is still truncated',
+    !textAfter.includes('N'.repeat(50)),
+    'the shrink budget was not applied to the other entry'
+  )
+  // The session record is keyed two different ways on the two sides of this
+  // feature: the usage listener uses `session.id` from the event, the pre-step
+  // handler uses `sessionIdFor(payload.agent)`. If they ever disagreed the tier
+  // would silently never fire, and every fixture here would still pass because
+  // `fakeAgent` gives the agent and its session the same id. This drives an
+  // agent whose two ids differ, which is what makes the agreement observable:
+  // the tier must still fire, so the pre-step side must be reading `session.id`
+  // and not `agent.id`.
+  const skewed = fakeAgent('agent-id-differs', 'F:/p7')
+  skewed.session.id = 'session-id-that-counts'
+  skewed.session.header.id = 'session-id-that-counts'
+  catHost.agents.set(skewed.id, skewed)
+  catHost.emit('session/event', skewed.session, {
+    type: 'tool/call',
+    seq: 6,
+    data: { turn: 1, step: 2, callId: 'c2', name: 'skill', arguments: JSON.stringify({ name: 'loaded-here' }) }
+  })
+  const skewChain = catHost.handlers.get('agent/pre-step') ?? []
+  let skewIndex = 0
+  const skewNext = async () => {
+    const handler = skewChain[skewIndex]
+    skewIndex += 1
+    return handler === undefined
+      ? { kind: 'enter', messages: [sessionCatalog] }
+      : handler({ agent: skewed }, skewNext)
+  }
+  const skewDecision = await skewNext()
+  check(
+    'the session tier keys on session.id, not agent.id',
+    skewDecision.messages[0].content[0].text.includes('L'.repeat(50)),
+    'the two sides of the session record disagree on the id'
+  )
+
+  // ---- catalog: the session record is released on disposal -----------------
+  // `usedInSession` is one Set per live session. Without the delete it grows
+  // with the number of sessions a host ever ran, which is the exact cost the
+  // comment on the handler says it avoids. The observable consequence is that a
+  // disposed session's skills stop keeping their full descriptions.
+  // Emitted here rather than relied on from the block above: without its own
+  // record in `usedInSession` the assertion below is vacuously true, and
+  // deleting the dispose line would pass. Review round 8 reproduced exactly
+  // that by moving this block up.
+  const disposeAgent = fakeAgent('session-dispose', 'F:/p7')
+  catHost.agents.set(disposeAgent.id, disposeAgent)
+  catHost.emit('session/event', disposeAgent.session, {
+    type: 'tool/call',
+    seq: 7,
+    data: { turn: 1, step: 1, callId: 'c3', name: 'skill', arguments: JSON.stringify({ name: 'loaded-here' }) }
+  })
+  const disposeChain = catHost.handlers.get('agent/pre-step') ?? []
+  const runFor = async (agent, decision) => {
+    let index = 0
+    const next = async () => {
+      const handler = disposeChain[index]
+      index += 1
+      return handler === undefined ? decision : handler({ agent }, next)
+    }
+    return next()
+  }
+  const beforeDispose = await runFor(disposeAgent, { kind: 'enter', messages: [sessionCatalog] })
+  check(
+    'the disposal fixture starts with a live session record',
+    beforeDispose.messages[0].content[0].text.includes('L'.repeat(50)),
+    'the fixture never recorded the load, so the assertion below proves nothing'
+  )
+  catHost.emit('agent/disposed', { agent: disposeAgent })
+  const afterDispose = await runFor(disposeAgent, { kind: 'enter', messages: [sessionCatalog] })
+  check(
+    'disposing a session drops the skills it loaded',
+    !afterDispose.messages[0].content[0].text.includes('L'.repeat(50)),
+    'usedInSession survived agent/disposed'
+  )
+
+  // ---- catalog: config values that reach shrinkCatalog ---------------------
+  // `catalog.test.mjs` covers the tier rules as a pure function. What it cannot
+  // see is whether each config value is actually read in `lib/index.js` and
+  // passed down: a hardcoded constant there passes every unit test. Each of the
+  // two checks below fails if its wiring line is dropped or pinned.
+  async function catalogFixture(overrides, registry) {
+    const wireRoot = await makeTempRoot('skill-evolve-catalog-wire-')
+    process.env.DSH_HOME = wireRoot
+    if (registry !== undefined) {
+      await mkdir(join(wireRoot, 'plugin-data', 'skill-evolve'), { recursive: true })
+      await writeFile(
+        join(wireRoot, 'plugin-data', 'skill-evolve', 'registry.json'),
+        JSON.stringify(registry),
+        'utf8'
+      )
+    }
+    const wireHost = fakeHost()
+    apply(wireHost.ctx, Config({ mode: 'suggest', catalogShrinkChars: 40, ...overrides }))
+    const wireAgent = fakeAgent('session-wire', 'F:/p7')
+    wireHost.agents.set(wireAgent.id, wireAgent)
+    const chain = wireHost.handlers.get('agent/pre-step') ?? []
+    const run = async (decision) => {
+      let index = 0
+      const next = async () => {
+        const handler = chain[index]
+        index += 1
+        return handler === undefined ? decision : handler({ agent: wireAgent }, next)
+      }
+      return next()
+    }
+    return { host: wireHost, agent: wireAgent, run }
+  }
+
+  const awareFixture = await catalogFixture({ catalogSessionAware: false })
+  awareFixture.host.emit('session/event', awareFixture.agent.session, {
+    type: 'tool/call',
+    seq: 5,
+    data: { turn: 1, step: 1, callId: 'c1', name: 'skill', arguments: JSON.stringify({ name: 'loaded-here' }) }
+  })
+  const awareDecision = await awareFixture.run({
+    kind: 'enter',
+    messages: [catalogMsg([{ name: 'loaded-here', description: 'L'.repeat(200) }], 'cat-aware')]
+  })
+  check(
+    'catalogSessionAware:false turns the session tier off',
+    !awareDecision.messages[0].content[0].text.includes('L'.repeat(50)),
+    'the session tier ignored catalogSessionAware'
+  )
+
+  const freqFixture = await catalogFixture(
+    { catalogFrequentUses: 3 },
+    { proven: { uses: 5 }, rare: { uses: 1 } }
+  )
+  const freqDecision = await freqFixture.run({
+    kind: 'enter',
+    messages: [
+      catalogMsg(
+        [
+          { name: 'proven', description: 'P'.repeat(200) },
+          { name: 'rare', description: 'R'.repeat(200) }
+        ],
+        'cat-freq'
+      )
+    ]
+  })
+  const freqText = freqDecision.messages[0].content[0].text
+  check(
+    'a skill used past catalogFrequentUses keeps its full description',
+    freqText.includes('P'.repeat(50)),
+    'the frequent tier ignored catalogFrequentUses'
+  )
+  check(
+    'a skill under catalogFrequentUses is still truncated',
+    !freqText.includes('R'.repeat(50)),
+    'the threshold was not applied'
+  )
+
+  // ---- catalog: the kill switch --------------------------------------------
+  // `catalogEnabled: false` is a user-facing switch whose whole meaning is that
+  // no handler is registered. Asserting on behaviour after the fact would pass
+  // even with the switch ignored, because a disabled rewrite looks like a
+  // catalog that needed no rewrite.
+  const catOffRoot = await makeTempRoot('skill-evolve-catalog-off-')
+  process.env.DSH_HOME = catOffRoot
+  const catOffHost = fakeHost()
+  apply(catOffHost.ctx, Config({ mode: 'suggest', catalogEnabled: false }))
+  check(
+    'catalogEnabled:false registers no pre-step handler',
+    (catOffHost.handlers.get('agent/pre-step') ?? []).length === 0,
+    String((catOffHost.handlers.get('agent/pre-step') ?? []).length)
+  )
+  process.env.DSH_HOME = root
+} catch (error) {
+  // Rethrown rather than swallowed: the exit hook still removes every temp root,
+  // so a failure here costs nothing but the message that explains it.
+  console.error(error)
+  process.exit(1)
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
