@@ -187,7 +187,7 @@ try {
   agent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'The PDF has no text layer, so pdftotext returns nothing. Use OCR instead.' }], source: { kind: 'user' } } })
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
-  check('three tools registered', host.tools.size === 3, [...host.tools.keys()].join(','))
+  check('four tools registered', host.tools.size === 4, [...host.tools.keys()].join(','))
   check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))
   check('hint context order is 121', host.contexts.get('skill-evolve:hint')?.order === 121)
