@@ -751,15 +751,12 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  // A 1920 frame with a 280px left sidebar, so the conversation column starts at
-  // 280 and the two coordinate systems differ by exactly that. 920 of prose
-  // centred in a 1640 column leaves 360 each side inside the column, and 640 /
-  // 360 in frame coordinates.
-  //
-  // This is the layout that catches a coordinate-space mistake: reading the
-  // column's width as the frame's under-reports the right gutter by the sidebar
-  // width, so a 'right' preference fails its width test and silently flips left.
-  const frame = { left: 0, top: 0, width: 1920, height: 1000 }
+  // A 1920 frame with a 280px left sidebar. The prose is 920px centred in the
+  // 1640px column, so it spans 640..1560 and the column's own left edge is 280.
+  // The gutter is 360 — the prose's distance from the *column* edge, not from the
+  // window's. That difference of 280 is the whole bug this pins down: the earlier
+  // version measured from the window, placed the cards at x=16, and on a real
+  // screen they landed on top of the host's sidebar.
   const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
   const instance = boot({ rect, proseWidth: '920px', routes: panelRoutes() })
   instance.module.apply(instance.ctx)
@@ -768,10 +765,9 @@ check(
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
   const rail = firstByClass(tree, 'dsse-rail')
-  // prose spans 280 + 360 = 640 .. 1560 in frame coordinates.
   const expected = placeCards({
     chatRect: { left: 640, top: 120, right: 1560, bottom: 900 },
-    viewportWidth: 1920,
+    columnRect: rect,
     side: 'left',
     cardWidth: 288,
   })
@@ -780,14 +776,22 @@ check(
   check('the rail is as wide as the geometry says', rail?.props?.style?.width === `${expected.width}px`, String(rail?.props?.style?.width))
   check('the rail starts below the conversation top', rail?.props?.style?.top === `${expected.top}px`, String(rail?.props?.style?.top))
   check('the rail marks its side', rail?.props?.['data-side'] === 'left', String(rail?.props?.['data-side']))
-  void frame
+  // The behavioural assertion, independent of the arithmetic above: wherever the
+  // cards end up, they must be clear of the host sidebar on the left.
+  const railLeft = Number.parseFloat(String(rail?.props?.style?.left ?? 'NaN'))
+  check(
+    'the rail clears the host sidebar',
+    Number.isFinite(railLeft) && railLeft >= rect.left,
+    `${railLeft} vs column starts ${rect.left}`,
+  )
 }
 
 {
-  // The right gutter must be measured against the frame, not the column. With a
-  // 280px sidebar the two answers differ by 280, which is more than the whole
-  // minimum card width — so this is not a cosmetic difference: it decides
-  // whether a right-side preference works at all.
+  // The right side mirrors the left: 360 of gutter inside the column, so the cards
+  // sit immediately right of the prose rather than at the window's right edge. The
+  // distinction only matters on a right preference — the default layout has a left
+  // sidebar, so a window-relative measurement leaves the right gutter correct by
+  // accident while wrecking the left one.
   const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
   const instance = boot({
     rect,
@@ -807,24 +811,34 @@ check(
   const tree = await instance.renderer.deepRender(cards)
   const rail = firstByClass(tree, 'dsse-rail')
 
-  const asFrame = placeCards({
+  const expected = placeCards({
     chatRect: { left: 640, top: 120, right: 1560, bottom: 900 },
-    viewportWidth: 1920,
+    columnRect: rect,
     side: 'right',
     cardWidth: 288,
   })
-  const asColumn = placeCards({
-    chatRect: { left: 360, top: 120, right: 1280, bottom: 900 },
-    viewportWidth: 1640,
-    side: 'right',
-    cardWidth: 288,
-  })
-  check('the two coordinate readings really do differ', asFrame.left !== asColumn.left, `frame ${asFrame.left} vs column ${asColumn.left}`)
+  // What a window-relative rule would have said: the prose ends 360 from the right
+  // edge either way, but from the window it reads the same number for the wrong
+  // reason. The assertion below therefore checks the relationship, not the number:
+  // the cards begin exactly one gap after the prose, inside the column.
+  const proseRight = 1560
   check('the rail honours the right setting', rail?.props?.['data-side'] === 'right', String(rail?.props?.['data-side']))
   check(
-    'and is placed against the frame edge, not the column edge',
-    rail?.props?.style?.left === `${asFrame.left}px`,
-    `${rail?.props?.style?.left} vs frame ${asFrame.left} (column reading would be ${asColumn.left})`,
+    'and is placed one gap right of the prose',
+    rail?.props?.style?.left === `${expected.left}px`,
+    `${rail?.props?.style?.left} vs computed ${expected.left}`,
+  )
+  const railLeft = Number.parseFloat(String(rail?.props?.style?.left ?? 'NaN'))
+  check(
+    'and clears the prose',
+    Number.isFinite(railLeft) && railLeft >= proseRight,
+    `${railLeft} vs prose ends ${proseRight}`,
+  )
+  const railWidth = Number.parseFloat(String(rail?.props?.style?.width ?? 'NaN'))
+  check(
+    'and stays inside the column',
+    Number.isFinite(railLeft) && Number.isFinite(railWidth) && railLeft + railWidth <= rect.right,
+    `${railLeft}+${railWidth} vs column ends ${rect.right}`,
   )
 }
 
