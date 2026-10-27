@@ -487,19 +487,25 @@ check(
   'names-only keeps every name',
   manySkills(50).every((entry) => names.message.content[0].text.includes(`\`${entry.name}\``))
 )
-check(
-  'names-only still sorts pinned first',
-  shrinkCatalog({
+{
+  // Both positions must exist before their order means anything: `indexOf`
+  // returns -1 for a missing name, and -1 sorts before every real offset, so a
+  // bare `<` comparison reports "pinned first" precisely when the pinned name
+  // never made it into the list at all.
+  const text = shrinkCatalog({
     message: catalogMessage(manySkills(50)),
     registry: { 'skill-049': { pinned: true } },
     options: { ...OPTS, fullListBelow: 40 }
-  }).message.content[0].text.indexOf('`skill-049`') <
-    shrinkCatalog({
-      message: catalogMessage(manySkills(50)),
-      registry: { 'skill-049': { pinned: true } },
-      options: { ...OPTS, fullListBelow: 40 }
-    }).message.content[0].text.indexOf('`skill-000`')
-)
+  }).message.content[0].text
+  const pinnedAt = text.indexOf('`skill-049`')
+  const otherAt = text.indexOf('`skill-000`')
+  check(
+    'names-only mode lists both names it is asked to order',
+    pinnedAt >= 0 && otherAt >= 0,
+    JSON.stringify({ pinnedAt, otherAt })
+  )
+  check('names-only still sorts pinned first', pinnedAt < otherAt, JSON.stringify({ pinnedAt, otherAt }))
+}
 check(
   'a pinned skill keeps its description even in names-only mode',
   (() => {

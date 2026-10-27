@@ -254,6 +254,17 @@ Three modules, top to bottom:
    available", which is the failure mode of trusting a catalogue over a running
    session. Setting both `summaryProvider` and `summaryModel` overrides it, and
    only that pair pins anything.
+
+   The call carries no `system` message. The host renders one as the `developer`
+   role on the wire, and some providers reject that outright — the panel showed
+   `400 unsupported message role: developer` on a model it had just chosen
+   correctly. Instead the instruction is the opening of the single `user`
+   message, which every wire protocol accepts. The instruction also names its own
+   delimiters (`<transcript>`), and the body is scrubbed of any such tag before
+   it goes in: a tool output that happened to contain `</transcript>` would
+   otherwise end the block early and let the rest of it read as instructions.
+   The scrub is case-insensitive and tolerates whitespace inside the tag, because
+   `</TRANSCRIPT >` closes a block just as well as `</transcript>`.
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question
