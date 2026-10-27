@@ -1748,6 +1748,47 @@ try {
     lateRoutes.get('/api/skill-evolve')?.kind === 'prefix',
     JSON.stringify(lateRoutes.get('/api/skill-evolve')?.kind)
   )
+
+  // The route existing is not the same as the route answering. Before the fix
+  // the four cards were empty *and* the endpoint reported 404, so a check that
+  // only looks at registration would have been satisfied by the broken build if
+  // the host had happened to activate webServer early enough to register it.
+  // Drive the late-registered handler and require real turn data back.
+  {
+    const lateAgent = fakeAgent('session-late', 'F:/some/project')
+    lateHost.agents.set(lateAgent.id, lateAgent)
+    const route = lateRoutes.get('/api/skill-evolve')
+    const res = {
+      statusCode: undefined,
+      writableEnded: false,
+      // The handler drains on 'close' for HEAD responses; a stub without this
+      // throws inside json() rather than exercising the route.
+      once() {
+        return this
+      },
+      writeHead(code) {
+        this.statusCode = code
+        return this
+      },
+      end(body) {
+        this.writableEnded = true
+        this.body = body
+        return this
+      }
+    }
+    await route.handler(
+      {
+        url: `/api/skill-evolve/panel?agent=${encodeURIComponent(lateAgent.id)}`,
+        method: 'GET',
+        headers: { host: '127.0.0.1:19387' }
+      },
+      res
+    )
+    const payload = JSON.parse(res.body)
+    check('the late route answers instead of falling through to the host 404', res.statusCode === 200, res.body)
+    check('the late route returns the panel payload', payload.ok === true && typeof payload.data === 'object', res.body)
+    check('the late route names the agent it was asked about', payload.data?.agent === lateAgent.id, res.body)
+  }
 } catch (error) {
   // Rethrown rather than swallowed: the exit hook still removes every temp root,
   // so a failure here costs nothing but the message that explains it.
