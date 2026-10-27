@@ -58,7 +58,7 @@ async function makeTempRoot(prefix) {
 /**
  * Build a fake Cordis context with the surface this plugin touches.
  */
-function fakeHost() {
+function fakeHost(options = {}) {
   const handlers = new Map()
   const tools = new Map()
   const commands = new Map()
@@ -67,6 +67,8 @@ function fakeHost() {
   const agents = new Map()
   const logs = []
   const routes = new Map()
+  const deferred = []
+  const withWebServer = options.webServer !== false
 
   const ctx = {
     logger: { info: (line) => logs.push(line) },
@@ -89,10 +91,17 @@ function fakeHost() {
       return result
     },
     // Mirrors cordis: the callback runs once every named service resolves, in
-    // a child context. The fake host has all of them at mount time.
+    // a child context. When `webServer: false` the service arrives late instead,
+    // which is the timing that produced the 404s: cordis refuses to hand back a
+    // service whose fiber is not yet active, so an eager `ctx.get('webServer')`
+    // inside `apply` saw undefined and skipped route registration entirely. The
+    // panel then rendered and every request hit the host's 404 fallback.
     inject(names, callback) {
       const missing = names.filter((name) => ctx[name] === undefined)
-      if (missing.length > 0) return undefined
+      if (missing.length > 0) {
+        deferred.push({ names, callback })
+        return undefined
+      }
       return callback(ctx)
     },
     tools: {
@@ -124,12 +133,14 @@ function fakeHost() {
     // The panel's routes. Registering them in the fixture is what makes the
     // wiring reachable: without it the plugin skipped the whole block and every
     // wiring assertion below would have passed vacuously.
-    webServer: {
-      register({ kind, path, handler }) {
-        routes.set(path, { kind, handler })
-        return () => routes.delete(path)
-      }
-    },
+    webServer: withWebServer
+      ? {
+          register({ kind, path, handler }) {
+            routes.set(path, { kind, handler })
+            return () => routes.delete(path)
+          }
+        }
+      : undefined,
     // Cordis resolves a service through `ctx.get(name)`; the plugin reads
     // `approval` that way to learn the session policy before downloading.
     // Falling back to `ctx[name]` keeps the services this fixture already
@@ -151,6 +162,23 @@ function fakeHost() {
     routes,
     emit(event, ...payload) {
       for (const handler of handlers.get(event) ?? []) handler(...payload)
+    },
+    /**
+     * Deliver a service the host did not have at mount time.
+     *
+     * Cordis runs a deferred `inject` callback once the service activates. The
+     * fake reproduces only that contract: assign the service, then run every
+     * waiting callback, and stop waiting.
+     */
+    provide(name, value) {
+      ctx[name] = value
+      const ready = deferred.filter((entry) => entry.names.includes(name))
+      for (const entry of ready) deferred.splice(deferred.indexOf(entry), 1)
+      for (const entry of ready) entry.callback(ctx)
+    },
+    /** How many `inject` callbacks are still waiting for a service. */
+    deferredCount() {
+      return deferred.length
     }
   }
 }
@@ -1685,6 +1713,41 @@ try {
     JSON.stringify(snapshotCalls.map((call) => Object.keys(call ?? {})))
   )
   process.env.DSH_HOME = root
+
+  // ---- the panel route survives a webServer that arrives late ---------------
+  // Reported by the user as "every card is empty and the panel says it got a
+  // 404". The plugin registered its route through `service('webServer')`, which
+  // goes through cordis's proxy: a service whose fiber is not active yet reads
+  // as undefined, and it does not throw. So the whole registration block was
+  // skipped silently, the client bundle still loaded, and every request fell
+  // through to the host's 404. Mounting with the service absent and delivering
+  // it afterwards is the only shape that can see the difference, because the
+  // fixture that provides it up front makes the eager read work by accident.
+  const lateHost = fakeHost({ webServer: false })
+  apply(lateHost.ctx, Config({ mode: 'suggest' }))
+  check(
+    'a host without webServer at mount time does not register the panel route',
+    lateHost.routes.has('/api/skill-evolve') === false,
+    [...lateHost.routes.keys()].join(',')
+  )
+
+  const lateRoutes = new Map()
+  lateHost.provide('webServer', {
+    register({ kind, path, handler }) {
+      lateRoutes.set(path, { kind, handler })
+      return () => lateRoutes.delete(path)
+    }
+  })
+  check(
+    'the panel route is registered once webServer activates',
+    lateRoutes.has('/api/skill-evolve') === true,
+    [...lateRoutes.keys()].join(',')
+  )
+  check(
+    'the late route is a prefix route, so the client can reach its subpaths',
+    lateRoutes.get('/api/skill-evolve')?.kind === 'prefix',
+    JSON.stringify(lateRoutes.get('/api/skill-evolve')?.kind)
+  )
 } catch (error) {
   // Rethrown rather than swallowed: the exit hook still removes every temp root,
   // so a failure here costs nothing but the message that explains it.
