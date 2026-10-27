@@ -212,11 +212,33 @@ A bundle without a `SKILL.md` is refused outright: the host discovers skills at 
 
 **Known limit:** the market is third-party code with no review step. The gate tells you what will be written and whether it is executable; it cannot tell you whether running it is safe.
 
-### The sidebar panel
+### The cards beside the conversation
 
 The plugin ships a client half. It is a real panel built from the host's own
-components — not a drawn mock — and it docks in the host's right pane, so it
-shows only while a conversation is open.
+components — not a drawn mock — floating in the empty space on one side of the
+conversation column, so it moves with the column instead of covering it.
+
+**Why cards and not a sidebar.** The host exposes a right-hand sidebar, but it is
+already the place file previews open, and taking it would mean the panel and a
+preview cannot be on screen together. There is no extension point *inside* the
+conversation column either — the host's only conversation-scoped slots are the
+header and the composer. So the panel is mounted in `shell.overlay` and positions
+itself against the measured conversation body: it reads the column's rectangle and
+the host's own `--dsh-chat-content-width`, then places itself in whichever gutter
+fits. Nothing about the layout is hard-coded, because a fixed offset is wrong the
+next time the window resizes or the width handle is dragged.
+
+Three consequences worth knowing, because each one is a deliberate choice:
+
+- **It never covers the top bar.** The overlay starts below the host's top
+  clearance and the cards are placed in the horizontal band the conversation body
+  occupies, not in the frame's full height.
+- **It is covered by the sidebar, not on top of it.** The cards set no `z-index`,
+  so the host decides the order and an opened sidebar naturally hides them. A
+  panel that punched through the sidebar would be a bug, not a feature.
+- **It can be collapsed to a handle.** Clicking the handle, or the header button,
+  folds the cards into a narrow strip against the same edge. The side
+  (`left`/`right`) and the starting collapsed state are plugin settings.
 
 Three modules, top to bottom:
 
@@ -243,6 +265,16 @@ handshake described above.
 **It needs a host restart.** The host discovers client bundles when its plugin
 graph is rebuilt, and editing `package.json` does not trigger that. If the panel
 does not appear after restarting, the Plugins page names the reason per entry.
+
+**What it cannot do, on purpose.** The geometry is the only thing the client
+computes; every number in the cards comes from the host route. The client holds no
+copy of the transcript and re-reads `/panel` on open and on a timer, so the three
+modules always describe the same turn. It also cannot decide where the column is:
+`measure()` falls back to the documented clamp formula when the host does not
+publish a width, and the placement function reports `no-room` rather than
+overlapping the text. On a narrow window the cards disappear and the handle
+remains, because a panel that cannot fit should not squeeze the thing it is
+annotating.
 
 ### The evidence gate
 
@@ -421,11 +453,12 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `catalogFullListBelow` | `40` | At or above this many skills, list names only; `0` disables |
 | `catalogFrequentUses` | `3` | Global use count that earns a full description |
 | `catalogSessionAware` | `true` | Give a full description to skills already used in this session |
-| `panelSummary` | `true` | Summarise the previous turn in the sidebar panel. Turning this off stops the panel from spending any model call |
+| `panelSummary` | `true` | Summarise the previous turn in the cards. Turning this off stops the panel from spending any model call |
 | `summaryProvider` | `""` | Provider for that summary. Empty means the session's own provider |
 | `summaryModel` | `""` | Model for that summary. Empty means the cheapest model the provider lists — a summary of one turn does not need the model doing the work |
 | `panelHelp` | `true` | Show the one-line explanation under each panel heading |
-| `panelPlacement` | `right` | Where the panel docks. `right` uses the host's right pane; `inline` renders under the conversation header |
+| `panelSide` | `left` | Which gutter the cards occupy. `right` puts them on the other side of the conversation column |
+| `panelCollapsed` | `false` | Start folded into a handle instead of showing the cards |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.
 
@@ -591,11 +624,14 @@ Each of these was considered and rejected, with the reason:
 
 ## Honest limits
 
-**The panel cannot draw inside the conversation column.** The host exposes a
-right pane and header actions, not a slot for extra columns beside the message
-list. The panel therefore lives in the right pane, which is shared with file
-previews — opening a file replaces it. A panel that claimed otherwise would be
-lying about where it is.
+**The cards float; they do not take space.** The host exposes no slot for a real
+column beside the message list, so the panel is an absolutely positioned overlay
+that places itself in whatever gutter the conversation column leaves. That has one
+consequence worth stating plainly: it cannot push the text aside to make room. On
+a window narrow enough that neither gutter fits a card, the cards disappear and
+only the handle remains — a panel that cannot fit should not squeeze the thing it
+is annotating. Widening the window or collapsing the host's own left sidebar
+brings them back.
 
 
 - **The core hypothesis is unproven.** The value depends on tasks recurring. If your work is genuinely one-off, this plugin will correctly stay silent and be worth nothing. That is the honest failure mode, and it is better than writing 50 useless skills.
