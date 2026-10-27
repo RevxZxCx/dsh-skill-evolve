@@ -41,42 +41,30 @@ const cases = [
   {
     label: 'summarise run reverted to this.llm()',
     file: 'lib/summarise.js',
-    from: '  async run({ key, body, signal }) {\n    const llm = valueOf(this.llm)',
-    to: '  async run({ key, body, signal }) {\n    const llm = this.llm()',
+    from: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = valueOf(this.llm)',
+    to: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = this.llm()',
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'describeSkills stops awaiting isOwned',
     file: 'lib/api.js',
-    from: `  const listed = await Promise.all(
-    rows.map(async (row) => {
-      const name = typeof row?.name === 'string' ? row.name : ''
-      let owned = false
-      try {
-        owned = (await isOwned(name)) === true
-      } catch {
-        owned = false
-      }
-      return {
-        name,
-        description: typeof row?.description === 'string' ? row.description : '',
-        invocation: typeof row?.invocation === 'string' ? row.invocation : undefined,
-        owned,
-      }
-    }),
-  )`,
-    to: `  const listed = rows.map((row) => ({
-    name: typeof row?.name === 'string' ? row.name : '',
-    description: typeof row?.description === 'string' ? row.description : '',
-    invocation: typeof row?.invocation === 'string' ? row.invocation : undefined,
-    owned: isOwned(typeof row?.name === 'string' ? row.name : ''),
-  }))`,
+    // Drop only the inner `await`, not the `Promise.all` wrapper. An earlier
+    // version replaced the whole `const listed = await Promise.all(...)` block
+    // and left an orphan `)` behind, so `lib/api.js` no longer parsed; the
+    // harness counted the resulting crash as "killed" and this mutation could
+    // not tell a working `owned` assertion from a missing one. Kept minimal so
+    // the only thing broken is the behaviour under test.
+    from: `        owned = (await isOwned(name)) === true`,
+    to: `        owned = isOwned(name) === true`,
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'resolveRoute stops rethrowing an abort',
     file: 'lib/summarise.js',
-    from: '      signal?.throwIfAborted()\n',
+    // Anchored on the surrounding comment: a bare `signal?.throwIfAborted()`
+    // matches the `listProviders` guard first, so the mutation used to land on
+    // a line no test covers and survived while looking like coverage.
+    from: '        // turned into a claim about the host\'s model list.\n        signal?.throwIfAborted()\n',
     to: '',
     test: 'test/summarise.test.mjs',
   },
@@ -109,6 +97,47 @@ const cases = [
     file: 'lib/index.js',
     from: '          steps: [],',
     to: '          steps: 0,',
+    test: 'test/index.test.mjs',
+  },
+  {
+    // The panel used to report every gestured name, including skills the host
+    // refuses to load. Without this filter a model-only skill typed as /x
+    // appears in the module although nothing was injected.
+    label: 'gesture permission filter removed',
+    file: 'lib/api.js',
+    from: '      if (!userInvocable) continue',
+    to: '      void userInvocable',
+    test: 'test/api.test.mjs',
+  },
+  {
+    // Recency across the two load paths is one ordered Map; without the delete a
+    // Map keeps the first position, so alpha -> beta -> alpha still lists beta
+    // first.
+    label: 'reloading a skill no longer moves it to the front',
+    file: 'lib/index.js',
+    from: `    const previous = names.get(name)
+    names.delete(name)
+    names.set(name, previous === 'tool' ? 'tool' : via)`,
+    to: `    const previous = names.get(name)
+    names.set(name, previous === 'tool' ? 'tool' : via)`,
+    test: 'test/index.test.mjs',
+  },
+  {
+    // Writing the newest path unconditionally demotes a tool load to a gesture
+    // one, and describeSkills then drops a model-only skill the session is using.
+    label: 'a later gesture demotes a tool load',
+    file: 'lib/index.js',
+    from: `    names.set(name, previous === 'tool' ? 'tool' : via)`,
+    to: `    names.set(name, via)`,
+    test: 'test/index.test.mjs',
+  },
+  {
+    // A gesture recorded as a tool load escapes the stricter user-invocable
+    // rule, which is the whole reason the path is recorded at all.
+    label: 'gesture loads recorded as tool loads',
+    file: 'lib/index.js',
+    from: "rememberSkillUse(agentId, name, 'gesture')",
+    to: "rememberSkillUse(agentId, name, 'tool')",
     test: 'test/index.test.mjs',
   },
 ]
@@ -147,6 +176,7 @@ const CHILD_TIMEOUT_MS = 120000
 
 let survived = 0
 let missing = 0
+let broken = 0
 for (const entry of cases) {
   const original = readFileSync(entry.file, 'utf8')
   if (!original.includes(entry.from)) {
@@ -159,6 +189,18 @@ for (const entry of cases) {
   let output = ''
   let exitCode = 0
   try {
+    // A mutation that does not parse proves nothing about the tests: the child
+    // dies before running a single assertion, and every harness that reads
+    // "non-zero exit" as "killed" then reports coverage it does not have. This
+    // happened here — a `Promise.all` wrapper was mutated away and left an
+    // orphan `)`, so `lib/api.js` stopped parsing and the case passed as killed
+    // even with its four `owned` assertions deleted. Check parseability first.
+    const syntax = spawnSync('node', ['--check', entry.file], { encoding: 'utf8', timeout: CHILD_TIMEOUT_MS })
+    if (syntax.status !== 0) {
+      console.log(`BROKEN MUTATION (does not parse)  ${entry.label}`)
+      broken += 1
+      continue
+    }
     const run = spawnSync('node', [entry.test], { encoding: 'utf8', timeout: CHILD_TIMEOUT_MS })
     output = String(run.stdout ?? '') + String(run.stderr ?? '')
     // A timeout returns status null; treat it as a failure to observe, not as a
@@ -172,7 +214,8 @@ for (const entry of cases) {
   const failedCount = summary === null ? null : Number(summary[2])
   // A crash is a kill: the suite noticed the behaviour changed even if it could
   // not print a tally. Only "ran to completion and reported zero failures" is a
-  // survivor.
+  // survivor. Parseability is already ruled out above, so a crash here means a
+  // real throw from the mutated behaviour.
   const killed = failedCount === null ? exitCode !== 0 : failedCount > 0
   if (killed) {
     console.log(`killed (${failedCount === null ? 'crashed' : `${failedCount} failed`})  ${entry.label}`)
@@ -183,5 +226,9 @@ for (const entry of cases) {
 }
 
 const total = cases.length
-console.log(`\n${total - survived - missing}/${total} mutations killed${missing > 0 ? `, ${missing} anchor(s) missing` : ''}`)
-if (survived > 0 || missing > 0) process.exit(1)
+console.log(
+  `\n${total - survived - missing - broken}/${total} mutations killed` +
+    `${missing > 0 ? `, ${missing} anchor(s) missing` : ''}` +
+    `${broken > 0 ? `, ${broken} mutation(s) did not parse` : ''}`,
+)
+if (survived > 0 || missing > 0 || broken > 0) process.exit(1)

@@ -245,13 +245,26 @@ Three modules, top to bottom:
 1. **Last turn.** What the previous turn actually did: the tool calls, the
    commands, the files touched, and a summary in prose. The summary is generated
    by a model call, so it is the one part of this plugin that costs money and the
-   only part that can be switched off entirely (`panelSummary: false`). It uses
-   `summaryModel` — by default the cheapest model the provider lists, because
-   summarising one turn is not a task that needs the model doing the work.
-2. **Skills and MCP.** What skills are installed and which MCP servers have been
-   called in this session. Each row that looks like a reusable procedure has a
-   **propose** action: it opens a new conversation pre-filled with the steps, so
-   the skill is drafted with a full context rather than from a one-line prompt.
+   only part that can be switched off entirely (`panelSummary: false`). By
+   default it runs on **the route this session is already using**, read from the
+   session's own folded `request/context` events. That route is known to be
+   reachable and authorised for this account; a catalogue entry only proves some
+   adapter advertised it. An earlier version picked the first model the first
+   provider listed and failed on the user's machine with "no model route is
+   available", which is the failure mode of trusting a catalogue over a running
+   session. Setting both `summaryProvider` and `summaryModel` overrides it, and
+   only that pair pins anything.
+2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
+   which MCP servers have been called. What is installed is not what was used:
+   the library can hold dozens of skills, and listing them all answers a question
+   nobody asked while burying the one that matters. A load is counted on either
+   path the host supports — the model calling the `skill` tool, and a person
+   typing `/name` — but the two paths are not interchangeable. The host refuses
+   a gesture at a skill whose `userInvocable` is false and injects nothing, so
+   that gesture is not a load and is not listed. Each row that looks like a
+   reusable procedure has a **propose** action: it opens a new conversation
+   pre-filled with the steps, so the skill is drafted with a full context rather
+   than from a one-line prompt.
 3. **Produced files.** Files this conversation wrote, newest first, with the
    added and removed line counts. Sourced from the same turn transcript the
    other two modules read, so all three agree on which turn they describe.
@@ -454,8 +467,8 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `catalogFrequentUses` | `3` | Global use count that earns a full description |
 | `catalogSessionAware` | `true` | Give a full description to skills already used in this session |
 | `panelSummary` | `true` | Summarise the previous turn in the cards. Turning this off stops the panel from spending any model call |
-| `summaryProvider` | `""` | Provider for that summary. Empty means the session's own provider |
-| `summaryModel` | `""` | Model for that summary. Empty means the cheapest model the provider lists — a summary of one turn does not need the model doing the work |
+| `summaryProvider` | `""` | Provider for the summary. Empty means borrow the session's own route — the one already proven to work for this account |
+| `summaryModel` | `""` | Model for that summary. Only read together with `summaryProvider`; setting one alone pins nothing |
 | `panelHelp` | `true` | Show the one-line explanation under each panel heading |
 | `panelSide` | `left` | Which side of the conversation column the cards occupy. Measured against the column, not the window, so the host sidebar is never covered |
 | `panelCollapsed` | `false` | Start folded into a handle instead of showing the cards |

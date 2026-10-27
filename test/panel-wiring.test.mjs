@@ -196,9 +196,14 @@ function fakeReq(url, method = 'GET', body = undefined) {
     async isOwned(name) {
       return name === 'beta'
     },
+    used: new Map([['alpha', 'tool'], ['beta', 'tool']]),
   })
-  check('an async isOwned resolves to a boolean', described.skills[0].owned === false, JSON.stringify(described.skills[0]))
-  check('an async isOwned marks the owned skill true', described.skills[1].owned === true, JSON.stringify(described.skills[1]))
+  // Asserted by name, not index: the list is ordered by load recency, and this
+  // block is about `owned`, not about ordering.
+  const alpha = described.skills.find((row) => row.name === 'alpha')
+  const beta = described.skills.find((row) => row.name === 'beta')
+  check('an async isOwned resolves to a boolean', alpha?.owned === false, JSON.stringify(alpha))
+  check('an async isOwned marks the owned skill true', beta?.owned === true, JSON.stringify(beta))
   check('no ownership field is a thenable', described.skills.every((row) => typeof row.owned === 'boolean'), JSON.stringify(described.skills))
 }
 
@@ -208,6 +213,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
     async isOwned() {
       throw new Error('the skill file is unreadable')
     },
+    used: new Map([['alpha', 'tool']]),
   })
   check('a failing ownership probe does not fail the panel', described.available === true, JSON.stringify(described))
   check('a failing ownership probe reports not-owned', described.skills[0].owned === false, JSON.stringify(described.skills[0]))
@@ -219,6 +225,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   const described = await describeSkills({
     skills: { async snapshot() { return { skills: [{ name: 'alpha' }] } } },
     isOwned: () => Promise.resolve(true),
+    used: new Map([['alpha', 'tool']]),
   })
   check('a synchronous isOwned returning a Promise is awaited too', described.skills[0].owned === true, JSON.stringify(described.skills[0]))
 }

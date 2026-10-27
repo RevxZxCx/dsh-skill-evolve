@@ -179,8 +179,12 @@ check('a missing turn is represented', summaryKey(undefined, 'abc').startsWith('
 {
   const summariser = new Summariser({ llm: () => undefined, config: () => ({ summaryProvider: 'p', summaryModel: 'm' }) })
   const route = await summariser.resolveRoute()
-  check('a pinned route is used verbatim', route.provider === 'p' && route.model === 'm', JSON.stringify(route))
-  check('a pinned route is marked pinned', route.pinned === true, JSON.stringify(route))
+  // Guarded with `route?.` on purpose: a mutation that drops the pinned branch
+  // must fail this assertion with a readable message, not crash the run with
+  // "cannot read properties of undefined". The old form took the whole suite
+  // down, which counts as killed but leaves nothing to diagnose.
+  check('a pinned route is used verbatim', route?.provider === 'p' && route?.model === 'm', JSON.stringify(route))
+  check('a pinned route is marked pinned', route?.pinned === true, JSON.stringify(route))
 }
 
 {
@@ -264,6 +268,66 @@ check('a missing turn is represented', summaryKey(undefined, 'abc').startsWith('
   const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({ summaryProvider: 'only-provider' }) })
   const route = await summariser.resolveRoute()
   check('a half-configured pair falls back rather than half-using it', route.pinned === false, JSON.stringify(route))
+}
+
+// ---------------------------------------------------------------------------
+// resolveRoute: the session's own route outranks the catalogue
+//
+// A catalogue entry only proves an adapter advertised a model. The route the
+// session is already running proves the account can actually call it, which is
+// exactly the fact the old fallback lacked when it picked providers[0].
+// ---------------------------------------------------------------------------
+
+{
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({}) })
+  const route = await summariser.resolveRoute(undefined, { provider: 'live-prov', model: 'live-model' })
+  check('the session route is preferred over the catalogue', route.provider === 'live-prov' && route.model === 'live-model', JSON.stringify(route))
+  check('a borrowed session route is not pinned', route.pinned === false, JSON.stringify(route))
+}
+
+{
+  // The catalogue here names a provider the account cannot call; the old code
+  // would have returned it and every summary would have failed.
+  const summariser = new Summariser({
+    llm: () => ({ listProviders: () => [{ id: 'advertised-only' }], listModels: async () => [{ id: 'ghost' }] }),
+    config: () => ({}),
+  })
+  const route = await summariser.resolveRoute(undefined, { provider: 'live-prov', model: 'live-model' })
+  check('an unusable catalogue entry never beats the session route', route?.provider === 'live-prov', JSON.stringify(route))
+}
+
+{
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({ summaryProvider: 'pinned-p', summaryModel: 'pinned-m' }) })
+  const route = await summariser.resolveRoute(undefined, { provider: 'live-prov', model: 'live-model' })
+  check('a configured pair still outranks the session route', route.provider === 'pinned-p' && route.model === 'pinned-m', JSON.stringify(route))
+  check('a configured pair stays pinned', route.pinned === true, JSON.stringify(route))
+}
+
+{
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({}) })
+  const route = await summariser.resolveRoute(undefined, { provider: 'live-prov' })
+  check('a session route without a model is not used', route.provider === 'prov-a', JSON.stringify(route))
+}
+
+{
+  // `typeof model === 'string'` alone lets an empty string through, which would
+  // hand the call a route with no model name. Emptiness is checked separately
+  // for both halves; this pins the model half.
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({}) })
+  const route = await summariser.resolveRoute(undefined, { provider: 'live-prov', model: '' })
+  check('a session route with an empty model is not used', route.provider === 'prov-a', JSON.stringify(route))
+}
+
+{
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({}) })
+  const route = await summariser.resolveRoute(undefined, { provider: '', model: 'live-model' })
+  check('a session route with an empty provider is not used', route.provider === 'prov-a', JSON.stringify(route))
+}
+
+{
+  const summariser = new Summariser({ llm: () => fakeLlm(), config: () => ({}) })
+  const route = await summariser.resolveRoute(undefined, { provider: '', model: '' })
+  check('an empty session route falls through to the catalogue', route.provider === 'prov-a', JSON.stringify(route))
 }
 
 // ---------------------------------------------------------------------------

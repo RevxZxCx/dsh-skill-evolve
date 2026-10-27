@@ -270,6 +270,9 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
 }
 
 {
+  // The module answers "what has this session used", so a skill the registry
+  // advertises but the session never loaded must not appear. `gamma` below is
+  // the control: present in the snapshot, absent from `used`, absent in output.
   const described = await describeSkills({
     skills: {
       async snapshot() {
@@ -277,20 +280,38 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
           complete: true,
           skills: [
             { name: 'alpha', description: 'first' },
-            { name: 'beta', description: 'second', invocation: 'explicit' },
+            { name: 'beta', description: 'second', invocation: { modelInvocable: false, userInvocable: true } },
+            { name: 'gamma', description: 'never loaded' },
             { description: 'nameless' },
           ],
         }
       },
     },
     isOwned: (name) => name === 'beta',
+    used: new Map([
+      ['alpha', 'tool'],
+      ['beta', 'gesture'],
+    ]),
   })
   check('the registry is reported available', described.available === true, JSON.stringify(described))
-  check('every row is described', described.skills.length === 3, JSON.stringify(described))
-  check('a nameless row is kept with an empty name', described.skills[2].name === '', JSON.stringify(described.skills[2]))
-  check('ownership is resolved per row', described.skills[1].owned === true && described.skills[0].owned === false, JSON.stringify(described.skills))
-  check('invocation is carried through', described.skills[1].invocation === 'explicit', JSON.stringify(described.skills[1]))
+  check('only the skills this session loaded are described', described.skills.length === 2, JSON.stringify(described))
+  check('the most recently loaded skill comes first', described.skills[0].name === 'beta', JSON.stringify(described.skills))
+  check('a loaded skill the registry does not list is dropped', described.skills.every((row) => row.name !== 'gamma'), JSON.stringify(described.skills))
+  check('a nameless registry row is never described', described.skills.every((row) => row.name !== ''), JSON.stringify(described.skills))
+  check('ownership is resolved per row', described.skills[0].owned === true && described.skills[1].owned === false, JSON.stringify(described.skills))
+  check('invocation is read as the policy object the host actually sends', described.skills[0].modelInvocable === false, JSON.stringify(described.skills[0]))
+  check('a missing invocation policy defaults to model-invocable', described.skills[1].modelInvocable === true, JSON.stringify(described.skills[1]))
   check('completeness is carried through', described.complete === true, String(described.complete))
+}
+
+{
+  // No `used` at all: the host may call this before the first skill is loaded.
+  const described = await describeSkills({
+    skills: { async snapshot() { return { complete: true, skills: [{ name: 'alpha', description: 'first' }] } } },
+    isOwned: () => false,
+  })
+  check('without a used set nothing is described', described.skills.length === 0, JSON.stringify(described.skills))
+  check('but the registry is still reported available', described.available === true, JSON.stringify(described))
 }
 
 {
@@ -307,6 +328,89 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
     isOwned: () => false,
   })
   check('a snapshot without skills lists none', described.skills.length === 0, JSON.stringify(described))
+}
+
+{
+  // A gesture only loads what the host considers user-invocable. The host runs
+  // `if (skill === void 0 || !isUserInvocable(skill)) continue`, so a gesture at
+  // a model-only skill injects nothing and must not appear in the module.
+  const rows = [
+    { name: 'both', invocation: { modelInvocable: true, userInvocable: true } },
+    { name: 'model-only', invocation: { modelInvocable: true, userInvocable: false } },
+    { name: 'user-only', invocation: { modelInvocable: false, userInvocable: true } },
+  ]
+  const described = await describeSkills({
+    skills: { async snapshot() { return { complete: true, skills: rows } } },
+    isOwned: () => false,
+    used: new Map([
+      ['both', 'gesture'],
+      ['model-only', 'gesture'],
+      ['user-only', 'gesture'],
+    ]),
+  })
+  check(
+    'a gesture at a model-only skill does not count as a load',
+    !described.skills.some((row) => row.name === 'model-only'),
+    JSON.stringify(described.skills),
+  )
+  check(
+    'a gesture at a user-invocable skill does count',
+    described.skills.some((row) => row.name === 'both') && described.skills.some((row) => row.name === 'user-only'),
+    JSON.stringify(described.skills),
+  )
+}
+
+{
+  // The tool path is filtered by the host's model-invocable check instead, so a
+  // skill the model loaded through `skill` stays listed even when a person could
+  // not have typed it.
+  const described = await describeSkills({
+    skills: {
+      async snapshot() {
+        return { complete: true, skills: [{ name: 'model-only', invocation: { modelInvocable: true, userInvocable: false } }] }
+      },
+    },
+    isOwned: () => false,
+    used: new Map([['model-only', 'tool']]),
+  })
+  check(
+    'a tool load survives the user-invocable filter',
+    described.skills.length === 1 && described.skills[0].name === 'model-only',
+    JSON.stringify(described.skills),
+  )
+}
+
+{
+  // A name in both sets was loaded through the tool at least once, so the
+  // stricter gesture rule must not remove it.
+  const described = await describeSkills({
+    skills: {
+      async snapshot() {
+        return { complete: true, skills: [{ name: 'both', invocation: { modelInvocable: true, userInvocable: false } }] }
+      },
+    },
+    isOwned: () => false,
+    used: new Map([['both', 'tool']]),
+  })
+  check(
+    'a skill loaded by tool and typed as well is kept',
+    described.skills.length === 1,
+    JSON.stringify(described.skills),
+  )
+}
+
+{
+  // Names arrive from two sets; the union must not list the same skill twice.
+  const described = await describeSkills({
+    skills: {
+      async snapshot() {
+        return { complete: true, skills: [{ name: 'dup', invocation: { modelInvocable: true, userInvocable: true } }] }
+      },
+    },
+    isOwned: () => false,
+    used: new Map([['dup', 'tool']]),
+  })
+  check('a skill in both sets is listed once', described.skills.length === 1, JSON.stringify(described.skills))
 }
 
 // ---------------------------------------------------------------------------

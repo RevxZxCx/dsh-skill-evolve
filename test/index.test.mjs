@@ -1789,6 +1789,211 @@ try {
     check('the late route returns the panel payload', payload.ok === true && typeof payload.data === 'object', res.body)
     check('the late route names the agent it was asked about', payload.data?.agent === lateAgent.id, res.body)
   }
+
+  // ---- the skill card lists what this session loaded, nothing else ---------
+  // The module promises "what has this session used". Two ways a skill gets
+  // loaded, and only one of them produces a tool call: the model invokes the
+  // `skill` tool, or a person types `/name` and the host injects the body
+  // directly. A test that only drives the tool call would pass with the gesture
+  // path missing, which is exactly the half that leaves the card empty in
+  // normal use.
+  {
+    const skillHost = fakeHost()
+    apply(skillHost.ctx, Config({ mode: 'suggest' }))
+    const skillAgent = fakeAgent('session-skill-card', 'F:/some/project')
+    skillHost.agents.set(skillAgent.id, skillAgent)
+    skillHost.ctx.skills = {
+      async snapshot() {
+        return {
+          complete: true,
+          skills: [
+            { name: 'alpha', description: 'loaded through the tool', invocation: { modelInvocable: true, userInvocable: true } },
+            { name: 'beta', description: 'loaded through the gesture', invocation: { modelInvocable: false, userInvocable: true } },
+            { name: 'gamma', description: 'never loaded' },
+            // Model-only: the host refuses a gesture at it and injects
+            // nothing, so typing /delta must not put it in the module.
+            { name: 'delta', description: 'model-only', invocation: { modelInvocable: true, userInvocable: false } }
+          ]
+        }
+      },
+      async get(name) {
+        return { name, description: name, content: 'body' }
+      }
+    }
+
+    // `data.skills` is the describeSkills envelope, not the array: the route
+    // nests one level further. Reading the envelope as the list made every
+    // assertion below compare against an object's `.length` (undefined).
+    const readSkills = async () => {
+      const route = skillHost.routes.get('/api/skill-evolve')
+      const res = {
+        statusCode: undefined,
+        writableEnded: false,
+        once() {
+          return this
+        },
+        writeHead(code) {
+          this.statusCode = code
+          return this
+        },
+        end(body) {
+          this.writableEnded = true
+          this.body = body
+          return this
+        }
+      }
+      await route.handler(
+        { url: `/api/skill-evolve/panel?agent=${encodeURIComponent(skillAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } },
+        res
+      )
+      return JSON.parse(res.body)
+    }
+
+    const before = await readSkills()
+    check('no skill is listed before this session loads one', before.data?.skills?.skills?.length === 0, JSON.stringify(before.data?.skills?.skills))
+
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'tool/call',
+      seq: 1,
+      time: Date.now(),
+      data: { turn: 1, step: 1, callId: 'c-skill', name: 'skill', arguments: '{"name":"alpha"}' }
+    })
+    const afterTool = await readSkills()
+    check('a skill the model loaded through the tool is listed', afterTool.data?.skills?.skills?.length === 1 && afterTool.data.skills.skills[0].name === 'alpha', JSON.stringify(afterTool.data?.skills?.skills))
+
+    // The host's own gesture. It produces no tool call at all, so a plugin that
+    // only watches tools cannot see it.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'user/message',
+      seq: 2,
+      time: Date.now(),
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'please run /beta for me' }] }
+    })
+    const afterGesture = await readSkills()
+    check('a skill loaded with the /name gesture is listed too', afterGesture.data?.skills?.skills?.length === 2, JSON.stringify(afterGesture.data?.skills?.skills))
+    check(
+      'the gesture-loaded skill is the one that was typed',
+      afterGesture.data?.skills?.skills?.some((row) => row.name === 'beta') === true,
+      JSON.stringify(afterGesture.data?.skills?.skills)
+    )
+
+    // A gesture at a skill the host will not load must not be reported as a
+    // load. The host filters with `isUserInvocable` before injecting; the panel
+    // has to apply the same rule or it invents activity that did not happen.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'user/message',
+      seq: 3,
+      time: Date.now(),
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'try /delta instead' }] }
+    })
+    const afterRefused = await readSkills()
+    check(
+      'a gesture at a model-only skill is not listed',
+      afterRefused.data?.skills?.skills?.some((row) => row.name === 'delta') === false,
+      JSON.stringify(afterRefused.data?.skills?.skills)
+    )
+    check(
+      'the refused gesture did not disturb the rest of the list',
+      afterRefused.data?.skills?.skills?.length === 2,
+      JSON.stringify(afterRefused.data?.skills?.skills)
+    )
+
+    check(
+      'a skill this session never loaded stays hidden',
+      afterGesture.data?.skills?.skills?.some((row) => row.name === 'gamma') === false,
+      JSON.stringify(afterGesture.data?.skills?.skills)
+    )
+    check(
+      'the newest load is listed first',
+      afterGesture.data?.skills?.skills?.[0]?.name === 'beta',
+      JSON.stringify(afterGesture.data?.skills?.skills)
+    )
+
+    // Reloading a skill must move it back to the top. A bare `Set.add` keeps
+    // the first position, so this ordering breaks on the very common
+    // "use alpha, use beta, use alpha again" sequence — and the assertion above
+    // cannot see it, because each skill there was loaded exactly once.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'tool/call',
+      seq: 5,
+      time: Date.now(),
+      data: { turn: 2, step: 1, callId: 'c-skill-again', name: 'skill', arguments: '{"name":"alpha"}' }
+    })
+    const afterReload = await readSkills()
+    check(
+      'reloading an already-listed skill moves it to the front',
+      afterReload.data?.skills?.skills?.[0]?.name === 'alpha',
+      JSON.stringify(afterReload.data?.skills?.skills)
+    )
+    check(
+      'reloading does not duplicate the entry',
+      afterReload.data?.skills?.skills?.length === 2,
+      JSON.stringify(afterReload.data?.skills?.skills)
+    )
+    check(
+      'the invocation policy is read as the object the host sends',
+      afterGesture.data?.skills?.skills?.find((row) => row.name === 'beta')?.modelInvocable === false,
+      JSON.stringify(afterGesture.data?.skills?.skills)
+    )
+
+    // A path is not a gesture, and neither is a fraction. Both appear in real
+    // messages and both would otherwise be counted as skills.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'user/message',
+      seq: 3,
+      time: Date.now(),
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'look at /usr/bin and 5/8 of the file' }] }
+    })
+    const afterNoise = await readSkills()
+    check('paths and fractions are not counted as skills', afterNoise.data?.skills?.skills?.length === 2, JSON.stringify(afterNoise.data?.skills?.skills))
+
+    // A message the host itself authored is not a person typing a slash command.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'user/message',
+      seq: 4,
+      time: Date.now(),
+      data: { source: { kind: 'system' }, content: [{ type: 'text', text: 'run /gamma' }] }
+    })
+    const afterSystem = await readSkills()
+    check('a slash in a non-human message is not a skill load', afterSystem.data?.skills?.skills?.length === 2, JSON.stringify(afterSystem.data?.skills?.skills))
+
+
+    // A model-only skill the model loaded through the tool must survive a later
+    // gesture at the same name. The gesture loads nothing (the host skips
+    // non-user-invocable skills), so if it overwrote the recorded path the panel
+    // would lose a skill the session is actually using. Recency may move the
+    // row; permission must not fall.
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'tool/call',
+      seq: 7,
+      time: Date.now(),
+      data: { turn: 3, step: 1, callId: 'c-skill-delta', name: 'skill', arguments: '{"name":"delta"}' }
+    })
+    const afterDeltaTool = await readSkills()
+    check(
+      'a model-only skill loaded by the tool is listed',
+      afterDeltaTool.data?.skills?.skills?.some((row) => row.name === 'delta') === true,
+      JSON.stringify(afterDeltaTool.data?.skills?.skills)
+    )
+
+    skillHost.emit('session/event', skillAgent.session, {
+      type: 'user/message',
+      seq: 8,
+      time: Date.now(),
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'and then /delta again' }] }
+    })
+    const afterDeltaGesture = await readSkills()
+    check(
+      'a later gesture does not demote a tool load of a model-only skill',
+      afterDeltaGesture.data?.skills?.skills?.some((row) => row.name === 'delta') === true,
+      JSON.stringify(afterDeltaGesture.data?.skills?.skills)
+    )
+
+    // Disposal must clear it, or a new session reusing the id inherits loads.
+    skillHost.emit('agent/disposed', { agent: skillAgent })
+    const afterDispose = await readSkills()
+    check('disposal forgets which skills this session loaded', afterDispose.data?.skills?.skills?.length === 0, JSON.stringify(afterDispose.data?.skills?.skills))
+  }
 } catch (error) {
   // Rethrown rather than swallowed: the exit hook still removes every temp root,
   // so a failure here costs nothing but the message that explains it.
