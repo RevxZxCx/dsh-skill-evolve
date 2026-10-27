@@ -66,6 +66,7 @@ function fakeHost() {
   const effects = []
   const agents = new Map()
   const logs = []
+  const routes = new Map()
 
   const ctx = {
     logger: { info: (line) => logs.push(line) },
@@ -120,6 +121,15 @@ function fakeHost() {
       roots: () => [...agents.values()].filter((agent) => agent.parent === undefined),
       get: (id) => agents.get(id)
     },
+    // The panel's routes. Registering them in the fixture is what makes the
+    // wiring reachable: without it the plugin skipped the whole block and every
+    // wiring assertion below would have passed vacuously.
+    webServer: {
+      register({ kind, path, handler }) {
+        routes.set(path, { kind, handler })
+        return () => routes.delete(path)
+      }
+    },
     // Cordis resolves a service through `ctx.get(name)`; the plugin reads
     // `approval` that way to learn the session policy before downloading.
     // Falling back to `ctx[name]` keeps the services this fixture already
@@ -138,6 +148,7 @@ function fakeHost() {
     contexts,
     agents,
     logs,
+    routes,
     emit(event, ...payload) {
       for (const handler of handlers.get(event) ?? []) handler(...payload)
     }
@@ -196,6 +207,101 @@ try {
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
   check('seven tools registered', host.tools.size === 7, [...host.tools.keys()].join(','))
+  check('the panel routes are registered', host.routes.has('/api/skill-evolve') === true, [...host.routes.keys()].join(','))
+
+  // --- the panel's "suggest a skill" button, end to end ---------------------
+  //
+  // The unit test fed `publish` a proper array, so it never saw the caller pass
+  // `steps: 0`. `publish` spreads that value into the shown list, so every
+  // press threw `0 is not iterable` and the route answered ok:false.
+  {
+    const route = host.routes.get('/api/skill-evolve')
+    const res = {
+      statusCode: undefined,
+      writableEnded: false,
+      once() {
+        return this
+      },
+      writeHead(code) {
+        this.statusCode = code
+        return this
+      },
+      end(body) {
+        this.writableEnded = true
+        this.body = body
+        return this
+      }
+    }
+    const body = JSON.stringify({ agent: agent.id })
+    const req = {
+      url: '/api/skill-evolve/propose',
+      method: 'POST',
+      headers: { host: '127.0.0.1:19387', 'content-type': 'application/json', 'content-length': String(body.length) },
+      async *[Symbol.asyncIterator]() {
+        yield Buffer.from(body)
+      }
+    }
+    await route.handler(req, res)
+    const payload = JSON.parse(res.body)
+    check('the propose route succeeds', payload.ok === true, res.body)
+    check('the propose route does not report a spread failure', String(res.body).includes('not iterable') === false, res.body)
+  }
+
+  // --- the transcript must be released with the agent ----------------------
+  {
+    const before = host.handlers.get('agent/disposed')?.length ?? 0
+    check('the disposal hook is registered', before > 0, String(before))
+    // Record something first, so "still there" would be observable.
+    // A turn opens only on a real human message; a bare tool/call would leave
+    // `turn` undefined and `turn/end` would return without folding anything.
+    host.emit('session/event', agent, {
+      type: 'user/message',
+      seq: 98,
+      time: Date.now(),
+      data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'list the directory' }] } }
+    })
+    host.emit('session/event', agent, {
+      type: 'tool/call',
+      seq: 99,
+      time: Date.now(),
+      data: { turn: 1, step: 1, callId: 'c-dispose', name: 'bash', arguments: '{"command":"ls"}' }
+    })
+    // The panel reports the *closed* turn, so the turn has to close: without
+    // this the assertion below compares against an empty snapshot and fails for
+    // a reason that has nothing to do with disposal.
+    host.emit('session/event', agent, {
+      type: 'turn/end',
+      seq: 100,
+      time: Date.now(),
+      data: { turn: 1, reason: { kind: 'completed' } }
+    })
+    const route = host.routes.get('/api/skill-evolve')
+    const readPanel = async () => {
+      const res = {
+        statusCode: undefined,
+        writableEnded: false,
+        once() {
+          return this
+        },
+        writeHead(code) {
+          this.statusCode = code
+          return this
+        },
+        end(body) {
+          this.writableEnded = true
+          this.body = body
+          return this
+        }
+      }
+      await route.handler({ url: `/api/skill-evolve/panel?agent=${agent.id}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+      return JSON.parse(res.body)
+    }
+    const filled = await readPanel()
+    check('the panel sees the turn before disposal', filled.data?.calls >= 1, JSON.stringify(filled))
+    host.emit('agent/disposed', { agent })
+    const cleared = await readPanel()
+    check('disposal releases the transcript', cleared.data?.calls === 0, JSON.stringify(cleared))
+  }
   check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))
   check('hint context order is 121', host.contexts.get('skill-evolve:hint')?.order === 121)

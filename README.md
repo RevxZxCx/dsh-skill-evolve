@@ -212,6 +212,38 @@ A bundle without a `SKILL.md` is refused outright: the host discovers skills at 
 
 **Known limit:** the market is third-party code with no review step. The gate tells you what will be written and whether it is executable; it cannot tell you whether running it is safe.
 
+### The sidebar panel
+
+The plugin ships a client half. It is a real panel built from the host's own
+components — not a drawn mock — and it docks in the host's right pane, so it
+shows only while a conversation is open.
+
+Three modules, top to bottom:
+
+1. **Last turn.** What the previous turn actually did: the tool calls, the
+   commands, the files touched, and a summary in prose. The summary is generated
+   by a model call, so it is the one part of this plugin that costs money and the
+   only part that can be switched off entirely (`panelSummary: false`). It uses
+   `summaryModel` — by default the cheapest model the provider lists, because
+   summarising one turn is not a task that needs the model doing the work.
+2. **Skills and MCP.** What skills are installed and which MCP servers have been
+   called in this session. Each row that looks like a reusable procedure has a
+   **propose** action: it opens a new conversation pre-filled with the steps, so
+   the skill is drafted with a full context rather than from a one-line prompt.
+3. **Produced files.** Files this conversation wrote, newest first, with the
+   added and removed line counts. Sourced from the same turn transcript the
+   other two modules read, so all three agree on which turn they describe.
+
+The panel is read-only over HTTP: it calls `GET /api/skill-evolve/panel`, and
+the only writes it can make are `POST /config` (its own switches) and
+`POST /propose` (opening a draft conversation). It cannot install a skill, write
+a skill file, or approve a candidate. Those stay behind the tools and the human
+handshake described above.
+
+**It needs a host restart.** The host discovers client bundles when its plugin
+graph is rebuilt, and editing `package.json` does not trigger that. If the panel
+does not appear after restarting, the Plugins page names the reason per entry.
+
 ### The evidence gate
 
 Four classes of evidence, each with different authority:
@@ -389,6 +421,11 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `catalogFullListBelow` | `40` | At or above this many skills, list names only; `0` disables |
 | `catalogFrequentUses` | `3` | Global use count that earns a full description |
 | `catalogSessionAware` | `true` | Give a full description to skills already used in this session |
+| `panelSummary` | `true` | Summarise the previous turn in the sidebar panel. Turning this off stops the panel from spending any model call |
+| `summaryProvider` | `""` | Provider for that summary. Empty means the session's own provider |
+| `summaryModel` | `""` | Model for that summary. Empty means the cheapest model the provider lists — a summary of one turn does not need the model doing the work |
+| `panelHelp` | `true` | Show the one-line explanation under each panel heading |
+| `panelPlacement` | `right` | Where the panel docks. `right` uses the host's right pane; `inline` renders under the conversation header |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.
 
@@ -482,6 +519,13 @@ The repetition trigger produces a differently shaped message when it fires first
 
 ## Tests
 
+Two suites exist beyond the unit tests. `test/real-mount.test.mjs` boots the
+plugin against a real cordis container, because several defects only appear when
+the framework's own service lookup is exercised. `test/mutate-panel.mjs`
+deliberately re-introduces each defect the panel's reviews found, one at a time,
+and fails if the suite stays green — a test that cannot fail is a test that is
+not testing. All ten mutations are currently killed.
+
 ```bash
 node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
@@ -546,6 +590,13 @@ Each of these was considered and rejected, with the reason:
 ---
 
 ## Honest limits
+
+**The panel cannot draw inside the conversation column.** The host exposes a
+right pane and header actions, not a slot for extra columns beside the message
+list. The panel therefore lives in the right pane, which is shared with file
+previews — opening a file replaces it. A panel that claimed otherwise would be
+lying about where it is.
+
 
 - **The core hypothesis is unproven.** The value depends on tasks recurring. If your work is genuinely one-off, this plugin will correctly stay silent and be worth nothing. That is the honest failure mode, and it is better than writing 50 useless skills.
 - **Detection is structural, not semantic.** It knows `bash,read,edit` repeated; it does not know whether the repetition was a good idea. The model supplies that judgement, which is why the hint asks rather than writes. The turn-end trigger exists specifically to cover what structure cannot see, but it can only reflect on what the model notices — a session that learned something and failed to articulate it teaches nothing.
