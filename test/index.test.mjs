@@ -486,6 +486,20 @@ try {
   check('the inverted file keeps the original instructions', inverted.includes('Run OCR at 300 dpi'))
   check('the inverted file states the harmful count', inverted.includes('3 times'))
 
+  // The skill stays inverted, so every further harmful report calls
+  // `invertBody` again on an already-inverted body. That used to nest another
+  // warning inside the previous one: the file opened with a growing stack of
+  // PITFALL blocks and the real instructions sank to the bottom.
+  for (let index = 0; index < 2; index += 1) {
+    await feedbackTool.execute({ name: 'scanned-pdf-tables', verdict: 'harmful', note: 'still wrong' }, { agent })
+  }
+  const reinverted = await readFile(join(skillsRoot, 'scanned-pdf-tables', 'SKILL.md'), 'utf8')
+  check('repeated harmful reports do not stack warnings',
+    (reinverted.match(/PITFALL/g) ?? []).length === 1, String((reinverted.match(/PITFALL/g) ?? []).length))
+  check('repeated harmful reports keep one copy of the instructions',
+    (reinverted.match(/Run OCR at 300 dpi/g) ?? []).length === 1, String((reinverted.match(/Run OCR at 300 dpi/g) ?? []).length))
+  check('the warning count follows the latest report', reinverted.includes('5 times'), reinverted.split('\n')[2])
+
   // Every feedback report rewrote the same file. A `FileHandle` keeps its
   // offset after a read and `truncate(0)` does not rewind it, so writing the
   // new text used to leave `oldLength` NUL bytes in front of the frontmatter.
@@ -897,6 +911,75 @@ try {
   offHost.emit('session/event', offAgent.session, { type: 'turn/end', seq: 2, data: { turn: 1, reason: { kind: 'completed' } } })
   check('triggers:[repeat] disables the turn reflection', offHint() === '')
   await rm(offRoot, { recursive: true, force: true })
+
+  // ---- mode:off must mean off everywhere ----------------------------------
+  //
+  // The config comment promises "no detection at all: no hints, no submissions,
+  // no writes". Both detectors honoured it, but the tool did not, so a model
+  // calling `skill_candidate_submit` directly — or replaying a hint written in
+  // an earlier session — could still queue a skill while the user believed the
+  // plugin was dormant.
+  {
+    const dormantRoot = await makeTempRoot('skill-evolve-dormant-')
+    process.env.DSH_HOME = dormantRoot
+    const dormantHost = fakeHost()
+    apply(dormantHost.ctx, Config({ mode: 'off' }))
+    const dormantAgent = fakeAgent('session-dormant', 'F:/p5')
+    dormantHost.agents.set(dormantAgent.id, dormantAgent)
+    dormantAgent.push({
+      type: 'user/message', seq: 1,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Always run the migration inside a transaction so a failure rolls back.' }] }
+    })
+    const submitDormant = dormantHost.tools.get('skill_candidate_submit')
+    const refused = await submitDormant.execute({
+      name: 'transactional-migration',
+      description: 'Run migrations inside a transaction.',
+      body: '1. BEGIN\n2. migrate\n3. COMMIT',
+      evidence: [{ class: 'user', quote: 'Always run the migration inside a transaction so a failure rolls back.' }]
+    }, { agent: dormantAgent })
+    check('mode:off refuses a new candidate', refused.ok === false && refused.code === 'mode-off', JSON.stringify(refused).slice(0, 240))
+    check('the refusal tells the user which setting to change', /mode/.test(refused.error ?? ''), refused.error)
+    check('mode:off queued nothing', (await dormantHost.commands.get('skill-review').handler({ rawInput: '', agent: dormantAgent })).text.includes('No skill candidates'))
+
+    // Detection is off too, so nothing is hinted either.
+    const dormantHint = () => dormantHost.contexts.get('skill-evolve:hint').text({ agent: dormantAgent })
+    dormantHost.emit('session/event', dormantAgent.session, { type: 'user/message', seq: 2, data: { source: { kind: 'user' } } })
+    for (let i = 0; i < 6; i += 1) dormantHost.emit('session/event', dormantAgent.session, toolCall('bash', `d_${i}`))
+    dormantHost.emit('session/event', dormantAgent.session, { type: 'turn/end', seq: 3, data: { turn: 1, reason: { kind: 'completed' } } })
+    check('mode:off hints nothing', dormantHint() === '')
+
+    // The promise is "no new work", not "your existing queue is now unreachable":
+    // a person turning the plugin off must still be able to approve what is
+    // already waiting.
+    await rm(dormantRoot, { recursive: true, force: true })
+    const stillRoot = await makeTempRoot('skill-evolve-dormant-approve-')
+    process.env.DSH_HOME = stillRoot
+    const approveHost = fakeHost()
+    apply(approveHost.ctx, Config({ mode: 'suggest' }))
+    const approveAgent = fakeAgent('session-approve', 'F:/p6')
+    approveHost.agents.set(approveAgent.id, approveAgent)
+    approveAgent.push({
+      type: 'user/message', seq: 1,
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Pin the dependency before installing so the build is reproducible.' }] }
+    })
+    await approveHost.tools.get('skill_candidate_submit').execute({
+      name: 'pin-then-install',
+      description: 'Pin dependencies before installing.',
+      body: '1. pin\n2. install',
+      evidence: [{ class: 'user', quote: 'Pin the dependency before installing so the build is reproducible.' }]
+    }, { agent: approveAgent })
+    // Flip to off *after* something is queued, then approve it.
+    apply(approveHost.ctx, Config({ mode: 'off' }))
+    await approveHost.commands.get('skill-capture').handler({ rawInput: 'pin-then-install', agent: approveAgent })
+    const approvedWhileOff = await approveHost.tools.get('skill_candidate_submit').execute({
+      name: 'pin-then-install',
+      description: 'Pin dependencies before installing.',
+      body: '1. pin\n2. install',
+      final: true
+    }, { agent: approveAgent })
+    check('an already-queued candidate can still be approved while mode is off', approvedWhileOff.ok === true, JSON.stringify(approvedWhileOff).slice(0, 240))
+    await rm(stillRoot, { recursive: true, force: true })
+  }
 
   // ---- a hint shrinks, and only then retires -------------------------------
   //
@@ -1999,6 +2082,154 @@ try {
   // so a failure here costs nothing but the message that explains it.
   console.error(error)
   process.exit(1)
+}
+
+// A person approves a draft; the model then writes a different one. Before this
+// was checked, `finalize` published whatever body the model sent under an
+// approval that had only ever seen the earlier text — the queue showed one
+// procedure and the skill directory got another.
+{
+  const editRoot = await makeTempRoot('skill-evolve-edited-')
+  process.env.DSH_HOME = editRoot
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  const agent = fakeAgent('session-edited', 'F:/proj')
+  host.agents.set(agent.id, agent)
+  agent.push({
+    type: 'user/message', seq: 1,
+    data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Always verify the archive lists every file before you report success.' }] }
+  })
+
+  const submit = host.tools.get('skill_candidate_submit')
+  const queued = await submit.execute({
+    name: 'zip-then-list',
+    description: 'Archive a build and prove the archive is complete.',
+    body: '1. Run 7z a build.7z ./dist\n2. Run 7z l build.7z',
+    evidence: [{ class: 'user', quote: 'Always verify the archive lists every file before you report success.' }]
+  }, { agent })
+  check('edited-after-approval setup: queued', queued.ok === true, JSON.stringify(queued).slice(0, 200))
+
+  const approved = await host.commands.get('skill-capture').handler({ rawInput: 'zip-then-list', agent })
+  check('edited-after-approval setup: approval staged it', approved.kind === 'success', JSON.stringify(approved).slice(0, 200))
+
+  // Same name, different procedure: this is the draft nobody approved.
+  const changed = await submit.execute({
+    name: 'zip-then-list',
+    description: 'Archive a build and prove the archive is complete.',
+    body: '1. Run tar -czf build.tgz ./dist\n2. Email the tarball to the team',
+    final: true
+  }, { agent })
+  check('a draft changed after approval is not published', changed.ok === false && changed.code === 'changed-since-approval', JSON.stringify(changed).slice(0, 300))
+  check('the unapproved text did not reach the skill directory',
+    (await fileExists(join(editRoot, 'skills', 'zip-then-list', 'SKILL.md'))) === false)
+  check('the refusal explains that nobody has seen this version',
+    /nobody has seen this version/.test(changed.error ?? ''), String(changed.error))
+
+  // The queue must now hold the *new* text, otherwise re-approving would
+  // re-approve the old body and the change would be lost in the other direction.
+  const relisted = await host.tools.get('skill_candidate_list').execute({}, { agent })
+  check('the new text is back in the queue for another look', relisted.text.includes('zip-then-list'), relisted.text.slice(0, 300))
+  const queueFile = JSON.parse(await readFile(join(editRoot, 'plugin-data', 'skill-evolve', 'candidates.json'), 'utf8'))
+  const entry = queueFile.find((item) => item.name === 'zip-then-list')
+  check('the queued entry now carries the changed body', String(entry?.body ?? '').includes('tar -czf'), String(entry?.body).slice(0, 120))
+  check('the queued entry is no longer flagged as approved', entry?.awaitingFinal !== true)
+  check('the stale approval digest was cleared', entry?.approvedDigest === undefined)
+
+  // Approving again and sending the *same* text must work: the check binds
+  // content, it does not forbid the confirm flow.
+  const reapproved = await host.commands.get('skill-capture').handler({ rawInput: 'zip-then-list', agent })
+  check('re-approval of the new text succeeds', reapproved.kind === 'success', JSON.stringify(reapproved).slice(0, 200))
+  const written = await submit.execute({
+    name: 'zip-then-list',
+    description: 'Archive a build and prove the archive is complete.',
+    body: '1. Run tar -czf build.tgz ./dist\n2. Email the tarball to the team',
+    final: true
+  }, { agent })
+  check('the re-approved text is published', written.ok === true, JSON.stringify(written).slice(0, 240))
+  const onDisk = await readFile(join(editRoot, 'skills', 'zip-then-list', 'SKILL.md'), 'utf8')
+  check('what landed is what was approved the second time', onDisk.includes('tar -czf'), onDisk.slice(0, 200))
+}
+
+// A revision is proposed from a snapshot, then the world moves on: the skill
+// gets pinned and used while the proposal waits for approval. `writeApproved`
+// used to rebuild the registry row from a literal object — seven fields, so
+// `pinned` / `demoted` were erased — and read the counters from the proposal's
+// snapshot, rolling back every use reported in between.
+{
+  const reviseRoot = await makeTempRoot('skill-evolve-revise-')
+  process.env.DSH_HOME = reviseRoot
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest', promoteAfterUses: 3 }))
+  const agent = fakeAgent('session-revise', 'F:/proj')
+  host.agents.set(agent.id, agent)
+  agent.push({
+    type: 'user/message', seq: 1,
+    data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Convert the spreadsheet with soffice before parsing it, never with a JS library.' }] }
+  })
+
+  const submit = host.tools.get('skill_candidate_submit')
+  const feedback = host.tools.get('skill_feedback')
+  const capture = host.commands.get('skill-capture')
+  const rank = host.commands.get('skill-rank')
+  const quoted = [{ class: 'user', quote: 'Convert the spreadsheet with soffice before parsing it, never with a JS library.' }]
+
+  // Land a first version.
+  await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets with soffice.', body: '1. Run soffice --convert-to csv', evidence: quoted
+  }, { agent })
+  await capture.handler({ rawInput: 'soffice-first', agent })
+  const firstWrite = await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets with soffice.', body: '1. Run soffice --convert-to csv', final: true
+  }, { agent })
+  check('revision setup: the first version landed', firstWrite.ok === true, JSON.stringify(firstWrite).slice(0, 200))
+
+  // A person marks it important, then it earns two uses.
+  const pinned = await rank.handler({ rawInput: 'soffice-first pin', agent })
+  check('revision setup: the skill was pinned', pinned.kind === 'success' && pinned.text.includes('pinned'), String(pinned.text))
+  await feedback.execute({ name: 'soffice-first', verdict: 'helpful' }, { agent })
+  await feedback.execute({ name: 'soffice-first', verdict: 'helpful' }, { agent })
+
+  // Revision proposed while `uses` is 2. The snapshot it carries says 2.
+  const proposal = await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets with soffice, then verify the CSV.', body: '1. Run soffice --convert-to csv\n2. Head the CSV', evidence: quoted
+  }, { agent })
+  check('revision setup: the revision was accepted', proposal.ok === true, JSON.stringify(proposal).slice(0, 200))
+  const snapshot = JSON.parse(await readFile(join(reviseRoot, 'plugin-data', 'skill-evolve', 'candidates.json'), 'utf8'))
+    .find((item) => item.name === 'soffice-first')
+  check('the revision recorded the counters it saw', Number(snapshot?.base?.uses) === 2, JSON.stringify(snapshot?.base))
+
+  // A third use arrives after the proposal was written: 3 reaches the
+  // promotion threshold, so the stage also moves while the revision waits.
+  await feedback.execute({ name: 'soffice-first', verdict: 'helpful' }, { agent })
+
+  await capture.handler({ rawInput: 'soffice-first', agent })
+  const revisionWrite = await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets with soffice, then verify the CSV.', body: '1. Run soffice --convert-to csv\n2. Head the CSV', final: true
+  }, { agent })
+  check('the revision is published', revisionWrite.ok === true, JSON.stringify(revisionWrite).slice(0, 240))
+
+  const registry = JSON.parse(await readFile(join(reviseRoot, 'plugin-data', 'skill-evolve', 'registry.json'), 'utf8'))
+  const row = registry['soffice-first'] ?? {}
+  check('a revision keeps the manual pin', row.pinned === true, JSON.stringify(row))
+  check('a revision keeps the uses reported after it was proposed', Number(row.uses) === 3, JSON.stringify(row))
+  check('a revision keeps the stage the skill reached in the meantime', row.stage === 'active', JSON.stringify(row))
+  const revisedFile = await readFile(join(reviseRoot, 'skills', 'soffice-first', 'SKILL.md'), 'utf8')
+  check('the file records the surviving use count', revisedFile.includes('evolved-uses: "3"'), revisedFile.match(/evolved-uses.*/)?.[0])
+  check('the file carries the new procedure', revisedFile.includes('Head the CSV'), revisedFile.slice(0, 200))
+
+  // And a demoted flag must survive too — it is the other half of the same
+  // literal-object bug, and the two are cleared by different commands.
+  await rank.handler({ rawInput: 'soffice-first demote', agent })
+  await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets, headers checked.', body: '1. Run soffice --convert-to csv\n2. Head the CSV', evidence: quoted
+  }, { agent })
+  await capture.handler({ rawInput: 'soffice-first', agent })
+  await submit.execute({
+    name: 'soffice-first', description: 'Convert spreadsheets, headers checked.', body: '1. Run soffice --convert-to csv\n2. Head the CSV', final: true
+  }, { agent })
+  const afterDemote = JSON.parse(await readFile(join(reviseRoot, 'plugin-data', 'skill-evolve', 'registry.json'), 'utf8'))['soffice-first'] ?? {}
+  check('a revision keeps the demotion', afterDemote.demoted === true, JSON.stringify(afterDemote))
+  check('a revision keeps the pin alongside the demotion', afterDemote.pinned === true, JSON.stringify(afterDemote))
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

@@ -333,6 +333,8 @@ Two details that look like nits and are not:
 
 Host-injected context (runtime reminders, skill catalogs, the system prompt) lands in a `system` lane that no evidence class may cite.
 
+**The gate ignores this plugin's own tools.** `skill_candidate_submit`, `skill_candidate_list` and `skill_feedback` are dispatched through the same `tool/call` and `tool/result` lanes as anything else, so the plugin's own output — a queue listing, an echo of a candidate's body — arrives looking exactly like third-party machine output. A session could quote it and pass a check that proves only that the plugin can read itself. All seven tool names the plugin registers are excluded from every lane before any quote is matched, and a test asserts that list still matches the registrations, so renaming a tool fails loudly instead of quietly reopening the hole.
+
 ### Lifecycle
 
 Four stages, driven by evidence rather than by a timer:
@@ -354,6 +356,10 @@ This is *not* gated on `mode`. `mode` governs detection and creation; bookkeepin
 Counters live in two places on purpose: `registry.json` is the read path, and the skill file's frontmatter is the durable copy. If the registry is lost, the next load rebuilds the entry from the file — which is why every load rewrites the file rather than only rewriting it when the stage moves.
 
 `inverted` is terminal until rewritten: the file gains a `PITFALL` section at the top and keeps the original procedure underneath, because a warning is only trustworthy if a reader can see what it warns about.
+
+Inversion is **idempotent** — the `PITFALL` block is recognised on the way in and replaced rather than nested. Without that, a skill reported harmful three times carries three stacked warnings, each wrapped around the ones before it, and the file grows quadratically with the count it reports.
+
+Every read-modify-write of a skill's counters happens inside one serialised section, and it re-reads the skill file while holding that section rather than trusting a value read earlier. Two sessions that both loaded the same skill would otherwise each write `uses + 1` from the same starting number and lose one; the field a skill is judged by is the one field that must not drift downward.
 
 Confidence decays with a 90-day half-life, and one harmful report costs four helpful ones (`helpful - 4 × harmful`).
 
@@ -390,6 +396,10 @@ This is Qoder's behaviour and its wording: "task creation does not mean the Skil
 `approvalMode: 'direct'` writes the queued body at once, which is what earlier versions of this plugin did.
 
 Approval is permission to write *this draft*, not permission to write anything: the ownership fence still applies, and a draft whose base changed since it was queued is refused rather than merged.
+
+**The yes is bound to a digest of the text.** `/skill-capture` stores a hash of the name, description, `whenToUse` and body it approved. When the final draft arrives, its hash is compared with that one, and a mismatch sends the candidate back to the queue instead of writing it under the old yes. This is what makes "the model writes the final body" safe: the model may improve the wording, but it may not use the approval as cover for publishing something the person never read. The revision then sits in the queue with `awaitingFinal: false` for one more look.
+
+The comparison uses the same normalisation on both sides — `whenToUse` is trimmed and a blank one is stored as absent — because a digest that disagrees about whitespace would send back drafts that did not change, and a person asked to approve the same text twice learns to stop reading it.
 
 ### Evidence is checked once, at submission
 
@@ -451,8 +461,7 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mode` | `suggest` | `suggest` = hint only; `auto` = write on submit; `off` = detect and log, never hint |
-| `triggers` | `['turn','repeat']` | Which triggers are active; `[]` disables both |
+| `mode` | `suggest` | `suggest` = hint only; `auto` = write on submit; `off` = detect and log, never hint || `triggers` | `['turn','repeat']` | Which triggers are active; `[]` disables both |
 | `reflectionCadence` | `3` | Human turns before the first reflection; doubles after each one |
 | `reflectionMinToolCalls` | `4` | Tool calls a turn needs before reflecting on it |
 | `maxReflectionsPerSession` | `2` | Hard cap on turn-end reflections |
@@ -485,6 +494,10 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `panelCollapsed` | `false` | Start folded into a handle instead of showing the cards |
 
 `mode: auto` is the only setting that writes without a person seeing it first. It is not the default and should not become one.
+
+`mode: 'off'` means the plugin produces no text for the model to read, on **every** route that could produce one. There are four: `skill_candidate_submit`, the repeat detector, the turn reflection, and the panel's suggest button. The button was the one that leaked — it publishes straight into the hint channel without going through any of the others, so a session switched off could still have text injected into its next prompt by a click. It now returns a refusal that names the setting, and a test asserts the hint context renders empty rather than merely that the request answered with an error: an error envelope over a live hint would still cost the model tokens.
+
+`auto` does not change `off`'s bookkeeping. Counting loads and recording feedback on skills that already exist keeps working, because turning detection off is a statement about new proposals, not about approved skills.
 
 ### Reflection budget
 
@@ -588,19 +601,39 @@ node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-335 assertions across nine suites. They are plain Node scripts with no test framework, so they also double as executable documentation.
+1441 assertions across 27 suites. They are plain Node scripts with no test
+framework, so they also double as executable documentation.
+
+**The runner treats a crash as a failure.** It checks the exit code *and* the
+signal, because a suite that segfaults, is killed, or exits non-zero without
+printing a summary would otherwise look like a pass — the harness reads stdout
+for assertions, and a process that dies before writing any prints nothing, which
+is indistinguishable from "nothing failed". It also imposes a per-suite timeout
+(`SKILL_EVOLVE_TEST_TIMEOUT_MS`, default 120 s): without one, a test that loops
+forever hangs the whole run, and the documented promise that a hung suite counts
+as a failure would simply not be true. A timeout is reported as a timeout rather
+than as a crash, since a killed child also carries a signal and reading only the
+signal would mislabel it.
 
 | Suite | Covers |
 |---|---|
 | `signal.test.mjs` | The four detection rules, including the regressions that motivated each one |
-| `evidence.test.mjs` | Verbatim matching, the four classes, fabrication rejection |
+| `command.test.mjs` | Expanding a shell call into the commands it runs; heredocs, separators, quoting |
+| `evidence.test.mjs` | Verbatim matching, the four classes, fabrication rejection, the plugin's own tools excluded |
 | `skillfile.test.mjs` | Frontmatter round-trip, ownership fence, malformed input |
-| `lifecycle.test.mjs` | Promotion, inversion, staleness, confidence decay |
-| `hint.test.mjs` | Sub-run dedupe, per-agent isolation, budget, rendering |
+| `lifecycle.test.mjs` | Promotion, inversion, staleness, confidence decay, concurrent counter updates |
+| `hint.test.mjs` | Sub-run dedupe, per-agent isolation, budget, rendering, two-stage ageing, reflection hold |
 | `reflection.test.mjs` | Human-turn detection, cadence backoff, substance filter, budget, rendering |
 | `candidates.test.mjs` | The four staleness rules and the queue annotation that keeps a recorded verdict meaningful |
 | `index.test.mjs` | The whole plugin against a fake host: detect → hint → submit → queue → approve → promote → invert, plus both triggers together |
 | `gaps.test.mjs` | The three later additions end to end: revisions, staleness in a real queue, and both approval modes |
+| `review-fixes.test.mjs` | The defects code review found: concurrent finalize, revision state loss, `off` closing the panel route, white-space digests, stale recomputation at write time |
+| `runner.test.mjs` | That the runner fails a suite which crashes, hangs, or exits non-zero |
+| `api.test.mjs` / `panel-wiring.test.mjs` / `client.test.mjs` | The panel's HTTP surface, its wiring into a host, and the browser bundle |
+| `gutter.test.mjs` / `gutter-drift.test.mjs` | Card placement geometry, and that the bundle's inlined copy still behaves like the module |
+| `summarise.test.mjs` / `transcript.test.mjs` | The one module that spends money, and the transcript it is fed |
+| `catalog.test.mjs` / `market.test.mjs` / `search.test.mjs` | Catalog rewriting, the skill market, and searching shrunk entries |
+| `usage.test.mjs` / `service.test.mjs` / `mutations.test.mjs` | Use counting, service lookup, and the panel mutation harness |
 
 ### Replay against a real session
 

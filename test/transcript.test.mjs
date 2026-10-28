@@ -11,6 +11,8 @@
 import {
   EDIT_TOOLS,
   MAX_CALLS_PER_TURN,
+  MAX_SAID_BLOCKS,
+  MAX_SAID_CHARS,
   SHELL_TOOLS,
   Transcript,
   TranscriptStore,
@@ -283,6 +285,51 @@ check(
   store.record('a', endTurn())
   check('a result without a call does not fabricate a row', store.view('a').previous.calls === 0, String(store.view('a').previous.calls))
   check('a result without a call does not fabricate a failure', store.view('a').previous.failed === 0, String(store.view('a').previous.failed))
+}
+
+// --- what the transcript refuses to hold ---------------------------------
+//
+// The panel renders a two-paragraph summary of one turn, so the text is capped
+// on the way in. The failure is invisible from the outside — the panel looks
+// right either way and only the process grows — which is exactly why the bound
+// needs an assertion rather than a code review.
+{
+  const transcript = new Transcript()
+  transcript.beginTurn(1)
+  for (let index = 0; index < MAX_SAID_BLOCKS * 3; index += 1) {
+    transcript.noteText([{ type: 'text', text: `block ${index}` }])
+  }
+  check('the text block count is capped', transcript.said.length === MAX_SAID_BLOCKS, String(transcript.said.length))
+  check('the earliest blocks are kept', transcript.said[0] === 'block 0', transcript.said[0])
+
+  const long = new Transcript()
+  long.beginTurn(1)
+  long.noteText([{ type: 'text', text: 'y'.repeat(MAX_SAID_CHARS * 4) }])
+  check('one oversized block is cut on the way in', long.said[0].length === MAX_SAID_CHARS, String(long.said[0].length))
+
+  const normal = new Transcript()
+  normal.beginTurn(1)
+  normal.noteText([{ type: 'text', text: '  short reply  ' }])
+  check('short text is stored trimmed and unmodified', normal.said[0] === 'short reply', JSON.stringify(normal.said[0]))
+
+  const empty = new Transcript()
+  empty.beginTurn(1)
+  empty.noteText([{ type: 'text', text: '   ' }, { type: 'thinking', text: 'skip me' }])
+  check('blank and non-text blocks are still skipped', empty.said.length === 0, String(empty.said.length))
+
+  transcript.beginTurn(2)
+  check('a new turn clears the text buffer', transcript.said.length === 0, String(transcript.said.length))
+  transcript.noteText([{ type: 'text', text: 'fresh' }])
+  check('a new turn gets its own budget', transcript.said.length === 1, String(transcript.said.length))
+
+  // The snapshot caps independently, so even a full buffer cannot produce an
+  // unbounded panel payload.
+  const full = new Transcript()
+  full.beginTurn(1)
+  for (let index = 0; index < MAX_SAID_BLOCKS; index += 1) {
+    full.noteText([{ type: 'text', text: 'z'.repeat(MAX_SAID_CHARS) }])
+  }
+  check('the snapshot text stays bounded', full.snapshot().said.length <= 1200, String(full.snapshot().said.length))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

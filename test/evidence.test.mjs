@@ -4,7 +4,9 @@ import {
   validateEvidenceEntry,
   quoteAppears,
   runGate,
-  corpusFromEvents
+  corpusFromEvents,
+  lanesFromEvents,
+  ownCallIds
 } from '../lib/evidence.js'
 
 let pass = 0
@@ -161,6 +163,73 @@ check('refuses to match a too-short fragment', quoteAppears('pip', normalize(COR
     corpus: 'user: 12 行',
     evidence: [{ class: 'tool', quote: '一共 9999 行数据' }]
   }).survived.length === 0)
+}
+
+// The gate must not be able to prove a quote with its own refusal text. This
+// is the one bug that made every other rule pointless: the model only has to
+// re-read the error message to find its invented sentence sitting in the
+// machine lane. No malice required — retrying after an error is default
+// behaviour.
+{
+  const INVENTED = 'This fabricated observation was never made by any user or external tool.'
+  const base = [
+    { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'do the thing' }] } }
+  ]
+
+  check('an invented quote is rejected before any echo', runGate({
+    evidence: [{ class: 'tool', quote: INVENTED }],
+    lanes: lanesFromEvents(base)
+  }).survived.length === 0)
+
+  // Exactly what the host records when the model submits, is refused, and tries
+  // the same sentence again.
+  const echoed = [
+    ...base,
+    { type: 'tool/call', data: { callId: 'call-1', name: 'skill_candidate_submit', arguments: '{"name":"alpha"}' } },
+    {
+      type: 'tool/result',
+      data: {
+        callId: 'call-1',
+        content: [{ type: 'text', text: `skill_candidate_submit failed: no-verified-evidence. Could not verify tool quote: "${INVENTED}"` }]
+      }
+    }
+  ]
+
+  check('our own refusal text is not machine evidence', runGate({
+    evidence: [{ class: 'tool', quote: INVENTED }],
+    lanes: lanesFromEvents(echoed)
+  }).survived.length === 0)
+
+  check('the refusal text is still quotable as this plugin talking', lanesFromEvents(echoed).tool.includes('no-verified-evidence') === false)
+
+  // The fix must not shrink the lane for real observations. A bash result in
+  // the same session still proves a number.
+  const withRealTool = [
+    ...echoed,
+    { type: 'tool/call', data: { callId: 'call-2', name: 'bash', arguments: '{"command":"npm test"}' } },
+    { type: 'tool/result', data: { callId: 'call-2', content: [{ type: 'text', text: '12 tests passed, 0 failed' }] } }
+  ]
+  const real = runGate({
+    evidence: [{ class: 'tool', quote: '12 tests passed, 0 failed' }],
+    lanes: lanesFromEvents(withRealTool)
+  })
+  check('a real tool result still verifies', real.survived.length === 1 && real.authoritative === true)
+
+  // A result whose call the host did not record stays usable: refusing to use
+  // it would let a missing event silently disable legitimate evidence.
+  const orphan = [
+    ...base,
+    { type: 'tool/result', data: { callId: 'call-x', content: [{ type: 'text', text: 'disk was full at that point' }] } }
+  ]
+  check('a result with no visible call is still machine evidence',
+    lanesFromEvents(orphan).tool.includes('disk was full at that point'))
+
+  check('ownCallIds only names our tools', [...ownCallIds([
+    { type: 'tool/call', data: { callId: 'a', name: 'skill_candidate_submit' } },
+    { type: 'tool/call', data: { callId: 'b', name: 'bash' } },
+    { type: 'tool/call', data: { callId: 'c', name: 'skill_market_install' } },
+    { type: 'tool/call', data: { name: 'skill_feedback' } }
+  ])].join(',') === 'a,c')
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

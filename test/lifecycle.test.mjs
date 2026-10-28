@@ -7,6 +7,7 @@ import {
   decideStage,
   stateToFrontmatter,
   invertBody,
+  unwrapInverted,
   summarize
 } from '../lib/lifecycle.js'
 
@@ -149,6 +150,38 @@ check('four stages are declared', STAGES.length === 4 && STAGES.includes('invert
   check('summary omits harmful when zero', !line.includes('harmful'), line)
   const withHarm = summarize({ stage: 'inverted', uses: 7, harmful: 3, helpful: 2, validated: daysAgo(0) }, NOW)
   check('summary includes harmful when present', withHarm.includes('3 harmful'), withHarm)
+}
+
+// --- inversion is idempotent ---------------------------------------------
+//
+// The lifecycle keeps calling `invertBody` on every harmful report for a skill
+// that is already inverted. Without unwrapping first, each call stacked another
+// PITFALL block and pushed the original instructions further down the file.
+{
+  const once = invertBody({ name: 'pdftotext-ocr', originalBody: '1. Run OCR at 300 dpi.', harmful: 3 })
+  check('the first inversion opens with the warning', once.includes('PITFALL'), once.slice(0, 60))
+  check('the first inversion keeps the instructions', once.includes('Run OCR at 300 dpi'))
+  check('the first inversion states the count', once.includes('3 times'), once.split('\n')[2])
+
+  const twice = invertBody({ name: 'pdftotext-ocr', originalBody: once, harmful: 4 })
+  check('re-inverting does not stack a second warning', (twice.match(/PITFALL/g) ?? []).length === 1, String((twice.match(/PITFALL/g) ?? []).length))
+  check('re-inverting still updates the count', twice.includes('4 times'), twice.split('\n')[2])
+  check('re-inverting keeps the instructions exactly once', (twice.match(/Run OCR at 300 dpi/g) ?? []).length === 1, String((twice.match(/Run OCR at 300 dpi/g) ?? []).length))
+
+  let many = once
+  for (let n = 4; n <= 12; n += 1) many = invertBody({ name: 'pdftotext-ocr', originalBody: many, harmful: n })
+  check('twelve reports leave exactly one warning', (many.match(/PITFALL/g) ?? []).length === 1, String((many.match(/PITFALL/g) ?? []).length))
+  check('twelve reports leave exactly one copy of the instructions', (many.match(/Run OCR at 300 dpi/g) ?? []).length === 1, String((many.match(/Run OCR at 300 dpi/g) ?? []).length))
+  check('twelve reports leave the latest count', many.includes('12 times'), many.split('\n')[2])
+  check('the file does not grow with the report count', many.length < once.length + 40, [once.length, many.length].join(' < '))
+
+  // A body that was never inverted must come back untouched, not emptied.
+  check('a plain body passes through the unwrapper unchanged', unwrapInverted('1. Do the thing.') === '1. Do the thing.')
+  check('an empty body does not throw', unwrapInverted(undefined) === '')
+  // A person may edit the warning prose; the heading is what marks a wrapper.
+  const handEdited = once.replace('do not follow this skill as written', 'DO NOT FOLLOW THIS')
+  const rewrapped = invertBody({ name: 'pdftotext-ocr', originalBody: handEdited, harmful: 5 })
+  check('an edited warning is still recognised as one layer', (rewrapped.match(/PITFALL/g) ?? []).length === 1, String((rewrapped.match(/PITFALL/g) ?? []).length))
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)
