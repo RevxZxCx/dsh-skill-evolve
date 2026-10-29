@@ -1,12 +1,19 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 
-const gutter = 'lib/gutter.js'
+// Resolved from this file, not from the caller's directory. `execFileSync` below
+// runs with the repo root as its cwd, but `fs` does not follow that — so a run
+// from anywhere else used to mutate one gutter.js and test another, which is how
+// a mutation that genuinely fails the suite was reported SURVIVED.
+const repo = fileURLToPath(new URL('..', import.meta.url))
+const gutter = path.join(repo, 'lib', 'gutter.js')
 const original = fs.readFileSync(gutter, 'utf8')
 
 function run(cmd) {
   try {
-    return execFileSync('node', [cmd.ref, ...(cmd.args ?? [])], { encoding: 'utf8', stdio: 'pipe' })
+    return execFileSync('node', [cmd.ref, ...(cmd.args ?? [])], { cwd: repo, encoding: 'utf8', stdio: 'pipe' })
   } catch (error) {
     return (error.stdout ?? '') + (error.stderr ?? '')
   }
@@ -39,32 +46,56 @@ const mutations = [
     to: '  if (chatRect == null) {\n    return { visible: false, side: preferred, left: 0, top: 0 }\n  }',
   },
   {
-    label: 'placeTip loses the vertical clamp for an off-screen trigger',
+    label: 'clampTop drops the bottom bound in a window tall enough to hold the box',
     from: [
-      '  if (foot !== undefined && foot >= TIP_HEIGHT + TIP_MARGIN * 2) {',
-      '    top = Math.max(TIP_MARGIN, Math.min(top, foot - TIP_HEIGHT - TIP_MARGIN))',
-      '  } else if (foot !== undefined) {',
+      '  if (foot !== undefined && foot >= height + EDGE_MARGIN * 2) {',
+      '    return Math.max(EDGE_MARGIN, Math.min(desired, foot - height - EDGE_MARGIN))',
+      '  }',
     ].join('\n'),
     to: [
       '  if (false) {',
-      '    top = Math.max(TIP_MARGIN, Math.min(top, foot - TIP_HEIGHT - TIP_MARGIN))',
-      '  } else if (foot !== undefined) {',
+      '    return Math.max(EDGE_MARGIN, Math.min(desired, foot - height - EDGE_MARGIN))',
+      '  }',
     ].join('\n'),
   },
   {
-    label: 'placeTip drops the bottom bound once the trigger is below the window',
-    from: '    top = Math.max(TIP_MARGIN, Math.min(top, Math.max(TIP_MARGIN, foot - TIP_MARGIN)))',
-    to: '    top = Math.max(TIP_MARGIN, top)',
+    label: 'clampTop drops the top bound in a window too short to hold the box',
+    from: '    return Math.max(EDGE_MARGIN, Math.min(desired, Math.max(EDGE_MARGIN, foot - EDGE_MARGIN)))',
+    to: '    return Math.max(EDGE_MARGIN, desired)',
   },
   {
-    label: 'placeTip drops the floor when the viewport height is unknown',
-    from: '    top = Math.max(TIP_MARGIN, top)',
-    to: '    top = top',
+    label: 'placeNear ignores the requested side',
+    from: "  if (preferred === 'right' && fitsRight) side = 'right'",
+    to: "  if (false) side = 'right'",
   },
   {
-    label: 'TIP_HEIGHT is reserved smaller than the text it has to hold',
-    from: 'export const TIP_HEIGHT = 160',
-    to: 'export const TIP_HEIGHT = 40',
+    label: 'placeNear lets a popover start past the left edge',
+    from: '  if (edge !== undefined) left = Math.max(EDGE_MARGIN, Math.min(left, edge - width - EDGE_MARGIN))',
+    to: '  if (edge !== undefined) left = left',
+  },
+  {
+    label: 'placeNear skips the vertical settle',
+    from: '  let top = clampTop(anchor.top, height, input?.viewportHeight)',
+    to: '  let top = Number.isFinite(anchor.top) ? anchor.top : EDGE_MARGIN',
+  },
+  {
+    // `avoid` is the only thing keeping the detail card off the list it hangs
+    // off. Without it the card is merely clamped, which in any window narrower
+    // than about 1280px puts it back over the list's approve/ignore column — so
+    // hovering a row to read it makes that row impossible to press.
+    label: 'placeNear ignores the rectangle it was told to keep clear',
+    from: '  if (covers(left, top, width, height, avoid) === true) {',
+    to: '  if (false) {',
+  },
+  {
+    // This slot used to hold the hover bubble's text budget. The bubble is gone —
+    // the checklist replaced it — so that anchor no longer exists and nothing
+    // reserves a text height any more.
+    // What replaces it: the settle has to use the box height. Passing 0 is how a
+    // popover ends up parked past the bottom edge instead of inside the window.
+    label: 'placeNear settles against a zero height',
+    from: '  let top = clampTop(anchor.top, height, input?.viewportHeight)',
+    to: '  let top = clampTop(anchor.top, 0, input?.viewportHeight)',
   },
 ]
 
@@ -79,14 +110,17 @@ for (const mutation of mutations) {
     run({ ref: 'scripts/sync-gutter.mjs' })
     const gutterOut = run({ ref: 'test/gutter.test.mjs' })
     const driftOut = run({ ref: 'test/gutter-drift.test.mjs' })
-    // The bubble-text check lives in the client suite, and it is the only thing
-    // that fails when TIP_HEIGHT is reserved smaller than the text it holds.
+    // The client suite runs because it owns the call sites: a placement change
+    // that only breaks what the bundle asks for shows up there, not in gutter.
     const clientOut = run({ ref: 'test/client.test.mjs' })
-    const killed = failures(gutterOut) + failures(driftOut) + failures(clientOut)
+    // `placeNear` lives in its own suite. Leaving it out is how three of its
+    // mutations reported SURVIVED: the suites that were run do not assert on it.
+    const nearOut = run({ ref: 'test/placeNear.test.mjs' })
+    const killed = failures(gutterOut) + failures(driftOut) + failures(clientOut) + failures(nearOut)
     results.push({
       label: mutation.label,
       outcome: killed > 0 ? `killed by ${killed}` : 'SURVIVED',
-      detail: [gutterOut, driftOut, clientOut].map((out) => out.trim().split('\n').pop()).join(' | '),
+      detail: [gutterOut, driftOut, clientOut, nearOut].map((out) => out.trim().split('\n').pop()).join(' | '),
     })
   } finally {
     fs.writeFileSync(gutter, original)

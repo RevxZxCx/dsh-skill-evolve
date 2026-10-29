@@ -77,7 +77,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
 {
   // Exactly how `lib/index.js` builds it: getters, not functions. Before the
   // fix every route answered `deps.config is not a function`.
-  const live = { panelSummary: true, panelHelp: false }
+  const live = { panelSummary: true, panelSide: 'left' }
   const deps = {
     get config() {
       return live
@@ -252,7 +252,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
 // ---------------------------------------------------------------------------
 
 {
-  const live = { panelSummary: true, panelHelp: true }
+  const live = { panelSummary: true, panelSide: 'left' }
   const applied = []
   const deps = {
     get config() {
@@ -280,7 +280,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   const payload = JSON.parse(res.body)
   check('saving applies the patch', applied.length === 1 && applied[0].panelSummary === false, JSON.stringify(applied))
   check('the reply carries the config fields, not just a receipt', payload.data.panelSummary === false, res.body)
-  check('the reply keeps the fields the patch did not touch', payload.data.panelHelp === true, res.body)
+  check('the reply keeps the fields the patch did not touch', payload.data.panelSide === 'left', res.body)
   check('the reply still reports success', payload.data.ok === true, res.body)
 }
 
@@ -289,7 +289,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   // client blanks its settings state on a failed save.
   const deps = {
     get config() {
-      return { panelSummary: true, panelHelp: true }
+      return { panelSummary: true, panelSide: 'left' }
     },
     transcripts: new TranscriptStore(),
     summariser: { summarise: async () => ({ enabled: true }), reset: () => {} },

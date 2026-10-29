@@ -1,0 +1,447 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>dsh-skill-evolve · 提炼清单卡片原型</title>
+<style>
+  :root{
+    --bg-base:#fff; --bg-layer-1:#fff; --bg-layer-2:#f6f7f9; --bg-layer-3:#eef0f4;
+    --label-primary:#0f1115; --label-secondary:#5b6270; --label-tertiary:#8b92a1;
+    --border-secondary:rgba(15,17,21,.12); --border-tertiary:rgba(15,17,21,.07);
+    --brand:#2f4bd8; --brand-bg:rgba(77,107,254,.12);
+    --ok:#1a7f4b; --danger:#b4232c;
+    --chat-content-width:720px;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    font:400 13px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    color:var(--label-primary); background:var(--bg-base);
+    display:grid; grid-template-rows:44px 1fr; grid-template-columns:250px 1fr;
+    grid-template-areas:"titlebar titlebar" "sidebar main";
+    overflow:hidden;
+  }
+
+  /* ---------- chrome that must NOT be covered ---------- */
+  .titlebar{grid-area:titlebar;display:flex;align-items:center;gap:10px;padding:0 14px;
+    border-bottom:1px solid var(--border-tertiary);background:var(--bg-layer-2);font-size:12px;color:var(--label-secondary)}
+  .titlebar .tabs{display:flex;gap:4px}
+  .titlebar .tab{padding:3px 10px;border-radius:6px;background:var(--bg-base);border:1px solid var(--border-secondary);font-size:11px}
+  .sidebar{grid-area:sidebar;border-right:1px solid var(--border-tertiary);background:var(--bg-layer-2);
+    padding:12px;font-size:12px;color:var(--label-secondary);overflow:auto}
+  .sidebar h4{margin:0 0 8px;font:600 11px/1.4 inherit;color:var(--label-tertiary);letter-spacing:.04em}
+  .sidebar .srow{padding:5px 8px;border-radius:6px;margin-bottom:2px}
+  .sidebar .srow.active{background:var(--bg-base);color:var(--label-primary);border:1px solid var(--border-tertiary)}
+
+  /* ---------- conversation column ---------- */
+  .main{grid-area:main;position:relative;overflow:hidden}
+  .conversation{height:100%;overflow-y:auto;scrollbar-width:thin}
+  .chat{width:var(--chat-content-width);margin:0 auto;padding:24px 0 80px}
+  .msg{margin-bottom:18px}
+  .msg .who{font:600 11px/1.4 inherit;color:var(--label-tertiary);margin-bottom:4px}
+  .msg.user .bubble{background:var(--bg-layer-3);border-radius:10px;padding:10px 14px;display:inline-block;max-width:85%}
+  .msg.assistant p{margin:0 0 10px}
+  .msg.assistant code{font:400 12px/1.5 ui-monospace,Consolas,monospace;background:var(--bg-layer-2);
+    padding:1px 5px;border-radius:4px}
+
+  /* ---------- the floating rail (real plugin renders 3 cards here) ---------- */
+  .rail{position:absolute;top:12px;bottom:12px;left:24px;width:268px;
+    display:flex;flex-direction:column;gap:10px;overflow:visible;z-index:5}
+  .card{background:var(--bg-layer-1);border:1px solid var(--border-secondary);border-radius:10px;
+    box-shadow:0 1px 2px rgba(15,17,21,.05),0 4px 14px rgba(15,17,21,.05);overflow:hidden;flex:0 0 auto}
+  .card-head{display:flex;align-items:center;gap:6px;padding:8px 10px 7px;border-bottom:1px solid var(--border-tertiary)}
+  .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto;background:var(--brand)}
+  .card-title{font:600 12px/1.2 inherit}
+  .card-meta{margin-left:auto;font:500 10px/1.2 inherit;color:var(--label-tertiary)}
+  .card-body{padding:8px 10px 10px;font-size:11px;line-height:1.5;color:var(--label-secondary)}
+  .btn{border:1px solid var(--border-secondary);background:var(--bg-layer-1);color:var(--label-primary);
+    border-radius:6px;padding:2px 7px;font:500 10px/1.5 inherit;cursor:pointer}
+  .btn:hover{background:var(--bg-layer-2)}
+
+  /* the trigger — what the user hovers */
+  .propose{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--border-secondary);
+    background:var(--bg-layer-1);border-radius:6px;padding:2px 8px;font:500 10px/1.5 inherit;
+    cursor:pointer;color:var(--label-primary)}
+  .propose:hover{background:var(--bg-brand-2,var(--bg-layer-2))}
+  .propose .count{display:inline-block;min-width:15px;padding:0 4px;border-radius:8px;
+    background:var(--brand-bg);color:var(--brand);font:600 10px/15px inherit;text-align:center}
+
+  /* ---------- popover: the skill list ---------- */
+  .popover{position:fixed;z-index:60;background:var(--bg-layer-1);border:1px solid var(--border-secondary);
+    border-radius:10px;box-shadow:0 4px 10px rgba(15,17,21,.08),0 16px 40px rgba(15,17,21,.14);
+    width:320px;overflow:hidden;font:400 12px/1.5 inherit}
+  .popover-head{display:flex;align-items:center;gap:6px;padding:9px 11px 8px;border-bottom:1px solid var(--border-tertiary)}
+  .popover-head .t{font:600 12px/1.2 inherit}
+  .popover-head .n{margin-left:auto;font:500 10px/1.2 inherit;color:var(--label-tertiary)}
+  .popover-list{padding:4px 0;max-height:260px;overflow-y:auto;scrollbar-width:thin}
+  .popover-foot{padding:7px 11px;border-top:1px solid var(--border-tertiary);font:400 10px/1.5 inherit;
+    color:var(--label-tertiary);display:flex;align-items:center;gap:6px}
+
+  .item{display:flex;align-items:center;gap:8px;padding:7px 11px;cursor:default;position:relative}
+  .item:hover,.item[data-open="true"]{background:var(--bg-layer-2)}
+  .item-main{flex:1;min-width:0}
+  .item-name{display:block;font:500 12px/1.4 inherit;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item-desc{display:block;font:400 10.5px/1.45 inherit;color:var(--label-tertiary);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item-acts{display:flex;gap:4px;flex:0 0 auto}
+  .act{width:22px;height:22px;display:inline-flex;align-items:center;justify-content:center;
+    border:1px solid var(--border-secondary);background:var(--bg-layer-1);border-radius:6px;
+    cursor:pointer;font:700 12px/1 inherit;padding:0}
+  .act.ok{color:var(--ok)}
+  .act.no{color:var(--danger)}
+  .act.ok:hover{background:rgba(26,127,75,.1);border-color:rgba(26,127,75,.4)}
+  .act.no:hover{background:rgba(180,35,44,.09);border-color:rgba(180,35,44,.35)}
+
+  /* ---------- the detail card: allowed to cover the conversation ---------- */
+  .detail{position:fixed;z-index:59;background:var(--bg-layer-1);border:1px solid var(--border-secondary);
+    border-radius:10px;box-shadow:0 6px 14px rgba(15,17,21,.1),0 20px 50px rgba(15,17,21,.18);
+    width:380px;max-height:380px;overflow:hidden;display:flex;flex-direction:column;
+    font:400 12px/1.55 inherit}
+  .detail-head{padding:10px 12px 8px;border-bottom:1px solid var(--border-tertiary)}
+  .detail-name{font:600 12.5px/1.3 ui-monospace,Consolas,monospace;word-break:break-all}
+  .detail-sub{margin-top:3px;font:400 11px/1.5 inherit;color:var(--label-secondary)}
+  .detail-body{padding:9px 12px 11px;overflow-y:auto;scrollbar-width:thin}
+  .detail-body p{margin:0 0 8px}
+  .detail-body .k{font:600 10px/1.4 inherit;color:var(--label-tertiary);letter-spacing:.03em;
+    text-transform:uppercase;margin:0 0 3px}
+  .detail-body pre{margin:0 0 9px;white-space:pre-wrap;word-break:break-word;
+    font:400 11px/1.6 ui-monospace,Consolas,monospace;color:var(--label-primary)}
+  .detail-body ul{margin:0 0 9px;padding-left:16px}
+  .detail-body li{margin-bottom:3px}
+  .evidence{font:400 10.5px/1.5 ui-monospace,Consolas,monospace;color:var(--label-secondary);
+    border-left:2px solid var(--border-secondary);padding-left:8px;margin-bottom:6px}
+  .detail-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;
+    border-top:1px solid var(--border-tertiary);background:var(--bg-layer-2)}
+  .detail-foot .hint{margin-left:auto;font:400 10px/1.5 inherit;color:var(--label-tertiary)}
+
+  /* ---------- state bar for screenshots ---------- */
+  .statebar{position:fixed;right:14px;bottom:14px;z-index:200;display:flex;gap:6px;
+    background:var(--bg-layer-1);border:1px solid var(--border-secondary);border-radius:10px;
+    padding:7px 9px;box-shadow:0 6px 18px rgba(15,17,21,.12);font-size:11px}
+  .statebar button{border:1px solid var(--border-secondary);background:var(--bg-layer-1);
+    border-radius:6px;padding:3px 9px;font:500 11px/1.5 inherit;cursor:pointer;color:var(--label-primary)}
+  .statebar button[data-on="true"]{background:var(--brand-bg);border-color:rgba(77,107,254,.5);color:var(--brand)}
+  .note{position:fixed;left:14px;bottom:14px;z-index:200;max-width:520px;
+    background:rgba(15,17,21,.86);color:#fff;font:400 11px/1.6 inherit;padding:8px 12px;border-radius:8px}
+  .note b{color:#8fb0ff}
+</style>
+</head>
+<body>
+
+<div class="titlebar">
+  <span style="font-weight:600;color:var(--label-primary)">DeepSeek Harness</span>
+  <span class="tabs"><span class="tab">F:\dsh-plugin</span><span class="tab">+</span></span>
+  <span style="margin-left:auto">这一条模拟宿主顶部标签栏 —— 浮层不会盖住它</span>
+</div>
+
+<div class="sidebar">
+  <h4>会话</h4>
+  <div class="srow active">侧边栏卡片布局</div>
+  <div class="srow">GGUF 语音模型调试</div>
+  <div class="srow">PDF 表格抽取</div>
+  <h4 style="margin-top:14px">工作区</h4>
+  <div class="srow">dsh-plugin</div>
+</div>
+
+<div class="main">
+  <div class="conversation">
+    <div class="chat">
+      <div class="msg user"><div class="who">你</div>
+        <div class="bubble">把「建议提炼」改成 hover 之后弹出一张卡片，列出可以提炼的技能，每条旁边有 √ 和 ×。</div></div>
+      <div class="msg assistant"><div class="who">助手</div>
+        <p>明白了 —— 不是一句说明，而是一份清单。我先确认一下几何：清单挂在触发按钮上，详情卡片挂在清单条目上、并且允许盖住正文。</p>
+        <p>这样做的好处是 <code>placeTip</code> 那套夹紧逻辑可以复用，只需要多一个「详情卡往正文方向展开」的偏好。</p>
+        <p>右侧三张卡片是常驻的，浮层只在 hover 时出现，所以盖住正文是可接受的。</p>
+        <p>悬停右侧「建议提炼」试试。先把鼠标停在条目上，详情会展开；鼠标移进详情卡，它会保持不消失。</p>
+        <p>点 √ 或 × 会让条目从清单里消失，剩余数量会更新。</p>
+      </div>
+
+      <!-- 常驻三卡（真实插件的位置） -->
+      <div class="rail">
+        <div class="card">
+          <div class="card-head"><span class="dot"></span><span class="card-title">上一轮</span><span class="card-meta">12 次工具</span></div>
+          <div class="card-body">改了 client 与 gutter 两处几何，把浮层定位抽成纯函数，并补了漂移守卫。</div>
+        </div>
+
+        <div class="card" id="skillsCard">
+          <div class="card-head"><span class="dot" data-tone="ok"></span><span class="card-title">技能与 MCP</span><span class="card-meta">4 已装 · 3 待定</span></div>
+          <div class="card-body">
+            <div style="display:flex;align-items:center;gap:8px">
+              <button class="propose" id="trigger">建议提炼 <span class="count" id="badge">3</span></button>
+              <span style="font-size:10px;color:var(--label-tertiary)">hover 查看清单</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head"><span class="dot" data-tone="warn"></span><span class="card-title">产出文件</span><span class="card-meta">3 个</span></div>
+          <div class="card-body">
+            <div style="font-family:ui-monospace,Consolas,monospace;font-size:11px">
+              lib/gutter.js <span style="color:var(--ok)">+124</span><br>
+              lib/client.js <span style="color:var(--ok)">+264</span><br>
+              test/gutter.test.mjs <span style="color:var(--ok)">+132</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="statebar">
+  <button data-state="idle" data-on="true">仅按钮</button>
+  <button data-state="list">清单</button>
+  <button data-state="detail">清单+详情</button>
+</div>
+
+<div class="note" id="note">
+  <b>交互：</b>悬停「建议提炼」→ 清单；悬停条目 → 详情展开（可盖住正文）；√ 批准 · × 忽略。
+</div>
+
+<script>
+const SKILLS = [
+  {
+    name: 'windows-source-edit-via-guarded-python',
+    desc: '用一次性 Python 脚本做多处精确改写，避免 shell 吃掉引号与反斜杠',
+    kind: 'create',
+    uses: 6,
+    body: [
+      '在 Windows 上用 bash 工具改源码时，含中文或反引号的模板字符串会被 shell 命令替换吃掉。',
+      '做法：把替换写成一次性 .mjs/.py 脚本，用 fs.readFileSync / writeFileSync，打印 changed: true/false 作为证据。',
+      '锚点必须逐字匹配（含缩进），失败时用 cat -A 看清真实缩进再重试。'
+    ],
+    evidence: [
+      'bash: 「反引号被命令替换吃掉」→ 改用脚本文件后 changed: true',
+      '"锚点文本，外包 2 空格与 10 空格缩进不同，首次报 anchor not found"'
+    ],
+    when: '当一次修改要动 3 处以上、且含引号/反斜杠/中文时'
+  },
+  {
+    name: 'stub-capability-mutation-testing',
+    desc: '为新增的 UI/配置行为补测试后，用变异验证证明断言真的会失败',
+    kind: 'update',
+    uses: 2,
+    body: [
+      '新增测试后，故意把实现改坏一次，确认测试变红；恢复后确认变绿。',
+      '只报「N passed」不能证明测试有效 —— 断言可能恒真。',
+      '等价变异（改了也没差别）不算覆盖缺口，应改注释而不是追测试。'
+    ],
+    evidence: [
+      '"变异测试报 SURVIVED 时，先怀疑测试"',
+      '"注释可以骗过宽度断言" —— 剥注释前后各跑一次'
+    ],
+    when: '新增了断言，需要证明它真的能失败'
+  },
+  {
+    name: 'windows-gguf-tts-audiocpp',
+    desc: '在 Windows 上用 audio.cpp 跑 GGUF 语音模型，绕开 HuggingFace 直连',
+    kind: 'create',
+    uses: 0,
+    body: [
+      'HuggingFace 直连不通时改走镜像；GitHub release 极慢时用断点续传。',
+      '显存紧张时先跑量化版，确认能出声再考虑质量。'
+    ],
+    evidence: ['"HF 直连 403 → 镜像下载成功"'],
+    when: '需要本地 TTS / 声音克隆且显存 ≤ 8G'
+  }
+];
+
+let alive = SKILLS.map((s, i) => ({ ...s, id: i }));
+let state = 'idle';       // idle | list | detail
+let openId = null;        // which row's detail is showing
+let hideTimer = null;     // grace period for the mouse travelling to the detail
+
+const trigger = document.getElementById('trigger');
+const badge = document.getElementById('badge');
+const note = document.getElementById('note');
+
+/** Geometry: same rule as placeTip — prefer a side, clamp into the viewport. */
+function place(anchorRect, width, height, prefer) {
+  const M = 8, GAP = 8;
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let left, side;
+
+  const roomRight = vw - anchorRect.right;
+  const roomLeft = anchorRect.left;
+  const fitsRight = roomRight >= width + M + GAP;
+  const fitsLeft = roomLeft >= width + M + GAP;
+
+  if (prefer === 'right' && fitsRight) side = 'right';
+  else if (prefer === 'left' && fitsLeft) side = 'left';
+  else if (fitsRight) side = 'right';
+  else if (fitsLeft) side = 'left';
+  else side = roomRight >= roomLeft ? 'right' : 'left';
+
+  left = side === 'right' ? anchorRect.right + GAP : anchorRect.left - GAP - width;
+  left = Math.max(M, Math.min(left, vw - width - M));
+
+  let top = anchorRect.top;
+  top = Math.max(M, Math.min(top, vh - height - M));
+
+  return { left, top, width, side };
+}
+
+function el(tag, cls, html) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (html !== undefined) node.innerHTML = html;
+  return node;
+}
+
+function render() {
+  document.querySelectorAll('.popover, .detail').forEach(n => n.remove());
+  badge.textContent = String(alive.length);
+  badge.style.display = alive.length ? '' : 'none';
+
+  if (state === 'idle' || alive.length === 0) return;
+
+  // ---- the list ----
+  const pop = el('div', 'popover');
+  const head = el('div', 'popover-head');
+  head.appendChild(el('span', 't', '可以提炼的技能'));
+  head.appendChild(el('span', 'n', alive.length + ' 条'));
+  pop.appendChild(head);
+
+  const list = el('div', 'popover-list');
+  for (const skill of alive) {
+    const row = el('div', 'item');
+    row.dataset.id = String(skill.id);
+    if (openId === skill.id) row.dataset.open = 'true';
+
+    const main = el('div', 'item-main');
+    main.appendChild(el('span', 'item-name', skill.name));
+    main.appendChild(el('span', 'item-desc', skill.desc));
+    row.appendChild(main);
+
+    const acts = el('div', 'item-acts');
+    const ok = el('button', 'act ok', '✓');
+    ok.title = '批准并写入全局技能库';
+    ok.onclick = (e) => { e.stopPropagation(); decide(skill.id, true); };
+    const no = el('button', 'act no', '×');
+    no.title = '忽略，且本会话不再提这条';
+    no.onclick = (e) => { e.stopPropagation(); decide(skill.id, false); };
+    acts.appendChild(ok); acts.appendChild(no);
+    row.appendChild(acts);
+
+    row.onmouseenter = () => { clearTimeout(hideTimer); openId = skill.id; render(); };
+    row.onmouseleave = () => { hideTimer = setTimeout(() => { openId = null; render(); }, 220); };
+    list.appendChild(row);
+  }
+  pop.appendChild(list);
+
+  const foot = el('div', 'popover-foot');
+  foot.innerHTML = '√ 批准会先让模型写定稿 · × 忽略只影响本会话';
+  pop.appendChild(foot);
+
+  const anchor = trigger.getBoundingClientRect();
+  const listPlace = place(anchor, 320, Math.min(360, 96 + alive.length * 46), 'right');
+  pop.style.left = listPlace.left + 'px';
+  pop.style.top = listPlace.top + 'px';
+  // keep it alive while the mouse crosses into it
+  pop.onmouseenter = () => clearTimeout(hideTimer);
+  pop.onmouseleave = () => { hideTimer = setTimeout(() => { openId = null; state = 'list'; render(); }, 220); };
+  document.body.appendChild(pop);
+
+  // ---- the detail, allowed to cover the conversation ----
+  if (state !== 'detail' || openId === null) return;
+  const skill = alive.find(s => s.id === openId);
+  if (!skill) return;
+  const row = document.querySelector(`.item[data-id="${skill.id}"]`);
+  if (!row) return;
+
+  const det = el('div', 'detail');
+  const dHead = el('div', 'detail-head');
+  dHead.appendChild(el('div', 'detail-name', skill.name));
+  dHead.appendChild(el('div', 'detail-sub',
+    skill.desc + ' · ' + (skill.kind === 'update' ? '修改已有技能' : '新建技能') + ' · 已用 ' + skill.uses + ' 次'));
+  det.appendChild(dHead);
+
+  const dBody = el('div', 'detail-body');
+  dBody.appendChild(el('p', 'k', '做法'));
+  dBody.appendChild(el('pre', '', skill.body.join('\n\n')));
+  dBody.appendChild(el('p', 'k', '证据'));
+  for (const quote of skill.evidence) dBody.appendChild(el('div', 'evidence', quote));
+  dBody.appendChild(el('p', 'k', '何时该用'));
+  dBody.appendChild(el('div', '', skill.when));
+  det.appendChild(dBody);
+
+  const dFoot = el('div', 'detail-foot');
+  const dOk = el('button', 'btn', '✓ 批准');
+  dOk.style.color = 'var(--ok)';
+  dOk.onclick = () => decide(skill.id, true);
+  const dNo = el('button', 'btn', '× 忽略');
+  dNo.style.color = 'var(--danger)';
+  dNo.onclick = () => decide(skill.id, false);
+  dFoot.appendChild(dOk); dFoot.appendChild(dNo);
+  dFoot.appendChild(el('span', 'hint', 'Esc 关闭'));
+  det.appendChild(dFoot);
+
+  det.onmouseenter = () => clearTimeout(hideTimer);
+  det.onmouseleave = () => { hideTimer = setTimeout(() => { openId = null; render(); }, 220); };
+  document.body.appendChild(det);
+
+  // Anchor to the popover, not to the row: the row's right edge is inside the
+  // popover, so placing the detail off the row drew it on top of the list.
+  // The row only supplies the vertical alignment — the detail should appear to
+  // belong to the row the pointer is on, not to the middle of the list.
+  const rowBox = row.getBoundingClientRect();
+  const popBox = pop.getBoundingClientRect();
+  const detHeight = Math.min(380, det.offsetHeight || 340);
+  const detPlace = place(popBox, 380, detHeight, 'right');
+  det.style.left = detPlace.left + 'px';
+  const wanted = rowBox.top - 10;
+  det.style.top = Math.max(8, Math.min(wanted, window.innerHeight - detHeight - 8)) + 'px';
+}
+
+function decide(id, approved) {
+  alive = alive.filter(s => s.id !== id);
+  openId = null;
+  note.innerHTML = approved
+    ? '<b>已批准</b> —— 真实插件里这一步会先注入一条提示，让模型用当前上下文写定稿，再由你确认落盘。'
+    : '<b>已忽略</b> —— 条目从清单移除，本会话不再提这一条。';
+  render();
+}
+
+trigger.addEventListener('mouseenter', () => {
+  clearTimeout(hideTimer);
+  state = state === 'idle' ? 'list' : state;
+  render();
+});
+trigger.addEventListener('mouseleave', () => {
+  hideTimer = setTimeout(() => { state = 'idle'; openId = null; render(); }, 260);
+});
+
+document.querySelectorAll('.statebar button').forEach(btn => {
+  btn.onclick = () => {
+    document.querySelectorAll('.statebar button').forEach(b => b.dataset.on = 'false');
+    btn.dataset.on = 'true';
+    const want = btn.dataset.state;
+    if (want === 'idle') { state = 'idle'; openId = null; }
+    if (want === 'list') { state = 'list'; openId = null; }
+    if (want === 'detail') { state = 'detail'; openId = alive[0] ? alive[0].id : null; }
+    render();
+  };
+});
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { state = 'idle'; openId = null; render(); }
+});
+
+// Screenshot hooks: ?state=list / ?state=detail&open=0 put the prototype into a
+// named state without a mouse, so the same file can be captured for review.
+{
+  const params = new URLSearchParams(location.search);
+  const want = params.get("state");
+  if (want === "list" || want === "detail") {
+    state = want;
+    if (want === "detail") openId = alive[Number(params.get("open") ?? 0)]?.id ?? null;
+    document.querySelectorAll(".statebar button").forEach((b) => { b.dataset.on = "false" });
+    const active = document.querySelector('.statebar button[data-state="' + want + '"]');
+    if (active !== null) active.dataset.on = "true";
+  }
+}
+
+render();
+</script>
+</body>
+</html>

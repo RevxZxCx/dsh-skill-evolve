@@ -2,7 +2,7 @@
 //
 // P0 (runner timeout) lives in runner.test.mjs; F02/F03/P3 here.
 import { join } from 'node:path'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { apply, Config } from '../lib/index.js'
 
@@ -587,6 +587,54 @@ async function post(route, path, payload) {
     cleared.ok === false && cleared.code === 'changed-since-approval',
     JSON.stringify(cleared).slice(0, 240)
   )
+}
+
+// --- A stale row and a live row can share a name --------------------------
+//
+// `findByName` prefers the live row, and the duplicate guard only refuses a
+// proposal while an earlier one is still live. So the queue really can hold two
+// rows called the same thing, and a discard aimed at the stale one has to name
+// it by id. By name alone it hits the live twin and deletes the wrong row --
+// the one the person was about to approve.
+{
+  const root = await makeRoot('skill-evolve-same-name-')
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  const route = host.routes.find((entry) => entry.path === '/api/skill-evolve')
+  check('same-name setup: the panel route was registered', route !== undefined, JSON.stringify(host.routes.map((entry) => entry.path)))
+
+  const dir = join(root, 'plugin-data', 'skill-evolve')
+  await mkdir(dir, { recursive: true })
+  const fresh = new Date().toISOString()
+  await writeFile(
+    join(dir, 'candidates.json'),
+    JSON.stringify([
+      // Genuinely stale: an update whose base is not in the catalog, which is
+      // what evaluateStaleness reports as base-changed.
+      { id: 'row-stale', name: 'dup-name', kind: 'update', description: 'old draft', body: 'b', createdAt: fresh, sessionId: 's1', base: { path: 'nowhere', digest: 'deadbeef' } },
+      { id: 'row-live', name: 'dup-name', kind: 'create', description: 'new draft', body: 'b', createdAt: fresh, sessionId: 's1' }
+    ]),
+    'utf8'
+  )
+
+  const res = await post(route, '/api/skill-evolve/candidates?agent=session-panel', { id: 'row-stale', name: 'dup-name', action: 'discard' })
+  check('same-name: the discard is accepted', res.statusCode === 200 && res.body?.ok === true, JSON.stringify(res.body))
+
+  const left = JSON.parse(await readFile(join(dir, 'candidates.json'), 'utf8'))
+  check('same-name: the row named by id is the one removed', left.every((entry) => entry.id !== 'row-stale'), JSON.stringify(left.map((entry) => entry.id)))
+  check('same-name: the live twin survives', left.some((entry) => entry.id === 'row-live'), JSON.stringify(left.map((entry) => entry.id)))
+
+  // The card can be stale in a narrower way: it shows a row that another session
+  // already discarded. An id that is no longer in the queue must be reported as
+  // gone. Resolving the name instead would delete (or publish) the live twin the
+  // person never looked at.
+  const missed = await post(route, '/api/skill-evolve/candidates?agent=session-panel', { id: 'row-vanished', name: 'dup-name', action: 'discard' })
+  check('same-name: an id that is gone is refused', missed.body?.data?.ok === false, JSON.stringify(missed.body))
+  check('same-name: the refusal says not-found', missed.body?.data?.code === 'not-found', JSON.stringify(missed.body))
+
+  const untouched = JSON.parse(await readFile(join(dir, 'candidates.json'), 'utf8'))
+  check('same-name: a vanished id does not take the live twin with it', untouched.some((entry) => entry.id === 'row-live'), JSON.stringify(untouched.map((entry) => entry.id)))
+
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

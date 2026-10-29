@@ -280,29 +280,64 @@ Three modules, top to bottom:
    added and removed line counts. Sourced from the same turn transcript the
    other two modules read, so all three agree on which turn they describe.
 
-The panel is read-only over HTTP: it calls `GET /api/skill-evolve/panel`, and
-the only writes it can make are `POST /config` (its own switches) and
-`POST /propose` (opening a draft conversation). It cannot install a skill, write
-a skill file, or approve a candidate. Those stay behind the tools and the human
-handshake described above.
+The panel can write, but only through the routes that already had a gate behind
+them. It calls `GET /api/skill-evolve/panel` to read the three modules,
+`GET /api/skill-evolve/candidates` to read the queue, `POST /config` for its own
+switches, `POST /propose` to open a draft conversation, and
+`POST /candidates` to approve or discard one candidate. That last route does not
+implement approval: it calls the same `approve()` the `/skill-capture` command
+calls, so the evidence gate and the confirm handshake are not re-implemented
+behind a second entrance. A route that wrote the skill file itself would be a way
+in that skips both.
 
-**Why the propose button explains itself in CSS.** The one action whose
-consequence is not visible from its label is *propose*: it writes a hint into
-this conversation rather than creating anything. Its explanation is a bubble the
-bundle draws, not the browser's `title` attribute. A native tooltip appears after
-about a second, cannot be styled, and — the deciding point — is clipped by the
-card's `overflow: hidden` to the card's own width, so in practice the sentence
-was never fully readable. The bubble is `position: fixed` and clamped to the
-viewport by the same pure-function geometry the cards use, with the clamp
-asserted in Node against a sweep of window sizes and trigger positions rather than
-against hand-computed numbers.
+### The propose button opens a checklist
 
-Two details there are deliberate. The hover handlers sit on the wrapper rather
-than on the button, because a *disabled* button receives no mouse events in
-Chrome — and "the button is greyed out, why" is exactly when the explanation is
-wanted. And `aria-describedby` is put on the focused element by cloning it, not on
-the wrapper: `aria-describedby` is not inherited, and a wrapper without `tabindex`
-never takes focus, so an association on the wrapper is inert.
+Pressing **propose** writes a hint into this conversation; it does not create
+anything. Its neighbour, though, is where the queue lives: hovering the propose
+button opens a card listing the candidates waiting for approval — name in mono,
+one grey line of description, and a ✓ / ✕ pair per row. Hovering a row opens a
+detail card with the body, the evidence quotes, when to use it, whether it creates
+or revises, and how many times it has been used.
+
+Four things about that card are deliberate.
+
+**It is drawn, not native.** A `title` attribute appears after about a second,
+cannot be styled, and is clipped by the card's `overflow: hidden` to the card's
+width, so the sentence explaining the button was never fully readable. The card is
+`position: fixed`, placed by the same pure geometry as the other cards, and that
+geometry is asserted in Node against a sweep of window sizes, viewport heights and
+trigger positions rather than against hand-computed numbers.
+
+**The detail card avoids the list instead of covering it.** On a narrow window
+there is not always room beside the list, and the earlier version clamped the
+detail card into the viewport — which put it on top of the list's own approve and
+discard buttons. `placeNear` now takes an `avoid` rectangle and tries the other
+side, then above, then below. The list is anchored on the *button* and the detail
+card on the *list's box*, not on the row: a row-anchored detail card lands on the
+list it belongs to.
+
+**A row survives its own approval.** With `approvalMode: 'confirm'` the default,
+approving does not write a file — it marks the queue row as awaiting a final draft,
+and the model writes the file on a later step. So the row is not removed from the
+list. It stays, with its ✓ disabled and a line saying the file is not in the skill
+directory yet. Removing it would be the comfortable lie: the row would vanish, the
+pending count would keep counting it, and it would reappear on the next hover.
+Getting this wrong is why the row is keyed by `id` and not by `name` — two
+candidates can share a name once an older one goes stale.
+
+**It closes lazily, but not on its own contents.** Leaving the button starts a
+220 ms timer so the pointer can cross the gap into the list; entering the list
+cancels it. A scroll closes the card, but only a scroll from outside it — the list
+body scrolls itself once there are more candidates than fit, and a capture-phase
+listener that ignored the event target closed the card exactly when somebody was
+scrolling to the eighth candidate. The same reasoning applies to focus: the row
+buttons are real `<button>`s, so pressing one fires `focusout`, and closing on that
+would hide the confirm-mode notice at the moment it matters.
+
+Accessibility stops short of a full dialog: the trigger gets `aria-haspopup` and
+`aria-expanded` by cloning the button (ARIA is not inherited, and a wrapper without
+`tabindex` never takes focus, so an association on the wrapper is inert), the list
+carries `role="dialog"` and a label, and Escape closes it. Focus is not trapped.
 
 **It needs a host restart.** The host discovers client bundles when its plugin
 graph is rebuilt, and editing `package.json` does not trigger that. If the panel
@@ -558,7 +593,6 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `panelSummary` | `true` | Summarise the previous turn in the cards. Turning this off stops the panel from spending any model call |
 | `summaryProvider` | `""` | Provider for the summary. Empty means borrow the session's own route — the one already proven to work for this account |
 | `summaryModel` | `""` | Model for that summary. Only read together with `summaryProvider`; setting one alone pins nothing |
-| `panelHelp` | `true` | Show the one-line explanation under each panel heading |
 | `panelSide` | `left` | Which side of the conversation column the cards occupy. Measured against the column, not the window, so the host sidebar is never covered |
 | `panelCollapsed` | `false` | Start folded into a handle instead of showing the cards |
 
@@ -663,14 +697,16 @@ plugin against a real cordis container, because several defects only appear when
 the framework's own service lookup is exercised. `test/mutate-panel.mjs`
 deliberately re-introduces each defect the panel's reviews found, one at a time,
 and fails if the suite stays green — a test that cannot fail is a test that is
-not testing. All eight guard mutations and every panel mutation are currently killed.
+not testing. Three mutation suites cover the geometry, the panel wiring and the
+checklist card; each one ends at zero survivors, which is the state to keep it in
+rather than a number to quote here.
 
 ```bash
 node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-1598 assertions across 29 suites. They are plain Node scripts with no test
+1722 assertions across 29 suites. They are plain Node scripts with no test
 framework, so they also double as executable documentation.
 
 **The runner treats a crash as a failure.** It checks the exit code *and* the
@@ -699,10 +735,13 @@ signal would mislabel it.
 | `review-fixes.test.mjs` | The defects code review found: concurrent finalize, revision state loss, `off` closing the panel route, white-space digests, stale recomputation at write time |
 | `runner.test.mjs` | That the runner fails a suite which crashes, hangs, or exits non-zero |
 | `api.test.mjs` / `panel-wiring.test.mjs` / `client.test.mjs` | The panel's HTTP surface, its wiring into a host, and the browser bundle |
-| `gutter.test.mjs` / `gutter-drift.test.mjs` | Card and bubble placement geometry, and that the bundle's inlined copy still behaves like the module |
+| `placeNear.test.mjs` | Popover placement: side preference, flip, edge clamps, the `avoid` rectangle, and a sweep that no box leaves the viewport horizontally |
+| `gutter.test.mjs` / `gutter-drift.test.mjs` | Card and popover placement geometry, and that the bundle's inlined copy still behaves like the module |
 | `summarise.test.mjs` / `transcript.test.mjs` | The one module that spends money, and the transcript it is fed |
 | `catalog.test.mjs` / `market.test.mjs` / `search.test.mjs` | Catalog rewriting, the skill market, and searching shrunk entries |
 | `usage.test.mjs` / `service.test.mjs` / `mutations.test.mjs` | Use counting, service lookup, and the panel mutation harness |
+
+Three mutation harnesses live beside them: `test/mutate-panel.mjs`, `scripts/mutate-guards.mjs` and `scripts/mutate-checklist-panel.mjs`. Each re-introduces a defect its review found and fails if the suite stays green; each also reports `NOT APPLIED` as a failure, because a mutation that no longer matches its anchor measures nothing.
 
 ### Replay against a real session
 

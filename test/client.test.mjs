@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { placeCards, TIP_WIDTH, TIP_HEIGHT } from '../lib/gutter.js'
+import { placeCards, PANEL_WIDTH, DETAIL_WIDTH } from '../lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -70,9 +70,15 @@ function element(type, props) {
  * @returns {object} the node.
  */
 function fakeNode(frame) {
+  // `contains` is part of the real node's surface that the bundle actually uses:
+  // a focus move that stays inside the card must not close it. Without it here,
+  // every `onBlur` took the "focus left" branch no matter where focus went, which
+  // made the behaviour untestable rather than merely untested.
+  const inside = frame.contains ?? []
   return {
     getBoundingClientRect: () => ({ left: frame.left, top: frame.top, right: frame.left + frame.width, bottom: frame.top + frame.height, width: frame.width, height: frame.height }),
     offsetWidth: frame.width,
+    contains: (node) => inside.includes(node),
   }
 }
 
@@ -502,6 +508,7 @@ function boot(options) {
     },
   }
 
+  const timers = []
   const routes = settings.routes ?? {}
   const fetchStub = async (url, init) => {
     const target = String(url)
@@ -534,15 +541,50 @@ function boot(options) {
   renderer.setTriggerForRef(
     settings.triggerLeft === undefined
       ? null
-      : fakeNode({ left: settings.triggerLeft, top: settings.triggerTop ?? 300, width: 40, height: 20 }),
+      : fakeNode({ left: settings.triggerLeft, top: settings.triggerTop ?? 300, width: 40, height: 20, contains: settings.triggerContains ?? [] }),
   )
 
 
   const source = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
-  const evaluate = new Function('window', 'document', 'fetch', 'getComputedStyle', 'setInterval', 'clearInterval', source)
-  // A fixed pair of timer stubs: the cards poll, and a real interval would keep
+  const evaluate = new Function(
+    'window',
+    'document',
+    'fetch',
+    'getComputedStyle',
+    'setInterval',
+    'clearInterval',
+    'setTimeout',
+    'clearTimeout',
+    source,
+  )
+  // A fixed pair of interval stubs: the cards poll, and a real interval would keep
   // the test process alive after it has finished asserting.
-  evaluate(windowStub, documentStub, fetchStub, computed, () => 0, () => {})
+  //
+  // `setTimeout` is injected rather than left global because the hover grace
+  // period is a real close delay: with the global timer and assertions that only
+  // await microtasks, the deferred close never runs and every assertion about it
+  // passes whether or not the code schedules anything. Fixtures either drive
+  // these by hand or wait on the real clock.
+  evaluate(
+    windowStub,
+    documentStub,
+    fetchStub,
+    computed,
+    () => 0,
+    () => {},
+    (fn, ms) => {
+      // Recorded so a fixture can assert on the delay the bundle asked for, and
+      // so a test can fire the callback itself instead of waiting on the clock.
+      const handle = (settings.setTimeout ?? setTimeout)(fn, ms)
+      timers.push({ fn, ms, handle, cleared: false })
+      return handle
+    },
+    (handle) => {
+      const row = timers.find((entry) => entry.handle === handle)
+      if (row !== undefined) row.cleared = true
+      ;(settings.clearTimeout ?? clearTimeout)(handle)
+    },
+  )
 
   const module = captured.factory(moduleTable)
 
@@ -556,6 +598,7 @@ function boot(options) {
     requested,
     calls,
     styles,
+    timers,
     document: documentStub,
     captured,
     renderer,
@@ -593,7 +636,7 @@ function panelRoutes() {
     },
     '/api/skill-evolve/config': {
       ok: true,
-      data: { panelSummary: true, panelSide: 'left', panelCollapsed: false, panelHelp: true },
+      data: { panelSummary: true, panelSide: 'left', panelCollapsed: false },
     },
     '/api/skill-evolve/models': { ok: true, data: { providers: [{ provider: 'p', models: [{ id: 'm', name: 'M' }] }] } },
     '/api/skill-evolve/propose': { ok: true, data: { hinted: true } },
@@ -707,7 +750,7 @@ check(
       ...panelRoutes(),
       '/api/skill-evolve/config': {
         ok: true,
-        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false, panelHelp: true },
+        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
       },
     },
   })
@@ -761,7 +804,7 @@ check(
   )
 
   // Now the setting arrives, which notifies the already-mounted overlay.
-  releaseConfig({ ok: true, data: { panelSummary: true, panelSide: 'right', panelCollapsed: false, panelHelp: true } })
+  releaseConfig({ ok: true, data: { panelSummary: true, panelSide: 'right', panelCollapsed: false } })
   for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
 
   const after = await instance.renderer.deepRender(cards)
@@ -783,7 +826,7 @@ check(
       ...panelRoutes(),
       '/api/skill-evolve/config': {
         ok: true,
-        data: { panelSummary: true, panelSide: 'left', panelCollapsed: true, panelHelp: true },
+        data: { panelSummary: true, panelSide: 'left', panelCollapsed: true },
       },
     },
   })
@@ -893,7 +936,7 @@ check(
       ...panelRoutes(),
       '/api/skill-evolve/config': {
         ok: true,
-        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false, panelHelp: true },
+        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
       },
     },
   })
@@ -1125,196 +1168,6 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// The explanation on the propose button
-// ---------------------------------------------------------------------------
-
-{
-  // The button once carried a native `title`. That tooltip is browser-owned: it
-  // waits about a second before appearing, cannot be styled, and inside a card
-  // with `overflow:hidden` it is clipped to the card's width. So the sentence
-  // explaining what the button does was effectively invisible.
-  const instance = boot({ routes: panelRoutes() })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-
-  const first = await instance.renderer.deepRender(cards)
-  // The Overlay already watches `resize` to re-measure its geometry, so only a
-  // delta around the hover describes the bubble's own listeners.
-  const baseListeners = instance.listeners.length
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  check('the propose button is wrapped in a hover trigger', trigger !== undefined, textOf(first).slice(0, 120))
-  check('no tooltip is shown before hovering', firstByClass(first, 'dsse-tip') === undefined)
-
-  const button = byClass(first, 'dsse-btn')[0]
-  check('the button no longer asks the browser for a tooltip', button?.props?.title === undefined, String(button?.props?.title))
-
-  // A disabled button receives no mouse events in Chrome, which is exactly when
-  // someone wants to know why. The wrapper is what the handlers sit on, so this
-  // asserts the wrapper — not the button — owns the interaction.
-  check('the trigger carries the hover handler', typeof trigger?.props?.onMouseEnter === 'function')
-  check('the trigger also reacts to keyboard focus', typeof trigger?.props?.onFocus === 'function')
-
-  // Guard the whole interaction: without the wrapper there is nothing to hover,
-  // and a `TypeError` here would be reported as "0 failing" — a crash dressed up
-  // as a pass. Fail by name instead.
-  check('the trigger can be hovered at all', trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function')
-  if (trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function') {
-    trigger.props.onMouseEnter()
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  }
-
-  const shown = await instance.renderer.deepRender(cards)
-  const tip = firstByClass(shown, 'dsse-tip')
-  check('hovering reveals the explanation', tip !== undefined)
-  const words = textOf(tip)
-  check('the explanation says what pressing the button does', words.includes('值不值得沉淀成技能'), words)
-  check('the explanation says it will not create a file on its own', words.includes('不会自动新建技能文件'), words)
-  check('the explanation is marked as a tooltip for assistive tech', tip?.props?.role === 'tooltip', String(tip?.props?.role))
-
-  // The cards sit in a side gutter; an unclamped bubble opens past the window
-  // edge. An unmeasured viewport would make this NaN, which reaches CSS as
-  // `left:NaNpx` and parks the bubble at the origin instead of beside its button.
-  const style = tip?.props?.style ?? {}
-  check('the bubble is horizontally placed with a finite value', typeof style.left === 'string' && style.left.endsWith('px') && Number.isFinite(Number(style.left.slice(0, -2))), String(style.left))
-  // `endsWith("px")` is satisfied by "NaNpx", so this has to read the number.
-  check(
-    'the bubble has a finite vertical placement',
-    typeof style.top === 'string' && style.top.endsWith('px') && Number.isFinite(Number(style.top.slice(0, -2))),
-    String(style.top),
-  )
-  // The attribute has to sit on the focusable element. Putting it on the wrapper
-  // span leaves it inert, because that span never receives focus — which is the
-  // mistake the second review caught.
-  const described = byClass(shown, 'dsse-btn')[0]?.props?.['aria-describedby']
-  check('the button points at the bubble it just opened', typeof described === 'string' && described.length > 0, String(described))
-  check('and the bubble carries that same id', tip?.props?.id === described, String(tip?.props?.id))
-  check(
-    'the description is not put on the unfocusable wrapper',
-    firstByClass(shown, 'dsse-tip-anchor')?.props?.['aria-describedby'] === undefined,
-    String(firstByClass(shown, 'dsse-tip-anchor')?.props?.['aria-describedby']),
-  )
-  check(
-    'the description is only advertised while the bubble exists',
-    byClass(first, 'dsse-btn')[0]?.props?.['aria-describedby'] === undefined,
-    String(byClass(first, 'dsse-btn')[0]?.props?.['aria-describedby']),
-  )
-
-  // Fixed positioning alone is not enough — the stylesheet must also carry the
-  // rule, or the element inherits `position:static` and `top/left` are inert.
-  // Whitespace-tolerant and comment-free for the same reason as the width check
-  // below: formatting is not a behavioural change, and a comment is not a rule.
-  const sheet = instance.styles
-    .map((node) => String(node.textContent))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-  const fixedRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(sheet) ?? [])[1] ?? ''
-  check('the stylesheet positions the bubble as fixed', fixedRule.includes('position:fixed'), fixedRule.slice(0, 80))
-
-  // A listener that is never removed outlives the bubble. The stub records
-  // every add/remove pair, so this can actually be checked.
-  const added = instance.listeners.slice(baseListeners).filter((row) => row.type === 'resize' || row.type === 'scroll')
-  check('an open bubble watches for resize and scroll', added.length === 2, String(added.length))
-  check(
-    'the scroll listener uses the capture phase so nested scrollers count',
-    added.some((row) => row.type === 'scroll' && row.options === true),
-    JSON.stringify(added.map((row) => [row.type, row.options])),
-  )
-
-  const hideTrigger = firstByClass(shown, 'dsse-tip-anchor')
-  check('the trigger survives the hover', hideTrigger !== undefined)
-  if (hideTrigger !== undefined) {
-    hideTrigger.props.onMouseLeave()
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  }
-  const hidden = await instance.renderer.deepRender(cards)
-  check('leaving the button dismisses the explanation', firstByClass(hidden, 'dsse-tip') === undefined)
-  const remaining = instance.listeners.slice(baseListeners).filter((row) => row.type === 'resize' || row.type === 'scroll')
-  check('dismissing also removes the listeners', remaining.length === 0, String(remaining.length))
-}
-
-// ---------------------------------------------------------------------------
-// The bubble stays inside a measurable window
-// ---------------------------------------------------------------------------
-
-{
-  // The button sits in the side gutter near the right edge of the frame, which is
-  // the case an unclamped bubble gets wrong. 400px is narrower than the bubble,
-  // so the only placement that keeps it on screen starts at the 8px margin.
-  const instance = boot({ routes: panelRoutes(), innerWidth: 400, triggerLeft: 380 })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  // Guard the hover: without the wrapper there is nothing to hover, and a
-  // `TypeError` here is reported as a crash rather than as a failing assertion.
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  check('a narrow window still has a hoverable trigger', trigger !== undefined)
-  if (trigger !== undefined) trigger.props.onMouseEnter()
-  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
-  const left = Number(String(tip?.props?.style?.left ?? '').replace('px', ''))
-  check('a narrow window still places the bubble on screen', Number.isFinite(left) && left >= 8, String(tip?.props?.style?.left))
-  check('and keeps its right edge inside the window', left + 230 <= 400, String(left))
-}
-
-{
-  // The other end of the clamp. A button at x=2 — the collapsed handle on the
-  // left rail, or a very narrow window — would otherwise open the bubble at x=2
-  // with its text touching the frame edge. Without this fixture the `Math.max(8,
-  // …)` bound is never the deciding term, so deleting it stays green.
-  const instance = boot({ routes: panelRoutes(), innerWidth: 1200, triggerLeft: 2 })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  check('a left-edge button is still hoverable', trigger !== undefined)
-  if (trigger !== undefined) trigger.props.onMouseEnter()
-  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
-  const left = Number(String(tip?.props?.style?.left ?? '').replace('px', ''))
-  check('the bubble never starts closer than the margin', Number.isFinite(left) && left >= 8, String(tip?.props?.style?.left))
-  // The clamp reserves the declared width, so the declared width has to be the
-  // outer width. Without `border-box` the 16px of padding and the 1px border are
-  // added on top and the bubble overflows by 18px — invisible to every other
-  // assertion here, because the harness does not lay anything out.
-  // Strip comments before matching, and allow whitespace before the brace. Searching
-  // the raw sheet let a comment satisfy the assertion (a false pass) and made a
-  // single added space cancel it (a false failure) — neither is a layout change.
-  const tipSheet = instance.styles
-    .map(node => String(node.textContent))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-  const tipRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(tipSheet) ?? [])[1] ?? ''
-  check(
-    'the width the clamp reserves is the bubble\'s outer width',
-    tipRule.includes('box-sizing:border-box') && tipRule.includes('max-width:230px'),
-    tipRule.slice(0, 80),
-  )
-  check('the rule was actually found', tipRule.length > 0, String(tipRule.length))
-  check('the margin pushes it away from the edge', left === 8, String(left))
-
-  // Unmounting has to unhook the listeners. This is the assertion that would have
-  // caught the harness regression the third review found: the effect wrapper
-  // returned nothing, so `cleanups` stayed empty, `unmount()` was a no-op, and
-  // every other test passed anyway.
-  // The overlay subscribes to `resize` on mount too, and unmounting tears that
-  // down as well — so this delta proves the listeners are released, not that all
-  // of them belonged to the bubble. The bubble's own pair is covered separately by
-  // "an open bubble watches for resize and scroll"; this one guards against the
-  // harness going back to an `unmount()` that does nothing at all.
-  const isDismiss = row => row.type === 'resize' || row.type === 'scroll'
-  const held = instance.listeners.filter(isDismiss).length
-  instance.renderer.unmount()
-  const afterUnmount = instance.listeners.filter(isDismiss).length
-  check('unmounting drops the listeners the bubble hooked', afterUnmount < held, `${held} → ${afterUnmount}`)
-}
-
-// ---------------------------------------------------------------------------
 // Every host slot this bundle names must be one the host publishes
 // ---------------------------------------------------------------------------
 
@@ -1329,130 +1182,599 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// TIP_HEIGHT has to stay an upper bound on the real call sites.
+// The checklist on the propose button
 //
-// The geometry reserves TIP_HEIGHT rather than measuring the bubble, because the
-// bubble is placed before it is laid out and reading its rect would give the size
-// of the previous bubble. That trade only holds while every call site text fits,
-// and nothing else in the suite would notice a longer string being added: it would
-// simply clamp against a height smaller than the thing it is clamping. So the
-// heights are computed here from the bundle source itself.
+// The button once carried a native `title`, then a one-sentence hover bubble.
+// What it must show now is the list of candidates: name plus a one-line
+// description per row, a detail card on row hover, and approve/ignore per row.
+// The failures worth catching here are the silent ones — a list that renders
+// "no candidates" when the queue actually failed to load, a decide button that
+// posts nothing, a row that stays on screen after it was decided.
 // ---------------------------------------------------------------------------
+
 {
-  const bundle = readFileSync(join(repo, "lib", "client.js"), "utf8")
-  const texts = []
-  // All three quote styles, and a wide window: the first version of this scan only
-  // matched a double-quoted string within 120 characters of `jsx(Hint,`, so a call
-  // site written any other way was silently not measured.
-  const quoteStyles = [
-    /jsx\(Hint,\s*\{[\s\S]*?text:\s*"([^"]*)"/,
-    /jsx\(Hint,\s*\{[\s\S]*?text:\s*'([^']*)'/,
-    /jsx\(Hint,\s*\{[\s\S]*?text:\s*`([^`]*)`/,
-  ]
-  const callSites = bundle.match(/jsx\(Hint,/g) ?? []
-  for (const style of quoteStyles) {
-    const wide = new RegExp(style.source, 'g')
-    for (let hit = wide.exec(bundle); hit !== null; hit = wide.exec(bundle)) texts.push(hit[1])
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = {
+    ok: true,
+    data: {
+      candidates: [
+        { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'BODY-A', whenToUse: 'WHEN-A', uses: 0 },
+        { id: 'b', name: 'office', description: '', kind: 'update', body: 'BODY-B', whenToUse: 'WHEN-B', uses: 2 },
+      ],
+    },
   }
-  // One measurement per call site, so a style this scan cannot read shows up as a
-  // count mismatch instead of as a silently unmeasured string.
-  check(
-    'every Hint call site was measured',
-    texts.length === callSites.length,
-    `${texts.length} measured, ${callSites.length} call site(s)`,
-  )
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
 
-  check("at least one Hint call site was found", texts.length > 0, String(texts.length))
+  const first = await instance.renderer.deepRender(cards)
+  check('no checklist is shown before hovering', firstByClass(first, 'dsse-ck') === undefined)
 
-  // Every number in the layout budget is read out of the `.dsse-tip` rule rather
-  // than restated here. Restating them is how the first version of this block
-  // failed to notice a font-size change: it was comparing the stylesheet against a
-  // copy of the stylesheet, so enlarging the font really did make the bubble
-  // taller than TIP_HEIGHT while all of this stayed green.
-  const tipSheetForBudget = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  check('the propose button still sits in a hover trigger', trigger !== undefined, textOf(first).slice(0, 120))
+  const button = byClass(first, 'dsse-btn')[0]
+  check('the button no longer asks the browser for a tooltip', button?.props?.title === undefined, String(button?.props?.title))
+  // A disabled button receives no mouse events in Chrome, which is exactly when
+  // someone wants to know what the button would do. The wrapper owns the hover.
+  check('the wrapper carries the hover handler', typeof trigger?.props?.onMouseEnter === 'function')
+  check('the wrapper also reacts to keyboard focus', typeof trigger?.props?.onFocus === 'function')
+
+  if (trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function') {
+    trigger.props.onMouseEnter()
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  }
+
+  const shown = await instance.renderer.deepRender(cards)
+  const list = firstByClass(shown, 'dsse-ck')
+  check('hovering opens the checklist', list !== undefined)
+  check('the checklist is a dialog for assistive tech', list?.props?.role === 'dialog', String(list?.props?.role))
+
+  const names = byClass(shown, 'dsse-ck-name').map((node) => textOf(node))
+  check('every candidate is listed by name', JSON.stringify(names) === '["pdf-tools","office"]', JSON.stringify(names))
+  const descs = byClass(shown, 'dsse-ck-desc').map((node) => textOf(node))
+  check('a row with a description shows it', descs[0] === 'work with pdfs', JSON.stringify(descs))
+  // An update with no description still has to say something: an empty line under
+  // a name reads as a rendering bug rather than as "this one had no summary".
+  check('a row without a description falls back to its kind', descs[1] === '修改已有技能', JSON.stringify(descs))
+  check('each row offers approve and ignore', byClass(shown, 'dsse-ck-yes').length === 2 && byClass(shown, 'dsse-ck-no').length === 2)
+
+  const head = textOf(byClass(shown, 'dsse-ck-head')[0])
+  check('the heading counts the candidates', head.includes('2'), head)
+
+  // The list is fixed-position outside the card, so it has to carry the rule.
+  const sheet = instance.styles
+    .map((node) => String(node.textContent))
+    .join('\n')
     .replace(/\/\*[\s\S]*?\*\//g, '')
-  const budgetRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(tipSheetForBudget) ?? [])[1] ?? ''
-  const fontMatch = /font:\s*[^;]*?([\d.]+)px\s*\/\s*([\d.]+)/.exec(budgetRule)
-  const padMatch = /padding:\s*(?:([\d.]+)px\s+)?([\d.]+)px/.exec(budgetRule)
-  const borderMatch = /border:\s*([\d.]+)px/.exec(budgetRule)
-  const maxWidthMatch = /max-width:\s*([\d.]+)px/.exec(budgetRule)
-  const fontSize = fontMatch === null ? Number.NaN : Number(fontMatch[1])
-  const lineHeight = fontMatch === null ? Number.NaN : Number(fontMatch[2])
-  const padY = padMatch === null ? Number.NaN : Number(padMatch[1] ?? padMatch[2])
-  const padX = padMatch === null ? Number.NaN : Number(padMatch[2])
-  const borderPx = borderMatch === null ? Number.NaN : Number(borderMatch[1])
-  const maxWidthPx = maxWidthMatch === null ? Number.NaN : Number(maxWidthMatch[1])
+  const listRule = (/\.dsse-ck\s*\{([^}]*)\}/.exec(sheet) ?? [])[1] ?? ''
+  check('the stylesheet positions the checklist as fixed', listRule.includes('position:fixed'), listRule.slice(0, 80))
+  check('the checklist rule was actually found', listRule.length > 0, String(listRule.length))
 
-  // A parse that silently produced NaN would make every comparison below false in
-  // a way that reads like a layout failure, so say which reading broke.
-  check(
-    'the budget was read out of the stylesheet',
-    [fontSize, lineHeight, padY, padX, borderPx, maxWidthPx].every(Number.isFinite),
-    `font ${fontSize}/${lineHeight} pad ${padY}x${padX} border ${borderPx} max-width ${maxWidthPx}`,
-  )
-  // TIP_HEIGHT and TIP_WIDTH are declared in the geometry module; the stylesheet
-  // is what actually decides the size. If the two disagree the clamp reserves one
-  // number and the browser draws another.
-  check(
-    'the reserved width is the width the stylesheet declares',
-    maxWidthPx === TIP_WIDTH,
-    `stylesheet ${maxWidthPx}px vs TIP_WIDTH ${TIP_WIDTH}px`,
-  )
+  const styleText = String(list?.props?.style?.left ?? '')
+  check('the checklist is placed with a finite value', styleText.endsWith('px') && Number.isFinite(Number(styleText.slice(0, -2))), styleText)
+  check('and reserves the declared panel width', list?.props?.style?.width === `${PANEL_WIDTH}px`, String(list?.props?.style?.width))
 
-  const perLine = Math.max(1, Math.floor((maxWidthPx - padX * 2 - borderPx * 2) / fontSize))
-  for (const text of texts) {
-    const lines = Math.max(1, Math.ceil(text.length / perLine))
-    const needed = lines * fontSize * lineHeight + padY * 2 + borderPx * 2
-    check(
-      `TIP_HEIGHT covers the call site text (${text.length} chars, ${lines} line(s))`,
-      needed <= TIP_HEIGHT,
-      `needed ${needed.toFixed(2)}px, reserved ${TIP_HEIGHT}px`,
-    )
+  // --- hovering a row opens the detail card -------------------------------
+  const rows = byClass(shown, 'dsse-ck-item')
+  check('the rows are hoverable', rows.length === 2)
+  if (rows.length > 0 && typeof rows[0].props?.onMouseEnter === 'function') {
+    rows[0].props.onMouseEnter()
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  }
+  const detailed = await instance.renderer.deepRender(cards)
+  const detail = firstByClass(detailed, 'dsse-ck-detail')
+  check('hovering a row opens the detail card', detail !== undefined)
+  const detailText = textOf(detail)
+  check('the detail card carries the body', detailText.includes('BODY-A'), detailText.slice(0, 160))
+  check('the detail card carries when-to-use', detailText.includes('WHEN-A'), detailText.slice(0, 160))
+  // Anchored to the LIST, not to the row: a row's right edge is inside the list,
+  // so anchoring there drew the card on top of it.
+  const detailLeft = Number(String(detail?.props?.style?.left ?? '').replace('px', ''))
+  const listLeft = Number(String(list?.props?.style?.left ?? '').replace('px', ''))
+  const listWidth = Number(String(list?.props?.style?.width ?? '').replace('px', ''))
+  check(
+    'the detail card opens beside the checklist, not over it',
+    Number.isFinite(detailLeft) && Number.isFinite(listLeft) && Number.isFinite(listWidth) && detailLeft >= listLeft + listWidth,
+    `detail ${detailLeft} vs list ${listLeft}+${listWidth}`,
+  )
+  check('the detail card reserves the declared width', detail?.props?.style?.width === `${DETAIL_WIDTH}px`, String(detail?.props?.style?.width))
+
+  // --- moving into the list must not close it -----------------------------
+  // The pointer crosses a gap between the button and the list, so closing is
+  // deferred. Without the grace period the list vanishes the moment the pointer
+  // leaves the button and nobody can ever reach the approve buttons.
+  const shownAgain = firstByClass(detailed, 'dsse-tip-anchor')
+  if (shownAgain !== undefined && typeof shownAgain.props?.onMouseLeave === 'function') {
+    shownAgain.props.onMouseLeave()
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
+  }
+  const stillOpen = await instance.renderer.deepRender(cards)
+  check('leaving the button does not close the list immediately', firstByClass(stillOpen, 'dsse-ck') !== undefined)
+
+  // Entering the list cancels the pending close.
+  const listNode = firstByClass(stillOpen, 'dsse-ck')
+  if (listNode !== undefined && typeof listNode.props?.onMouseEnter === 'function') {
+    listNode.props.onMouseEnter()
+    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
+  }
+  const afterGrace = await instance.renderer.deepRender(cards)
+  check('entering the list keeps it open past the grace period', firstByClass(afterGrace, 'dsse-ck') !== undefined)
+
+  // --- deciding a row ----------------------------------------------------
+  const approve = byClass(afterGrace, 'dsse-ck-yes')[0]
+  check('the approve button is rendered', approve !== undefined)
+  check('the approve button shows a check mark', textOf(approve).length === 1, textOf(approve))
+  if (approve !== undefined && typeof approve.props?.onClick === 'function') {
+    approve.props.onClick({ stopPropagation() {} })
+    for (let turn = 0; turn < 16; turn += 1) await Promise.resolve()
+  }
+  const posted = instance.calls.filter((row) => row.url.includes('/candidates') && row.init?.method === 'POST')
+  check('approving posts to the decide route', posted.length === 1, String(posted.length))
+  check('the post names the row and the action', posted.length === 1 && String(posted[0].init.body).includes('"action":"approve"') && String(posted[0].init.body).includes('pdf-tools'), String(posted[0]?.init?.body))
+  // The row leaves without a refetch: refetching reorders the list under the
+  // pointer, and the decide request is what the user is watching.
+  const afterDecide = await instance.renderer.deepRender(cards)
+  const remainingNames = byClass(afterDecide, 'dsse-ck-name').map((node) => textOf(node))
+  check('the approved row leaves the list', JSON.stringify(remainingNames) === '["office"]', JSON.stringify(remainingNames))
+}
+
+// ---------------------------------------------------------------------------
+// Empty, loading and failed look different from each other
+//
+// This is the point of the module. "Nothing is waiting" and "the queue could not
+// be read" both render an empty list if the states are collapsed, and only one of
+// them means the button is useless.
+// ---------------------------------------------------------------------------
+
+{
+  const cases = [
+    { label: 'empty', route: { ok: true, data: { candidates: [] } }, expect: '没有待批准', forbid: '失败' },
+    { label: 'unavailable', route: { ok: true, data: { available: false, reason: 'the queue needs a host' } }, expect: '不可用', forbid: '没有待批准' },
+    { label: 'refused', route: { ok: false, code: 'boom', error: 'the queue is unreadable' }, expect: '读取失败', forbid: '没有待批准' },
+  ]
+  for (const item of cases) {
+    const routes = panelRoutes()
+    routes['/api/skill-evolve/candidates'] = item.route
+    const instance = boot({ routes })
+    instance.module.apply(instance.ctx)
+    const toggle = instance.seat('toggle')
+    const cards = instance.seat('cards')
+    firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    const first = await instance.renderer.deepRender(cards)
+    const trigger = firstByClass(first, 'dsse-tip-anchor')
+    if (trigger !== undefined) {
+      trigger.props.onMouseEnter()
+      for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+    }
+    const shown = await instance.renderer.deepRender(cards)
+    const text = textOf(firstByClass(shown, 'dsse-ck') ?? shown)
+    check(`the ${item.label} state says so`, text.includes(item.expect), text.slice(0, 160))
+    check(`the ${item.label} state is not mistaken for an empty queue`, text.includes(item.forbid) === false, text.slice(0, 160))
   }
 }
 
 // ---------------------------------------------------------------------------
-// The vertical placement, reached through the bundle rather than only in the
-// unit tests. `window.innerHeight` is the single thing that makes any of it run,
-// and no other fixture sets it, so before this block the bundle could have
-// stopped passing the height through and every client assertion stayed green.
+// A stale row cannot be approved, but can be discarded
 //
-// Scope note: this window is short enough for the flip, not short enough to
-// exercise the two clamp branches. Those need a trigger reported outside the
-// viewport, which a rect taken from the live DOM cannot produce — they stay
-// covered by `gutter.test.mjs`, which is where the geometry belongs. Asserting
-// them here would need a fabricated trigger and would then be testing the fake.
+// Stale rows are listed rather than hidden: a candidate that lost its name to
+// another skill still occupies the name, and hiding it leaves no way to clear it.
 // ---------------------------------------------------------------------------
 
 {
-  const instance = boot({ routes: panelRoutes(), innerWidth: 1600, innerHeight: 300, triggerLeft: 400, triggerTop: 250 })
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = {
+    ok: true,
+    data: {
+      candidates: [
+        { id: 's', name: 'stale-one', description: 'gone', kind: 'create', body: 'B', whenToUse: '', stale: { reason: 'base-changed' } },
+        { id: 'f', name: 'fresh-one', description: 'fine', kind: 'create', body: 'B', whenToUse: '' },
+      ],
+    },
+  }
+  const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const first = await instance.renderer.deepRender(cards)
   const trigger = firstByClass(first, 'dsse-tip-anchor')
-  check('the short-window fixture has a trigger to hover', trigger !== undefined)
-  if (trigger === undefined) {
-    // Without the wrapper there is nothing to hover and the rest of this block
-    // would throw, which reads as a crash instead of a failed assertion.
-  } else {
+  if (trigger !== undefined) {
     trigger.props.onMouseEnter()
-    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-    const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
-    const top = Number(String(tip?.props?.style?.top ?? '').replace('px', ''))
-    // 86 = 250 - TIP_OFFSET(4) - TIP_HEIGHT(160). Stated as the arithmetic rather
-    // than a bare number so a constant change is visible in the failure.
-    check(
-      'a bubble with no room below flips above its trigger',
-      top === 86,
-      `top ${top}, expected 86 = 250 - 4 - 160`,
-    )
-    // And it stayed on screen: the flip put it at 86, so the whole bubble is
-    // inside a 300px viewport rather than hanging out of the bottom.
-    check('the flipped bubble is fully inside the short window', top >= 8 && top + 160 <= 292, String(top))
+    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
   }
+  const shown = await instance.renderer.deepRender(cards)
+  const yes = byClass(shown, 'dsse-ck-yes')
+  const no = byClass(shown, 'dsse-ck-no')
+  check('every stale and fresh row is listed', byClass(shown, 'dsse-ck-item').length === 2)
+  check('the stale row cannot be approved', yes[0]?.props?.disabled === true, String(yes[0]?.props?.disabled))
+  check('the stale row can still be discarded', no[0]?.props?.disabled !== true, String(no[0]?.props?.disabled))
+  check('the fresh row can still be approved', yes[1]?.props?.disabled !== true, String(yes[1]?.props?.disabled))
+  const why = byClass(shown, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
+  check('the stale row explains why', why.includes('已被改动'), why)
 }
+
+
+
+// ---------------------------------------------------------------------------
+// A staged approval keeps its row, and says what happened
+//
+// In `confirm` mode (the default) pressing approve writes no file: it marks the
+// candidate `awaitingFinal` and asks the model to produce the final wording. The
+// row used to vanish anyway, which said "done" about work that had not started
+// and left the queue badge still counting it. The row must stay, must be
+// disabled, and must say why; only a real write may remove a row.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = {
+    ok: true,
+    data: {
+      candidates: [
+        { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'BODY-A', whenToUse: '' },
+        { id: 'b', name: 'office', description: '', kind: 'update', body: 'BODY-B', whenToUse: '' },
+      ],
+    },
+  }
+  routes['/api/skill-evolve/candidates'] = (init) => {
+    if (init?.method !== 'POST') return { ok: true, data: { candidates: [
+      { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'BODY-A', whenToUse: '' },
+      { id: 'b', name: 'office', description: '', kind: 'update', body: 'BODY-B', whenToUse: '' },
+    ] } }
+    return { ok: true, data: { ok: true, staged: true } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const listed = await instance.renderer.deepRender(cards)
+  check('both rows are listed before deciding', byClass(listed, 'dsse-ck-item').length === 2, String(byClass(listed, 'dsse-ck-item').length))
+  byClass(listed, 'dsse-ck-yes')[0].props.onClick()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const after = await instance.renderer.deepRender(cards)
+  check('a staged approval keeps its row', byClass(after, 'dsse-ck-item').length === 2, String(byClass(after, 'dsse-ck-item').length))
+  check('the staged row cannot be approved twice', byClass(after, 'dsse-ck-yes')[0]?.props?.disabled === true, String(byClass(after, 'dsse-ck-yes')[0]?.props?.disabled))
+  const why = byClass(after, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
+  check('the staged row says the file is not written yet', why.includes('等模型写出定稿'), why)
+  check('the staged row says it is not in the skill directory', why.includes('还不在技能目录里'), why)
+}
+
+{
+  // The other half of the same rule: a decided-and-written row does go away, and
+  // it goes away by id. Removing by name would also take a stale row that happens
+  // to share the name, which the queue explicitly allows to exist.
+  const listed = [
+    { id: 'live', name: 'dup', description: 'live one', kind: 'create', body: 'B', whenToUse: '' },
+    { id: 'stale', name: 'dup', description: 'stale one', kind: 'create', body: 'B', whenToUse: '', stale: { reason: 'expired' } },
+  ]
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = (init) =>
+    init?.method === 'POST' ? { ok: true, data: { ok: true } } : { ok: true, data: { candidates: listed } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const before = await instance.renderer.deepRender(cards)
+  check('two rows share a name', byClass(before, 'dsse-ck-item').length === 2, String(byClass(before, 'dsse-ck-item').length))
+  byClass(before, 'dsse-ck-no')[0].props.onClick()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const after = await instance.renderer.deepRender(cards)
+  check('deciding one row removes exactly one row', byClass(after, 'dsse-ck-item').length === 1, String(byClass(after, 'dsse-ck-item').length))
+  const left = byClass(after, 'dsse-ck-name').map((node) => textOf(node)).join(' ')
+  check('the row that stayed is the other one with the same name', byClass(after, 'dsse-ck-item').length === 1 && left.includes('dup'), left)
+  // The discarded row was the live one, so the survivor is the stale entry — and
+  // a stale entry must stay unapprovable. Asserting the wrong survivor would pass
+  // for the wrong reason and hide a filter that took both rows.
+  const survivor = byClass(after, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
+  check('the survivor is the stale row, still unapprovable', byClass(after, 'dsse-ck-yes')[0]?.props?.disabled === true, String(byClass(after, 'dsse-ck-yes')[0]?.props?.disabled))
+  check('the survivor still explains why it cannot be approved', survivor.includes('已过期') || survivor.includes('过期'), survivor)
+}
+
+// ---------------------------------------------------------------------------
+// The decide request carries the session
+//
+// Every other write the card makes appends `?agent=`. The decide call did not, so
+// the host resolved the candidate against no session at all. There is no visible
+// symptom today — the root is config-only — which is exactly why it needs a test
+// rather than an eyeball.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = (init) =>
+    init?.method === 'POST'
+      ? { ok: true, data: { ok: true } }
+      : { ok: true, data: { candidates: [{ id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' }] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-z' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const listed = await instance.renderer.deepRender(cards)
+  byClass(listed, 'dsse-ck-no')[0].props.onClick()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const posted = instance.calls.filter((entry) => entry.init?.method === 'POST')
+  check('the decide call is a POST', posted.length === 1, String(posted.length))
+  check('the decide call names the session', String(posted[0]?.url).includes('agent=session-z'), String(posted[0]?.url))
+  const body = JSON.parse(String(posted[0]?.init?.body ?? '{}'))
+  check('the decide call names the candidate', body.name === 'pdf-tools', JSON.stringify(body))
+  check('the decide call names the action', body.action === 'discard', JSON.stringify(body))
+}
+
+// ---------------------------------------------------------------------------
+// The hover grace period is a real delay, not a claim about one
+//
+// The bubble and the list are separate fixed-position layers with a gap between
+// them, so the pointer necessarily leaves the button before it reaches the list.
+// Without the delay the list closes in that gap and cannot be used at all. With
+// the global timer un-injected, the deferred close never ran during a test and
+// every assertion about it passed either way.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  trigger.props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  check('the list is open before the pointer leaves', byClass(opened, 'dsse-ck').length === 1, String(byClass(opened, 'dsse-ck').length))
+
+  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const still = await instance.renderer.deepRender(cards)
+  check('leaving the button does not close the list straight away', byClass(still, 'dsse-ck').length === 1, String(byClass(still, 'dsse-ck').length))
+  const pending = instance.timers.filter((entry) => entry.cleared === false && entry.ms > 0)
+  check('leaving the button schedules a close', pending.length === 1, String(pending.length))
+  check('the close delay is long enough to cross the gap', (pending[0]?.ms ?? 0) >= 150, String(pending[0]?.ms))
+
+  // Entering the list must cancel that pending close, or the list shuts while the
+  // pointer is inside it.
+  const list = byClass(still, 'dsse-ck')[0]
+  list?.props?.onMouseEnter?.()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  check('entering the list cancels the pending close', instance.timers.some((entry) => entry.cleared === true), JSON.stringify(instance.timers.map((entry) => entry.cleared)))
+  const kept = await instance.renderer.deepRender(cards)
+  check('the list is still open after the pointer enters it', byClass(kept, 'dsse-ck').length === 1, String(byClass(kept, 'dsse-ck').length))
+}
+
+{
+  // And the delay must actually elapse into a close, or it is just a timer that
+  // nobody reads. Driven by hand so the suite stays fast and deterministic.
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const armed = instance.timers.filter((entry) => entry.cleared === false && entry.ms > 0)
+  for (const entry of armed) entry.fn()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const closed = await instance.renderer.deepRender(cards)
+  check('the scheduled close really closes the list', byClass(closed, 'dsse-ck').length === 0, String(byClass(closed, 'dsse-ck').length))
+}
+
+// ---------------------------------------------------------------------------
+// Listeners added while open are removed when it closes
+//
+// The window stub records every listener precisely so this can be asserted; the
+// invariant had dropped out when the bubble was replaced and nothing noticed. The
+// scroll listener must also be on the capture phase, because the conversation
+// scrolls inside nested elements and a bubble-phase listener on window never
+// hears it.
+//
+// The baseline is the set attached before the list opened, not an empty list: the
+// overlay keeps its own `resize` listener for as long as it is mounted, so
+// asserting "nothing is attached afterwards" would fail on correct code.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  const beforeHover = instance.listeners.slice()
+
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  trigger.props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  const added = instance.listeners.filter((row) => beforeHover.includes(row) === false)
+  check('opening the list adds listeners', added.length >= 2, JSON.stringify(added.map((row) => row.type)))
+  const scroll = added.find((row) => row.type === 'scroll')
+  check('the scroll listener sits on the capture phase', scroll?.options === true || scroll?.options?.capture === true, JSON.stringify(scroll?.options))
+  const keydown = added.find((row) => row.type === 'keydown')
+  check('opening the list also listens for Escape', keydown !== undefined, JSON.stringify(added.map((row) => row.type)))
+
+  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  // A re-render is what lets the effect's cleanup run; without it the listeners
+  // are still attached and the assertion would report a leak that has only not
+  // been torn down yet.
+  const after = await instance.renderer.deepRender(cards)
+  check('the scheduled close emptied the list', byClass(after, 'dsse-ck').length === 0, String(byClass(after, 'dsse-ck').length))
+  const leaked = added.filter((row) => instance.listeners.includes(row))
+  check('closing the list removes every listener it added', leaked.length === 0, JSON.stringify(leaked.map((row) => row.type)))
+  const kept = beforeHover.filter((row) => instance.listeners.includes(row))
+  check('closing the list keeps the listeners it did not add', kept.length === beforeHover.length, `${kept.length} of ${beforeHover.length}`)
+
+  instance.renderer.unmount()
+  check('unmounting leaves nothing hooked', instance.listeners.length === 0, JSON.stringify(instance.listeners.map((row) => row.type)))
+}
+
+// ---------------------------------------------------------------------------
+// The trigger announces the list it opens
+//
+// `role="dialog"` on the list alone is not enough: a screen reader reaches the
+// button and has no idea anything opened. ARIA is not inherited from an ancestor,
+// so the attributes have to land on the button itself.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const closed = await instance.renderer.deepRender(cards)
+  const closedButton = byClass(closed, 'dsse-btn')[0]
+  check('a closed list claims no popup', closedButton?.props?.['aria-expanded'] === undefined, JSON.stringify(closedButton?.props?.['aria-expanded']))
+
+  firstByClass(closed, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  const openButton = byClass(opened, 'dsse-btn')[0]
+  check('an open list tells the button it is expanded', openButton?.props?.['aria-expanded'] === true, JSON.stringify(openButton?.props?.['aria-expanded']))
+  check('the button names the kind of thing it opens', openButton?.props?.['aria-haspopup'] === 'dialog', JSON.stringify(openButton?.props?.['aria-haspopup']))
+}
+// ---------------------------------------------------------------------------
+// The card must survive its own contents
+//
+// Both of these were real: the list scrolls whenever it holds more candidates
+// than fit, and every row has two real <button>s, so the two things a person
+// naturally does to a card — scroll it, press a row's button — used to close it.
+// In confirm mode the button press closed the card before the "approved, waiting
+// for the draft" notice could be read, which is the one case where the notice
+// matters.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+    { id: 'b', name: 'office', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  check('the list is open before the scroll test', byClass(opened, 'dsse-ck').length === 1, String(byClass(opened, 'dsse-ck').length))
+
+  const scroll = instance.listeners.find((row) => row.type === 'scroll')
+  check('a scroll listener exists to test', scroll !== undefined, JSON.stringify(instance.listeners.map((row) => row.type)))
+
+  // A scroll inside the list body is the person reading further down the list.
+  scroll.handler({ target: { closest: (selector) => (selector.includes('.dsse-ck') ? { className: 'dsse-ck' } : null) } })
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const stillOpen = await instance.renderer.deepRender(cards)
+  check('scrolling inside the list does not close it', byClass(stillOpen, 'dsse-ck').length === 1, String(byClass(stillOpen, 'dsse-ck').length))
+
+  // A scroll anywhere else still means the anchor moved out from under the card.
+  scroll.handler({ target: { closest: () => null } })
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const closed = await instance.renderer.deepRender(cards)
+  check('scrolling the conversation still closes it', byClass(closed, 'dsse-ck').length === 0, String(byClass(closed, 'dsse-ck').length))
+}
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+  ] } }
+  // Pressing a row's ✓ moves focus to a button that lives inside the wrapper,
+  // so the fixture has to declare that button as contained — that is exactly the
+  // predicate the handler asks about.
+  const inner = { tag: 'button' }
+  const instance = boot({ routes, triggerLeft: 400, triggerContains: [inner] })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  const wrapper = firstByClass(opened, 'dsse-tip-anchor')
+  check('the wrapper handles blur', typeof wrapper.props.onBlur === 'function', typeof wrapper.props.onBlur)
+  wrapper.props.onBlur({ relatedTarget: inner })
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const held = await instance.renderer.deepRender(cards)
+  check('moving focus inside the card does not close it', byClass(held, 'dsse-ck').length === 1, String(byClass(held, 'dsse-ck').length))
+
+  // Focus leaving for somewhere else is the real "walked away".
+  const outside = { tag: 'body' }
+  const fresh = firstByClass(held, 'dsse-tip-anchor')
+  fresh.props.onBlur({ relatedTarget: outside })
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const gone = await instance.renderer.deepRender(cards)
+  check('focus leaving the card closes it', byClass(gone, 'dsse-ck').length === 0, String(byClass(gone, 'dsse-ck').length))
+}
+
+{
+  // The decide call has to name the row by id. Two candidates can share a name,
+  // and the host resolves a bare name to the live one — so a name-only request
+  // aimed at a stale row acts on its live twin instead.
+  const sent = []
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = (init) => {
+    if (init?.method === 'POST') {
+      sent.push(String(init.body))
+      return { ok: true, data: { ok: true } }
+    }
+    return { ok: true, data: { candidates: [
+      { id: 'stale', name: 'dup', description: 'stale one', kind: 'create', body: 'B', whenToUse: '', stale: { reason: 'expired' } },
+      { id: 'live', name: 'dup', description: 'live one', kind: 'create', body: 'B', whenToUse: '' },
+    ] } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await instance.renderer.deepRender(cards)
+  const staleRow = byClass(opened, 'dsse-ck-item')[0]
+  firstByClass(staleRow, 'dsse-ck-no').props.onClick()
+  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const body = JSON.parse(sent[0] ?? '{}')
+  check('the decide call carries the id of the row that was clicked', body.id === 'stale', JSON.stringify(body))
+  check('the decide call still carries the name', body.name === 'dup', JSON.stringify(body))
+  check('the decide call says which action it was', body.action === 'discard', JSON.stringify(body))
+}
+
 
 console.log(`\n${passed} passed, ${failed} failed`)
 for (const failure of failures) console.log(`  FAIL ${failure}`)

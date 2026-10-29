@@ -19,12 +19,12 @@ import {
   gutters,
   placeCards,
   placeHandle,
-  placeTip,
+  placeNear,
   HANDLE_WIDTH,
-  TIP_WIDTH,
-  TIP_HEIGHT,
-  TIP_MARGIN,
-  TIP_OFFSET,
+  EDGE_MARGIN,
+  PANEL_WIDTH,
+  DETAIL_WIDTH,
+  POPOVER_GAP,
   MIN_CARD_WIDTH,
   MAX_CARD_WIDTH,
   CARD_GAP,
@@ -60,7 +60,7 @@ function loadInlined() {
   const end = source.indexOf('// </gutter>')
   if (start < 0 || end < 0) throw new Error('lib/client.js has no gutter markers — run scripts/sync-gutter.mjs')
   const block = source.slice(start, end)
-  const body = `${block}\nreturn { gutters, placeCards, placeHandle, placeTip, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH, TIP_WIDTH, TIP_HEIGHT, TIP_MARGIN, TIP_OFFSET }`
+  const body = `${block}\nreturn { gutters, placeCards, placeHandle, placeNear, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH, EDGE_MARGIN, PANEL_WIDTH, DETAIL_WIDTH, POPOVER_GAP }`
   // eslint-disable-next-line no-new-func
   return new Function(body)()
 }
@@ -71,11 +71,11 @@ check('the inlined minimum card width matches the module', inlined.MIN_CARD_WIDT
 check('the inlined maximum card width matches the module', inlined.MAX_CARD_WIDTH === MAX_CARD_WIDTH, String(inlined.MAX_CARD_WIDTH))
 check('the inlined card gap matches the module', inlined.CARD_GAP === CARD_GAP, String(inlined.CARD_GAP))
 check('the inlined handle width matches the module', inlined.HANDLE_WIDTH === HANDLE_WIDTH, String(inlined.HANDLE_WIDTH))
-check('the inlined block exposes the four functions', ['gutters', 'placeCards', 'placeHandle', 'placeTip'].every((name) => typeof inlined[name] === 'function'))
-check('the inlined tip width matches the module', inlined.TIP_WIDTH === TIP_WIDTH, String(inlined.TIP_WIDTH))
-check('the inlined tip height matches the module', inlined.TIP_HEIGHT === TIP_HEIGHT, String(inlined.TIP_HEIGHT))
-check('the inlined tip margin matches the module', inlined.TIP_MARGIN === TIP_MARGIN, String(inlined.TIP_MARGIN))
-check('the inlined tip offset matches the module', inlined.TIP_OFFSET === TIP_OFFSET, String(inlined.TIP_OFFSET))
+check('the inlined block exposes every geometry function', ['gutters', 'placeCards', 'placeHandle', 'placeNear'].every((name) => typeof inlined[name] === 'function'))
+check('the inlined edge margin matches the module', inlined.EDGE_MARGIN === EDGE_MARGIN, String(inlined.EDGE_MARGIN))
+check('the inlined panel width matches the module', inlined.PANEL_WIDTH === PANEL_WIDTH, String(inlined.PANEL_WIDTH))
+check('the inlined detail width matches the module', inlined.DETAIL_WIDTH === DETAIL_WIDTH, String(inlined.DETAIL_WIDTH))
+check('the inlined popover gap matches the module', inlined.POPOVER_GAP === POPOVER_GAP, String(inlined.POPOVER_GAP))
 
 // Rect shapes that are incomplete in one edge at a time. The sweep below only
 // builds complete rects, so without these the `edges` argument to `usableRect` is
@@ -224,62 +224,64 @@ check('the inlined tip offset matches the module', inlined.TIP_OFFSET === TIP_OF
   check('the inlined copy handles degenerate input identically', mismatches.length === 0, mismatches.join(' | '))
 }
 
-// The bubble has its own input shape (a trigger rect and a viewport, in viewport
-// coordinates) and its own arithmetic, so comparing it inside the card sweep is
-// not possible. The grid below crosses every branch: room below, no room below,
-// a window too short to hold the bubble at all, an unmeasurable viewport, and a
-// trigger scrolled off either end of the viewport.
+// `placeNear` is what positions both panel layers, and it was missing from this
+// file entirely — the same gap the bubble had before a review found it. Copying
+// the arithmetic into the bundle and forgetting to re-run the sync left every
+// other check green.
 {
-  const mismatches = []
-  let visible = 0
-  let flipped = 0
+  let mismatches = []
   let checked = 0
-  for (const viewportWidth of [400, 720, 900, 1200, 1600, 1920, 2560]) {
-    for (const viewportHeight of [120, 170, 176, 200, 400, 600, 1000, 1440]) {
-      for (const top of [-600, -300, -8, 0, 40, 300, viewportHeight - 120, viewportHeight - 60, viewportHeight + 200, 2600]) {
-        for (const left of [0, 2, 120, 380, viewportWidth - 40, viewportWidth + 120]) {
-          const input = {
-            trigger: { left, right: left + 40, top, bottom: top + 22 },
-            viewportWidth,
-            viewportHeight,
+  let swapped = 0
+  let visible = 0
+  for (const viewportWidth of [400, 760, 1200, 1600, 2560]) {
+    for (const viewportHeight of [120, 400, 1000]) {
+      for (const top of [-300, 0, 300, viewportHeight - 120, viewportHeight + 200]) {
+        for (const left of [2, 380, viewportWidth - 60]) {
+          for (const side of ['left', 'right', 'auto']) {
+            for (const width of [320, 380]) {
+              {
+                const input = {
+                  anchor: { left, right: left + 40, top, bottom: top + 26 },
+                  width,
+                  height: 240,
+                  side,
+                  viewportWidth,
+                  viewportHeight,
+                }
+                checked += 1
+                const mine = placeNear(input)
+                const theirs = inlined.placeNear(input)
+                if (mine.visible) visible += 1
+                if (side !== 'auto' && mine.visible && mine.side !== side) swapped += 1
+                const a = JSON.stringify(mine)
+                const b = JSON.stringify(theirs)
+                if (a !== b) mismatches.push(`${JSON.stringify(input)}: ${a} vs ${b}`)
+              }
+            }
           }
-          checked += 1
-          const mine = placeTip(input)
-          const theirTip = inlined.placeTip(input)
-          if (mine.visible) {
-            visible += 1
-            if (mine.top < input.trigger.top) flipped += 1
-          }
-          const a = JSON.stringify(mine)
-          const b = JSON.stringify(theirTip)
-          if (a !== b) mismatches.push(`${viewportWidth}x${viewportHeight}/${left}/${top}: ${a} vs ${b}`)
         }
       }
     }
   }
-  // Partial and unmeasurable inputs: these are the branches where a guard in the
-  // generated copy could be dropped and the sweep above would never notice.
   for (const input of [
     {},
-    { trigger: undefined, viewportWidth: 1600, viewportHeight: 1000 },
-    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: 1600, viewportHeight: 1000 },
-    { trigger: { left: 100, top: 300 }, viewportWidth: 1600, viewportHeight: 1000 },
-    { trigger: { left: 100, top: Number.NaN, bottom: 322 }, viewportWidth: 1600, viewportHeight: 1000 },
-    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: undefined, viewportHeight: undefined },
-    { trigger: { left: 100, top: -400, bottom: -378 }, viewportWidth: undefined, viewportHeight: undefined },
-    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: 1600, viewportHeight: undefined },
-    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: undefined, viewportHeight: 1000 },
+    { anchor: undefined, width: 320, height: 240, viewportWidth: 1600, viewportHeight: 1000 },
+    { anchor: { left: 100, top: 300 }, width: 320, height: 240, viewportWidth: 1600, viewportHeight: 1000 },
+    { anchor: { left: Number.NaN, top: 300, right: 140 }, width: 320, height: 240, viewportWidth: 1600, viewportHeight: 1000 },
+    { anchor: { left: 100, top: 300, right: 140, bottom: 326 }, width: 320, height: 240, viewportWidth: undefined, viewportHeight: undefined },
+    { anchor: { left: 100, top: 300, right: 140, bottom: 326 }, width: 320, height: 240, side: 'left', viewportWidth: 400, viewportHeight: 120 },
   ]) {
     checked += 1
-    const a = JSON.stringify(placeTip(input))
-    const b = JSON.stringify(inlined.placeTip(input))
+    const a = JSON.stringify(placeNear(input))
+    const b = JSON.stringify(inlined.placeNear(input))
     if (a !== b) mismatches.push(`degenerate ${JSON.stringify(input)}: ${a} vs ${b}`)
   }
-  check('the inlined copy places the bubble identically across a sweep', mismatches.length === 0, mismatches.slice(0, 3).join(' | '))
-  // Prove the grid reached both outcomes. A copy collapsed to `visible: false`
-  // would otherwise match a module collapsed the same way.
-  check('the tip sweep produced visible placements', visible > 0, `only ${visible} of ${checked} were visible`)
-  check('the tip sweep reached the flip-above branch', flipped > 0, `only ${flipped} of ${visible} flipped`)
+  check('the inlined copy places a popover identically across a sweep', mismatches.length === 0, mismatches.slice(0, 3).join(' | '))
+  check('the popover sweep produced visible placements', visible > 0, `only ${visible} of ${checked} were visible`)
+  // A copy whose side selection collapsed to the tiebreak alone would match any
+  // module collapsed the same way, so prove the requested side is sometimes
+  // refused as well as sometimes honoured.
+  check('the popover sweep reached the side fallback', swapped > 0, `only ${swapped} of ${visible} ignored the request`)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

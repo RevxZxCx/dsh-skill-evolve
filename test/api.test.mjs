@@ -22,6 +22,8 @@ import {
   describeSkills,
   json,
   readJsonBody,
+  readCandidates,
+  decideCandidate,
   readPanel,
   statTouchedFiles
 } from '../lib/api.js'
@@ -747,6 +749,157 @@ async function route(overrides, req) {
   check('an empty patch says there is nothing to change', bodyOf(res).data.ok === false, String(res.body))
 }
 
+
+// ---------------------------------------------------------------------------
+// The candidate routes the hover card talks to
+//
+// These functions are the only way the browser can approve or discard a skill,
+// and they were reachable with zero tests: the client suite fakes this route with
+// a stub, so nothing exercised the real shapes. What is worth pinning down is not
+// the happy path but the edges — a missing dependency has to answer "unavailable"
+// rather than throw, a stale row has to arrive marked, and a refusal has to travel
+// as data so the card can print it instead of "unknown error".
+// ---------------------------------------------------------------------------
+
+{
+  const rows = [
+    {
+      id: 'a',
+      name: 'pdf-tools',
+      description: `work with pdfs ${'d'.repeat(300)}`,
+      kind: 'create',
+      whenToUse: 'when a pdf appears',
+      body: 'B'.repeat(5000),
+      evidence: Array.from({ length: 9 }, (_, index) => ({ class: 'tool', quote: `quote ${index} ${'x'.repeat(400)}` })),
+    },
+    { id: 'b', name: 'stale-one', kind: 'create', description: '', body: 'B', stale: { reason: 'base-changed' } },
+  ]
+  const payload = await readCandidates(deps({ listCandidates: async () => rows }))
+  check('the candidate route reports itself available', payload.available === true, JSON.stringify(payload.available))
+  check('every candidate is listed', payload.candidates.length === 2, String(payload.candidates.length))
+  const first = payload.candidates[0]
+  check('a candidate keeps its id', first.id === 'a', String(first.id))
+  check('the description is truncated for transport', first.description.length <= 161, String(first.description.length))
+  check('a truncated description ends in an ellipsis', first.description.endsWith('…'), first.description.slice(-3))
+  check('the body is truncated for transport', first.body.length <= 4001, String(first.body.length))
+  check('evidence is capped at six quotes', first.evidence.length === 6, String(first.evidence.length))
+  check('each quote is truncated', first.evidence.every((entry) => entry.quote.length <= 301), JSON.stringify(first.evidence.map((entry) => entry.quote.length)))
+  check('a truncated string ends in an ellipsis', first.body.endsWith('…'), first.body.slice(-3))
+  const stale = payload.candidates[1]
+  check('a stale row arrives with its reason', stale.stale?.reason === 'base-changed', JSON.stringify(stale.stale))
+  check('a live row carries no stale field', first.stale === undefined, JSON.stringify(first.stale))
+  check('a candidate without a description still renders', stale.description === '', JSON.stringify(stale.description))
+}
+
+{
+  const payload = await readCandidates(deps({ listCandidates: undefined }))
+  check('an unwired queue says unavailable rather than throwing', payload.available === false, JSON.stringify(payload.available))
+  check('and it explains why', String(payload.reason).includes('not wired up'), String(payload.reason))
+  check('an unwired queue lists nothing', payload.candidates.length === 0, JSON.stringify(payload.candidates))
+}
+
+{
+  const payload = await readCandidates(
+    deps({
+      listCandidates: async () => {
+        throw new Error('the queue file is corrupt')
+      },
+    }),
+  )
+  check('a queue that fails to read says unavailable', payload.available === false, JSON.stringify(payload.available))
+  check('and the reason travels to the card', String(payload.reason).includes('corrupt'), String(payload.reason))
+}
+
+{
+  const refused = await decideCandidate(deps(), { name: '', action: 'approve' })
+  check('a nameless decision is refused', refused.ok === false && refused.code === 'no-name', JSON.stringify(refused))
+
+  const badAction = await decideCandidate(deps(), { name: 'alpha', action: 'delete' })
+  check('an unknown action is refused', badAction.ok === false && badAction.code === 'no-action', JSON.stringify(badAction))
+
+  const unwired = await decideCandidate(deps(), { name: 'alpha', action: 'approve' })
+  check('approving without a handler says unavailable', unwired.ok === false && unwired.code === 'unavailable', JSON.stringify(unwired))
+
+  const unwiredDiscard = await decideCandidate(deps(), { name: 'alpha', action: 'discard' })
+  check('discarding without a handler says unavailable', unwiredDiscard.ok === false && unwiredDiscard.code === 'unavailable', JSON.stringify(unwiredDiscard))
+}
+
+{
+  const seen = []
+  const approved = await decideCandidate(
+    deps({
+      approveCandidate: async (name, agentId) => {
+        seen.push([name, agentId])
+        return { ok: true, staged: true }
+      },
+    }),
+    { name: ' alpha ', action: 'approve' },
+    'agent-7',
+  )
+  check('an approve reaches the handler', approved.ok === true, JSON.stringify(approved))
+  check('the name is trimmed before use', seen[0]?.[0] === 'alpha', JSON.stringify(seen))
+  check('the deciding session travels with the request', seen[0]?.[1] === 'agent-7', JSON.stringify(seen))
+  check('the staged flag survives the hop', approved.staged === true, JSON.stringify(approved))
+}
+
+{
+  const refused = await decideCandidate(
+    deps({ approveCandidate: async () => ({ ok: false, code: 'refused', error: 'the evidence gate said no' }) }),
+    { name: 'alpha', action: 'approve' },
+  )
+  check('a refusal from the gate stays a refusal', refused.ok === false && refused.code === 'refused', JSON.stringify(refused))
+  check('the gate message survives so the card can print it', String(refused.error).includes('evidence gate'), JSON.stringify(refused))
+}
+
+{
+  const thrown = await decideCandidate(
+    deps({
+      approveCandidate: async () => {
+        throw new Error('the disk is full')
+      },
+    }),
+    { name: 'alpha', action: 'approve' },
+  )
+  check('a handler that throws still answers with data', thrown.ok === false, JSON.stringify(thrown))
+  check('the thrown message is preserved', String(thrown.error).includes('disk is full'), JSON.stringify(thrown))
+}
+
+{
+  const res = await route(
+    { approveCandidate: async () => ({ ok: true }) },
+    fakeReq({
+      url: `${ROUTE_PREFIX}/candidates?agent=agent-9`,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'alpha', action: 'approve' }),
+    }),
+  )
+  check('the decide route answers 200', res.statusCode === 200, String(res.statusCode))
+  check('the decide route uses the ok envelope', bodyOf(res).ok === true, String(res.body))
+  check('the decide route reports the outcome as data', bodyOf(res).data?.ok === true, String(res.body))
+}
+
+{
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates?agent=a`, method: 'POST', headers: { 'content-type': 'text/plain' }, body: '{}' }))
+  check('the decide route refuses a non-json body', res.statusCode === 415, String(res.statusCode))
+  check('and it names the type it got', String(bodyOf(res).error).includes('text/plain'), String(res.body))
+}
+
+{
+  // A structured-suffix type is still JSON; a form post is not. Both directions
+  // matter: refusing too much would break a client the host itself ships.
+  const suffix = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates`, method: 'POST', headers: { 'content-type': 'application/vnd.api+json' }, body: '{"name":"a","action":"discard"}' }))
+  check('a +json content type is accepted', suffix.statusCode === 200, String(suffix.statusCode))
+
+  const charset = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates`, method: 'POST', headers: { 'content-type': 'application/json; charset=utf-8' }, body: '{"name":"a","action":"discard"}' }))
+  check('a charset parameter does not hide the type', charset.statusCode === 200, String(charset.statusCode))
+
+  const form = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates`, method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: 'name=a' }))
+  check('a form post is refused', form.statusCode === 415, String(form.statusCode))
+
+  const bare = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates`, method: 'POST', body: '{"name":"a","action":"discard"}' }))
+  check('an untyped body is still parsed, so curl and the tests keep working', bare.statusCode === 200, String(bare.statusCode))
+}
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)
