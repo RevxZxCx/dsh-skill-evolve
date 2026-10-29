@@ -801,11 +801,40 @@ brings them back.
 
 - **The geometry moved to the conversation column, and the tests had to move with it.** The panel originally measured against the viewport. That read as correct because the prose is centred in the column, so both rectangles agreed on a wide window with no sidebar — and disagreed the moment the host sidebar opened, which put a card on top of it. The fix was to measure the column and place the card against the prose, but the instructive part is what the tests did. The guard meant to catch a drift between `lib/gutter.js` and its generated copy in `lib/client.js` compared those two copies against each other, and both copies were wrong in the same way — so it ran the placement arithmetic on 240 of its 360 inputs and agreed with itself every time. A comparison between two instances of the same mistake cannot fail. Two more guards turned out to be unobservable in the same way: they asserted an outcome that also holds for the broken implementation. All of them now have a mutation that must fail if they are weakened (`scripts/mutate-guards.mjs`, `scripts/mutate-bundle.mjs`), and `test/mutations.test.mjs` asserts the mutation anchors themselves still apply — an anchor written against the patch you meant to land silently proves nothing, which happened twice here. It also compares the generated block against `buildBlock()` from the sync script rather than against a second copy of the same transformation, and checks each side of the sweep drew both a card and a handle: the first version counted draws in total, so deleting one whole side still passed.
 
-The layout budget that decides how tall the bubble must be was itself transcribed rather than derived: the test restated the stylesheet's `10.5px` font, `1.5` line-height, `6px`/`8px` padding and `1px` border, then compared the result against `TIP_HEIGHT`. Changing the rule to `font:400 20px/1.5` made the bubble genuinely overflow its reserved height and the suite stayed green, because the two numbers being compared both came from the same place. The budget is now parsed out of the `.dsse-tip` rule, `max-width` is checked against `TIP_WIDTH` so the clamp cannot reserve one width while the browser draws another, and a guard fails loudly if the parse yields `NaN` rather than letting every comparison quietly come out false.
+Three more lessons came from the hover bubble that this card replaced, and they
+are recorded because each one generalises. First, the layout budget that decided
+how tall the bubble must be was *transcribed* rather than derived: the test
+restated the stylesheet's font size, line height and padding, then compared its own
+arithmetic against a constant it had also written down. Changing the rule to a
+20px font made the bubble genuinely overflow its reserved height and the suite
+stayed green, because both numbers compared came from the same place. The budget
+was changed to be parsed out of the stylesheet, and a guard was added to fail
+loudly when the parse yields `NaN` instead of letting every comparison quietly
+come out false. The bubble itself is gone; the rule stands.
 
-The call-site scan had a narrower version of the same fault: it matched `text: "..."` in double quotes within 120 characters of `jsx(Hint,`, so a second call site written with single quotes, a template literal, or a longer argument object would not have been measured at all — and a string that is not measured looks exactly like a string that fits. It now reads all three quote styles and asserts the number of measurements equals the number of call sites, so an unreadable call site fails as a count mismatch instead of passing as zero.
+Second, the scan that measured the bubble's text matched one quote style within a
+fixed distance of one call expression, so a second call site written differently
+would not have been measured at all — and a string that is not measured looks
+exactly like a string that fits. It read all three quote styles and asserted the
+number of measurements equalled the number of call sites, so an unreadable call
+site failed as a count mismatch rather than passing as zero.
 
-The same guard then went blind a second time, in the same way, for a new function. `placeTip` (the bubble) was added to `lib/gutter.js`, generated into the bundle by the sync script, and covered by its own unit tests in `test/gutter.test.mjs` — but the drift test's evaluated block returned only `gutters`, `placeCards` and `placeHandle`. Editing the bubble's arithmetic and skipping the sync left the copied stale code in place and the guard green, which is precisely the case it exists to catch; nothing failed because nothing compared it. Two readings were needed to notice: the unit tests all passed because they test the module, and the drift test passed because it never asked. The fix is a second sweep over the bubble's own input shape (trigger rect, viewport width and height) crossing room-below, no-room-below, a window too short for the bubble, an unmeasurable viewport, and a trigger scrolled past either end, plus a check that the sweep produced both visible and flipped placements — a copy collapsed to `visible: false` would otherwise match a module collapsed the same way. Rounding is directed rather than uniform — the prose edges round outward and the column edges inward — so a measured gutter is a lower bound on the real one; rounding both the same way measured 16px where the truth was 15.1 and drew a handle past the column edge.
+Third, the guard that exists to catch a drift between `lib/gutter.js` and its
+generated copy went blind twice, in the same way, for a new function: the drift
+test's evaluated block was a hand-written list, so a function added to the module
+and inlined into the bundle simply was not compared. Editing its arithmetic and
+skipping the sync left stale code in place and the guard green — precisely the
+case it exists to catch. Nothing failed because nothing asked. The fix is a sweep
+over each exported function's own input shape plus a check that the sweep produced
+more than one kind of answer: a copy collapsed to `visible: false` would otherwise
+match a module collapsed the same way. **The lesson is that the enumeration is
+hand-written and nothing forces it to grow**, so adding an export means asking
+which guards' lists need the new name.
+
+Rounding is directed rather than uniform — the prose edges round outward and the
+column edges inward — so a measured gutter is a lower bound on the real one;
+rounding both the same way measured 16px where the truth was 15.1 and drew a
+handle past the column edge.
 
 - **The core hypothesis is unproven.** The value depends on tasks recurring. If your work is genuinely one-off, this plugin will correctly stay silent and be worth nothing. That is the honest failure mode, and it is better than writing 50 useless skills.
 - **Detection is structural, not semantic.** It knows `bash,read,edit` repeated; it does not know whether the repetition was a good idea. The model supplies that judgement, which is why the hint asks rather than writes. The turn-end trigger exists specifically to cover what structure cannot see, but it can only reflect on what the model notices — a session that learned something and failed to articulate it teaches nothing.
@@ -835,3 +864,12 @@ The research that produced these decisions is in `docs/`:
 | `03-Hermes与开源生态补充.md` | Hermes in depth: `skill_manage`, Curator, frozen memory snapshots |
 | `04-开源实现横向对比.md` | 14 open-source implementations, four architectural shapes, five mechanisms worth copying |
 | `05-设计方案.md` | The design this code implements, including what was rejected and why |
+| `06-代码审查与修改建议.md` | An external review of an earlier design |
+| `07-方案评价与升级路线.md` | The same reviewer's assessment and upgrade path |
+
+`docs/handover/` is a different kind of document: a maintainer's record rather
+than a user's or a designer's. It holds the current state, the decisions as ADRs,
+every defect with the reason its test missed it, and the log of each review round.
+Those files are **append-only** — corrections are added, never edited in, because
+their whole purpose is to stay trustworthy when the conversation that produced
+them is gone. Start at `docs/handover/index.md`.
