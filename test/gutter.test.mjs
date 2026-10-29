@@ -694,6 +694,61 @@ function defaultLayout() {
   check('no window size or trigger position puts the bubble off screen', escapes === 0, escapesDetail)
 }
 
+{
+  // The sweep above proves the invariant, not the arithmetic that upholds it: a
+  // window sized 176 (exactly TIP_HEIGHT + 2 * TIP_MARGIN) is the boundary between
+  // the two vertical branches, and no sweep value lands on it. Each assertion
+  // below is one the reviewer's mutations survived before it existed.
+  const tall = TIP_HEIGHT + TIP_MARGIN * 2
+  const below = { left: 100, right: 140, top: 2000, bottom: 2020 }
+
+  // Just under the gate the bubble hugs the bottom edge; at the gate it snaps to
+  // the top one. Both numbers are stated so a 1px shift of the gate is visible.
+  check(
+    'a window 1px too short keeps the bubble against the bottom edge',
+    placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: tall - 1 }).top === tall - 1 - TIP_MARGIN,
+    String(placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: tall - 1 }).top),
+  )
+  check(
+    'a window exactly tall enough uses the full clamp',
+    placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: tall }).top === TIP_MARGIN,
+    String(placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: tall }).top),
+  )
+  // The too-short branch must not be reachable from a window that can hold the
+  // bubble: pinning it to TIP_MARGIN would pass the tall case and fail this one.
+  check(
+    'a window tall enough still places a trigger high on screen below it',
+    placeTip({ trigger: { left: 100, right: 140, top: 40, bottom: 60 }, viewportWidth: 1600, viewportHeight: 1000 }).top === 64,
+    String(placeTip({ trigger: { left: 100, right: 140, top: 40, bottom: 60 }, viewportWidth: 1600, viewportHeight: 1000 }).top),
+  )
+  // A viewport of 0 is not a viewport. Treating it as one collapses edge to 0 and
+  // clamps a 900px-left trigger to the left margin; the unmeasurable path instead
+  // reserves the bubble to the right of the trigger.
+  check(
+    'a zero-width viewport is treated as unmeasurable, not as zero',
+    placeTip({ trigger: { left: 900, right: 940, top: 300, bottom: 320 }, viewportWidth: 0, viewportHeight: 800 }).left === 892,
+    String(placeTip({ trigger: { left: 900, right: 940, top: 300, bottom: 320 }, viewportWidth: 0, viewportHeight: 800 }).left),
+  )
+  check(
+    'a zero-height viewport is treated as unmeasurable, not as zero',
+    placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: 0 }).top === below.bottom + TIP_OFFSET,
+    String(placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: 0 }).top),
+  )
+  // foot < 2 * TIP_MARGIN is where the two bounds would cross: without the inner
+  // Math.max the floor wins and Math.min returns a negative bound.
+  check(
+    'a viewport shorter than twice the margin does not cross the clamp',
+    placeTip({ trigger: { left: 100, right: 140, top: 300, bottom: 320 }, viewportWidth: 1600, viewportHeight: 15 }).top === TIP_MARGIN,
+    String(placeTip({ trigger: { left: 100, right: 140, top: 300, bottom: 320 }, viewportWidth: 1600, viewportHeight: 15 }).top),
+  )
+  // The left clamp was only ever exercised by one fixture with a positive left.
+  check(
+    'a trigger scrolled off the left edge is clamped to the margin',
+    placeTip({ trigger: { left: -500, right: -460, top: 300, bottom: 320 }, viewportWidth: 400, viewportHeight: 800 }).left === TIP_MARGIN,
+    String(placeTip({ trigger: { left: -500, right: -460, top: 300, bottom: 320 }, viewportWidth: 400, viewportHeight: 800 }).left),
+  )
+}
+
 console.log(`
 ${passed} passed, ${failed} failed`)
 process.exit(failed === 0 ? 0 : 1)

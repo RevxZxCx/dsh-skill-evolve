@@ -1341,18 +1341,68 @@ check(
 {
   const bundle = readFileSync(join(repo, "lib", "client.js"), "utf8")
   const texts = []
-  const callSite = /jsx\(Hint,\s*\{[\s\S]{0,120}?text:\s*"([^"]+)"/g
-  for (let hit = callSite.exec(bundle); hit !== null; hit = callSite.exec(bundle)) texts.push(hit[1])
+  // All three quote styles, and a wide window: the first version of this scan only
+  // matched a double-quoted string within 120 characters of `jsx(Hint,`, so a call
+  // site written any other way was silently not measured.
+  const quoteStyles = [
+    /jsx\(Hint,\s*\{[\s\S]*?text:\s*"([^"]*)"/,
+    /jsx\(Hint,\s*\{[\s\S]*?text:\s*'([^']*)'/,
+    /jsx\(Hint,\s*\{[\s\S]*?text:\s*`([^`]*)`/,
+  ]
+  const callSites = bundle.match(/jsx\(Hint,/g) ?? []
+  for (const style of quoteStyles) {
+    const wide = new RegExp(style.source, 'g')
+    for (let hit = wide.exec(bundle); hit !== null; hit = wide.exec(bundle)) texts.push(hit[1])
+  }
+  // One measurement per call site, so a style this scan cannot read shows up as a
+  // count mismatch instead of as a silently unmeasured string.
+  check(
+    'every Hint call site was measured',
+    texts.length === callSites.length,
+    `${texts.length} measured, ${callSites.length} call site(s)`,
+  )
 
   check("at least one Hint call site was found", texts.length > 0, String(texts.length))
 
-  // The width budget is the outer 230px minus 8px of padding and 1px of border on
-  // each side; 10.5px is the font size the stylesheet sets.
-  const perLine = Math.floor((TIP_WIDTH - 20) / 10.5)
+  // Every number in the layout budget is read out of the `.dsse-tip` rule rather
+  // than restated here. Restating them is how the first version of this block
+  // failed to notice a font-size change: it was comparing the stylesheet against a
+  // copy of the stylesheet, so enlarging the font really did make the bubble
+  // taller than TIP_HEIGHT while all of this stayed green.
+  const tipSheetForBudget = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  const budgetRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(tipSheetForBudget) ?? [])[1] ?? ''
+  const fontMatch = /font:\s*[^;]*?([\d.]+)px\s*\/\s*([\d.]+)/.exec(budgetRule)
+  const padMatch = /padding:\s*(?:([\d.]+)px\s+)?([\d.]+)px/.exec(budgetRule)
+  const borderMatch = /border:\s*([\d.]+)px/.exec(budgetRule)
+  const maxWidthMatch = /max-width:\s*([\d.]+)px/.exec(budgetRule)
+  const fontSize = fontMatch === null ? Number.NaN : Number(fontMatch[1])
+  const lineHeight = fontMatch === null ? Number.NaN : Number(fontMatch[2])
+  const padY = padMatch === null ? Number.NaN : Number(padMatch[1] ?? padMatch[2])
+  const padX = padMatch === null ? Number.NaN : Number(padMatch[2])
+  const borderPx = borderMatch === null ? Number.NaN : Number(borderMatch[1])
+  const maxWidthPx = maxWidthMatch === null ? Number.NaN : Number(maxWidthMatch[1])
+
+  // A parse that silently produced NaN would make every comparison below false in
+  // a way that reads like a layout failure, so say which reading broke.
+  check(
+    'the budget was read out of the stylesheet',
+    [fontSize, lineHeight, padY, padX, borderPx, maxWidthPx].every(Number.isFinite),
+    `font ${fontSize}/${lineHeight} pad ${padY}x${padX} border ${borderPx} max-width ${maxWidthPx}`,
+  )
+  // TIP_HEIGHT and TIP_WIDTH are declared in the geometry module; the stylesheet
+  // is what actually decides the size. If the two disagree the clamp reserves one
+  // number and the browser draws another.
+  check(
+    'the reserved width is the width the stylesheet declares',
+    maxWidthPx === TIP_WIDTH,
+    `stylesheet ${maxWidthPx}px vs TIP_WIDTH ${TIP_WIDTH}px`,
+  )
+
+  const perLine = Math.max(1, Math.floor((maxWidthPx - padX * 2 - borderPx * 2) / fontSize))
   for (const text of texts) {
     const lines = Math.max(1, Math.ceil(text.length / perLine))
-    // 15.75 is the 1.5 line-height at 10.5px; +12 padding, +2 border.
-    const needed = lines * 15.75 + 14
+    const needed = lines * fontSize * lineHeight + padY * 2 + borderPx * 2
     check(
       `TIP_HEIGHT covers the call site text (${text.length} chars, ${lines} line(s))`,
       needed <= TIP_HEIGHT,
