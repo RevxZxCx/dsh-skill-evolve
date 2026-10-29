@@ -19,7 +19,12 @@ import {
   gutters,
   placeCards,
   placeHandle,
+  placeTip,
   HANDLE_WIDTH,
+  TIP_WIDTH,
+  TIP_HEIGHT,
+  TIP_MARGIN,
+  TIP_OFFSET,
   MIN_CARD_WIDTH,
   MAX_CARD_WIDTH,
   CARD_GAP,
@@ -55,7 +60,7 @@ function loadInlined() {
   const end = source.indexOf('// </gutter>')
   if (start < 0 || end < 0) throw new Error('lib/client.js has no gutter markers — run scripts/sync-gutter.mjs')
   const block = source.slice(start, end)
-  const body = `${block}\nreturn { gutters, placeCards, placeHandle, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH }`
+  const body = `${block}\nreturn { gutters, placeCards, placeHandle, placeTip, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH, TIP_WIDTH, TIP_HEIGHT, TIP_MARGIN, TIP_OFFSET }`
   // eslint-disable-next-line no-new-func
   return new Function(body)()
 }
@@ -66,7 +71,11 @@ check('the inlined minimum card width matches the module', inlined.MIN_CARD_WIDT
 check('the inlined maximum card width matches the module', inlined.MAX_CARD_WIDTH === MAX_CARD_WIDTH, String(inlined.MAX_CARD_WIDTH))
 check('the inlined card gap matches the module', inlined.CARD_GAP === CARD_GAP, String(inlined.CARD_GAP))
 check('the inlined handle width matches the module', inlined.HANDLE_WIDTH === HANDLE_WIDTH, String(inlined.HANDLE_WIDTH))
-check('the inlined block exposes the three functions', ['gutters', 'placeCards', 'placeHandle'].every((name) => typeof inlined[name] === 'function'))
+check('the inlined block exposes the four functions', ['gutters', 'placeCards', 'placeHandle', 'placeTip'].every((name) => typeof inlined[name] === 'function'))
+check('the inlined tip width matches the module', inlined.TIP_WIDTH === TIP_WIDTH, String(inlined.TIP_WIDTH))
+check('the inlined tip height matches the module', inlined.TIP_HEIGHT === TIP_HEIGHT, String(inlined.TIP_HEIGHT))
+check('the inlined tip margin matches the module', inlined.TIP_MARGIN === TIP_MARGIN, String(inlined.TIP_MARGIN))
+check('the inlined tip offset matches the module', inlined.TIP_OFFSET === TIP_OFFSET, String(inlined.TIP_OFFSET))
 
 // Rect shapes that are incomplete in one edge at a time. The sweep below only
 // builds complete rects, so without these the `edges` argument to `usableRect` is
@@ -213,6 +222,64 @@ check('the inlined block exposes the three functions', ['gutters', 'placeCards',
     if (mine !== theirs) mismatches.push(`${JSON.stringify(input)}: ${mine} vs ${theirs}`)
   }
   check('the inlined copy handles degenerate input identically', mismatches.length === 0, mismatches.join(' | '))
+}
+
+// The bubble has its own input shape (a trigger rect and a viewport, in viewport
+// coordinates) and its own arithmetic, so comparing it inside the card sweep is
+// not possible. The grid below crosses every branch: room below, no room below,
+// a window too short to hold the bubble at all, an unmeasurable viewport, and a
+// trigger scrolled off either end of the viewport.
+{
+  const mismatches = []
+  let visible = 0
+  let flipped = 0
+  let checked = 0
+  for (const viewportWidth of [400, 720, 900, 1200, 1600, 1920, 2560]) {
+    for (const viewportHeight of [120, 170, 176, 200, 400, 600, 1000, 1440]) {
+      for (const top of [-600, -300, -8, 0, 40, 300, viewportHeight - 120, viewportHeight - 60, viewportHeight + 200, 2600]) {
+        for (const left of [0, 2, 120, 380, viewportWidth - 40, viewportWidth + 120]) {
+          const input = {
+            trigger: { left, right: left + 40, top, bottom: top + 22 },
+            viewportWidth,
+            viewportHeight,
+          }
+          checked += 1
+          const mine = placeTip(input)
+          const theirTip = inlined.placeTip(input)
+          if (mine.visible) {
+            visible += 1
+            if (mine.top < input.trigger.top) flipped += 1
+          }
+          const a = JSON.stringify(mine)
+          const b = JSON.stringify(theirTip)
+          if (a !== b) mismatches.push(`${viewportWidth}x${viewportHeight}/${left}/${top}: ${a} vs ${b}`)
+        }
+      }
+    }
+  }
+  // Partial and unmeasurable inputs: these are the branches where a guard in the
+  // generated copy could be dropped and the sweep above would never notice.
+  for (const input of [
+    {},
+    { trigger: undefined, viewportWidth: 1600, viewportHeight: 1000 },
+    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: 1600, viewportHeight: 1000 },
+    { trigger: { left: 100, top: 300 }, viewportWidth: 1600, viewportHeight: 1000 },
+    { trigger: { left: 100, top: Number.NaN, bottom: 322 }, viewportWidth: 1600, viewportHeight: 1000 },
+    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: undefined, viewportHeight: undefined },
+    { trigger: { left: 100, top: -400, bottom: -378 }, viewportWidth: undefined, viewportHeight: undefined },
+    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: 1600, viewportHeight: undefined },
+    { trigger: { left: 100, top: 300, bottom: 322 }, viewportWidth: undefined, viewportHeight: 1000 },
+  ]) {
+    checked += 1
+    const a = JSON.stringify(placeTip(input))
+    const b = JSON.stringify(inlined.placeTip(input))
+    if (a !== b) mismatches.push(`degenerate ${JSON.stringify(input)}: ${a} vs ${b}`)
+  }
+  check('the inlined copy places the bubble identically across a sweep', mismatches.length === 0, mismatches.slice(0, 3).join(' | '))
+  // Prove the grid reached both outcomes. A copy collapsed to `visible: false`
+  // would otherwise match a module collapsed the same way.
+  check('the tip sweep produced visible placements', visible > 0, `only ${visible} of ${checked} were visible`)
+  check('the tip sweep reached the flip-above branch', flipped > 0, `only ${flipped} of ${visible} flipped`)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

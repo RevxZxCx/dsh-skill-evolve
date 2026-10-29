@@ -38,6 +38,34 @@ const mutations = [
     from: '  if (!usableRect(chatRect, ALL_EDGES)) {\n    return { visible: false, side: preferred, left: 0, top: 0 }\n  }',
     to: '  if (chatRect == null) {\n    return { visible: false, side: preferred, left: 0, top: 0 }\n  }',
   },
+  {
+    label: 'placeTip loses the vertical clamp for an off-screen trigger',
+    from: [
+      '  if (foot !== undefined && foot >= TIP_HEIGHT + TIP_MARGIN * 2) {',
+      '    top = Math.max(TIP_MARGIN, Math.min(top, foot - TIP_HEIGHT - TIP_MARGIN))',
+      '  } else if (foot !== undefined) {',
+    ].join('\n'),
+    to: [
+      '  if (false) {',
+      '    top = Math.max(TIP_MARGIN, Math.min(top, foot - TIP_HEIGHT - TIP_MARGIN))',
+      '  } else if (foot !== undefined) {',
+    ].join('\n'),
+  },
+  {
+    label: 'placeTip drops the bottom bound once the trigger is below the window',
+    from: '    top = Math.max(TIP_MARGIN, Math.min(top, Math.max(TIP_MARGIN, foot - TIP_MARGIN)))',
+    to: '    top = Math.max(TIP_MARGIN, top)',
+  },
+  {
+    label: 'placeTip drops the floor when the viewport height is unknown',
+    from: '    top = Math.max(TIP_MARGIN, top)',
+    to: '    top = top',
+  },
+  {
+    label: 'TIP_HEIGHT is reserved smaller than the text it has to hold',
+    from: 'export const TIP_HEIGHT = 160',
+    to: 'export const TIP_HEIGHT = 40',
+  },
 ]
 
 const results = []
@@ -51,11 +79,14 @@ for (const mutation of mutations) {
     run({ ref: 'scripts/sync-gutter.mjs' })
     const gutterOut = run({ ref: 'test/gutter.test.mjs' })
     const driftOut = run({ ref: 'test/gutter-drift.test.mjs' })
-    const killed = failures(gutterOut) + failures(driftOut)
+    // The bubble-text check lives in the client suite, and it is the only thing
+    // that fails when TIP_HEIGHT is reserved smaller than the text it holds.
+    const clientOut = run({ ref: 'test/client.test.mjs' })
+    const killed = failures(gutterOut) + failures(driftOut) + failures(clientOut)
     results.push({
       label: mutation.label,
       outcome: killed > 0 ? `killed by ${killed}` : 'SURVIVED',
-      detail: [gutterOut.trim().split('\n').pop(), driftOut.trim().split('\n').pop()].join(' | '),
+      detail: [gutterOut, driftOut, clientOut].map((out) => out.trim().split('\n').pop()).join(' | '),
     })
   } finally {
     fs.writeFileSync(gutter, original)

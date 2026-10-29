@@ -286,6 +286,24 @@ the only writes it can make are `POST /config` (its own switches) and
 a skill file, or approve a candidate. Those stay behind the tools and the human
 handshake described above.
 
+**Why the propose button explains itself in CSS.** The one action whose
+consequence is not visible from its label is *propose*: it writes a hint into
+this conversation rather than creating anything. Its explanation is a bubble the
+bundle draws, not the browser's `title` attribute. A native tooltip appears after
+about a second, cannot be styled, and — the deciding point — is clipped by the
+card's `overflow: hidden` to the card's own width, so in practice the sentence
+was never fully readable. The bubble is `position: fixed` and clamped to the
+viewport by the same pure-function geometry the cards use, with the clamp
+asserted in Node against a sweep of window sizes and trigger positions rather than
+against hand-computed numbers.
+
+Two details there are deliberate. The hover handlers sit on the wrapper rather
+than on the button, because a *disabled* button receives no mouse events in
+Chrome — and "the button is greyed out, why" is exactly when the explanation is
+wanted. And `aria-describedby` is put on the focused element by cloning it, not on
+the wrapper: `aria-describedby` is not inherited, and a wrapper without `tabindex`
+never takes focus, so an association on the wrapper is inert.
+
 **It needs a host restart.** The host discovers client bundles when its plugin
 graph is rebuilt, and editing `package.json` does not trigger that. If the panel
 does not appear after restarting, the Plugins page names the reason per entry.
@@ -645,14 +663,14 @@ plugin against a real cordis container, because several defects only appear when
 the framework's own service lookup is exercised. `test/mutate-panel.mjs`
 deliberately re-introduces each defect the panel's reviews found, one at a time,
 and fails if the suite stays green — a test that cannot fail is a test that is
-not testing. All ten mutations are currently killed.
+not testing. All eight guard mutations and every panel mutation are currently killed.
 
 ```bash
 node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-1531 assertions across 29 suites. They are plain Node scripts with no test
+1585 assertions across 29 suites. They are plain Node scripts with no test
 framework, so they also double as executable documentation.
 
 **The runner treats a crash as a failure.** It checks the exit code *and* the
@@ -681,7 +699,7 @@ signal would mislabel it.
 | `review-fixes.test.mjs` | The defects code review found: concurrent finalize, revision state loss, `off` closing the panel route, white-space digests, stale recomputation at write time |
 | `runner.test.mjs` | That the runner fails a suite which crashes, hangs, or exits non-zero |
 | `api.test.mjs` / `panel-wiring.test.mjs` / `client.test.mjs` | The panel's HTTP surface, its wiring into a host, and the browser bundle |
-| `gutter.test.mjs` / `gutter-drift.test.mjs` | Card placement geometry, and that the bundle's inlined copy still behaves like the module |
+| `gutter.test.mjs` / `gutter-drift.test.mjs` | Card and bubble placement geometry, and that the bundle's inlined copy still behaves like the module |
 | `summarise.test.mjs` / `transcript.test.mjs` | The one module that spends money, and the transcript it is fed |
 | `catalog.test.mjs` / `market.test.mjs` / `search.test.mjs` | Catalog rewriting, the skill market, and searching shrunk entries |
 | `usage.test.mjs` / `service.test.mjs` / `mutations.test.mjs` | Use counting, service lookup, and the panel mutation harness |
@@ -742,7 +760,9 @@ is annotating. Widening the window or collapsing the host's own left sidebar
 brings them back.
 
 
-- **The geometry moved to the conversation column, and the tests had to move with it.** The panel originally measured against the viewport. That read as correct because the prose is centred in the column, so both rectangles agreed on a wide window with no sidebar — and disagreed the moment the host sidebar opened, which put a card on top of it. The fix was to measure the column and place the card against the prose, but the instructive part is what the tests did. The guard meant to catch a drift between `lib/gutter.js` and its generated copy in `lib/client.js` compared those two copies against each other, and both copies were wrong in the same way — so it ran the placement arithmetic on 240 of its 360 inputs and agreed with itself every time. A comparison between two instances of the same mistake cannot fail. Two more guards turned out to be unobservable in the same way: they asserted an outcome that also holds for the broken implementation. All of them now have a mutation that must fail if they are weakened (`scripts/mutate-guards.mjs`, `scripts/mutate-bundle.mjs`), and `test/mutations.test.mjs` asserts the mutation anchors themselves still apply — an anchor written against the patch you meant to land silently proves nothing, which happened twice here. It also compares the generated block against `buildBlock()` from the sync script rather than against a second copy of the same transformation, and checks each side of the sweep drew both a card and a handle: the first version counted draws in total, so deleting one whole side still passed. Rounding is directed rather than uniform — the prose edges round outward and the column edges inward — so a measured gutter is a lower bound on the real one; rounding both the same way measured 16px where the truth was 15.1 and drew a handle past the column edge.
+- **The geometry moved to the conversation column, and the tests had to move with it.** The panel originally measured against the viewport. That read as correct because the prose is centred in the column, so both rectangles agreed on a wide window with no sidebar — and disagreed the moment the host sidebar opened, which put a card on top of it. The fix was to measure the column and place the card against the prose, but the instructive part is what the tests did. The guard meant to catch a drift between `lib/gutter.js` and its generated copy in `lib/client.js` compared those two copies against each other, and both copies were wrong in the same way — so it ran the placement arithmetic on 240 of its 360 inputs and agreed with itself every time. A comparison between two instances of the same mistake cannot fail. Two more guards turned out to be unobservable in the same way: they asserted an outcome that also holds for the broken implementation. All of them now have a mutation that must fail if they are weakened (`scripts/mutate-guards.mjs`, `scripts/mutate-bundle.mjs`), and `test/mutations.test.mjs` asserts the mutation anchors themselves still apply — an anchor written against the patch you meant to land silently proves nothing, which happened twice here. It also compares the generated block against `buildBlock()` from the sync script rather than against a second copy of the same transformation, and checks each side of the sweep drew both a card and a handle: the first version counted draws in total, so deleting one whole side still passed.
+
+The same guard then went blind a second time, in the same way, for a new function. `placeTip` (the bubble) was added to `lib/gutter.js`, generated into the bundle by the sync script, and covered by its own unit tests in `test/gutter.test.mjs` — but the drift test's evaluated block returned only `gutters`, `placeCards` and `placeHandle`. Editing the bubble's arithmetic and skipping the sync left the copied stale code in place and the guard green, which is precisely the case it exists to catch; nothing failed because nothing compared it. Two readings were needed to notice: the unit tests all passed because they test the module, and the drift test passed because it never asked. The fix is a second sweep over the bubble's own input shape (trigger rect, viewport width and height) crossing room-below, no-room-below, a window too short for the bubble, an unmeasurable viewport, and a trigger scrolled past either end, plus a check that the sweep produced both visible and flipped placements — a copy collapsed to `visible: false` would otherwise match a module collapsed the same way. Rounding is directed rather than uniform — the prose edges round outward and the column edges inward — so a measured gutter is a lower bound on the real one; rounding both the same way measured 16px where the truth was 15.1 and drew a handle past the column edge.
 
 - **The core hypothesis is unproven.** The value depends on tasks recurring. If your work is genuinely one-off, this plugin will correctly stay silent and be worth nothing. That is the honest failure mode, and it is better than writing 50 useless skills.
 - **Detection is structural, not semantic.** It knows `bash,read,edit` repeated; it does not know whether the repetition was a good idea. The model supplies that judgement, which is why the hint asks rather than writes. The turn-end trigger exists specifically to cover what structure cannot see, but it can only reflect on what the model notices — a session that learned something and failed to articulate it teaches nothing.

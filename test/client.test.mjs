@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { placeCards } from '../lib/gutter.js'
+import { placeCards, TIP_WIDTH, TIP_HEIGHT } from '../lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -47,7 +47,15 @@ function check(label, condition, detail) {
  */
 function element(type, props) {
   const component = typeof type === 'function' ? type : undefined
-  return { type: component === undefined ? type : component.name || 'anonymous', component, props: props ?? {} }
+  return {
+    // React identifies elements by this marker, not by their shape. Carrying it
+    // lets `isValidElement` below make the same judgement the real runtime does
+    // instead of accepting anything that happens to have `type` and `props`.
+    $$typeof: Symbol.for('react.element'),
+    type: component === undefined ? type : component.name || 'anonymous',
+    component,
+    props: props ?? {},
+  }
 }
 
 /**
@@ -193,8 +201,21 @@ function createRenderer() {
         list.length !== prior.deps.length ||
         list.some((value, index) => !Object.is(value, prior.deps[index]))
       if (!changed) return
-      deps.set(key, { deps: list })
-      pending.push(effect)
+      // React tears down the previous effect before running the new one. Without
+      // this, an effect with non-empty deps that subscribes to something leaks its
+      // first subscription — and a leak is exactly what the tooltip assertions
+      // are trying to detect.
+      if (prior !== undefined && typeof prior.cleanup === 'function') prior.cleanup()
+      const record = { deps: list, cleanup: undefined }
+      deps.set(key, record)
+      pending.push(() => {
+        const cleanup = effect()
+        record.cleanup = typeof cleanup === 'function' ? cleanup : undefined
+        // Return it so the renderer can collect it. Without this the renderer's
+        // own `typeof cleanup === 'function'` check sees undefined, `cleanups`
+        // stays empty, and `unmount()` quietly does nothing.
+        return record.cleanup
+      })
     },
     useMemo(factory, list) {
       const key = hookIndex++
@@ -219,6 +240,34 @@ function createRenderer() {
       return slots.get(key).value
     },
     createElement: element,
+    /**
+     * Merge props into an existing element.
+     *
+     * Only the shallow merge of object props that this bundle relies on; a real
+     * React also remounts on a changed key and re-resolves refs, neither of which
+     * is observable here.
+     *
+     * @param {object} node - the element to copy.
+     * @param {object} props - the props to merge in.
+     * @returns {object} the new element.
+     */
+    cloneElement(node, props) {
+      return { ...node, props: { ...node.props, ...props } }
+    },
+    /**
+     * Tell an element literal from a string or null.
+     *
+     * The test is `$$typeof`, not the shape: an earlier version recognised an
+     * element by having `type` and `props`, which accepted plain objects that were
+     * never rendered and rejected nothing a real element needs. React itself keys
+     * off this symbol, so the double does too.
+     *
+     * @param {unknown} value - the candidate.
+     * @returns {boolean} whether it is an element.
+     */
+    isValidElement(value) {
+      return typeof value === 'object' && value !== null && value.$$typeof === Symbol.for('react.element')
+    },
   }
 
   /**
@@ -271,12 +320,26 @@ function createRenderer() {
     walk(node, (row) => {
       const ref = row.props?.ref
       if (ref !== null && typeof ref === 'object' && 'current' in ref && ref.current === null) {
-        ref.current = nodeForRef
+        // The tooltip trigger has its own node when a test supplies one: the
+        // clamp only differs from a lower bound once the button sits near the
+        // right edge, so the trigger's position has to be settable.
+        const isTrigger = String(row.props?.className ?? '').includes('dsse-tip-anchor')
+        ref.current = isTrigger && nodeForTrigger !== null ? nodeForTrigger : nodeForRef
       }
     })
   }
 
   let nodeForRef = null
+  let nodeForTrigger = null
+
+  /**
+   * Give every tooltip trigger a node at a fixed screen position.
+   *
+   * @param {object | null} node - the fake DOM node, or null to share the frame.
+   */
+  function setTriggerForRef(node) {
+    nodeForTrigger = node
+  }
 
   /**
    * Tell the renderer what a ref should resolve to.
@@ -341,7 +404,7 @@ function createRenderer() {
     return node
   }
 
-  return { hooks, render, deepRender, unmount, setNodeForRef }
+  return { hooks, render, deepRender, unmount, setNodeForRef, setTriggerForRef }
 }
 
 /**
@@ -410,14 +473,33 @@ function boot(options) {
   }
 
   let captured
+  // Recorded so a test can assert that every listener added is also removed.
+  // A no-op stub cannot express a leak, which is why the review found the
+  // resize/scroll pair untested rather than merely unasserted.
+  const listeners = []
   const windowStub = {
     __ModuleLoader__: {
       load(entry) {
         captured = entry
       },
     },
-    addEventListener() {},
-    removeEventListener() {},
+    // Absent by default, exactly as in the test double the review used: the
+    // clamp branch must behave when the viewport cannot be measured, and tests
+    // that describe a narrow window set it explicitly.
+    innerWidth: settings.innerWidth,
+    // Set explicitly by the fixtures that exercise the vertical clamp. Left
+    // undefined elsewhere so the "viewport cannot be measured" branch keeps being
+    // exercised by everything that does not care about it.
+    innerHeight: settings.innerHeight,
+    addEventListener(type, handler, options) {
+      listeners.push({ type, handler, options })
+    },
+    removeEventListener(type, handler, options) {
+      const at = listeners.findIndex(
+        (row) => row.type === type && row.handler === handler && row.options === options,
+      )
+      if (at >= 0) listeners.splice(at, 1)
+    },
   }
 
   const routes = settings.routes ?? {}
@@ -445,6 +527,16 @@ function boot(options) {
   // conversation column's. Tests that describe a narrow window must narrow both.
   const frame = settings.frame ?? { left: 0, top: 0, width: 1920, height: 1000 }
   renderer.setNodeForRef(fakeNode(frame))
+  // Default: the trigger shares the frame node, so its rect starts at the
+  // frame's left edge. Tests that care about placement set this. `triggerTop` is
+  // separate because the vertical clamp only decides anything once the trigger is
+  // close enough to the bottom edge that the bubble below it would overflow.
+  renderer.setTriggerForRef(
+    settings.triggerLeft === undefined
+      ? null
+      : fakeNode({ left: settings.triggerLeft, top: settings.triggerTop ?? 300, width: 40, height: 20 }),
+  )
+
 
   const source = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
   const evaluate = new Function('window', 'document', 'fetch', 'getComputedStyle', 'setInterval', 'clearInterval', source)
@@ -457,6 +549,7 @@ function boot(options) {
   return {
     module,
     ctx,
+    listeners,
     registrations,
     effects,
     injectedNames,
@@ -1032,6 +1125,196 @@ check(
 }
 
 // ---------------------------------------------------------------------------
+// The explanation on the propose button
+// ---------------------------------------------------------------------------
+
+{
+  // The button once carried a native `title`. That tooltip is browser-owned: it
+  // waits about a second before appearing, cannot be styled, and inside a card
+  // with `overflow:hidden` it is clipped to the card's width. So the sentence
+  // explaining what the button does was effectively invisible.
+  const instance = boot({ routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const first = await instance.renderer.deepRender(cards)
+  // The Overlay already watches `resize` to re-measure its geometry, so only a
+  // delta around the hover describes the bubble's own listeners.
+  const baseListeners = instance.listeners.length
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  check('the propose button is wrapped in a hover trigger', trigger !== undefined, textOf(first).slice(0, 120))
+  check('no tooltip is shown before hovering', firstByClass(first, 'dsse-tip') === undefined)
+
+  const button = byClass(first, 'dsse-btn')[0]
+  check('the button no longer asks the browser for a tooltip', button?.props?.title === undefined, String(button?.props?.title))
+
+  // A disabled button receives no mouse events in Chrome, which is exactly when
+  // someone wants to know why. The wrapper is what the handlers sit on, so this
+  // asserts the wrapper — not the button — owns the interaction.
+  check('the trigger carries the hover handler', typeof trigger?.props?.onMouseEnter === 'function')
+  check('the trigger also reacts to keyboard focus', typeof trigger?.props?.onFocus === 'function')
+
+  // Guard the whole interaction: without the wrapper there is nothing to hover,
+  // and a `TypeError` here would be reported as "0 failing" — a crash dressed up
+  // as a pass. Fail by name instead.
+  check('the trigger can be hovered at all', trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function')
+  if (trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function') {
+    trigger.props.onMouseEnter()
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  }
+
+  const shown = await instance.renderer.deepRender(cards)
+  const tip = firstByClass(shown, 'dsse-tip')
+  check('hovering reveals the explanation', tip !== undefined)
+  const words = textOf(tip)
+  check('the explanation says what pressing the button does', words.includes('值不值得沉淀成技能'), words)
+  check('the explanation says it will not create a file on its own', words.includes('不会自动新建技能文件'), words)
+  check('the explanation is marked as a tooltip for assistive tech', tip?.props?.role === 'tooltip', String(tip?.props?.role))
+
+  // The cards sit in a side gutter; an unclamped bubble opens past the window
+  // edge. An unmeasured viewport would make this NaN, which reaches CSS as
+  // `left:NaNpx` and parks the bubble at the origin instead of beside its button.
+  const style = tip?.props?.style ?? {}
+  check('the bubble is horizontally placed with a finite value', typeof style.left === 'string' && style.left.endsWith('px') && Number.isFinite(Number(style.left.slice(0, -2))), String(style.left))
+  // `endsWith("px")` is satisfied by "NaNpx", so this has to read the number.
+  check(
+    'the bubble has a finite vertical placement',
+    typeof style.top === 'string' && style.top.endsWith('px') && Number.isFinite(Number(style.top.slice(0, -2))),
+    String(style.top),
+  )
+  // The attribute has to sit on the focusable element. Putting it on the wrapper
+  // span leaves it inert, because that span never receives focus — which is the
+  // mistake the second review caught.
+  const described = byClass(shown, 'dsse-btn')[0]?.props?.['aria-describedby']
+  check('the button points at the bubble it just opened', typeof described === 'string' && described.length > 0, String(described))
+  check('and the bubble carries that same id', tip?.props?.id === described, String(tip?.props?.id))
+  check(
+    'the description is not put on the unfocusable wrapper',
+    firstByClass(shown, 'dsse-tip-anchor')?.props?.['aria-describedby'] === undefined,
+    String(firstByClass(shown, 'dsse-tip-anchor')?.props?.['aria-describedby']),
+  )
+  check(
+    'the description is only advertised while the bubble exists',
+    byClass(first, 'dsse-btn')[0]?.props?.['aria-describedby'] === undefined,
+    String(byClass(first, 'dsse-btn')[0]?.props?.['aria-describedby']),
+  )
+
+  // Fixed positioning alone is not enough — the stylesheet must also carry the
+  // rule, or the element inherits `position:static` and `top/left` are inert.
+  // Whitespace-tolerant and comment-free for the same reason as the width check
+  // below: formatting is not a behavioural change, and a comment is not a rule.
+  const sheet = instance.styles
+    .map((node) => String(node.textContent))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  const fixedRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(sheet) ?? [])[1] ?? ''
+  check('the stylesheet positions the bubble as fixed', fixedRule.includes('position:fixed'), fixedRule.slice(0, 80))
+
+  // A listener that is never removed outlives the bubble. The stub records
+  // every add/remove pair, so this can actually be checked.
+  const added = instance.listeners.slice(baseListeners).filter((row) => row.type === 'resize' || row.type === 'scroll')
+  check('an open bubble watches for resize and scroll', added.length === 2, String(added.length))
+  check(
+    'the scroll listener uses the capture phase so nested scrollers count',
+    added.some((row) => row.type === 'scroll' && row.options === true),
+    JSON.stringify(added.map((row) => [row.type, row.options])),
+  )
+
+  const hideTrigger = firstByClass(shown, 'dsse-tip-anchor')
+  check('the trigger survives the hover', hideTrigger !== undefined)
+  if (hideTrigger !== undefined) {
+    hideTrigger.props.onMouseLeave()
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  }
+  const hidden = await instance.renderer.deepRender(cards)
+  check('leaving the button dismisses the explanation', firstByClass(hidden, 'dsse-tip') === undefined)
+  const remaining = instance.listeners.slice(baseListeners).filter((row) => row.type === 'resize' || row.type === 'scroll')
+  check('dismissing also removes the listeners', remaining.length === 0, String(remaining.length))
+}
+
+// ---------------------------------------------------------------------------
+// The bubble stays inside a measurable window
+// ---------------------------------------------------------------------------
+
+{
+  // The button sits in the side gutter near the right edge of the frame, which is
+  // the case an unclamped bubble gets wrong. 400px is narrower than the bubble,
+  // so the only placement that keeps it on screen starts at the 8px margin.
+  const instance = boot({ routes: panelRoutes(), innerWidth: 400, triggerLeft: 380 })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  // Guard the hover: without the wrapper there is nothing to hover, and a
+  // `TypeError` here is reported as a crash rather than as a failing assertion.
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  check('a narrow window still has a hoverable trigger', trigger !== undefined)
+  if (trigger !== undefined) trigger.props.onMouseEnter()
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
+  const left = Number(String(tip?.props?.style?.left ?? '').replace('px', ''))
+  check('a narrow window still places the bubble on screen', Number.isFinite(left) && left >= 8, String(tip?.props?.style?.left))
+  check('and keeps its right edge inside the window', left + 230 <= 400, String(left))
+}
+
+{
+  // The other end of the clamp. A button at x=2 — the collapsed handle on the
+  // left rail, or a very narrow window — would otherwise open the bubble at x=2
+  // with its text touching the frame edge. Without this fixture the `Math.max(8,
+  // …)` bound is never the deciding term, so deleting it stays green.
+  const instance = boot({ routes: panelRoutes(), innerWidth: 1200, triggerLeft: 2 })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  check('a left-edge button is still hoverable', trigger !== undefined)
+  if (trigger !== undefined) trigger.props.onMouseEnter()
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
+  const left = Number(String(tip?.props?.style?.left ?? '').replace('px', ''))
+  check('the bubble never starts closer than the margin', Number.isFinite(left) && left >= 8, String(tip?.props?.style?.left))
+  // The clamp reserves the declared width, so the declared width has to be the
+  // outer width. Without `border-box` the 16px of padding and the 1px border are
+  // added on top and the bubble overflows by 18px — invisible to every other
+  // assertion here, because the harness does not lay anything out.
+  // Strip comments before matching, and allow whitespace before the brace. Searching
+  // the raw sheet let a comment satisfy the assertion (a false pass) and made a
+  // single added space cancel it (a false failure) — neither is a layout change.
+  const tipSheet = instance.styles
+    .map(node => String(node.textContent))
+    .join('\n')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+  const tipRule = (/\.dsse-tip\s*\{([^}]*)\}/.exec(tipSheet) ?? [])[1] ?? ''
+  check(
+    'the width the clamp reserves is the bubble\'s outer width',
+    tipRule.includes('box-sizing:border-box') && tipRule.includes('max-width:230px'),
+    tipRule.slice(0, 80),
+  )
+  check('the rule was actually found', tipRule.length > 0, String(tipRule.length))
+  check('the margin pushes it away from the edge', left === 8, String(left))
+
+  // Unmounting has to unhook the listeners. This is the assertion that would have
+  // caught the harness regression the third review found: the effect wrapper
+  // returned nothing, so `cleanups` stayed empty, `unmount()` was a no-op, and
+  // every other test passed anyway.
+  // The overlay subscribes to `resize` on mount too, and unmounting tears that
+  // down as well — so this delta proves the listeners are released, not that all
+  // of them belonged to the bubble. The bubble's own pair is covered separately by
+  // "an open bubble watches for resize and scroll"; this one guards against the
+  // harness going back to an `unmount()` that does nothing at all.
+  const isDismiss = row => row.type === 'resize' || row.type === 'scroll'
+  const held = instance.listeners.filter(isDismiss).length
+  instance.renderer.unmount()
+  const afterUnmount = instance.listeners.filter(isDismiss).length
+  check('unmounting drops the listeners the bubble hooked', afterUnmount < held, `${held} → ${afterUnmount}`)
+}
+
+// ---------------------------------------------------------------------------
 // Every host slot this bundle names must be one the host publishes
 // ---------------------------------------------------------------------------
 
@@ -1042,6 +1325,39 @@ check(
   const published = new Set(['conversation.session.header.actions', 'shell.overlay'])
   for (const name of booted.injectedNames) {
     check(`"${name}" is a slot the host publishes`, published.has(name), name)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TIP_HEIGHT has to stay an upper bound on the real call sites.
+//
+// The geometry reserves TIP_HEIGHT rather than measuring the bubble, because the
+// bubble is placed before it is laid out and reading its rect would give the size
+// of the previous bubble. That trade only holds while every call site text fits,
+// and nothing else in the suite would notice a longer string being added: it would
+// simply clamp against a height smaller than the thing it is clamping. So the
+// heights are computed here from the bundle source itself.
+// ---------------------------------------------------------------------------
+{
+  const bundle = readFileSync(join(repo, "lib", "client.js"), "utf8")
+  const texts = []
+  const callSite = /jsx\(Hint,\s*\{[\s\S]{0,120}?text:\s*"([^"]+)"/g
+  for (let hit = callSite.exec(bundle); hit !== null; hit = callSite.exec(bundle)) texts.push(hit[1])
+
+  check("at least one Hint call site was found", texts.length > 0, String(texts.length))
+
+  // The width budget is the outer 230px minus 8px of padding and 1px of border on
+  // each side; 10.5px is the font size the stylesheet sets.
+  const perLine = Math.floor((TIP_WIDTH - 20) / 10.5)
+  for (const text of texts) {
+    const lines = Math.max(1, Math.ceil(text.length / perLine))
+    // 15.75 is the 1.5 line-height at 10.5px; +12 padding, +2 border.
+    const needed = lines * 15.75 + 14
+    check(
+      `TIP_HEIGHT covers the call site text (${text.length} chars, ${lines} line(s))`,
+      needed <= TIP_HEIGHT,
+      `needed ${needed.toFixed(2)}px, reserved ${TIP_HEIGHT}px`,
+    )
   }
 }
 
