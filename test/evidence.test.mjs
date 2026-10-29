@@ -182,15 +182,25 @@ check('refuses to match a too-short fragment', quoteAppears('pip', normalize(COR
   }).survived.length === 0)
 
   // Exactly what the host records when the model submits, is refused, and tries
-  // the same sentence again.
+  // the same sentence again. The result uses the host's real nesting: the id is
+  // in `data.message`, not at the top of `data`. A flat fixture passed through
+  // the fallback branch and proved nothing about the echo check.
   const echoed = [
     ...base,
     { type: 'tool/call', data: { callId: 'call-1', name: 'skill_candidate_submit', arguments: '{"name":"alpha"}' } },
     {
       type: 'tool/result',
       data: {
-        callId: 'call-1',
-        content: [{ type: 'text', text: `skill_candidate_submit failed: no-verified-evidence. Could not verify tool quote: "${INVENTED}"` }]
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'call-1' },
+          toolCallId: 'call-1',
+          isError: true,
+          content: [{ type: 'text', text: `skill_candidate_submit failed: no-verified-evidence. Could not verify tool quote: "${INVENTED}"` }],
+          id: 'm-1'
+        }
       }
     }
   ]
@@ -203,11 +213,28 @@ check('refuses to match a too-short fragment', quoteAppears('pip', normalize(COR
   check('the refusal text is still quotable as this plugin talking', lanesFromEvents(echoed).tool.includes('no-verified-evidence') === false)
 
   // The fix must not shrink the lane for real observations. A bash result in
-  // the same session still proves a number.
+  // the same session still proves a number. This fixture uses the host's real
+  // nesting too: a flat one would fall through to the fallback branch and pass
+  // no matter how the echo check was written, so it would not guard against the
+  // failure it exists to catch — dropping every real result from the lane.
   const withRealTool = [
     ...echoed,
     { type: 'tool/call', data: { callId: 'call-2', name: 'bash', arguments: '{"command":"npm test"}' } },
-    { type: 'tool/result', data: { callId: 'call-2', content: [{ type: 'text', text: '12 tests passed, 0 failed' }] } }
+    {
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'call-2' },
+          toolCallId: 'call-2',
+          isError: false,
+          content: [{ type: 'text', text: '12 tests passed, 0 failed' }],
+          id: 'm-2'
+        }
+      }
+    }
   ]
   const real = runGate({
     evidence: [{ class: 'tool', quote: '12 tests passed, 0 failed' }],
@@ -216,10 +243,25 @@ check('refuses to match a too-short fragment', quoteAppears('pip', normalize(COR
   check('a real tool result still verifies', real.survived.length === 1 && real.authoritative === true)
 
   // A result whose call the host did not record stays usable: refusing to use
-  // it would let a missing event silently disable legitimate evidence.
+  // it would let a missing event silently disable legitimate evidence. The
+  // result still has the real nesting; what is missing is the matching call.
   const orphan = [
     ...base,
-    { type: 'tool/result', data: { callId: 'call-x', content: [{ type: 'text', text: 'disk was full at that point' }] } }
+    {
+      type: 'tool/result',
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'tool',
+          source: { callId: 'call-x' },
+          toolCallId: 'call-x',
+          isError: false,
+          content: [{ type: 'text', text: 'disk was full at that point' }],
+          id: 'm-x'
+        }
+      }
+    }
   ]
   check('a result with no visible call is still machine evidence',
     lanesFromEvents(orphan).tool.includes('disk was full at that point'))

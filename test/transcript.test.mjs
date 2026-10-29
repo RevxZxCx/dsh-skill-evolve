@@ -47,8 +47,23 @@ const toolResult = () => ({ type: 'user/message', data: { source: { kind: 'tool'
 /** A tool call event. */
 const call = (name, args, id) => ({ type: 'tool/call', data: { name, arguments: args === undefined ? undefined : JSON.stringify(args), callId: id } })
 
-/** A tool result event for the matching call. */
-const result = (id, ok, error) => ({ type: 'tool/result', data: { callId: id, ok, error } })
+/**
+ * A tool result event for the matching call.
+ *
+ * Uses the host's real nesting: the verdict and the id live under
+ * `data.message`, and the top of `data` holds only `turn`, `step` and the
+ * message. A flat fixture here would let the module pass while reading a shape
+ * that no session ever produces.
+ */
+const result = (id, ok, error) => ({
+  type: 'tool/result',
+  data: {
+    turn: 1,
+    step: 1,
+    message: { role: 'tool', source: { callId: id }, toolCallId: id, content: [], isError: !ok, id: `m-${id}` },
+    ...(error === undefined ? {} : { error: { message: error } })
+  }
+})
 
 /** An assistant message carrying text blocks. */
 const said = (text) => ({ type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } } })
@@ -285,6 +300,31 @@ check(
   store.record('a', endTurn())
   check('a result without a call does not fabricate a row', store.view('a').previous.calls === 0, String(store.view('a').previous.calls))
   check('a result without a call does not fabricate a failure', store.view('a').previous.failed === 0, String(store.view('a').previous.failed))
+}
+
+// ---------------------------------------------------------------------------
+// A failure the host marks only through the error payload
+// ---------------------------------------------------------------------------
+//
+// Real failures almost always carry `message.isError: true`, but the host also
+// records some of them as a result that merely has an `error` object. Both are
+// failures, and a window that saw one must not be reported as clean.
+
+{
+  const store = new TranscriptStore()
+  store.record('a', human('one'))
+  store.record('a', call('bash', { command: 'npm test' }, 'e1'))
+  store.record('a', {
+    type: 'tool/result',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { role: 'tool', source: { callId: 'e1' }, toolCallId: 'e1', content: [], isError: false, id: 'm-e1' },
+      error: { message: 'spawn failed' }
+    }
+  })
+  store.record('a', endTurn())
+  check('a result-level error payload still counts as a failure', store.view('a').previous.failed === 1, String(store.view('a').previous.failed))
 }
 
 // --- what the transcript refuses to hold ---------------------------------

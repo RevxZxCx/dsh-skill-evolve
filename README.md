@@ -363,6 +363,56 @@ Every read-modify-write of a skill's counters happens inside one serialised sect
 
 Confidence decays with a 90-day half-life, and one harmful report costs four helpful ones (`helpful - 4 × harmful`).
 
+### What happened after the skill was loaded
+
+A load counter answers "was it reached". It cannot answer "did it help", and a
+panel that reports `uses: 6` invites the reader to assume the second. So a load
+also opens a short observation window, and what the window saw is appended to the
+ledger as a `skill_result` line.
+
+The window records only facts the host has already decided. It does not judge the
+work, does not ask a model whether the skill was good, and has no opinion about
+quality. It counts: how many tool calls happened, how many the host marked as
+failed, whether a tool that had already failed was called again, whether a turn
+ended without completing, and which tools failed. All mechanical.
+
+```
+unobserved  nothing happened in the window at all
+no-error    calls happened and none failed
+retried     something failed and the same tool was tried again
+errors      something failed and was not retried
+```
+
+`unobserved` is a distinct outcome on purpose. An empty window is not a clean one,
+and collapsing the two would let a skill that was loaded and then ignored inherit
+the evidence of a skill that was loaded and used. Missing data is reported as
+missing.
+
+The window is bounded by **turns**, not by a timer: `outcomeTurns` (default `2`)
+completed turns after the load. Turns are the unit the host works in, and a timer
+would make the observation depend on how fast the machine is. Loading a second
+skill closes the first window and writes it — dropping it would under-report
+exactly the sessions that use several skills. Disposing a session discards an open
+window instead of writing it, because an observation that was cut short is not a
+result.
+
+Only skills this plugin owns are observed. A skill installed from elsewhere cannot
+be revised by this plugin, so its aftermath is not a decision this plugin is
+entitled to record.
+
+The failure test reads the host’s own `isError` flag rather than parsing tool
+output. A plugin that tried to recognise failure inside each tool’s own error text
+would be wrong about most of them.
+
+Finding that flag took a real fix rather than a guess: the host nests a tool
+result inside `data.message`, so `data.message.toolCallId` carries the id and
+`data.message.isError` the verdict, while the top of `data` holds only `turn`, `step`
+and the message. Reading the flat shape made every retry invisible and turned real
+failures into `no-error` — the one outcome this module must never invent. Verified
+against 32,545 real `tool/result` events, where the flat fields appear zero times.
+The same read appeared in two other modules (the evidence gate’s echo filter and
+the panel’s failure count); both were wrong in the same way and both are fixed.
+
 ### Proposing a revision
 
 A submission whose name matches a skill **this plugin** wrote is not a collision — it is a revision. The first version was written in a session that did not know what the current one knows; refusing the update is how a catalog ends up full of skills whose first draft is all anybody ever gets.
@@ -475,6 +525,7 @@ All fields are optional. The defaults are deliberate: **propose, do not write.**
 | `candidateTtlDays` | `30` | Days a candidate stays approvable; older ones are reported stale, never deleted |
 | `approvalMode` | `confirm` | `confirm` = approve, then the model writes the final body on its next step; `direct` = write at once |
 | `verifyCandidateSource` | `true` | Refuse to approve a candidate whose source session no longer exists |
+| `outcomeTurns` | `2` | Completed turns a loaded skill is observed for; `0` turns observation off |
 | `promoteAfterUses` | `3` | Helpful reports needed for `unverified` → `active` |
 | `invertAfterHarmful` | `3` | Harmful reports needed to invert into a warning |
 | `staleAfterDays` | `90` | Days without validation before `active` → `stale` |
@@ -601,7 +652,7 @@ node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-1441 assertions across 27 suites. They are plain Node scripts with no test
+1531 assertions across 29 suites. They are plain Node scripts with no test
 framework, so they also double as executable documentation.
 
 **The runner treats a crash as a failure.** It checks the exit code *and* the
