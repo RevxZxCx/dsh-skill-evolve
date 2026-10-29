@@ -670,7 +670,7 @@ node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-1595 assertions across 29 suites. They are plain Node scripts with no test
+1598 assertions across 29 suites. They are plain Node scripts with no test
 framework, so they also double as executable documentation.
 
 **The runner treats a crash as a failure.** It checks the exit code *and* the

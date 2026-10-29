@@ -1411,6 +1411,49 @@ check(
   }
 }
 
+// ---------------------------------------------------------------------------
+// The vertical placement, reached through the bundle rather than only in the
+// unit tests. `window.innerHeight` is the single thing that makes any of it run,
+// and no other fixture sets it, so before this block the bundle could have
+// stopped passing the height through and every client assertion stayed green.
+//
+// Scope note: this window is short enough for the flip, not short enough to
+// exercise the two clamp branches. Those need a trigger reported outside the
+// viewport, which a rect taken from the live DOM cannot produce — they stay
+// covered by `gutter.test.mjs`, which is where the geometry belongs. Asserting
+// them here would need a fabricated trigger and would then be testing the fake.
+// ---------------------------------------------------------------------------
+
+{
+  const instance = boot({ routes: panelRoutes(), innerWidth: 1600, innerHeight: 300, triggerLeft: 400, triggerTop: 250 })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  const trigger = firstByClass(first, 'dsse-tip-anchor')
+  check('the short-window fixture has a trigger to hover', trigger !== undefined)
+  if (trigger === undefined) {
+    // Without the wrapper there is nothing to hover and the rest of this block
+    // would throw, which reads as a crash instead of a failed assertion.
+  } else {
+    trigger.props.onMouseEnter()
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+    const tip = firstByClass(await instance.renderer.deepRender(cards), 'dsse-tip')
+    const top = Number(String(tip?.props?.style?.top ?? '').replace('px', ''))
+    // 86 = 250 - TIP_OFFSET(4) - TIP_HEIGHT(160). Stated as the arithmetic rather
+    // than a bare number so a constant change is visible in the failure.
+    check(
+      'a bubble with no room below flips above its trigger',
+      top === 86,
+      `top ${top}, expected 86 = 250 - 4 - 160`,
+    )
+    // And it stayed on screen: the flip put it at 86, so the whole bubble is
+    // inside a 300px viewport rather than hanging out of the bottom.
+    check('the flipped bubble is fully inside the short window', top >= 8 && top + 160 <= 292, String(top))
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 for (const failure of failures) console.log(`  FAIL ${failure}`)
 process.exit(failed === 0 ? 0 : 1)

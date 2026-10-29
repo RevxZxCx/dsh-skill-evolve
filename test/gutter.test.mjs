@@ -734,8 +734,9 @@ function defaultLayout() {
     placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: 0 }).top === below.bottom + TIP_OFFSET,
     String(placeTip({ trigger: below, viewportWidth: 1600, viewportHeight: 0 }).top),
   )
-  // foot < 2 * TIP_MARGIN is where the two bounds would cross: without the inner
-  // Math.max the floor wins and Math.min returns a negative bound.
+  // foot < 2 * TIP_MARGIN is where the two bounds would invert. This pins the
+  // result, not the inner Math.max: that guard is defensive and the outer max
+  // restores the same value without it, so a mutation deleting it survives here.
   check(
     'a viewport shorter than twice the margin does not cross the clamp',
     placeTip({ trigger: { left: 100, right: 140, top: 300, bottom: 320 }, viewportWidth: 1600, viewportHeight: 15 }).top === TIP_MARGIN,
