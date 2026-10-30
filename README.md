@@ -290,68 +290,56 @@ calls, so the evidence gate and the confirm handshake are not re-implemented
 behind a second entrance. A route that wrote the skill file itself would be a way
 in that skips both.
 
-### The propose button opens a checklist
+### Candidate review and panel settings
 
-Pressing **propose** writes a hint into this conversation; it does not create
-anything. Its neighbour, though, is where the queue lives: hovering the propose
-button opens a card listing the candidates waiting for approval — name in mono,
-one grey line of description, and a ✓ / ✕ pair per row. Hovering a row opens a
-detail card with the body, the evidence quotes, when to use it, whether it creates
-or revises, and how many times it has been used.
+The three cards stay visible together: **Last turn**, **Skills and MCP**, and
+**Produced files**. A card with no content is hidden rather than drawn empty. The
+last-turn card owns **propose**, which writes a hint into this conversation; it
+does not create anything. The top of the rail is a single row with refresh, the
+candidate queue, and settings — no title block. Skills and MCP servers share one
+list ordered by most recent use on a single recency clock, with a different icon
+per type. A separate **Candidate review** button opens the queue, so asking for a
+proposal and reviewing an existing one are no longer two gestures hidden inside
+the same button.
 
-Four things about that card are deliberate.
+Candidate review is a click-open modal, not a pair of hover cards. The queue is on
+the left and the selected candidate's description, body, `whenToUse`, and evidence
+are on the right. It supports search, explicit approval and discard, and a second
+confirmation before a discard removes a queue entry. Stale entries stay readable
+but cannot be approved.
 
-**It is drawn, not native.** A `title` attribute appears after about a second,
-cannot be styled, and is clipped by the card's `overflow: hidden` to the card's
-width, so the sentence explaining the button was never fully readable. The card is
-`position: fixed`, placed by the same pure geometry as the other cards, and that
-geometry is asserted in Node against a sweep of window sizes, viewport heights and
-trigger positions rather than against hand-computed numbers.
+With `approvalMode: 'confirm'` the default, approving does not write a file — it
+marks the candidate as awaiting a final draft. The row therefore stays visible
+with a waiting notice and cannot be approved twice. Only a direct write or a
+discard removes it, and removal is always by `id`: two candidates can share a name
+once an older one goes stale.
 
-**The detail card avoids the list instead of covering it.** On a narrow window
-there is not always room beside the list, and the earlier version clamped the
-detail card into the viewport — which put it on top of the list's own approve and
-discard buttons. `placeNear` now takes an `avoid` rectangle and tries the other
-side, then above, then below. The list is anchored on the *button* and the detail
-card on the *list's box*, not on the row: a row-anchored detail card lands on the
-list it belongs to.
+The modal traps Tab focus while it is open, closes on Escape or the backdrop, and
+returns focus to the review button. Its close transition leaves the controls
+unreachable while it is fading out. Panel settings use the same modal pattern and
+hold the summary switch, model picker, and side preference instead of interrupting
+the cards themselves.
 
-**A row survives its own approval.** With `approvalMode: 'confirm'` the default,
-approving does not write a file — it marks the queue row as awaiting a final draft,
-and the model writes the file on a later step. So the row is not removed from the
-list. It stays, with its ✓ disabled and a line saying the file is not in the skill
-directory yet. Removing it would be the comfortable lie: the row would vanish, the
-pending count would keep counting it, and it would reappear on the next hover.
-Getting this wrong is why the row is keyed by `id` and not by `name` — two
-candidates can share a name once an older one goes stale.
-
-**It closes lazily, but not on its own contents.** Leaving the button starts a
-220 ms timer so the pointer can cross the gap into the list; entering the list
-cancels it. A scroll closes the card, but only a scroll from outside it — the list
-body scrolls itself once there are more candidates than fit, and a capture-phase
-listener that ignored the event target closed the card exactly when somebody was
-scrolling to the eighth candidate. The same reasoning applies to focus: the row
-buttons are real `<button>`s, so pressing one fires `focusout`, and closing on that
-would hide the confirm-mode notice at the moment it matters.
-
-Accessibility stops short of a full dialog: the trigger gets `aria-haspopup` and
-`aria-expanded` by cloning the button (ARIA is not inherited, and a wrapper without
-`tabindex` never takes focus, so an association on the wrapper is inert), the list
-carries `role="dialog"` and a label, and Escape closes it. Focus is not trapped.
+Typography follows the host rather than naming a platform font. The client reads
+`fontFamily`, `fontSize`, and `lineHeight` from the conversation's computed style,
+reads the code font from a host `code` or `pre` element when one exists, and watches
+host class and inline-style mutations so a live font or size change reaches the
+cards and both modals. Code labels use the host code font; everything else uses the
+host conversation font.
 
 **It needs a host restart.** The host discovers client bundles when its plugin
 graph is rebuilt, and editing `package.json` does not trigger that. If the panel
 does not appear after restarting, the Plugins page names the reason per entry.
 
-**What it cannot do, on purpose.** The geometry is the only thing the client
-computes; every number in the cards comes from the host route. The client holds no
-copy of the transcript and re-reads `/panel` on open and on a timer, so the three
-modules always describe the same turn. It also cannot decide where the column is:
-`measure()` falls back to the documented clamp formula when the host does not
-publish a width, and the placement function reports `no-room` rather than
-overlapping the text. On a narrow window the cards disappear and the handle
-remains, because a panel that cannot fit should not squeeze the thing it is
-annotating.
+**What it cannot do, on purpose.** Every number in the cards comes from the host
+route. The client holds no copy of the transcript and re-reads `/panel` on open and
+on a timer, so the three modules always describe the same turn. A failed background
+refresh keeps the last good cards visible beside the error instead of replacing
+them with an empty panel. The rail still uses measured geometry: `measure()` falls
+back to the documented clamp formula when the host does not publish a width, and
+the placement function reports `no-room` rather than overlapping the text. On a
+narrow window the cards disappear and the handle remains, because a panel that
+cannot fit should not squeeze the thing it is annotating.
 
 ### The evidence gate
 
@@ -706,8 +694,8 @@ node test/run.mjs          # every suite
 node test/run.mjs signal   # one suite
 ```
 
-1722 assertions across 29 suites. They are plain Node scripts with no test
-framework, so they also double as executable documentation.
+They are plain Node scripts with no test framework, so they also double as
+executable documentation.
 
 **The runner treats a crash as a failure.** It checks the exit code *and* the
 signal, because a suite that segfaults, is killed, or exits non-zero without
@@ -740,8 +728,17 @@ signal would mislabel it.
 | `summarise.test.mjs` / `transcript.test.mjs` | The one module that spends money, and the transcript it is fed |
 | `catalog.test.mjs` / `market.test.mjs` / `search.test.mjs` | Catalog rewriting, the skill market, and searching shrunk entries |
 | `usage.test.mjs` / `service.test.mjs` / `mutations.test.mjs` | Use counting, service lookup, and the panel mutation harness |
+| `tokens.test.mjs` | That every `--dsw-*` custom property the bundle references is one the installed host theme actually defines |
+
+`test/tokens.test.mjs` guards a contract with the host rather than with this code. Every colour the panel uses is a `--dsw-*` custom property the shell defines, so the panel follows the light and dark palettes without shipping a second theme — but only if the names are real. An undefined property makes the declaration fall back to the literal colour written beside it, which looks plausible in one theme and wrong in the other; four invented names shipped exactly that way, invisible in light mode and unreadable in dark. `scripts/extract-host-tokens.mjs` dumps the definitions out of the installed theme into `test/host-tokens.txt`, and the suite asserts that every token the bundle names appears in that dump. Re-run the script after a host upgrade:
+
+```bash
+node scripts/extract-host-tokens.mjs   # refresh test/host-tokens.txt
+```
 
 Three mutation harnesses live beside them: `test/mutate-panel.mjs`, `scripts/mutate-guards.mjs` and `scripts/mutate-checklist-panel.mjs`. Each re-introduces a defect its review found and fails if the suite stays green; each also reports `NOT APPLIED` as a failure, because a mutation that no longer matches its anchor measures nothing.
+
+`scripts/mutate-guards.mjs` additionally refuses to start when `lib/gutter.js` differs from git HEAD. It holds a mutated copy of that file on disk while it runs, so an interrupted run — a killed process, a `SIGPIPE` from piping its output into `tail` — leaves the mutation behind, and the *next* run then reads that file as its baseline and reports every anchor as missing. Exiting non-zero on a survivor, on a missing anchor, and on a failing suite after the restore are the other three ways this harness used to look green when it was not.
 
 ### Replay against a real session
 

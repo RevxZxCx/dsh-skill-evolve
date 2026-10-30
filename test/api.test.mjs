@@ -236,9 +236,16 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
 {
   const described = describeMcp(new Set(['mcp__github__search_code', 'mcp__github__get_me', 'mcp__files__read']))
   check('two servers are described', described.length === 2, JSON.stringify(described))
-  check('servers are sorted by name', described[0].server === 'files' && described[1].server === 'github', JSON.stringify(described))
+  check('servers without recency fall back to name order', described[0].server === 'files' && described[1].server === 'github', JSON.stringify(described))
   check('tools are counted per server', described[1].tools === 2, JSON.stringify(described))
   check('a server that answered tools is marked used', described.every((row) => row.used === true), JSON.stringify(described))
+}
+
+{
+  const recency = new Map([['mcp:zeta', 9], ['mcp:alpha', 3]])
+  const described = describeMcp(new Set(['mcp__alpha__read', 'mcp__zeta__read']), recency)
+  check('the most recently used server beats alphabetical order', described[0].server === 'zeta' && described[1].server === 'alpha', JSON.stringify(described.map((row) => row.server)))
+  check('each server carries its recency', described[0].lastUsed === 9 && described[1].lastUsed === 3, JSON.stringify(described.map((row) => row.lastUsed)))
 }
 
 {
@@ -304,6 +311,16 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
   check('invocation is read as the policy object the host actually sends', described.skills[0].modelInvocable === false, JSON.stringify(described.skills[0]))
   check('a missing invocation policy defaults to model-invocable', described.skills[1].modelInvocable === true, JSON.stringify(described.skills[1]))
   check('completeness is carried through', described.complete === true, String(described.complete))
+}
+
+{
+  const described = await describeSkills({
+    skills: { async snapshot() { return { complete: true, skills: [{ name: 'alpha' }, { name: 'beta' }] } } },
+    isOwned: () => false,
+    used: new Map([['alpha', 'tool'], ['beta', 'tool']]),
+    recency: new Map([['skill:alpha', 4], ['skill:beta', 8]]),
+  })
+  check('each skill carries its recency for the merged panel list', described.skills.find((row) => row.name === 'beta')?.lastUsed === 8 && described.skills.find((row) => row.name === 'alpha')?.lastUsed === 4, JSON.stringify(described.skills))
 }
 
 {

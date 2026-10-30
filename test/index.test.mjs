@@ -2232,6 +2232,52 @@ try {
   check('a revision keeps the pin alongside the demotion', afterDemote.pinned === true, JSON.stringify(afterDemote))
 }
 
+{
+  // The panel lists skills and MCP servers in one stream, so both kinds of use
+  // have to advance the same recency clock. A mutation that stops recording MCP
+  // calls would otherwise leave the merged list ordered by skill loads alone.
+  const recencyHost = fakeHost()
+  apply(recencyHost.ctx, Config({ mode: 'suggest' }))
+  const recencyAgent = fakeAgent('session-recency', 'F:/some/project')
+  recencyHost.agents.set(recencyAgent.id, recencyAgent)
+  recencyHost.ctx.skills = {
+    async snapshot() {
+      return { complete: true, skills: [{ name: 'alpha', description: 'a' }, { name: 'beta', description: 'b' }] }
+    },
+  }
+  const readPanel = async () => {
+    const route = recencyHost.routes.get('/api/skill-evolve')
+    const res = {
+      statusCode: undefined,
+      writableEnded: false,
+      once() {
+        return this
+      },
+      writeHead(code) {
+        this.statusCode = code
+        return this
+      },
+      end(body) {
+        this.writableEnded = true
+        this.body = body
+        return this
+      },
+    }
+    await route.handler({ url: `/api/skill-evolve/panel?agent=${encodeURIComponent(recencyAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+    return JSON.parse(res.body)
+  }
+  recencyHost.emit('session/event', recencyAgent.session, { type: 'tool/call', seq: 1, time: Date.now(), data: { turn: 1, step: 1, callId: 'r1', name: 'skill', arguments: '{"name":"alpha"}' } })
+  recencyHost.emit('session/event', recencyAgent.session, { type: 'tool/call', seq: 2, time: Date.now(), data: { turn: 1, step: 2, callId: 'r2', name: 'mcp__zeta__search', arguments: '{}' } })
+  recencyHost.emit('session/event', recencyAgent.session, { type: 'tool/call', seq: 3, time: Date.now(), data: { turn: 1, step: 3, callId: 'r3', name: 'skill', arguments: '{"name":"beta"}' } })
+  const payload = await readPanel()
+  const activity = [
+    ...(payload.data?.skills?.skills ?? []).map((row) => ({ name: row.name, lastUsed: row.lastUsed })),
+    ...(payload.data?.mcp ?? []).map((row) => ({ name: row.server, lastUsed: row.lastUsed })),
+  ].sort((a, b) => b.lastUsed - a.lastUsed)
+  check('skill and MCP uses share one recency clock', JSON.stringify(activity.map((row) => row.name)) === '["beta","zeta","alpha"]', JSON.stringify(activity))
+  check('an MCP use sits between two skill uses', activity[1].name === 'zeta' && activity[1].lastUsed > activity[2].lastUsed && activity[1].lastUsed < activity[0].lastUsed, JSON.stringify(activity))
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
 

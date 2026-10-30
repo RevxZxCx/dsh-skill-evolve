@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { placeCards, PANEL_WIDTH, DETAIL_WIDTH } from '../lib/gutter.js'
+import { placeCards } from '../lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -75,10 +75,14 @@ function fakeNode(frame) {
   // every `onBlur` took the "focus left" branch no matter where focus went, which
   // made the behaviour untestable rather than merely untested.
   const inside = frame.contains ?? []
+  const focusable = frame.focusable ?? []
   return {
     getBoundingClientRect: () => ({ left: frame.left, top: frame.top, right: frame.left + frame.width, bottom: frame.top + frame.height, width: frame.width, height: frame.height }),
     offsetWidth: frame.width,
     contains: (node) => inside.includes(node),
+    querySelector: () => focusable[0] ?? null,
+    querySelectorAll: () => focusable,
+    focus: () => frame.onFocus?.(),
   }
 }
 
@@ -430,6 +434,9 @@ function boot(options) {
   const styles = []
   const requested = []
   const calls = []
+  const mutationObservers = []
+  const hostStyle = new Map()
+  const hostWrites = []
   // The default fixture has a 280px left sidebar, so the conversation column and
   // the overlay do not share an origin. A fixture with `left: 0` is the single
   // layout where a coordinate-space mistake is invisible, which is how the
@@ -449,13 +456,26 @@ function boot(options) {
     throw new Error(`the bundle required "${id}", which the shared module table does not carry`)
   }
 
+  const code = rect === null ? null : {}
   const conversation =
-    rect === null ? null : { getBoundingClientRect: () => ({ ...rect }), offsetWidth: rect.width }
+    rect === null ? null : {
+      getBoundingClientRect: () => ({ ...rect }),
+      offsetWidth: rect.width,
+      querySelector: (selector) => (selector === 'code, pre' ? code : null),
+    }
 
   const documentStub = {
     baseURI: 'http://127.0.0.1:19387/',
     head: { appendChild: (node) => styles.push(node) },
     body: { attributes: new Map() },
+    documentElement: {
+      style: {
+        getPropertyValue: (name) => hostStyle.get(name) ?? '',
+        setProperty: (name, value) => { hostWrites.push([name, String(value)]); hostStyle.set(name, String(value)) },
+        removeProperty: (name) => hostStyle.delete(name),
+      },
+    },
+    activeElement: null,
     getElementById: () => null,
     createElement: () => ({ id: '', textContent: '' }),
     querySelector: (selector) => (selector === '[data-conversation-content]' ? conversation : null),
@@ -517,18 +537,37 @@ function boot(options) {
     for (const [prefix, answer] of Object.entries(routes)) {
       if (path.startsWith(prefix) === false) continue
       if (answer instanceof Error) throw answer
-      const payload = typeof answer === 'function' ? answer(init) : answer
+      const payload = typeof answer === 'function' ? answer(init, target) : answer
       return { ok: true, status: 200, json: async () => payload }
     }
     throw new Error(`no route for ${path}`)
   }
 
-  const computed = () => ({
+  const computed = (node) => ({
     // The default body is wide enough to leave a real gutter: 1920 body, 920
     // prose, 500 either side. A fixture with no gutter would exercise the handle
     // branch in every test and quietly never test the cards at all.
     getPropertyValue: () => settings.proseWidth ?? '920px',
+    fontFamily: node === code ? settings.monoFontFamily ?? 'Host Mono' : settings.fontFamily ?? 'Host Sans',
+    fontSize: settings.fontSize ?? '14px',
+    lineHeight: settings.lineHeight ?? '21px',
   })
+
+  class MutationObserverStub {
+    constructor(callback) {
+      this.callback = callback
+      this.targets = []
+      this.disconnected = false
+      mutationObservers.push(this)
+    }
+    observe(target, options) {
+      this.targets.push({ target, options })
+    }
+    disconnect() {
+      this.disconnected = true
+      this.targets = []
+    }
+  }
 
   // The overlay spans the frame, so its width is the window's — not the
   // conversation column's. Tests that describe a narrow window must narrow both.
@@ -555,6 +594,7 @@ function boot(options) {
     'clearInterval',
     'setTimeout',
     'clearTimeout',
+    'MutationObserver',
     source,
   )
   // A fixed pair of interval stubs: the cards poll, and a real interval would keep
@@ -584,6 +624,7 @@ function boot(options) {
       if (row !== undefined) row.cleared = true
       ;(settings.clearTimeout ?? clearTimeout)(handle)
     },
+    MutationObserverStub,
   )
 
   const module = captured.factory(moduleTable)
@@ -599,6 +640,9 @@ function boot(options) {
     calls,
     styles,
     timers,
+    hostStyle,
+    hostWrites,
+    mutationObservers,
     document: documentStub,
     captured,
     renderer,
@@ -730,6 +774,7 @@ check(
   const button = firstByClass(tree, 'dsse-toggle')
   check('the toggle is a button', button?.type === 'button', String(button?.type))
   check('the toggle is labelled', textOf(tree).includes('技能'), textOf(tree).slice(0, 40))
+  check('the toggle counts the three cards', textOf(firstByClass(tree, 'dsse-toggle-count')) === '3', textOf(tree).slice(0, 40))
   check('the toggle starts inactive', button?.props?.['data-active'] === 'false', String(button?.props?.['data-active']))
   check(
     'the toggle reads the config on mount so the side setting is honoured',
@@ -855,7 +900,8 @@ check(
   firstByClass(toggleTree, 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
 
-  check('four cards are rendered', byClass(tree, 'dsse-card').length === 4, String(byClass(tree, 'dsse-card').length))
+  check('three cards are rendered together', byClass(tree, 'dsse-card').length === 3, String(byClass(tree, 'dsse-card').length))
+  check('skills and MCP share the second card', textOf(byClass(tree, 'dsse-card')[1]).includes('技能与 MCP') && textOf(byClass(tree, 'dsse-card')[1]).includes('github'), textOf(byClass(tree, 'dsse-card')[1]).slice(0, 160))
   check(
     'the first card is the last turn',
     textOf(byClass(tree, 'dsse-card')[0]).includes('上一轮'),
@@ -863,7 +909,7 @@ check(
   )
   check('the summary text is shown', textOf(tree).includes('Read three files and edited one'), textOf(tree).slice(0, 120))
   check('the turn counter is shown', textOf(tree).includes('第 7 轮'), textOf(tree).slice(0, 120))
-  check('the candidate badge is shown', textOf(tree).includes('2 待批'), textOf(tree).slice(0, 200))
+  check('the candidate badge is shown', textOf(firstByClass(tree, 'dsse-queue')).includes('2'), textOf(firstByClass(tree, 'dsse-queue')).slice(0, 80))
   check('skills are listed', textOf(tree).includes('pdf-tools'), textOf(tree).slice(0, 200))
   check('a captured skill is marked', textOf(tree).includes('本插件'), textOf(tree).slice(0, 200))
   check('MCP servers are listed', textOf(tree).includes('github'), textOf(tree).slice(0, 200))
@@ -880,6 +926,63 @@ check(
     instance.calls.some((row) => row.url.endsWith('/models')),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
+}
+
+// ---------------------------------------------------------------------------
+// The compact top row, merged activity list, and empty-card hiding
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 4,
+      calls: 3,
+      failed: 0,
+      summary: { text: 'used one skill and two servers' },
+      pendingCandidates: 1,
+      skills: {
+        available: true,
+        skills: [
+          { name: 'skill-old', description: 'old', owned: false, lastUsed: 1 },
+          { name: 'skill-new', description: 'new', owned: true, lastUsed: 5 },
+        ],
+      },
+      mcp: [
+        { server: 'mcp-old', tools: 1, lastUsed: 2 },
+        { server: 'mcp-new', tools: 2, lastUsed: 7 },
+      ],
+      files: [{ path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 }],
+      commands: ['a'],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const activityCard = byClass(tree, 'dsse-card')[1]
+  const names = byClass(activityCard, 'dsse-name').map((node) => textOf(node))
+  const kinds = byClass(activityCard, 'dsse-row-icon').map((node) => node.props['data-kind'])
+  check('skills and MCP share one recency-ordered list', JSON.stringify(names) === '["mcp-new","skill-new","mcp-old","skill-old"]', JSON.stringify(names))
+  check('each row carries a type icon', JSON.stringify(kinds) === '["mcp","skill","mcp","skill"]', JSON.stringify(kinds))
+  check('the top row does not repeat the plugin title', textOf(firstByClass(tree, 'dsse-top-row')).includes('Skill Evolve') === false, textOf(firstByClass(tree, 'dsse-top-row')))
+  check('the queue entry stays reachable from the top row', firstByClass(tree, 'dsse-top-row .dsse-queue')?.props?.['aria-label'] === '候选审核' || firstByClass(tree, 'dsse-queue')?.props?.['aria-label'] === '候选审核')
+  check('the propose button no longer carries an explanatory note', textOf(tree).includes('不会直接写入技能') === false, textOf(tree).slice(0, 200))
+}
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/panel'] = {
+    ok: true,
+    data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  check('cards with no content are hidden', byClass(tree, 'dsse-card').length === 0, String(byClass(tree, 'dsse-card').length))
+  check('the top row still offers refresh, review and settings', firstByClass(tree, 'dsse-refresh') !== undefined && firstByClass(tree, 'dsse-queue') !== undefined && firstByClass(tree, 'dsse-settings-open') !== undefined)
 }
 
 // ---------------------------------------------------------------------------
@@ -1048,9 +1151,11 @@ check(
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-settings-open').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
   const checkbox = byClass(tree, 'dsse-check')[0]
-  check('the summary switch reflects the config', checkbox?.props?.checked === true, String(checkbox?.props?.checked))
+  check('the summary switch reflects the config in settings', checkbox?.props?.checked === true, String(checkbox?.props?.checked))
   checkbox.props.onChange({ target: { checked: false } })
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
   const post = instance.calls.find((row) => row.url.endsWith('/config') && row.init?.method === 'POST')
@@ -1072,9 +1177,11 @@ check(
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-settings-open').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
   const select = firstByClass(tree, 'dsse-select')
-  check('the model picker is offered', select !== undefined, textOf(tree).slice(0, 200))
+  check('the model picker is offered in settings', select !== undefined, textOf(tree).slice(0, 200))
   const options = Array.isArray(select?.props?.children) ? select.props.children : [select?.props?.children]
   check('the picker has a default plus one real model', options.length === 2, String(options.length))
   check('the default follows the plugin default', String(options[0]?.props?.value) === '', String(options[0]?.props?.value))
@@ -1099,8 +1206,8 @@ check(
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
-  const propose = byClass(tree, 'dsse-btn')[0]
-  check('the propose button exists', propose !== undefined && textOf(propose).includes('建议提炼'), textOf(tree).slice(0, 120))
+  const propose = firstByClass(tree, 'dsse-propose')
+  check('the propose button exists', propose !== undefined && textOf(propose).includes('从本轮提炼技能'), textOf(tree).slice(0, 120))
   propose.props.onClick()
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
   const post = instance.calls.find((row) => row.url.endsWith('/propose') && row.init?.method === 'POST')
@@ -1165,6 +1272,8 @@ check(
   check('open before teardown', (await instance.renderer.deepRender(cards)) !== null)
   for (const dispose of disposers) dispose()
   check('teardown closes the cards', (await instance.renderer.deepRender(cards)) === null)
+  check('teardown disconnects typography observers', instance.mutationObservers.every((observer) => observer.disconnected), JSON.stringify(instance.mutationObservers.map((observer) => observer.disconnected)))
+  check('teardown removes host typography variables', instance.hostStyle.size === 0, JSON.stringify([...instance.hostStyle.entries()]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1182,15 +1291,37 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// The checklist on the propose button
-//
-// The button once carried a native `title`, then a one-sentence hover bubble.
-// What it must show now is the list of candidates: name plus a one-line
-// description per row, a detail card on row hover, and approve/ignore per row.
-// The failures worth catching here are the silent ones — a list that renders
-// "no candidates" when the queue actually failed to load, a decide button that
-// posts nothing, a row that stays on screen after it was decided.
+// Candidate review is a click-open modal. The write path still uses the exact
+// candidate id and the existing approve/discard routes.
 // ---------------------------------------------------------------------------
+
+async function settle(turns = 12) {
+  for (let turn = 0; turn < turns; turn += 1) await Promise.resolve()
+}
+
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+async function openReview(instance, sessionId = 'session-a') {
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-queue').props.onClick()
+  await settle()
+  return instance.renderer.deepRender(cards)
+}
+
+function byAction(node, action) {
+  const out = []
+  walk(node, (row) => {
+    if (row.props?.['data-action'] === action) out.push(row)
+  })
+  return out[0]
+}
 
 {
   const routes = panelRoutes()
@@ -1205,119 +1336,51 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const closed = await instance.renderer.deepRender(cards)
+  check('no dialog is shown before the review button is clicked', firstByClass(closed, 'dsse-dialog') === undefined)
+  const closedTrigger = firstByClass(closed, 'dsse-queue')
+  check('the review trigger announces a dialog', closedTrigger?.props?.['aria-haspopup'] === 'dialog', JSON.stringify(closedTrigger?.props))
+  check('the review trigger starts collapsed', closedTrigger?.props?.['aria-expanded'] === false, String(closedTrigger?.props?.['aria-expanded']))
 
-  const first = await instance.renderer.deepRender(cards)
-  check('no checklist is shown before hovering', firstByClass(first, 'dsse-ck') === undefined)
-
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  check('the propose button still sits in a hover trigger', trigger !== undefined, textOf(first).slice(0, 120))
-  const button = byClass(first, 'dsse-btn')[0]
-  check('the button no longer asks the browser for a tooltip', button?.props?.title === undefined, String(button?.props?.title))
-  // A disabled button receives no mouse events in Chrome, which is exactly when
-  // someone wants to know what the button would do. The wrapper owns the hover.
-  check('the wrapper carries the hover handler', typeof trigger?.props?.onMouseEnter === 'function')
-  check('the wrapper also reacts to keyboard focus', typeof trigger?.props?.onFocus === 'function')
-
-  if (trigger !== undefined && typeof trigger?.props?.onMouseEnter === 'function') {
-    trigger.props.onMouseEnter()
-    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  }
-
+  closedTrigger.props.onClick()
+  await settle()
   const shown = await instance.renderer.deepRender(cards)
-  const list = firstByClass(shown, 'dsse-ck')
-  check('hovering opens the checklist', list !== undefined)
-  check('the checklist is a dialog for assistive tech', list?.props?.role === 'dialog', String(list?.props?.role))
+  const dialog = firstByClass(shown, 'dsse-dialog')
+  check('clicking opens the review dialog', dialog !== undefined)
+  check('the review dialog is modal for assistive tech', dialog?.props?.['aria-modal'] === 'true', String(dialog?.props?.['aria-modal']))
+  check('the trigger expands when the dialog opens', firstByClass(shown, 'dsse-queue')?.props?.['aria-expanded'] === true)
 
-  const names = byClass(shown, 'dsse-ck-name').map((node) => textOf(node))
+  const names = byClass(shown, 'dsse-candidate-name').map((node) => textOf(node))
   check('every candidate is listed by name', JSON.stringify(names) === '["pdf-tools","office"]', JSON.stringify(names))
-  const descs = byClass(shown, 'dsse-ck-desc').map((node) => textOf(node))
+  const descs = byClass(shown, 'dsse-candidate-desc').map((node) => textOf(node))
   check('a row with a description shows it', descs[0] === 'work with pdfs', JSON.stringify(descs))
-  // An update with no description still has to say something: an empty line under
-  // a name reads as a rendering bug rather than as "this one had no summary".
-  check('a row without a description falls back to its kind', descs[1] === '修改已有技能', JSON.stringify(descs))
-  check('each row offers approve and ignore', byClass(shown, 'dsse-ck-yes').length === 2 && byClass(shown, 'dsse-ck-no').length === 2)
+  check('a row without a description falls back to its kind', descs[1] === '修订已有技能', JSON.stringify(descs))
+  check('the first candidate is selected initially', textOf(firstByClass(shown, 'dsse-detail')).includes('BODY-A'), textOf(firstByClass(shown, 'dsse-detail')).slice(0, 160))
+  check('the detail carries when-to-use', textOf(firstByClass(shown, 'dsse-detail')).includes('WHEN-A'), textOf(firstByClass(shown, 'dsse-detail')).slice(0, 160))
 
-  const head = textOf(byClass(shown, 'dsse-ck-head')[0])
-  check('the heading counts the candidates', head.includes('2'), head)
-
-  // The list is fixed-position outside the card, so it has to carry the rule.
-  const sheet = instance.styles
-    .map((node) => String(node.textContent))
-    .join('\n')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-  const listRule = (/\.dsse-ck\s*\{([^}]*)\}/.exec(sheet) ?? [])[1] ?? ''
-  check('the stylesheet positions the checklist as fixed', listRule.includes('position:fixed'), listRule.slice(0, 80))
-  check('the checklist rule was actually found', listRule.length > 0, String(listRule.length))
-
-  const styleText = String(list?.props?.style?.left ?? '')
-  check('the checklist is placed with a finite value', styleText.endsWith('px') && Number.isFinite(Number(styleText.slice(0, -2))), styleText)
-  check('and reserves the declared panel width', list?.props?.style?.width === `${PANEL_WIDTH}px`, String(list?.props?.style?.width))
-
-  // --- hovering a row opens the detail card -------------------------------
-  const rows = byClass(shown, 'dsse-ck-item')
-  check('the rows are hoverable', rows.length === 2)
-  if (rows.length > 0 && typeof rows[0].props?.onMouseEnter === 'function') {
-    rows[0].props.onMouseEnter()
-    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  }
+  byClass(shown, 'dsse-candidate')[1].props.onClick()
   const detailed = await instance.renderer.deepRender(cards)
-  const detail = firstByClass(detailed, 'dsse-ck-detail')
-  check('hovering a row opens the detail card', detail !== undefined)
-  const detailText = textOf(detail)
-  check('the detail card carries the body', detailText.includes('BODY-A'), detailText.slice(0, 160))
-  check('the detail card carries when-to-use', detailText.includes('WHEN-A'), detailText.slice(0, 160))
-  // Anchored to the LIST, not to the row: a row's right edge is inside the list,
-  // so anchoring there drew the card on top of it.
-  const detailLeft = Number(String(detail?.props?.style?.left ?? '').replace('px', ''))
-  const listLeft = Number(String(list?.props?.style?.left ?? '').replace('px', ''))
-  const listWidth = Number(String(list?.props?.style?.width ?? '').replace('px', ''))
-  check(
-    'the detail card opens beside the checklist, not over it',
-    Number.isFinite(detailLeft) && Number.isFinite(listLeft) && Number.isFinite(listWidth) && detailLeft >= listLeft + listWidth,
-    `detail ${detailLeft} vs list ${listLeft}+${listWidth}`,
-  )
-  check('the detail card reserves the declared width', detail?.props?.style?.width === `${DETAIL_WIDTH}px`, String(detail?.props?.style?.width))
+  check('clicking another candidate switches the detail', textOf(firstByClass(detailed, 'dsse-detail')).includes('BODY-B'), textOf(firstByClass(detailed, 'dsse-detail')).slice(0, 160))
 
-  // --- moving into the list must not close it -----------------------------
-  // The pointer crosses a gap between the button and the list, so closing is
-  // deferred. Without the grace period the list vanishes the moment the pointer
-  // leaves the button and nobody can ever reach the approve buttons.
-  const shownAgain = firstByClass(detailed, 'dsse-tip-anchor')
-  if (shownAgain !== undefined && typeof shownAgain.props?.onMouseLeave === 'function') {
-    shownAgain.props.onMouseLeave()
-    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
-  }
-  const stillOpen = await instance.renderer.deepRender(cards)
-  check('leaving the button does not close the list immediately', firstByClass(stillOpen, 'dsse-ck') !== undefined)
-
-  // Entering the list cancels the pending close.
-  const listNode = firstByClass(stillOpen, 'dsse-ck')
-  if (listNode !== undefined && typeof listNode.props?.onMouseEnter === 'function') {
-    listNode.props.onMouseEnter()
-    for (let turn = 0; turn < 4; turn += 1) await Promise.resolve()
-  }
-  const afterGrace = await instance.renderer.deepRender(cards)
-  check('entering the list keeps it open past the grace period', firstByClass(afterGrace, 'dsse-ck') !== undefined)
-
-  // --- deciding a row ----------------------------------------------------
-  const approve = byClass(afterGrace, 'dsse-ck-yes')[0]
-  check('the approve button is rendered', approve !== undefined)
-  check('the approve button shows a check mark', textOf(approve).length === 1, textOf(approve))
-  if (approve !== undefined && typeof approve.props?.onClick === 'function') {
-    approve.props.onClick({ stopPropagation() {} })
-    for (let turn = 0; turn < 16; turn += 1) await Promise.resolve()
-  }
+  byClass(detailed, 'dsse-candidate')[0].props.onClick()
+  const approving = await instance.renderer.deepRender(cards)
+  const approve = byAction(approving, 'approve')
+  check('the selected candidate offers approval', approve !== undefined)
+  approve.props.onClick()
+  await settle(16)
   const posted = instance.calls.filter((row) => row.url.includes('/candidates') && row.init?.method === 'POST')
   check('approving posts to the decide route', posted.length === 1, String(posted.length))
-  check('the post names the row and the action', posted.length === 1 && String(posted[0].init.body).includes('"action":"approve"') && String(posted[0].init.body).includes('pdf-tools'), String(posted[0]?.init?.body))
-  // The row leaves without a refetch: refetching reorders the list under the
-  // pointer, and the decide request is what the user is watching.
+  check('the post names the row and the action', posted.length === 1 && String(posted[0].init.body).includes('"action":"approve"') && String(posted[0].init.body).includes('"id":"a"'), String(posted[0]?.init?.body))
   const afterDecide = await instance.renderer.deepRender(cards)
-  const remainingNames = byClass(afterDecide, 'dsse-ck-name').map((node) => textOf(node))
+  const remainingNames = byClass(afterDecide, 'dsse-candidate-name').map((node) => textOf(node))
   check('the approved row leaves the list', JSON.stringify(remainingNames) === '["office"]', JSON.stringify(remainingNames))
+
+  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  check('the modal layer is fixed above the host', /\.dsse-layer\{[^}]*position:fixed/.test(sheet))
+  check('the modal inherits live host typography', /\.dsse-dialog\{[^}]*font-family:var\(--dsse-font-family,inherit\)/.test(sheet))
+  check('no platform font stack is hard-coded', !/system-ui|Segoe UI|ui-monospace|Consolas/.test(sheet))
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,15 +1404,8 @@ check(
     instance.module.apply(instance.ctx)
     const toggle = instance.seat('toggle')
     const cards = instance.seat('cards')
-    firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-    const first = await instance.renderer.deepRender(cards)
-    const trigger = firstByClass(first, 'dsse-tip-anchor')
-    if (trigger !== undefined) {
-      trigger.props.onMouseEnter()
-      for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-    }
-    const shown = await instance.renderer.deepRender(cards)
-    const text = textOf(firstByClass(shown, 'dsse-ck') ?? shown)
+    const shown = await openReview(instance)
+    const text = textOf(firstByClass(shown, 'dsse-dialog') ?? shown)
     check(`the ${item.label} state says so`, text.includes(item.expect), text.slice(0, 160))
     check(`the ${item.label} state is not mistaken for an empty queue`, text.includes(item.forbid) === false, text.slice(0, 160))
   }
@@ -1375,24 +1431,15 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  if (trigger !== undefined) {
-    trigger.props.onMouseEnter()
-    for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  }
-  const shown = await instance.renderer.deepRender(cards)
-  const yes = byClass(shown, 'dsse-ck-yes')
-  const no = byClass(shown, 'dsse-ck-no')
-  check('every stale and fresh row is listed', byClass(shown, 'dsse-ck-item').length === 2)
-  check('the stale row cannot be approved', yes[0]?.props?.disabled === true, String(yes[0]?.props?.disabled))
-  check('the stale row can still be discarded', no[0]?.props?.disabled !== true, String(no[0]?.props?.disabled))
-  check('the fresh row can still be approved', yes[1]?.props?.disabled !== true, String(yes[1]?.props?.disabled))
-  const why = byClass(shown, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
-  check('the stale row explains why', why.includes('已被改动'), why)
+  const shown = await openReview(instance)
+  check('every stale and fresh row is listed', byClass(shown, 'dsse-candidate').length === 2)
+  check('the stale row cannot be approved', byAction(shown, 'approve')?.props?.disabled === true, String(byAction(shown, 'approve')?.props?.disabled))
+  check('the stale row can still be discarded', byAction(shown, 'discard')?.props?.disabled !== true, String(byAction(shown, 'discard')?.props?.disabled))
+  check('the stale row explains why', textOf(firstByClass(shown, 'dsse-detail')).includes('已被改动'), textOf(firstByClass(shown, 'dsse-detail')).slice(0, 160))
+  byClass(shown, 'dsse-candidate')[1].props.onClick()
+  const fresh = await instance.renderer.deepRender(cards)
+  check('the fresh row can still be approved', byAction(fresh, 'approve')?.props?.disabled !== true, String(byAction(fresh, 'approve')?.props?.disabled))
 }
 
 
@@ -1428,20 +1475,16 @@ check(
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const listed = await instance.renderer.deepRender(cards)
-  check('both rows are listed before deciding', byClass(listed, 'dsse-ck-item').length === 2, String(byClass(listed, 'dsse-ck-item').length))
-  byClass(listed, 'dsse-ck-yes')[0].props.onClick()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const listed = await openReview(instance)
+  check('both rows are listed before deciding', byClass(listed, 'dsse-candidate').length === 2, String(byClass(listed, 'dsse-candidate').length))
+  byAction(listed, 'approve').props.onClick()
+  await settle()
   const after = await instance.renderer.deepRender(cards)
-  check('a staged approval keeps its row', byClass(after, 'dsse-ck-item').length === 2, String(byClass(after, 'dsse-ck-item').length))
-  check('the staged row cannot be approved twice', byClass(after, 'dsse-ck-yes')[0]?.props?.disabled === true, String(byClass(after, 'dsse-ck-yes')[0]?.props?.disabled))
-  const why = byClass(after, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
-  check('the staged row says the file is not written yet', why.includes('等模型写出定稿'), why)
-  check('the staged row says it is not in the skill directory', why.includes('还不在技能目录里'), why)
+  check('a staged approval keeps its row', byClass(after, 'dsse-candidate').length === 2, String(byClass(after, 'dsse-candidate').length))
+  check('the staged row cannot be approved twice', byAction(after, 'approve') === undefined && textOf(firstByClass(after, 'dsse-detail')).includes('等待定稿'))
+  const why = textOf(firstByClass(after, 'dsse-detail'))
+  check('the staged row says the model still has to write the final draft', why.includes('等待模型定稿'), why)
+  check('the staged row says it is not written yet', why.includes('尚未写入'), why)
 }
 
 {
@@ -1458,23 +1501,20 @@ check(
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const before = await instance.renderer.deepRender(cards)
-  check('two rows share a name', byClass(before, 'dsse-ck-item').length === 2, String(byClass(before, 'dsse-ck-item').length))
-  byClass(before, 'dsse-ck-no')[0].props.onClick()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const before = await openReview(instance)
+  check('two rows share a name', byClass(before, 'dsse-candidate').length === 2, String(byClass(before, 'dsse-candidate').length))
+  byAction(before, 'discard').props.onClick()
+  const confirming = await instance.renderer.deepRender(cards)
+  check('discarding asks for confirmation first', byAction(confirming, 'confirm-discard') !== undefined)
+  check('confirmation has not posted yet', instance.calls.some((row) => row.url.includes('/candidates') && row.init?.method === 'POST') === false)
+  byAction(confirming, 'confirm-discard').props.onClick()
+  await settle()
   const after = await instance.renderer.deepRender(cards)
-  check('deciding one row removes exactly one row', byClass(after, 'dsse-ck-item').length === 1, String(byClass(after, 'dsse-ck-item').length))
-  const left = byClass(after, 'dsse-ck-name').map((node) => textOf(node)).join(' ')
-  check('the row that stayed is the other one with the same name', byClass(after, 'dsse-ck-item').length === 1 && left.includes('dup'), left)
-  // The discarded row was the live one, so the survivor is the stale entry — and
-  // a stale entry must stay unapprovable. Asserting the wrong survivor would pass
-  // for the wrong reason and hide a filter that took both rows.
-  const survivor = byClass(after, 'dsse-ck-why').map((node) => textOf(node)).join(' ')
-  check('the survivor is the stale row, still unapprovable', byClass(after, 'dsse-ck-yes')[0]?.props?.disabled === true, String(byClass(after, 'dsse-ck-yes')[0]?.props?.disabled))
+  check('deciding one row removes exactly one row', byClass(after, 'dsse-candidate').length === 1, String(byClass(after, 'dsse-candidate').length))
+  const left = byClass(after, 'dsse-candidate-name').map((node) => textOf(node)).join(' ')
+  check('the row that stayed is the other one with the same name', byClass(after, 'dsse-candidate').length === 1 && left.includes('dup'), left)
+  const survivor = textOf(firstByClass(after, 'dsse-detail'))
+  check('the survivor is the stale row, still unapprovable', byAction(after, 'approve')?.props?.disabled === true, String(byAction(after, 'approve')?.props?.disabled))
   check('the survivor still explains why it cannot be approved', survivor.includes('已过期') || survivor.includes('过期'), survivor)
 }
 
@@ -1496,13 +1536,11 @@ check(
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-z' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const listed = await instance.renderer.deepRender(cards)
-  byClass(listed, 'dsse-ck-no')[0].props.onClick()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const listed = await openReview(instance, 'session-z')
+  byAction(listed, 'discard').props.onClick()
+  const confirming = await instance.renderer.deepRender(cards)
+  byAction(confirming, 'confirm-discard').props.onClick()
+  await settle()
   const posted = instance.calls.filter((entry) => entry.init?.method === 'POST')
   check('the decide call is a POST', posted.length === 1, String(posted.length))
   check('the decide call names the session', String(posted[0]?.url).includes('agent=session-z'), String(posted[0]?.url))
@@ -1512,52 +1550,28 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// The hover grace period is a real delay, not a claim about one
-//
-// The bubble and the list are separate fixed-position layers with a gap between
-// them, so the pointer necessarily leaves the button before it reaches the list.
-// Without the delay the list closes in that gap and cannot be used at all. With
-// the global timer un-injected, the deferred close never ran during a test and
-// every assertion about it passed either way.
+// Search, Escape and the close animation
 // ---------------------------------------------------------------------------
 
 {
   const routes = panelRoutes()
   routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
-    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
+    { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'A', whenToUse: '' },
+    { id: 'b', name: 'office', description: 'office documents', kind: 'update', body: 'B', whenToUse: '' },
   ] } }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  trigger.props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  check('the list is open before the pointer leaves', byClass(opened, 'dsse-ck').length === 1, String(byClass(opened, 'dsse-ck').length))
-
-  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const still = await instance.renderer.deepRender(cards)
-  check('leaving the button does not close the list straight away', byClass(still, 'dsse-ck').length === 1, String(byClass(still, 'dsse-ck').length))
-  const pending = instance.timers.filter((entry) => entry.cleared === false && entry.ms > 0)
-  check('leaving the button schedules a close', pending.length === 1, String(pending.length))
-  check('the close delay is long enough to cross the gap', (pending[0]?.ms ?? 0) >= 150, String(pending[0]?.ms))
-
-  // Entering the list must cancel that pending close, or the list shuts while the
-  // pointer is inside it.
-  const list = byClass(still, 'dsse-ck')[0]
-  list?.props?.onMouseEnter?.()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  check('entering the list cancels the pending close', instance.timers.some((entry) => entry.cleared === true), JSON.stringify(instance.timers.map((entry) => entry.cleared)))
-  const kept = await instance.renderer.deepRender(cards)
-  check('the list is still open after the pointer enters it', byClass(kept, 'dsse-ck').length === 1, String(byClass(kept, 'dsse-ck').length))
+  const shown = await openReview(instance)
+  firstByClass(shown, 'dsse-search').props.onChange({ target: { value: 'office' } })
+  const filtered = await instance.renderer.deepRender(instance.seat('cards'))
+  const listText = textOf(firstByClass(filtered, 'dsse-candidate-list'))
+  check('search filters candidates by name and description', listText.includes('office') && listText.includes('pdf-tools') === false, listText)
+  firstByClass(filtered, 'dsse-search').props.onChange({ target: { value: 'missing' } })
+  const empty = await instance.renderer.deepRender(instance.seat('cards'))
+  check('a search with no match says so', textOf(firstByClass(empty, 'dsse-candidate-list')).includes('没有匹配'), textOf(firstByClass(empty, 'dsse-candidate-list')))
 }
 
 {
-  // And the delay must actually elapse into a close, or it is just a timer that
-  // nobody reads. Driven by hand so the suite stays fast and deterministic.
   const routes = panelRoutes()
   routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
@@ -1565,32 +1579,21 @@ check(
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const armed = instance.timers.filter((entry) => entry.cleared === false && entry.ms > 0)
-  for (const entry of armed) entry.fn()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await openReview(instance)
+  const keydown = instance.listeners.find((row) => row.type === 'keydown')
+  check('the open dialog listens for Escape', keydown !== undefined)
+  keydown.handler({ key: 'Escape', preventDefault() {} })
+  const leaving = await instance.renderer.deepRender(cards)
+  check('Escape starts the close transition', firstByClass(leaving, 'dsse-layer')?.props?.['data-closing'] === 'true', String(firstByClass(leaving, 'dsse-layer')?.props?.['data-closing']))
+  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms === 180)) entry.fn()
+  await settle()
   const closed = await instance.renderer.deepRender(cards)
-  check('the scheduled close really closes the list', byClass(closed, 'dsse-ck').length === 0, String(byClass(closed, 'dsse-ck').length))
+  check('the close transition unmounts the dialog', firstByClass(closed, 'dsse-dialog') === undefined)
+  check('the trigger returns to its collapsed state', firstByClass(closed, 'dsse-queue')?.props?.['aria-expanded'] === false)
 }
 
 // ---------------------------------------------------------------------------
-// Listeners added while open are removed when it closes
-//
-// The window stub records every listener precisely so this can be asserted; the
-// invariant had dropped out when the bubble was replaced and nothing noticed. The
-// scroll listener must also be on the capture phase, because the conversation
-// scrolls inside nested elements and a bubble-phase listener on window never
-// hears it.
-//
-// The baseline is the set attached before the list opened, not an empty list: the
-// overlay keeps its own `resize` listener for as long as it is mounted, so
-// asserting "nothing is attached afterwards" would fail on correct code.
+// Modal listeners are removed when the dialog closes
 // ---------------------------------------------------------------------------
 
 {
@@ -1603,43 +1606,24 @@ check(
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const first = await instance.renderer.deepRender(cards)
-  const beforeHover = instance.listeners.slice()
+  const baseline = instance.listeners.slice()
 
-  const trigger = firstByClass(first, 'dsse-tip-anchor')
-  trigger.props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  const added = instance.listeners.filter((row) => beforeHover.includes(row) === false)
-  check('opening the list adds listeners', added.length >= 2, JSON.stringify(added.map((row) => row.type)))
-  const scroll = added.find((row) => row.type === 'scroll')
-  check('the scroll listener sits on the capture phase', scroll?.options === true || scroll?.options?.capture === true, JSON.stringify(scroll?.options))
-  const keydown = added.find((row) => row.type === 'keydown')
-  check('opening the list also listens for Escape', keydown !== undefined, JSON.stringify(added.map((row) => row.type)))
-
-  firstByClass(opened, 'dsse-tip-anchor').props.onMouseLeave()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  // A re-render is what lets the effect's cleanup run; without it the listeners
-  // are still attached and the assertion would report a leak that has only not
-  // been torn down yet.
+  firstByClass(first, 'dsse-queue').props.onClick()
+  await settle()
+  await instance.renderer.deepRender(cards)
+  const added = instance.listeners.filter((row) => baseline.includes(row) === false)
+  check('opening the dialog adds one keydown listener', added.length === 1 && added[0].type === 'keydown', JSON.stringify(added.map((row) => row.type)))
+  added[0].handler({ key: 'Escape', preventDefault() {} })
+  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms === 180)) entry.fn()
+  await settle()
   const after = await instance.renderer.deepRender(cards)
-  check('the scheduled close emptied the list', byClass(after, 'dsse-ck').length === 0, String(byClass(after, 'dsse-ck').length))
-  const leaked = added.filter((row) => instance.listeners.includes(row))
-  check('closing the list removes every listener it added', leaked.length === 0, JSON.stringify(leaked.map((row) => row.type)))
-  const kept = beforeHover.filter((row) => instance.listeners.includes(row))
-  check('closing the list keeps the listeners it did not add', kept.length === beforeHover.length, `${kept.length} of ${beforeHover.length}`)
-
+  check('the dialog is gone after closing', firstByClass(after, 'dsse-dialog') === undefined)
   instance.renderer.unmount()
-  check('unmounting leaves nothing hooked', instance.listeners.length === 0, JSON.stringify(instance.listeners.map((row) => row.type)))
+  check('unmounting removes both modal and overlay listeners', instance.listeners.length === 0, JSON.stringify(instance.listeners.map((row) => row.type)))
 }
 
 // ---------------------------------------------------------------------------
-// The trigger announces the list it opens
-//
-// `role="dialog"` on the list alone is not enough: a screen reader reaches the
-// button and has no idea anything opened. ARIA is not inherited from an ancestor,
-// so the attributes have to land on the button itself.
+// The trigger and dialog share an accessible relationship
 // ---------------------------------------------------------------------------
 
 {
@@ -1652,94 +1636,119 @@ check(
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const closed = await instance.renderer.deepRender(cards)
-  const closedButton = byClass(closed, 'dsse-btn')[0]
-  check('a closed list claims no popup', closedButton?.props?.['aria-expanded'] === undefined, JSON.stringify(closedButton?.props?.['aria-expanded']))
+  const closedButton = firstByClass(closed, 'dsse-queue')
+  check('a closed dialog is not expanded', closedButton?.props?.['aria-expanded'] === false, JSON.stringify(closedButton?.props?.['aria-expanded']))
+  check('the trigger names its dialog', closedButton?.props?.['aria-controls'] === 'dsse-candidate-dialog', JSON.stringify(closedButton?.props?.['aria-controls']))
 
-  firstByClass(closed, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  firstByClass(closed, 'dsse-queue').props.onClick()
+  await settle()
   const opened = await instance.renderer.deepRender(cards)
-  const openButton = byClass(opened, 'dsse-btn')[0]
-  check('an open list tells the button it is expanded', openButton?.props?.['aria-expanded'] === true, JSON.stringify(openButton?.props?.['aria-expanded']))
-  check('the button names the kind of thing it opens', openButton?.props?.['aria-haspopup'] === 'dialog', JSON.stringify(openButton?.props?.['aria-haspopup']))
+  const openButton = firstByClass(opened, 'dsse-queue')
+  check('an open dialog tells the trigger it is expanded', openButton?.props?.['aria-expanded'] === true, JSON.stringify(openButton?.props?.['aria-expanded']))
+  check('the dialog id matches the trigger controls', firstByClass(opened, 'dsse-dialog')?.props?.id === openButton?.props?.['aria-controls'])
 }
-// ---------------------------------------------------------------------------
-// The card must survive its own contents
-//
-// Both of these were real: the list scrolls whenever it holds more candidates
-// than fit, and every row has two real <button>s, so the two things a person
-// naturally does to a card — scroll it, press a row's button — used to close it.
-// In confirm mode the button press closed the card before the "approved, waiting
-// for the draft" notice could be read, which is the one case where the notice
-// matters.
-// ---------------------------------------------------------------------------
 
 {
   const routes = panelRoutes()
   routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
-    { id: 'b', name: 'office', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
   ] } }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const first = { disabled: false, offsetParent: {}, focus: () => { instance.document.activeElement = first } }
+  const last = { disabled: false, offsetParent: {}, focus: () => { instance.document.activeElement = last } }
+  instance.renderer.setNodeForRef(fakeNode({ left: 0, top: 0, width: 1920, height: 1000, focusable: [first, last], contains: [first, last] }))
+  await openReview(instance)
+  const keydown = instance.listeners.find((row) => row.type === 'keydown')
+  check('the dialog focuses its first control on open', instance.document.activeElement === first)
+
+  instance.document.activeElement = { tag: 'body' }
+  keydown.handler({ key: 'Tab', preventDefault() {} })
+  check('Tab from outside the dialog returns to the first control', instance.document.activeElement === first)
+  instance.document.activeElement = { tag: 'body' }
+  keydown.handler({ key: 'Tab', shiftKey: true, preventDefault() {} })
+  check('Shift+Tab from outside returns to the last control', instance.document.activeElement === last)
+  keydown.handler({ key: 'Tab', preventDefault() {} })
+  check('Tab wraps from last to first', instance.document.activeElement === first)
+  keydown.handler({ key: 'Tab', shiftKey: true, preventDefault() {} })
+  check('Shift+Tab wraps from first to last', instance.document.activeElement === last)
+}
+
+// ---------------------------------------------------------------------------
+// Typography follows the host's computed style and subsequent mutations
+// ---------------------------------------------------------------------------
+
+{
+  const typography = {
+    routes: panelRoutes(),
+    fontFamily: 'Host Font A',
+    monoFontFamily: 'Host Code A',
+    fontSize: '15px',
+    lineHeight: '24px',
+  }
+  const instance = boot(typography)
+  instance.module.apply(instance.ctx)
+  await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' })
+  check('the panel reads the host font family', instance.hostStyle.get('--dsse-font-family') === 'Host Font A', String(instance.hostStyle.get('--dsse-font-family')))
+  check('the panel reads the host mono font', instance.hostStyle.get('--dsse-font-mono') === 'Host Code A', String(instance.hostStyle.get('--dsse-font-mono')))
+  check('the panel reads the host font size', instance.hostStyle.get('--dsse-font-size') === '15px', String(instance.hostStyle.get('--dsse-font-size')))
+  check('the panel reads the host line height', instance.hostStyle.get('--dsse-line-height') === '24px', String(instance.hostStyle.get('--dsse-line-height')))
+  check('typography watches the host root, body and conversation', instance.mutationObservers[0]?.targets.length === 3, String(instance.mutationObservers[0]?.targets.length))
+
+  typography.fontFamily = 'Host Font B'
+  typography.monoFontFamily = 'Host Code B'
+  typography.fontSize = '17px'
+  typography.lineHeight = '28px'
+  instance.mutationObservers[0].callback()
+  check('a host font mutation updates the panel', instance.hostStyle.get('--dsse-font-family') === 'Host Font B', String(instance.hostStyle.get('--dsse-font-family')))
+  check('a host mono mutation updates code labels', instance.hostStyle.get('--dsse-font-mono') === 'Host Code B', String(instance.hostStyle.get('--dsse-font-mono')))
+  check('a host size mutation updates the panel', instance.hostStyle.get('--dsse-font-size') === '17px', String(instance.hostStyle.get('--dsse-font-size')))
+  check('a host line-height mutation updates the panel', instance.hostStyle.get('--dsse-line-height') === '28px', String(instance.hostStyle.get('--dsse-line-height')))
+  const writesBeforeRepeat = instance.hostWrites.length
+  instance.mutationObservers[0].callback([{ type: 'attributes' }])
+  check('repeated sync does not rewrite identical typography', instance.hostWrites.length === writesBeforeRepeat, `${writesBeforeRepeat} → ${instance.hostWrites.length}`)
+  typography.monoFontFamily = 'Host Code C'
+  instance.mutationObservers[0].callback([{ type: 'childList', addedNodes: [{ matches: (selector) => selector === 'code, pre' }] }])
+  check('inserting a code element refreshes the mono font', instance.hostStyle.get('--dsse-font-mono') === 'Host Code C', String(instance.hostStyle.get('--dsse-font-mono')))
+  typography.monoFontFamily = 'Should Not Apply'
+  instance.mutationObservers[0].callback([{ type: 'childList', addedNodes: [{ matches: () => false, querySelector: () => null }] }])
+  check('ordinary transcript insertions do not trigger a typography write', instance.hostStyle.get('--dsse-font-mono') === 'Host Code C', String(instance.hostStyle.get('--dsse-font-mono')))
+}
+
+// ---------------------------------------------------------------------------
+// A background refresh failure keeps the last good cards on screen
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  let reads = 0
+  routes['/api/skill-evolve/panel'] = () => {
+    reads += 1
+    if (reads > 1) throw new Error('panel temporarily offline')
+    return { ok: true, data: {
+      turn: 7,
+      calls: 12,
+      failed: 0,
+      summary: { text: 'keep this summary' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [{ name: 'kept-skill', owned: true, lastUsed: 2 }] },
+      mcp: [{ server: 'kept-mcp', tools: 1, lastUsed: 1 }],
+      files: [{ path: '/tmp/kept.md', bytes: 10, mtimeMs: 1 }],
+      commands: [],
+    } }
+  }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  check('the list is open before the scroll test', byClass(opened, 'dsse-ck').length === 1, String(byClass(opened, 'dsse-ck').length))
-
-  const scroll = instance.listeners.find((row) => row.type === 'scroll')
-  check('a scroll listener exists to test', scroll !== undefined, JSON.stringify(instance.listeners.map((row) => row.type)))
-
-  // A scroll inside the list body is the person reading further down the list.
-  scroll.handler({ target: { closest: (selector) => (selector.includes('.dsse-ck') ? { className: 'dsse-ck' } : null) } })
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const stillOpen = await instance.renderer.deepRender(cards)
-  check('scrolling inside the list does not close it', byClass(stillOpen, 'dsse-ck').length === 1, String(byClass(stillOpen, 'dsse-ck').length))
-
-  // A scroll anywhere else still means the anchor moved out from under the card.
-  scroll.handler({ target: { closest: () => null } })
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const closed = await instance.renderer.deepRender(cards)
-  check('scrolling the conversation still closes it', byClass(closed, 'dsse-ck').length === 0, String(byClass(closed, 'dsse-ck').length))
-}
-
-{
-  const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
-    { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
-  ] } }
-  // Pressing a row's ✓ moves focus to a button that lives inside the wrapper,
-  // so the fixture has to declare that button as contained — that is exactly the
-  // predicate the handler asks about.
-  const inner = { tag: 'button' }
-  const instance = boot({ routes, triggerLeft: 400, triggerContains: [inner] })
-  instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  const wrapper = firstByClass(opened, 'dsse-tip-anchor')
-  check('the wrapper handles blur', typeof wrapper.props.onBlur === 'function', typeof wrapper.props.onBlur)
-  wrapper.props.onBlur({ relatedTarget: inner })
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const held = await instance.renderer.deepRender(cards)
-  check('moving focus inside the card does not close it', byClass(held, 'dsse-ck').length === 1, String(byClass(held, 'dsse-ck').length))
-
-  // Focus leaving for somewhere else is the real "walked away".
-  const outside = { tag: 'body' }
-  const fresh = firstByClass(held, 'dsse-tip-anchor')
-  fresh.props.onBlur({ relatedTarget: outside })
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  for (const entry of instance.timers.filter((row) => row.cleared === false && row.ms > 0)) entry.fn()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const gone = await instance.renderer.deepRender(cards)
-  check('focus leaving the card closes it', byClass(gone, 'dsse-ck').length === 0, String(byClass(gone, 'dsse-ck').length))
+  check('the first panel payload is visible', textOf(first).includes('keep this summary'), textOf(first).slice(0, 120))
+  firstByClass(first, 'dsse-refresh').props.onClick()
+  await settle()
+  const failed = await instance.renderer.deepRender(cards)
+  check('the refresh error is visible', textOf(failed).includes('panel temporarily offline'), textOf(failed).slice(0, 180))
+  check('the last good summary remains visible', textOf(failed).includes('keep this summary'), textOf(failed).slice(0, 180))
+  check('all three cards remain visible', byClass(failed, 'dsse-card').length === 3, String(byClass(failed, 'dsse-card').length))
 }
 
 {
@@ -1761,20 +1770,139 @@ check(
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-tip-anchor').props.onMouseEnter()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
-  const opened = await instance.renderer.deepRender(cards)
-  const staleRow = byClass(opened, 'dsse-ck-item')[0]
-  firstByClass(staleRow, 'dsse-ck-no').props.onClick()
-  for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
+  const opened = await openReview(instance)
+  byAction(opened, 'discard').props.onClick()
+  const confirming = await instance.renderer.deepRender(cards)
+  byAction(confirming, 'confirm-discard').props.onClick()
+  await settle()
   const body = JSON.parse(sent[0] ?? '{}')
   check('the decide call carries the id of the row that was clicked', body.id === 'stale', JSON.stringify(body))
   check('the decide call still carries the name', body.name === 'dup', JSON.stringify(body))
   check('the decide call says which action it was', body.action === 'discard', JSON.stringify(body))
 }
 
+
+// ---------------------------------------------------------------------------
+// Slow responses cannot overwrite a newer session, queue, or config change
+// ---------------------------------------------------------------------------
+
+{
+  const slowA = deferred()
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/panel'] = (init, target) => {
+    if (target.includes('agent=session-a')) return slowA.promise
+    return { ok: true, data: {
+      turn: 9, calls: 2, failed: 0, summary: { text: 'SESSION B' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(cards)
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  const fastB = await instance.renderer.deepRender(cards)
+  check('the newer session renders its own payload', textOf(fastB).includes('SESSION B'), textOf(fastB).slice(0, 100))
+  slowA.resolve({ ok: true, data: {
+    turn: 1, calls: 99, failed: 0, summary: { text: 'STALE SESSION A' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const after = await instance.renderer.deepRender(cards)
+  check('a slow older session cannot overwrite the newer one', textOf(after).includes('SESSION B') && textOf(after).includes('STALE SESSION A') === false, textOf(after).slice(0, 140))
+}
+
+{
+  const slowFirst = deferred()
+  let reads = 0
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/candidates'] = () => {
+    reads += 1
+    if (reads === 1) return slowFirst.promise
+    return { ok: true, data: { candidates: [{ id: 'new', name: 'new-queue', description: 'new', kind: 'create', body: 'NEW', whenToUse: '' }] } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-queue').props.onClick()
+  await instance.renderer.deepRender(cards)
+  const reopened = await instance.renderer.deepRender(cards)
+  firstByClass(reopened, 'dsse-queue').props.onClick()
+  await settle()
+  const fresh = await instance.renderer.deepRender(cards)
+  check('the newest candidate response is visible', textOf(fresh).includes('new-queue'), textOf(fresh).slice(0, 120))
+  slowFirst.resolve({ ok: true, data: { candidates: [{ id: 'old', name: 'stale-queue', description: 'old', kind: 'create', body: 'OLD', whenToUse: '' }] } })
+  await settle()
+  const after = await instance.renderer.deepRender(cards)
+  check('a slow older candidate response cannot replace it', textOf(after).includes('new-queue') && textOf(after).includes('stale-queue') === false, textOf(after).slice(0, 140))
+}
+
+{
+  const firstSave = deferred()
+  const secondSave = deferred()
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/config'] = (init) => {
+    if (init?.method !== 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
+    const body = JSON.parse(String(init.body))
+    return body.panelSummary === false ? firstSave.promise : secondSave.promise
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-settings-open').props.onClick()
+  const settings = await instance.renderer.deepRender(cards)
+  firstByClass(settings, 'dsse-check').props.onChange({ target: { checked: false } })
+  const changedAgain = await instance.renderer.deepRender(cards)
+  firstByClass(changedAgain, 'dsse-check').props.onChange({ target: { checked: true } })
+  secondSave.resolve({ ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } })
+  await settle()
+  firstSave.resolve({ ok: true, data: { panelSummary: false, panelSide: 'left', panelCollapsed: false } })
+  await settle()
+  const after = await instance.renderer.deepRender(cards)
+  check('an older config response cannot roll back the latest choice', firstByClass(after, 'dsse-check')?.props?.checked === true, String(firstByClass(after, 'dsse-check')?.props?.checked))
+}
+
+{
+  const instance = boot({ routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-settings-open').props.onClick()
+  const settings = await instance.renderer.deepRender(cards)
+  const right = byClass(settings, 'dsse-side-option').find((node) => textOf(node) === '右侧')
+  right.props.onClick()
+  const moved = await instance.renderer.deepRender(cards)
+  check('moving the panel keeps the loaded summary', textOf(moved).includes('Read three files and edited one'), textOf(moved).slice(0, 140))
+  check('moving the panel still changes its side', firstByClass(moved, 'dsse-rail')?.props?.['data-side'] === 'right', String(firstByClass(moved, 'dsse-rail')?.props?.['data-side']))
+}
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/config'] = (init) => {
+    if (init?.method === 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false, ok: false, reason: 'settings are read only' } }
+    return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const first = await instance.renderer.deepRender(cards)
+  firstByClass(first, 'dsse-settings-open').props.onClick()
+  const settings = await instance.renderer.deepRender(cards)
+  byClass(settings, 'dsse-side-option').find((node) => textOf(node) === '右侧').props.onClick()
+  await settle()
+  const refused = await instance.renderer.deepRender(cards)
+  check('a refused side change returns to the previous side', firstByClass(refused, 'dsse-rail')?.props?.['data-side'] === 'left', String(firstByClass(refused, 'dsse-rail')?.props?.['data-side']))
+  check('the refusal is shown to the user', textOf(refused).includes('settings are read only'), textOf(refused).slice(0, 180))
+  check('the refusal does not clear the loaded cards', textOf(refused).includes('Read three files and edited one'), textOf(refused).slice(0, 180))
+}
 
 console.log(`\n${passed} passed, ${failed} failed`)
 for (const failure of failures) console.log(`  FAIL ${failure}`)

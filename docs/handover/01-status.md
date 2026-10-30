@@ -5,6 +5,7 @@
 | 日期 | 快照 | 一句话 |
 |---|---|---|
 | 2026-10-30 | 首次整理 | 22 个模块 11,939 行；1722 断言全绿；三个变异套件归零；清单卡片已推送 `051d8b6` |
+| 2026-10-30 | 前端重构 | 三卡同屏、点击式候选审核、宿主字体实时同步；1734 断言全绿；26 个清单变异归零 |
 
 ---
 
@@ -67,3 +68,44 @@ DSH 插件。在会话进行中观察，识别值得复用的流程，把候选�
 1. 重启宿主，确认清单卡片在真实界面里可见（唯一未在真机验证的一环）。
 2. 攒几次真实使用，再看 `ledger.jsonl` 里 `skill_used` 之后有没有 `skill_result` 行——那是 L1 是否真的有数据的唯一判据。
 3. 如果 L1 有数据，再谈 L2（逐技能验收）；L3 对照实验不该做进插件。
+
+---
+
+## 2026-10-30 · 前端重构
+
+### 做了什么
+
+按用户验收意见重构客户端界面：保留分卡片侧栏但改为三卡同屏（上一轮、技能与 MCP、产出文件），候选审核从双层 hover 清单改为点击打开的 modal，设置集中到面板头部弹窗，面板与 modal 的字体、字号、行高实时读取宿主计算样式。
+
+### 现在真的能用的
+
+| 能力 | 证据 |
+|---|---|
+| 三卡同屏与技能/MCP 合并卡 | `test/client.test.mjs` 三卡、合并卡、数据保留断言；真实 React 浏览器截图 |
+| 点击式候选审核 | 搜索、切换详情、批准 staged、stale 禁用、忽略二次确认、按 id 请求均有测试；真实 DOM 验证 |
+| 焦点圈定与恢复 | fake DOM 焦点测试 + 真实 DOM 删除按钮后 Tab、Esc 后焦点恢复验证 |
+| 宿主字体实时同步 | 属性变化、代码元素插入/删除、重复同步不写回均有测试；真实 DOM 字号与等宽字体验证 |
+| 响应乱序保护 | 会话、候选、设置反向完成顺序测试；26 个清单变异全部 killed |
+
+### 当前数字
+
+- `node test/run.mjs`：1734 passed / 0 failed（30 套件）。
+- `scripts/mutate-checklist-panel.mjs`：26 killed / 0 survived / 0 not applied。
+- `test/mutate-panel.mjs`：14/14；`scripts/mutate-guards.mjs`：11/11。
+
+### 已知缺口
+
+- 窄窗口没有 gutter 时仍只显示把手，尚未实现原型里的窄屏抽屉；审核入口在极窄窗口不可达。
+- fake renderer 不会在子组件从树中移除时自动执行 cleanup，Modal 关闭清理由真实浏览器验证覆盖。
+
+**更正 2026-10-30**：前端重构快照中的「1734 断言」为中途数字，最终 `node test/run.mjs` 为 **1738 passed / 0 failed**（新增侧向拒绝回滚与重复排版写入测试后）。
+
+**更正 2026-10-30（二）**：同一轮后续按用户意见改为合并活动列表、空卡隐藏与紧凑操作行后，最终 `node test/run.mjs` 为 **1749 passed / 0 failed**，清单变异为 **30 killed / 0 survived / 0 not applied**。
+
+**更正 2026-10-30（三）**：补 index 层 recency 断言后，最终 `node test/run.mjs` 为 **1751 passed / 0 failed**；清单变异仍为 **30 killed / 0 survived / 0 not applied**。变异脚本的源码写回已加短暂重试，避免文件锁把源码留在变异状态。
+
+**更正 2026-10-30（四）**：另一个 agent 的前端重构经真实 Chrome 验收后修掉两处缺陷（见 DEF-25 主题 token 编造、DEF-26 网格项溢出），并新增 `test/tokens.test.mjs`（7 条）与 `scripts/extract-host-tokens.mjs`。最终 `node test/run.mjs` 为 **1758 passed / 0 failed**（31 套件）；三个变异套件分别为 `scripts/mutate-guards.mjs` 11/11、`test/mutate-panel.mjs` 14/14、`scripts/mutate-checklist-panel.mjs` 30/30，全部 killed。
+
+`scripts/mutate-guards.mjs` 本轮同时加固：启动时若 `lib/gutter.js` 与 git HEAD 不一致就拒绝运行（上一轮被管道 `SIGPIPE` 打断，`finally` 未执行，把变异后的 `if (false)` 留在了磁盘上，下一次运行又把它当作基线，于是把全部锚点报成失效）；锚点未命中或替换后文本未变都计入失败并以非零码退出，恢复后若测试仍失败同样以非零码退出。
+
+**宿主主题 token 的维护方式**：`lib/client.js` 里出现的每个 `--dsw-*` 都必须是宿主真实定义的。宿主升级后跑 `node scripts/extract-host-tokens.mjs` 重新生成 `test/host-tokens.txt`（当前 403 个 token），`test/tokens.test.mjs` 会在名字失效时失败。

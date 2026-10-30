@@ -415,6 +415,34 @@ function fakeReq(url, method = 'GET', body = undefined) {
   )
 }
 
+{
+  const deps = {
+    config: () => ({ panelSummary: false }),
+    transcripts: new TranscriptStore(),
+    summariser: { summarise: async () => ({ enabled: false }), reset: () => {} },
+    execFor: () => ({}),
+    skills: () => ({ async snapshot() { return { complete: true, skills: [{ name: 'alpha' }, { name: 'beta' }] } } }),
+    isOwned: () => false,
+    cwdFor: () => process.cwd(),
+    requestProposal: () => {},
+    skillsUsed: () => new Map([['alpha', 'tool'], ['beta', 'tool']]),
+    mcpTools: () => new Set(['mcp__zeta__tool', 'mcp__alpha-server__tool']),
+    recentUse: () => new Map([['skill:beta', 2], ['mcp:zeta', 5], ['skill:alpha', 1], ['mcp:alpha-server', 3]]),
+    modelCatalog: () => [],
+    pendingCandidates: async () => 0,
+    log: () => {},
+  }
+  const handler = createPanelApi(deps)
+  const res = fakeRes()
+  await handler(fakeReq('/api/skill-evolve/panel?agent=a'), res)
+  const payload = JSON.parse(res.body)
+  const activity = [
+    ...payload.data.skills.skills.map((row) => ({ kind: 'skill', name: row.name, lastUsed: row.lastUsed })),
+    ...payload.data.mcp.map((row) => ({ kind: 'mcp', name: row.server, lastUsed: row.lastUsed })),
+  ].sort((a, b) => b.lastUsed - a.lastUsed)
+  check('the panel exposes one recency clock for skills and MCP', JSON.stringify(activity.map((row) => row.name)) === '["zeta","alpha-server","beta","alpha"]', JSON.stringify(activity))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

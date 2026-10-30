@@ -45,24 +45,24 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'the hover grace period collapses to nothing',
+    label: 'the dialog close transition collapses to nothing',
     file: 'lib/client.js',
-    from: 'const CLOSE_GRACE_MS = 220',
-    to: 'const CLOSE_GRACE_MS = 0',
+    from: 'closeTimer.current = setTimeout(props.onClose, 180)',
+    to: 'closeTimer.current = setTimeout(props.onClose, 0)',
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'entering the list no longer cancels the close',
+    label: 'candidate search no longer filters the queue',
     file: 'lib/client.js',
-    from: 'onMouseEnter: cancelClose',
-    to: 'onMouseEnter: () => {}',
+    from: "const visible = needle === ''\n        ? rows.list\n        : rows.list.filter((row) => `${row.name} ${row.description ?? ''}`.toLowerCase().includes(needle))",
+    to: 'const visible = rows.list',
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'the trigger stops announcing the list it opens',
+    label: 'the trigger stops announcing that the dialog expanded',
     file: 'lib/client.js',
-    from: "return React.cloneElement(child, { 'aria-haspopup': 'dialog', 'aria-expanded': true })",
-    to: 'return child',
+    from: "'aria-expanded': open,",
+    to: "'aria-expanded': false,",
     suites: ['test/client.test.mjs'],
   },
   {
@@ -108,22 +108,115 @@ const mutations = [
     suites: ['test/api.test.mjs'],
   },
   {
-    // The list body scrolls whenever there are more candidates than fit, so a
-    // capture-phase handler that does not check where the scroll came from closes
-    // the card the moment somebody scrolls to the eighth candidate.
-    label: 'a scroll inside the card closes it',
+    label: 'Escape no longer closes the dialog',
     file: 'lib/client.js',
-    from: "if (inside !== null && typeof inside?.closest === 'function' && inside.closest('.dsse-ck, .dsse-ck-detail') !== null) return",
+    from: "if (event?.key === 'Escape') {",
+    to: 'if (false) {',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'selecting another candidate stops switching the detail',
+    file: 'lib/client.js',
+    from: 'onClick: () => onSelect(row.id),',
+    to: 'onClick: () => {},',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the panel stops reading the host font family',
+    file: 'lib/client.js',
+    from: "publish('--dsse-font-family', style.fontFamily)",
+    to: "publish('--dsse-font-family', '')",
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a refresh failure discards the last good cards',
+    file: 'lib/client.js',
+    from: 'setState((prior) => ({ status: "ready", data: prior.data }))',
+    to: 'setState({ status: "ready", data: undefined })',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'Tab can escape when focus is outside the dialog',
+    file: 'lib/client.js',
+    from: "if (typeof node.contains === 'function' && !node.contains(document.activeElement)) {",
+    to: 'if (false) {',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an older panel response overwrites the newer session',
+    file: 'lib/client.js',
+    from: 'if (request !== panelRequest.current || sessionId !== bridge.sessionId) return',
     to: 'if (false) return',
     suites: ['test/client.test.mjs'],
   },
   {
-    // A row's approve button is a real <button>, so pressing it fires focusout.
-    // Closing on that hides the confirm-mode notice exactly when it matters.
-    label: 'moving focus inside the card closes it',
+    label: 'an older candidate response replaces the latest queue',
     file: 'lib/client.js',
-    from: "if (next !== null && next !== undefined && held !== null && typeof held?.contains === 'function' && held.contains(next)) return",
+    from: 'if (request !== loadRequest.current) return',
     to: 'if (false) return',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an older config response rolls back the latest choice',
+    file: 'lib/client.js',
+    from: 'if (request !== configRequest.current) return',
+    to: 'if (false) return',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'identical typography is written back and re-triggers the observer',
+    file: 'lib/client.js',
+    from: 'if (value && rootStyle.getPropertyValue(name) !== value) rootStyle.setProperty(name, value)',
+    to: 'if (value) rootStyle.setProperty(name, value)',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'code element mutations no longer refresh typography',
+    file: 'lib/client.js',
+    from: 'if (typographyChanged(mutations)) syncHostTypography()',
+    to: 'if (false) syncHostTypography()',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'plugin teardown leaves typography observers and variables behind',
+    file: 'lib/client.js',
+    from: '          stopHostTypography()\n',
+    to: '',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'MCP servers ignore the shared recency clock',
+    file: 'lib/api.js',
+    from: '.sort((a, b) => (b.lastUsed - a.lastUsed) || a.server.localeCompare(b.server))',
+    to: '.sort((a, b) => a.server.localeCompare(b.server))',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'MCP tool calls stop updating recency',
+    file: 'lib/index.js',
+    from: 'if (server.length > 0) recentUse.set(`mcp:${server}`, ++useSequence)',
+    to: 'if (false) recentUse.set(`mcp:${server}`, ++useSequence)',
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    label: 'the merged activity list stops sorting by recency',
+    file: 'lib/client.js',
+    from: '].sort((a, b) => b.lastUsed - a.lastUsed)',
+    to: '].sort(() => 0)',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an empty activity card is still drawn',
+    file: 'lib/client.js',
+    from: 'const showActivity = loading || activity.length > 0',
+    to: 'const showActivity = true',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a refused side change leaves the panel on the refused side',
+    file: 'lib/client.js',
+    from: "bridge.side = prior?.panelSide === 'right' ? 'right' : 'left'",
+    to: 'bridge.side = patch.panelSide',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -152,6 +245,29 @@ const mutations = [
     suites: ['test/review-fixes.test.mjs'],
   },
 ]
+
+/**
+ * Write a source file, retrying briefly when the OS reports the file as busy.
+ *
+ * A watcher or indexer holding the file made a plain `writeFileSync` throw in the
+ * middle of a mutation, which left the mutated source on disk. The restore path
+ * matters more than the mutate path: a failed restore is a corrupted checkout.
+ *
+ * @param {string} path - the file to write.
+ * @param {string} content - the exact bytes to restore.
+ */
+function writeWithRetry(path, content) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      writeFileSync(path, content, 'utf8')
+      return
+    } catch (error) {
+      if (attempt === 4) throw error
+      const spin = new Date.now() + 200
+      while (Date.now() < spin) { /* wait out the transient lock */ }
+    }
+  }
+}
 
 function failures(output) {
   return output.split('\n').filter((line) => line.trimStart().startsWith('FAIL ')).length
@@ -196,7 +312,7 @@ for (const mutation of mutations) {
     continue
   }
   try {
-    writeFileSync(path, windows ? mutated.split('\n').join('\r\n') : mutated, 'utf8')
+    writeWithRetry(path, windows ? mutated.split('\n').join('\r\n') : mutated)
     const result = run(mutation.suites)
     if (result.total > 0) {
       killed += 1
@@ -206,7 +322,7 @@ for (const mutation of mutations) {
       notes.push(`SURVIVED     ${mutation.label}`)
     }
   } finally {
-    writeFileSync(path, onDisk, 'utf8')
+    writeWithRetry(path, onDisk)
   }
 }
 
