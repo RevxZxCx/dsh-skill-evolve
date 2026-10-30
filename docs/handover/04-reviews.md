@@ -96,3 +96,35 @@
 - 预算与几何是声明值还是实测值要分清：`DETAIL_HEIGHT=300` 这类是预留上界，真实高度在布局前无从得知，因此不能用「实测值」的口径去描述它。
 
 **收敛判据**：`node test/run.mjs` 1758 passed / 0 failed（新增 `test/tokens.test.mjs` 7 条）；`scripts/mutate-guards.mjs` 11/11、`test/mutate-panel.mjs` 14/14、`scripts/mutate-checklist-panel.mjs` 30/30 全部 killed；真实 Chrome 浅色/深色截图确认徽标可读（深色下对比度 4.39）、主按钮对比度 18.08、卡片正文 15.03。
+
+---
+
+## R-10 第二轮界面五项改动（m22337）
+
+**用户诉求**：①「上一轮」卡片太高，统计与提炼按钮移进标题栏；②总结正文截断并渐隐；③顶栏改为刷新/设置/建议，整栏加卡片背景；④所有卡片为空时顶栏三按钮一起隐藏；⑤切换会话时闪空卡。
+
+**第一轮审查**（run `efc669a3`）六条，全部成立：
+- **[P1]** 手动刷新把 `status` 置 `'loading'`，`turnHasContent` 变假，整条 rail 连同设置弹窗被卸载。
+- **[P2]** `aria-label: '候选审核'` 覆盖可见文字「建议」，违反 label-in-name。
+- **[P2]** 空态断言恒真：依赖 `byClass`/`textOf`，而 `walk` 对 `null` 不产出节点。
+- **[P2]** 顶栏背景断言只查节点存在，与背景无关。
+- **[P2]** `props.head` 的 `meta` 回退分支零覆盖。
+- **[P3]** 死的 `.dsse-clip[data-clipped]` 重复规则、`.dsse-facts` 一系、`.dsse-btn-full`、`Icon` 的 `shield` 分支。
+
+**第二轮审查**（run `a91cb32e`）四条成立：
+- **[P2]** 渐隐层恒定渲染（见 DEF-28）。
+- **[P2]** 空态 `return null` 卸载设置弹窗并让它复活（见 DEF-29）。
+- **[P3]** 有待审候选时「建议」入口一起消失。
+- **[P3]** header 统计断言只验标签不验数值 —— 把 `String(commands)` 换成 `String(ordered.length)` 全套仍绿。
+
+**第三轮审查**（run `8afa9d17`）：五个待判问题里四个无缺陷，一个成立 —— `useEffect` 量溢出会在首帧闪一下「已截断但没渐隐」。改用 `React.useLayoutEffect`（对没有布局阶段的环境回退到 `useEffect`），假渲染器同时补上 `useLayoutEffect`，否则走的永远是回退分支。
+
+**这一轮最值得记的三件事**：
+
+1. **我为 P1 写的回归测试第一版是无效的。** 把 `routes['/api/skill-evolve/panel']` 当成函数调用（`first(...args)`），而路由表里存的是普通信封对象，于是面板渲染出 `first is not a function`，刷新前后文本完全一样，断言 `includes('REFRESH')` 恒真。**只有当我把修复回退、重跑，发现 207 条全绿时，这个空测试才暴露出来。** 教训：新写的回归测试必须做一次「把修复改回去」的反向验证，否则你测的是自己想当然以为的东西。
+
+2. **`data-clipped === 'true'` 这条断言把缺陷固化成了期望。** 当产品代码写死一个常量时，任何断言该常量的测试都不会失败，它只会阻止别人修好。判断标准不是「断言够不够多」，而是「把它改坏会不会红」。
+
+3. **DOM 卸载与状态不同步是最难看见的一类缺陷。** 设置弹窗 `settingsOpen` 状态仍在，DOM 被 `return null` 带走，等数据回来就复活。这类问题的共同形状是：**渲染分支的短路把 state 驱动的东西一起吞掉**。凡是「由状态驱动、但渲染在别的分支里」的节点，都要问一句它会不会被兄弟分支短路。
+
+**收敛判据**：`node test/run.mjs` **1791 passed / 0 failed**；`scripts/mutate-checklist-panel.mjs` **41 killed / 0 survived / 0 not applied**；`test/mutate-panel.mjs` 14/14；`scripts/mutate-guards.mjs` 11/11。真实 Chrome 复验：短摘要 `data-clipped=false`、`::after` 的 `content:none`；长摘要 `data-clipped=true`、34px 渐隐。浅色/深色截图确认顶栏有独立背景、标题栏统计与提炼按钮排版正确、技能图标可辨识为书本。

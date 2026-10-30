@@ -293,14 +293,35 @@ in that skips both.
 ### Candidate review and panel settings
 
 The three cards stay visible together: **Last turn**, **Skills and MCP**, and
-**Produced files**. A card with no content is hidden rather than drawn empty. The
-last-turn card owns **propose**, which writes a hint into this conversation; it
-does not create anything. The top of the rail is a single row with refresh, the
-candidate queue, and settings — no title block. Skills and MCP servers share one
-list ordered by most recent use on a single recency clock, with a different icon
-per type. A separate **Candidate review** button opens the queue, so asking for a
-proposal and reviewing an existing one are no longer two gestures hidden inside
-the same button.
+**Produced files**. A card with no content is hidden rather than drawn empty, and
+if none of the three has anything to say the rail hides entirely — header row
+included, because an empty panel with buttons on it still looks like a panel.
+Skills and MCP servers share one list ordered by most recent use on a single
+recency clock, with a different icon per type.
+
+The header row is ordered **refresh, settings, review**. The review entry is
+labelled with the word 建议 rather than an icon, and it carries the pending count
+as a badge; it is the only way into the queue from the panel, so a session whose
+cards are all empty but whose queue holds work still draws the header. Its
+accessible name starts with the visible word (`建议 候选审核`), because a name that
+replaces the label rather than containing it fails WCAG's label-in-name rule. The
+whole row sits on its own card surface — border, radius, background — instead of
+three bare buttons floating over the conversation.
+
+The last-turn card carries its counts in the header, not in a strip below the
+text: calls, commands, and files as labelled numbers, with **propose** as a small
+button beside them. That button writes a hint into this conversation; it does not
+create anything. The summary below it is capped at 5.2em and fades out when — and
+only when — there is more text than the cap shows.
+
+The fade is measured, not assumed. A `Clip` component compares `scrollHeight`
+against `clientHeight` in a layout effect and sets `data-clipped` on the result;
+the stylesheet draws the gradient only for `data-clipped="true"`. Two things go
+wrong when the flag is hard-coded instead: a one-line summary shorter than the
+34px mask gets washed out by a fade covering text that was never truncated, and a
+long summary is cut with no indication that anything follows. A layout effect
+rather than a passive one, because a passive effect runs after the browser has
+painted — every first render would show one frame with clipped text and no fade.
 
 Candidate review is a click-open modal, not a pair of hover cards. The queue is on
 the left and the selected candidate's description, body, `whenToUse`, and evidence
@@ -335,7 +356,10 @@ does not appear after restarting, the Plugins page names the reason per entry.
 route. The client holds no copy of the transcript and re-reads `/panel` on open and
 on a timer, so the three modules always describe the same turn. A failed background
 refresh keeps the last good cards visible beside the error instead of replacing
-them with an empty panel. The rail still uses measured geometry: `measure()` falls
+them with an empty panel — and a *manual* refresh keeps them too: the loading state
+belongs to a session whose answer has never arrived, not to a reload of an answer
+already on screen. Dropping the payload there emptied the whole rail for the length
+of the request, and an open settings dialog went with it. The rail still uses measured geometry: `measure()` falls
 back to the documented clamp formula when the host does not publish a width, and
 the placement function reports `no-room` rather than overlapping the text. On a
 narrow window the cards disappear and the handle remains, because a panel that

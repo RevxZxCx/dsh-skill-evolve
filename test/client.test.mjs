@@ -79,6 +79,11 @@ function fakeNode(frame) {
   return {
     getBoundingClientRect: () => ({ left: frame.left, top: frame.top, right: frame.left + frame.width, bottom: frame.top + frame.height, width: frame.width, height: frame.height }),
     offsetWidth: frame.width,
+    // `Clip` reads these two to decide whether there is hidden text. Defaulting to
+    // equality means "nothing hidden", which is the common case; a test that wants
+    // the fade says so with `overflowHeight`.
+    scrollHeight: frame.overflowHeight ?? frame.height,
+    clientHeight: frame.height,
     contains: (node) => inside.includes(node),
     querySelector: () => focusable[0] ?? null,
     querySelectorAll: () => focusable,
@@ -226,6 +231,16 @@ function createRenderer() {
         // stays empty, and `unmount()` quietly does nothing.
         return record.cleanup
       })
+    },
+    /**
+     * Layout effects, run in the same phase as passive ones.
+     *
+     * The harness has no paint step, so "before paint" and "after paint" are the
+     * same moment here. Providing the hook keeps the bundle on its real path rather
+     * than its no-layout fallback, which would leave the pre-paint branch untested.
+     */
+    useLayoutEffect(effect, list) {
+      return hooks.useEffect(effect, list)
     },
     useMemo(factory, list) {
       const key = hookIndex++
@@ -908,7 +923,32 @@ check(
     textOf(byClass(tree, 'dsse-card')[0]).slice(0, 60),
   )
   check('the summary text is shown', textOf(tree).includes('Read three files and edited one'), textOf(tree).slice(0, 120))
-  check('the turn counter is shown', textOf(tree).includes('第 7 轮'), textOf(tree).slice(0, 120))
+  {
+    const firstHead = firstByClass(tree, 'dsse-head-stats')
+    {
+    const clipped = firstByClass(tree, 'dsse-clip')
+    check('the summary is wrapped in a clip', clipped !== undefined, textOf(tree).slice(0, 120))
+    const queue = firstByClass(tree, 'dsse-queue')
+    check('the candidates button is labelled in words', queue !== undefined && textOf(queue).includes('建议'), textOf(queue))
+    // The fake DOM does not parse CSS, so a claim about the background has to be
+    // made against the stylesheet itself; asserting the element exists proves
+    // nothing about its appearance.
+    const sheet = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+    check('the top row carries a background, a border and a radius', /\.dsse-top-row\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet) && /\.dsse-top-row\{[^}]*border:1px solid/.test(sheet) && /\.dsse-top-row\{[^}]*border-radius:10px/.test(sheet), 'top-row rule')
+  }
+  check('the card header carries the call count', firstHead !== undefined && textOf(firstHead).includes('12'), textOf(tree).slice(0, 120))
+    // Numbers, not just labels: swapping the command count for the file count used
+    // to leave every assertion green because both were labelled.
+    const headStats = firstHead === undefined ? [] : byClass(firstHead, 'dsse-head-stat').map((node) => textOf(node))
+    check('the card header carries the command count', headStats.some((row) => /^0\s*命令$/.test(row)), JSON.stringify(headStats))
+    check('the card header carries the file count', headStats.some((row) => /^1\s*文件$/.test(row)), JSON.stringify(headStats))
+    check('the old stat strip is gone', firstByClass(tree, 'dsse-facts') === undefined, textOf(tree).slice(0, 160))
+    check('the propose button moved into the header', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') !== undefined, textOf(tree).slice(0, 160))
+    // Cards without a `head` still get their metadata from `meta`. Both paths have
+    // to be pinned: removing the fallback would silently empty two headers.
+    const metas = byClass(tree, 'dsse-card-meta').map((node) => textOf(node))
+    check('a card without a custom head still shows its meta', metas.includes('2 技能 · 1 服务') && metas.includes('1 个文件'), JSON.stringify(metas))
+  }
   check('the candidate badge is shown', textOf(firstByClass(tree, 'dsse-queue')).includes('2'), textOf(firstByClass(tree, 'dsse-queue')).slice(0, 80))
   check('skills are listed', textOf(tree).includes('pdf-tools'), textOf(tree).slice(0, 200))
   check('a captured skill is marked', textOf(tree).includes('本插件'), textOf(tree).slice(0, 200))
@@ -967,7 +1007,11 @@ check(
   check('skills and MCP share one recency-ordered list', JSON.stringify(names) === '["mcp-new","skill-new","mcp-old","skill-old"]', JSON.stringify(names))
   check('each row carries a type icon', JSON.stringify(kinds) === '["mcp","skill","mcp","skill"]', JSON.stringify(kinds))
   check('the top row does not repeat the plugin title', textOf(firstByClass(tree, 'dsse-top-row')).includes('Skill Evolve') === false, textOf(firstByClass(tree, 'dsse-top-row')))
-  check('the queue entry stays reachable from the top row', firstByClass(tree, 'dsse-top-row .dsse-queue')?.props?.['aria-label'] === '候选审核' || firstByClass(tree, 'dsse-queue')?.props?.['aria-label'] === '候选审核')
+  // The name starts with the visible word: WCAG's "label in name" means the text a
+  // person sees has to be findable inside the name a screen reader announces.
+  const queueLabel = firstByClass(tree, 'dsse-queue')?.props?.['aria-label'] ?? ''
+  check('the queue entry stays reachable from the top row', firstByClass(tree, 'dsse-top-row') !== undefined && firstByClass(firstByClass(tree, 'dsse-top-row'), 'dsse-queue') !== undefined, String(queueLabel))
+  check('the queue entry is named by the word on it', queueLabel.startsWith('建议'), String(queueLabel))
   check('the propose button no longer carries an explanatory note', textOf(tree).includes('不会直接写入技能') === false, textOf(tree).slice(0, 200))
 }
 
@@ -981,8 +1025,25 @@ check(
   instance.module.apply(instance.ctx)
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  // `Overlay` always returns *some* node — a display:none wrapper when it has
+  // nowhere to draw — so lookups against a null tree are the vacuous case, and
+  // asserting the tree is null was simply the wrong claim. Pin the wrapper's own
+  // state as well as the absence of the rail, or "hidden correctly" and "crashed
+  // to nothing" would be indistinguishable here.
+  // `Overlay` keeps one absolutely-positioned, pointer-transparent wrapper and
+  // draws nothing inside it. That empty wrapper is the whole node: no class, no
+  // children, no rail. Asserting on the absence of content rather than on `null`
+  // is what makes "hidden" distinguishable from "nothing rendered at all".
+  // `Overlay` keeps one absolutely-positioned, pointer-transparent wrapper and puts
+  // nothing inside it. The claim worth pinning is that this wrapper carries no
+  // panel content — no rail, no card, no header button — not that the tree is
+  // `null`, which it never is.
+  check('a session with nothing in it still draws the overlay wrapper', tree !== null && tree.props?.style?.inset === 0, JSON.stringify(tree === null ? null : tree.props?.style))
+  check('a session with nothing in it draws no rail at all', firstByClass(tree, 'dsse-rail') === undefined, textOf(tree).slice(0, 120))
+  check('a session with nothing in it draws no header buttons', firstByClass(tree, 'dsse-refresh') === undefined && firstByClass(tree, 'dsse-settings-open') === undefined && firstByClass(tree, 'dsse-queue') === undefined, textOf(tree).slice(0, 120))
+  check('a session with nothing in it draws no text at all', textOf(tree) === '', textOf(tree).slice(0, 120))
   check('cards with no content are hidden', byClass(tree, 'dsse-card').length === 0, String(byClass(tree, 'dsse-card').length))
-  check('the top row still offers refresh, review and settings', firstByClass(tree, 'dsse-refresh') !== undefined && firstByClass(tree, 'dsse-queue') !== undefined && firstByClass(tree, 'dsse-settings-open') !== undefined)
+  check('an empty rail hides the header buttons too', firstByClass(tree, 'dsse-refresh') === undefined && firstByClass(tree, 'dsse-queue') === undefined && firstByClass(tree, 'dsse-settings-open') === undefined, textOf(tree).slice(0, 120))
 }
 
 // ---------------------------------------------------------------------------
@@ -1207,7 +1268,7 @@ check(
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
   const propose = firstByClass(tree, 'dsse-propose')
-  check('the propose button exists', propose !== undefined && textOf(propose).includes('从本轮提炼技能'), textOf(tree).slice(0, 120))
+  check('the propose button exists', propose !== undefined && textOf(propose).includes('提炼'), textOf(tree).slice(0, 120))
   propose.props.onClick()
   for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
   const post = instance.calls.find((row) => row.url.endsWith('/propose') && row.init?.method === 'POST')
@@ -1902,6 +1963,186 @@ function byAction(node, action) {
   check('a refused side change returns to the previous side', firstByClass(refused, 'dsse-rail')?.props?.['data-side'] === 'left', String(firstByClass(refused, 'dsse-rail')?.props?.['data-side']))
   check('the refusal is shown to the user', textOf(refused).includes('settings are read only'), textOf(refused).slice(0, 180))
   check('the refusal does not clear the loaded cards', textOf(refused).includes('Read three files and edited one'), textOf(refused).slice(0, 180))
+}
+
+
+// ---------------------------------------------------------------------------
+// Switching to a session with nothing in it must not flash empty cards
+//
+// The reported bug: while a session was still being read, the panel drew its
+// cards with placeholder text ("reading…") and then hid them a moment later, so
+// switching to an empty session looked like a glitch. Nothing has to be drawn
+// while the answer is in flight — the cards appear when it lands.
+// ---------------------------------------------------------------------------
+
+{
+  const slowEmpty = deferred()
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/panel'] = (init, target) => {
+    if (target.includes('agent=empty-session')) return slowEmpty.promise
+    return { ok: true, data: {
+      turn: 4, calls: 3, failed: 0, summary: { text: 'SESSION FULL' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'full-session' }), 'dsse-toggle').props.onClick()
+  const full = await instance.renderer.deepRender(cards)
+  check('the filled session draws its card', textOf(full).includes('SESSION FULL'), textOf(full).slice(0, 100))
+
+  await instance.renderer.render(toggle, { sessionId: 'empty-session' })
+  const during = await instance.renderer.deepRender(cards)
+  const duringHollow = during === null || (byClass(during, 'dsse-rail').length === 0 && byClass(during, 'dsse-card').length === 0)
+  check('a session still being read leaves only an empty wrapper', duringHollow, JSON.stringify(during === null ? null : during.props?.style))
+  check('a session still being read draws no cards at all', byClass(during, 'dsse-card').length === 0, String(byClass(during, 'dsse-card').length))
+  check('and it does not draw the header buttons over nothing', firstByClass(during, 'dsse-refresh') === undefined, textOf(during).slice(0, 120))
+  check('no loading placeholder is shown while it waits', textOf(during).includes('正在读取') === false, textOf(during).slice(0, 140))
+
+  slowEmpty.resolve({ ok: true, data: {
+    turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const after = await instance.renderer.deepRender(cards)
+  check('an empty session stays empty once the answer lands', byClass(after, 'dsse-card').length === 0, String(byClass(after, 'dsse-card').length))
+  check('and it reveals no chrome afterwards either', firstByClass(after, 'dsse-refresh') === undefined, textOf(after).slice(0, 120))
+}
+
+// ---------------------------------------------------------------------------
+// A manual refresh keeps what is already on screen
+//
+// The reported regression: clicking refresh dropped the payload while the new
+// answer was in flight, so every card vanished and the header buttons went with
+// it. The loading state belongs to a session whose answer has never arrived; a
+// refresh is not that.
+//
+// The route table holds plain envelopes, not functions — an earlier version of
+// this block called the stored envelope as if it were a handler, so the panel
+// rendered the resulting TypeError and "before" and "during" were the same error
+// string. Assert on a real answer or the comparison is vacuous.
+// ---------------------------------------------------------------------------
+
+{
+  const slow = deferred()
+  const routes = panelRoutes()
+  const firstAnswer = routes['/api/skill-evolve/panel']
+  let served = 0
+  routes['/api/skill-evolve/panel'] = () => {
+    served += 1
+    return served === 1 ? firstAnswer : slow.promise
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const settled = await instance.renderer.deepRender(cards)
+  const beforeText = textOf(settled)
+  check('the first answer is drawn before the refresh', beforeText.includes('Read three files and edited one.'), beforeText.slice(0, 120))
+
+  const refresh = firstByClass(settled, 'dsse-refresh')
+  check('the refresh button is on screen to click', refresh !== undefined, beforeText.slice(0, 120))
+  refresh.props.onClick()
+  const during = await instance.renderer.deepRender(cards)
+  const duringText = textOf(during)
+  check('a refresh in flight keeps the text it already drew', duringText.includes('Read three files and edited one.'), duringText.slice(0, 140))
+  check('a refresh in flight keeps the header buttons', firstByClass(during, 'dsse-refresh') !== undefined && firstByClass(during, 'dsse-settings-open') !== undefined, duringText.slice(0, 140))
+  check('a refresh in flight keeps the cards it already drew', byClass(during, 'dsse-card').length > 0, duringText.slice(0, 140))
+  check('a refresh in flight shows no loading placeholder', duringText.includes('正在读取') === false, duringText.slice(0, 140))
+}
+
+// ---------------------------------------------------------------------------
+// The summary fades only what it actually hides
+//
+// `data-clipped` used to be hardcoded true, so the 34px gradient was drawn over
+// every summary — including one-liners, which are shorter than the gradient and
+// came out half washed out. The mask is a claim about overflow, and overflow is a
+// layout fact, so the fake node has to be able to report a difference between the
+// scroll height and the box.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes, rect: { left: 280, top: 120, right: 1920, bottom: 420, width: 1640, height: 300 } })
+  // A summary far taller than its box: this is the case that must fade.
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const overflowing = await instance.renderer.deepRender(cards)
+  check('a summary taller than its box is marked as clipped', firstByClass(overflowing, 'dsse-clip')?.props?.['data-clipped'] === 'true', textOf(overflowing).slice(0, 120))
+}
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes, rect: { left: 280, top: 120, right: 1920, bottom: 420, width: 1640, height: 300 } })
+  // The same tree with nothing hidden: no fade may be drawn.
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const resting = await instance.renderer.deepRender(cards)
+  check('a summary that fits is not marked as clipped', firstByClass(resting, 'dsse-clip')?.props?.['data-clipped'] === 'false', textOf(resting).slice(0, 120))
+}
+
+// ---------------------------------------------------------------------------
+// Hidden chrome must not take the settings dialog with it
+//
+// The dialog is state-driven. Unmounting it while `settingsOpen` stays true means
+// it reappears untouched the moment a later answer draws cards again — a dialog
+// the user never reopened.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const open = await instance.renderer.deepRender(cards)
+  firstByClass(open, 'dsse-settings-open').props.onClick()
+  const withDialog = await instance.renderer.deepRender(cards)
+  check('the settings dialog opens from the header', firstByClass(withDialog, 'dsse-settings-dialog') !== undefined, textOf(withDialog).slice(0, 120))
+
+  // Now make every card disappear underneath the open dialog. The rail goes, but
+  // the dialog must not: it is the thing the person is looking at, and unmounting
+  // it here left `settingsOpen` true, so it reappeared on its own once cards came
+  // back. Reachability is not the issue — nobody can reopen a dialog they believe
+  // is already open.
+  routes['/api/skill-evolve/panel'] = {
+    ok: true,
+    data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  firstByClass(withDialog, 'dsse-refresh').props.onClick()
+  await settle()
+  const emptied = await instance.renderer.deepRender(cards)
+  check('emptying the cards leaves the open settings dialog alone', firstByClass(emptied, 'dsse-settings-dialog') !== undefined, textOf(emptied).slice(0, 140))
+  check('emptying the cards still hides the rail', firstByClass(emptied, 'dsse-rail') === undefined, textOf(emptied).slice(0, 140))
+}
+
+// ---------------------------------------------------------------------------
+// Pending candidates are content
+//
+// The header button is the panel's only route to the review dialog. An empty
+// session with work in the queue would otherwise hide the one control that shows
+// there is work to do.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/skill-evolve/panel'] = {
+    ok: true,
+    data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 3, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(cards)
+  check('a queue with work in it keeps the header visible', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
+  check('the queue button reports how much work there is', textOf(firstByClass(tree, 'dsse-queue')).includes('3'), textOf(tree).slice(0, 120))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

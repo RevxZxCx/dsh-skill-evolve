@@ -24,6 +24,34 @@ const repo = fileURLToPath(new URL('..', import.meta.url))
 
 const mutations = [
   {
+    label: 'an empty session still draws its chrome',
+    file: 'lib/client.js',
+    from: "if (hasAnyCard === false && error === '') return settings",
+    to: 'if (false) return settings',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'loading counts as content again',
+    file: 'lib/client.js',
+    from: 'const showTurn = turnHasContent',
+    to: "const showTurn = state.status === 'loading' || turnHasContent",
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the header stats fall back to the old title-only metadata',
+    file: 'lib/client.js',
+    from: "className: 'dsse-head-stats',",
+    to: "className: 'dsse-head-stats-gone',",
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the candidates button loses its label',
+    file: 'lib/client.js',
+    from: "jsx('span', { children: '建议' }),",
+    to: "jsx('span', { children: '' }),",
+    suites: ['test/client.test.mjs'],
+  },
+  {
     label: 'a staged approval deletes its row anyway',
     file: 'lib/client.js',
     from: 'if (outcome?.staged === true) {',
@@ -208,7 +236,7 @@ const mutations = [
   {
     label: 'an empty activity card is still drawn',
     file: 'lib/client.js',
-    from: 'const showActivity = loading || activity.length > 0',
+    from: 'const showActivity = activity.length > 0',
     to: 'const showActivity = true',
     suites: ['test/client.test.mjs'],
   },
@@ -243,6 +271,58 @@ const mutations = [
       '  return findByName(queue, name)',
     ].join('\n'),
     suites: ['test/review-fixes.test.mjs'],
+  },
+  // P1 from the review: a manual refresh must not drop the payload it already has.
+  {
+    label: 'a manual refresh empties the rail while the new answer is in flight',
+    file: 'lib/client.js',
+    from: 'if (quiet !== true) setState((prior) => (prior.status === "ready" ? prior : { ...prior, status: "loading" }))',
+    to: 'if (quiet !== true) setState((prior) => ({ ...prior, status: "loading" }))',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the queue button is named by something other than the word on it',
+    file: 'lib/client.js',
+    from: "'aria-label': '建议 候选审核',",
+    to: "'aria-label': '候选审核',",
+    suites: ['test/client.test.mjs'],
+  },
+  // Round two: the fade is a measurement, not a constant, and hidden chrome must
+  // not take the settings dialog down with it.
+  {
+    label: 'the fade is drawn whether or not anything is hidden',
+    file: 'lib/client.js',
+    from: 'const hidden = node.scrollHeight > node.clientHeight + 1',
+    to: 'const hidden = true',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the fade is never drawn, so clipped text just stops',
+    file: 'lib/client.js',
+    from: 'const hidden = node.scrollHeight > node.clientHeight + 1',
+    to: 'const hidden = false',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an empty rail takes the settings dialog down with it',
+    file: 'lib/client.js',
+    from: "if (hasAnyCard === false && error === '') return settings",
+    to: "if (hasAnyCard === false && error === '') return null",
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'pending candidates stop counting as content',
+    file: 'lib/client.js',
+    from: 'const hasAnyCard = showTurn || showActivity || showFiles || pendingCandidates > 0',
+    to: 'const hasAnyCard = showTurn || showActivity || showFiles',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the command count is reported as the file count',
+    file: 'lib/client.js',
+    from: "jsx('b', { children: String(commands) })",
+    to: "jsx('b', { children: String(ordered.length) })",
+    suites: ['test/client.test.mjs'],
   },
 ]
 

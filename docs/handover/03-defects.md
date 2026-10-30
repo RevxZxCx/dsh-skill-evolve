@@ -306,3 +306,37 @@ const error = new Error(`cannot get property "${name}" without declaring it in i
 **修法**：`.dsse-row` 规则加 `min-width:0`。修复后 `.dsse-list` 与卡片层级溢出归零，只剩 `.dsse-name` 的两条 —— 那是 `text-overflow:ellipsis` 的正常工作，不是缺陷。
 
 **为什么测试没抓到**：假渲染器没有布局引擎，`scrollWidth`/`clientWidth` 全为 0，溢出审计只可能在真实浏览器成立。`test/client.test.mjs` 开头就声明「几何是否对齐是浏览器事实」。
+
+---
+
+## DEF-27 「上一轮」卡片被自身的统计条撑高，总结正文没有高度上限
+
+**现象**（用户 m22337 报告）：卡片占用的垂直空间太大，标题栏里显示的「轮次/调用/失败」与卡片正文下方的统计块重复；一段长总结会把整张卡撑满，把下面两张卡挤出视野。
+
+**根因**：两张分开的表。标题栏只显示轮次文字，三个计数在正文下方另占一整块（`.dsse-facts` 三列网格）；总结正文没有任何高度约束，长度完全由模型输出决定。
+
+**修法**：
+1. 三个计数与提炼按钮移进标题栏（`Card` 新增可选 `props.head`，自定义头与原来的 `meta` 回退互斥），删掉 `.dsse-facts` 整块与 `dsse-btn-full`。
+2. `.dsse-text` 加 `max-height:5.2em`，底部加 34px 渐变遮罩。
+
+**为什么测试没抓到**：假渲染器没有布局引擎，`scrollHeight`/`clientHeight` 恒相等，「卡片有多高」这件事在旧套件里根本不可观测；旧断言只检查「有没有这个节点」。
+
+## DEF-28 渐隐遮罩恒定渲染，把没被截断的短摘要也压暗
+
+**现象**：`data-clipped` 被硬编码为 `'true'`，于是 34px 的渐变层对每一条摘要都生效。一两行的短摘要比渐变层本身还矮，下半截被白色渐变盖住，看起来像文字淡出了但后面什么都没有。
+
+**根因**：把「是否溢出」当成常量而不是测量结果。CSS 里 `max-height:5.2em` 与 `::after` 共用同一个选择器，两者被绑在一起。
+
+**修法**：新增 `Clip` 组件，用 `useLayoutEffect` 比较 `scrollHeight` 与 `clientHeight` 再设置 `data-clipped`。用 layout effect 而非 passive effect，是因为后者在浏览器已经绘制之后才运行，每次首帧都会闪一下「已截断但还没有渐隐」。
+
+**为什么测试没抓到**：断言写的是 `data-clipped === 'true'`，而它就是那个恒定值 —— 一条把缺陷固化成期望的断言。修法是把假节点的 `scrollHeight` 与 `clientHeight` 分开（`overflowHeight` 参数），并写两条相反的用例：溢出必须 `true`、不溢出必须 `false`。
+
+## DEF-29 卡片全空时设置弹窗被卸载，随后自行重新弹出
+
+**现象**：打开设置后切换会话（或后台刷新期间卡片变空），弹窗消失；等新会话的数据到达、卡片重新画出来，弹窗又自己冒出来 —— 用户没有再做任何操作。
+
+**根因**：`if (hasAnyCard === false && error === '') return null` 把整个返回树吞掉，而设置弹窗 `settings` 是同一棵树里的兄弟节点（`settings,` 在 cards 数组末尾）。弹窗由 `settingsOpen` 状态驱动，DOM 被卸载但状态仍是 `true`，下一次渲染就复活。
+
+**修法**：空态返回 `settings` 而不是 `null`。顶栏与卡片不渲染，弹窗保留。同时 `hasAnyCard` 纳入 `pendingCandidates > 0`：那个按钮是面板里通往候选审核的唯一入口，队列里有活时把它藏掉等于让工作不可达。
+
+**为什么测试没抓到**：空态断言只检查「没有 rail」，设置弹窗的存活从未被断言；而「能不能打开弹窗」与「弹窗会不会被别的东西带走」是两件事。

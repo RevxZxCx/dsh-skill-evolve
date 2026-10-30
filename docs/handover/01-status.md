@@ -109,3 +109,7 @@ DSH 插件。在会话进行中观察，识别值得复用的流程，把候选�
 `scripts/mutate-guards.mjs` 本轮同时加固：启动时若 `lib/gutter.js` 与 git HEAD 不一致就拒绝运行（上一轮被管道 `SIGPIPE` 打断，`finally` 未执行，把变异后的 `if (false)` 留在了磁盘上，下一次运行又把它当作基线，于是把全部锚点报成失效）；锚点未命中或替换后文本未变都计入失败并以非零码退出，恢复后若测试仍失败同样以非零码退出。
 
 **宿主主题 token 的维护方式**：`lib/client.js` 里出现的每个 `--dsw-*` 都必须是宿主真实定义的。宿主升级后跑 `node scripts/extract-host-tokens.mjs` 重新生成 `test/host-tokens.txt`（当前 403 个 token），`test/tokens.test.mjs` 会在名字失效时失败。
+
+**更正 2026-10-30（五）**：第二轮界面五项改动（m22337）完成并收敛。新增 `Clip` 组件（`useLayoutEffect` 量测溢出后决定是否渐隐）、`Card` 的可选 `props.head`、顶栏重排为刷新/设置/建议。修掉三个由审查发现的真实缺陷：DEF-28「渐隐恒定渲染压暗短摘要」、DEF-29「空态卸载设置弹窗后自行复活」、以及「有待审候选时入口一起消失」。最终 `node test/run.mjs` 为 **1791 passed / 0 failed**；变异套件 `scripts/mutate-checklist-panel.mjs` **41 killed / 0 survived / 0 not applied**、`test/mutate-panel.mjs` 14/14、`scripts/mutate-guards.mjs` 11/11。
+
+本轮的三条可复用教训记在 R-10：新写的回归测试必须做一次「把修复改回去」的反向验证；断言一个被写死的常量不会失败，只会阻止别人修好它；渲染分支的短路不能吞掉由 state 驱动的兄弟节点。
