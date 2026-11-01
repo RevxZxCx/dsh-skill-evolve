@@ -14,7 +14,7 @@
 import { join } from 'node:path'
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { apply, Config } from '../lib/index.js'
+import { apply, Config } from '../packages/skill-evolve/lib/index.js'
 
 let pass = 0
 let fail = 0
@@ -69,6 +69,7 @@ function fakeHost() {
   const contexts = []
   const agents = new Map()
   const handlers = new Map()
+  const provided = new Map()
   const deferred = []
   const routes = []
   const ctx = {
@@ -76,7 +77,12 @@ function fakeHost() {
     commands: { register: (command) => (commands.set(command.name, command), () => commands.delete(command.name)) },
     systemPrompt: { context: (entry) => (contexts.push(entry), () => {}) },
     webServer: { register: (route) => (routes.push(route), () => {}) },
-    get: (name) => (name === 'agents' ? { get: (id) => agents.get(id) } : undefined),
+    provide(name, value) {
+      provided.set(name, value)
+      return () => provided.delete(name)
+    },
+    get: (name) =>
+      name === 'agents' ? { get: (id) => agents.get(id) } : provided.get(name),
     inject(names, callback) {
       const missing = names.filter((name) => ctx[name] === undefined)
       if (missing.length > 0) {

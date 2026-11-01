@@ -1,12 +1,16 @@
 /**
- * Validated plugin configuration.
+ * Validated configuration for `@revxz/dsh-skill-evolve`.
  *
  * Every field is optional so the bundle patch can mount the plugin with no
  * `config:` block at all. Defaults mirror the values argued for in
  * `docs/05-设计方案.md`: the plugin proposes by default, writes only through
  * the model's own tool call, and never grows the catalog on its own.
  *
- * @module dsh-skill-evolve/config
+ * The five panel switches that used to live here moved to
+ * `@revxz/dsh-ui-evolve` when the two plugins were split: they configure a card,
+ * not a candidate, and a profile can now install either half alone.
+ *
+ * @module @revxz/dsh-skill-evolve/config
  */
 
 import z from '@deepseek-ai/schemastery'
@@ -252,50 +256,4 @@ export const Config = z.object({
    * reads like a bug even when it is intended.
    */
   catalogFrequentUses: z.number().step(1).min(1).max(1000).default(3),
-
-  /**
-   * Show the "previous turn" summary in the session panel.
-   *
-   * This is the only feature in this plugin that spends money on its own: every
-   * completed turn becomes one small model call. It is on by default because the
-   * summary is the panel's main reason to exist, but the switch is here so a
-   * person who objects to the cost is not forced to uninstall the plugin to stop
-   * it.
-   */
-  panelSummary: z.boolean().default(true),
-
-  /**
-   * Provider for the summary call. Set together with `summaryModel`.
-   *
-   * Left empty, the summary uses the first model the first registered provider
-   * advertises. That is a deliberate choice to be cheap and predictable rather
-   * than good: a sidebar summary does not warrant the session's own route, and
-   * silently borrowing it would make the panel expensive in proportion to how
-   * much the conversation matters.
-   */
-  summaryProvider: z.string().default(''),
-
-  /** Model for the summary call. Set together with `summaryProvider`. */
-  summaryModel: z.string().default(''),
-
-  /**
-   * Which gutter the cards float in.
-   *
-   * The conversation column is centred and narrower than the window, so both
-   * sides have empty space. Cards live in one of them — never both — because two
-   * columns of small text either side of the prose competes with the prose. The
-   * left gutter is the default: the right one is where the host puts file
-   * previews, so parking cards there means they are hidden exactly when a person
-   * is reading something and most likely to want them.
-   */
-  panelSide: z.union(['left', 'right']).default('left'),
-
-  /**
-   * Start with the cards collapsed to a handle.
-   *
-   * Off by default so the panel is discoverable, but a person who has decided
-   * they do not want it on screen can leave it collapsed permanently without
-   * losing the toggle.
-   */
-  panelCollapsed: z.boolean().default(false)
 })

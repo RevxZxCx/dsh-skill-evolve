@@ -19,35 +19,35 @@ import { spawnSync } from 'node:child_process'
 const cases = [
   {
     label: 'valueOf stops rejecting a primitive result',
-    file: 'lib/api.js',
+    file: 'packages/ui-evolve/lib/api.js',
     from: `  if (value !== undefined && (typeof value !== 'object' || value === null)) {`,
     to: `  if (false) {`,
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'valueOf calls its dependency unconditionally again',
-    file: 'lib/api.js',
+    file: 'packages/ui-evolve/lib/api.js',
     from: "  const value = typeof dependency === 'function' ? dependency() : dependency",
     to: '  const value = dependency()',
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'summarise readConfig reverted to this.config()',
-    file: 'lib/summarise.js',
+    file: 'packages/ui-evolve/lib/summarise.js',
     from: '    const config = valueOf(this.config)\n    if (config?.panelSummary',
     to: '    const config = this.config()\n    if (config?.panelSummary',
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'summarise run reverted to this.llm()',
-    file: 'lib/summarise.js',
+    file: 'packages/ui-evolve/lib/summarise.js',
     from: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = valueOf(this.llm)',
     to: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = this.llm()',
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'describeSkills stops awaiting isOwned',
-    file: 'lib/api.js',
+    file: 'packages/ui-evolve/lib/api.js',
     // Drop only the inner `await`, not the `Promise.all` wrapper. An earlier
     // version replaced the whole `const listed = await Promise.all(...)` block
     // and left an orphan `)` behind, so `lib/api.js` no longer parsed; the
@@ -60,7 +60,7 @@ const cases = [
   },
   {
     label: 'resolveRoute stops rethrowing an abort',
-    file: 'lib/summarise.js',
+    file: 'packages/ui-evolve/lib/summarise.js',
     // Anchored on the surrounding comment: a bare `signal?.throwIfAborted()`
     // matches the `listProviders` guard first, so the mutation used to land on
     // a line no test covers and survived while looking like coverage.
@@ -70,7 +70,7 @@ const cases = [
   },
   {
     label: 'writeConfig returns a receipt instead of the config',
-    file: 'lib/api.js',
+    file: 'packages/ui-evolve/lib/api.js',
     from: `  return {
     ...readConfig(deps),
     ok: true,`,
@@ -80,22 +80,22 @@ const cases = [
   },
   {
     label: 'the empty-turn guard lets an empty body reach the model',
-    file: 'lib/summarise.js',
+    file: 'packages/ui-evolve/lib/summarise.js',
     from: "    if (body.length === 0) return { enabled: true, reason: 'the turn left nothing to summarise' }",
     to: "    if (body.length === 0 && false) return { enabled: true, reason: 'the turn left nothing to summarise' }",
     test: 'test/panel-wiring.test.mjs',
   },
   {
     label: 'transcripts.forget dropped from agent disposal',
-    file: 'lib/index.js',
-    from: '      transcripts.forget(agentId)\n',
+    file: 'packages/ui-evolve/lib/index.js',
+    from: '    transcripts.forget(agentId)\n',
     to: '',
     test: 'test/index.test.mjs',
   },
   {
     label: 'publish called with steps: 0 again',
-    file: 'lib/index.js',
-    from: '          steps: [],',
+    file: 'packages/skill-evolve/lib/index.js',
+    from: '        steps: [],',
     to: '          steps: 0,',
     test: 'test/index.test.mjs',
   },
@@ -104,7 +104,7 @@ const cases = [
     // refuses to load. Without this filter a model-only skill typed as /x
     // appears in the module although nothing was injected.
     label: 'gesture permission filter removed',
-    file: 'lib/api.js',
+    file: 'packages/ui-evolve/lib/api.js',
     from: '      if (!userInvocable) continue',
     to: '      void userInvocable',
     test: 'test/api.test.mjs',
@@ -114,7 +114,7 @@ const cases = [
     // Map keeps the first position, so alpha -> beta -> alpha still lists beta
     // first.
     label: 'reloading a skill no longer moves it to the front',
-    file: 'lib/index.js',
+    file: 'packages/ui-evolve/lib/index.js',
     from: `    const previous = names.get(name)
     names.delete(name)
     names.set(name, previous === 'tool' ? 'tool' : via)`,
@@ -126,7 +126,7 @@ const cases = [
     // Writing the newest path unconditionally demotes a tool load to a gesture
     // one, and describeSkills then drops a model-only skill the session is using.
     label: 'a later gesture demotes a tool load',
-    file: 'lib/index.js',
+    file: 'packages/ui-evolve/lib/index.js',
     from: `    names.set(name, previous === 'tool' ? 'tool' : via)`,
     to: `    names.set(name, via)`,
     test: 'test/index.test.mjs',
@@ -135,8 +135,8 @@ const cases = [
     // A gesture recorded as a tool load escapes the stricter user-invocable
     // rule, which is the whole reason the path is recorded at all.
     label: 'gesture loads recorded as tool loads',
-    file: 'lib/index.js',
-    from: "rememberSkillUse(agentId, name, 'gesture')",
+    file: 'packages/ui-evolve/lib/index.js',
+    from: "if (typeof name === 'string' && name.length > 0) rememberSkillUse(agentId, name, 'gesture')",
     to: "rememberSkillUse(agentId, name, 'tool')",
     test: 'test/index.test.mjs',
   },

@@ -4,3 +4,4 @@ node_modules/
 # One-off patch and probe scripts written while developing; the ones worth keeping
 # live in scripts/ and have tests of their own.
 .research/
+packages/*/node_modules/

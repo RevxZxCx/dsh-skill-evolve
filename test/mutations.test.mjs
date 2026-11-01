@@ -111,7 +111,7 @@ for (const [label, source, want] of [
 // ---- lib/gutter.js mutations -------------------------------------------------
 {
   const script = readFileSync(join(repo, 'scripts/mutate-guards.mjs'), 'utf8')
-  const target = readFileSync(join(repo, 'lib/gutter.js'), 'utf8')
+  const target = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'gutter.js'), 'utf8')
   const anchors = parseAnchors(script)
 
   check('the guard mutation script declares anchors', anchors.length >= 4, `found ${anchors.length}`)
@@ -136,7 +136,7 @@ for (const [label, source, want] of [
 // ---- lib/client.js mutations -------------------------------------------------
 {
   const script = readFileSync(join(repo, 'scripts/mutate-bundle.mjs'), 'utf8')
-  const target = readFileSync(join(repo, 'lib/client.js'), 'utf8')
+  const target = readFileSync(join(repo, 'packages/ui-evolve/lib/client.js'), 'utf8')
   const anchors = parseAnchors(script)
 
   check('the bundle mutation script declares anchors', anchors.length >= 4, `found ${anchors.length}`)
@@ -192,7 +192,7 @@ for (const [label, source, want] of [
 
 // ---- the generated copy is present and marked -------------------------------
 {
-  const bundle = readFileSync(join(repo, 'lib/client.js'), 'utf8')
+  const bundle = readFileSync(join(repo, 'packages/ui-evolve/lib/client.js'), 'utf8')
   check('the bundle carries the generated-geometry markers', bundle.includes('// <gutter>') && bundle.includes('// </gutter>'), 'markers missing')
   const sync = readFileSync(join(repo, 'scripts/sync-gutter.mjs'), 'utf8')
   check('the sync script writes the generated region', sync.includes('// <gutter>'), basename(sync))
@@ -208,8 +208,8 @@ for (const [label, source, want] of [
     // the same transformation: the first version of this check rebuilt the block by
     // hand, kept the file header the sync drops, and was off by 412 characters — the
     // same two-implementations drift the sync exists to prevent, one level up.
-    const gutterSource = readFileSync(join(repo, 'lib/gutter.js'), 'utf8')
-    const bundle = readFileSync(join(repo, 'lib/client.js'), 'utf8')
+    const gutterSource = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'gutter.js'), 'utf8')
+    const bundle = readFileSync(join(repo, 'packages/ui-evolve/lib/client.js'), 'utf8')
     const generated = buildBlock(gutterSource)
     const start = bundle.indexOf(OPEN)
     const end = bundle.indexOf(CLOSE)

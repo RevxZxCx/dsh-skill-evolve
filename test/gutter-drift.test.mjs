@@ -28,7 +28,7 @@ import {
   MIN_CARD_WIDTH,
   MAX_CARD_WIDTH,
   CARD_GAP,
-} from '../lib/gutter.js'
+} from '../packages/ui-evolve/lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -55,7 +55,7 @@ function check(label, condition, detail) {
  * @returns {object} the functions the block defines.
  */
 function loadInlined() {
-  const source = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+  const source = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
   const start = source.indexOf('// <gutter>')
   const end = source.indexOf('// </gutter>')
   if (start < 0 || end < 0) throw new Error('lib/client.js has no gutter markers — run scripts/sync-gutter.mjs')

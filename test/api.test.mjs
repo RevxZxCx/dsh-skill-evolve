@@ -26,7 +26,7 @@ import {
   decideCandidate,
   readPanel,
   statTouchedFiles
-} from '../lib/api.js'
+} from '../packages/ui-evolve/lib/api.js'
 
 let passed = 0
 let failed = 0
@@ -917,6 +917,52 @@ async function route(overrides, req) {
   const bare = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/candidates`, method: 'POST', body: '{"name":"a","action":"discard"}' }))
   check('an untyped body is still parsed, so curl and the tests keep working', bare.statusCode === 200, String(bare.statusCode))
 }
+{
+  // The dependency is wired up but the package that owns the queue is not
+  // installed. Before this was distinguished, the panel reported `available:
+  // true` with zero rows, which reads as "you have no candidates" rather than
+  // "you have not installed the package that has candidates".
+  const payload = await readCandidates(deps({ listCandidates: async () => undefined }))
+  check('an absent skill half is not an empty queue', payload.available === false, JSON.stringify(payload.available))
+  check('and it names the missing package', String(payload.reason).includes('skill half is not installed'), String(payload.reason))
+  check('an absent skill half still lists nothing', payload.candidates.length === 0, JSON.stringify(payload.candidates))
+}
+
+{
+  const absent = await decideCandidate(
+    deps({ discardCandidate: async () => undefined }),
+    { name: 'pdf-tools', action: 'discard' },
+    'agent-1',
+  )
+  check('discarding without a skill half is refused', absent.ok === false, JSON.stringify(absent.ok))
+  check('and the refusal is unavailable, not not-found', absent.code === 'unavailable', String(absent.code))
+}
+
+{
+  const absent = await decideCandidate(
+    deps({ approveCandidate: async () => undefined }),
+    { name: 'pdf-tools', action: 'approve' },
+    'agent-1',
+  )
+  check('approving without a skill half is refused', absent.ok === false, JSON.stringify(absent.ok))
+  check('and approving reports unavailable too', absent.code === 'unavailable', String(absent.code))
+}
+
+{
+  // `'unavailable'` used to be returned by the wiring layer and matched none of
+  // the four refusals the route knows, so it fell through to `{ ok: true }`. The
+  // absent case is now `undefined`, and the route has to say so.
+  const res = await route(deps({ requestProposal: () => undefined }), fakeReq({
+    url: `${ROUTE_PREFIX}/propose?agent=agent-1`,
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: '{"agent":"agent-1"}',
+  }))
+  const body = JSON.parse(res.body)
+  check('a propose with no skill half is not reported as success', body.data?.ok === false, JSON.stringify(body.data))
+  check('and it says why', String(body.data?.reason).includes('skill half is not installed'), String(body.data?.reason))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

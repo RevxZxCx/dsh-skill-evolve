@@ -9,7 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { Window, OutcomeStore, OUTCOMES, OUTCOME_TURNS, MAX_FAILED_TOOLS, MAX_TRACKED_CALLS } from '../lib/outcome.js'
+import { Window, OutcomeStore, OUTCOMES, OUTCOME_TURNS, MAX_FAILED_TOOLS, MAX_TRACKED_CALLS } from '@revxz/dsh-evolve-core'
 
 let passed = 0
 let failed = 0

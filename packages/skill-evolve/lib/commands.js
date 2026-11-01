@@ -22,7 +22,7 @@
  * @module dsh-skill-evolve/commands
  */
 
-import { describeStale, findByName, isLive } from './candidates.js'
+import { describeStale, findByName, isLive } from '@revxz/dsh-evolve-core'
 
 /**
  * Truncate text on a word boundary.

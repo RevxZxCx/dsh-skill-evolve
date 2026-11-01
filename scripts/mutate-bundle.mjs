@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process'
 // panel drawn in the wrong place. Mutating the *module* is caught by
 // test/gutter.test.mjs; mutating only the generated copy is a different question,
 // and it is the one that matters for a browser-only file.
-const bundle = 'lib/client.js'
+const bundle = 'packages/ui-evolve/lib/client.js'
 const original = fs.readFileSync(bundle, 'utf8')
 
 function run(ref, ...args) {

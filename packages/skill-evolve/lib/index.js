@@ -27,23 +27,38 @@
 import { lstat, mkdir, open, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Config } from './config.js'
-import { dshHome, skillRoot } from './paths.js'
 import { createDetector, renderSteps } from './signal.js'
 import { stepsFor } from './command.js'
 import { createTools } from './tools.js'
 import { createCommands } from './commands.js'
 import { HintChannel, renderHint, renderHintPointer } from './hint.js'
 import { ReflectionPacer, renderReflection, renderReflectionPointer } from './reflection.js'
-import { Store } from './store.js'
-import { OWNER_MARKER, parseFrontmatter, SKILL_FILE, SKILL_NAME, listOwnedSkills, readSkillFile, renderSkillFile, readState } from './skillfile.js'
-import { confidence, decideStage, invertBody, stateToFrontmatter } from './lifecycle.js'
-import { annotateQueue, contentDigest, describeStale, findByName, isLive } from './candidates.js'
-import { OutcomeStore } from './outcome.js'
 import { findCatalogMessages, shrinkCatalog } from './catalog.js'
 import { fetchMarketBundle, isValidMarketId } from './market.js'
-import { TranscriptStore, readToolCallBlock } from './transcript.js'
-import { Summariser } from './summarise.js'
-import { createPanelApi, ROUTE_PREFIX } from './api.js'
+import {
+  annotateQueue,
+  confidence,
+  contentDigest,
+  decideStage,
+  describeStale,
+  dshHome,
+  findByName,
+  invertBody,
+  isLive,
+  listOwnedSkills,
+  OWNER_MARKER,
+  OutcomeStore,
+  parseFrontmatter,
+  readSkillArgument,
+  readSkillFile,
+  readState,
+  renderSkillFile,
+  SKILL_FILE,
+  SKILL_NAME,
+  skillRoot,
+  stateToFrontmatter,
+  Store
+} from '@revxz/dsh-evolve-core'
 
 /** Cordis plugin name. */
 export const name = 'skill-evolve'
@@ -61,17 +76,6 @@ export const name = 'skill-evolve'
  * host without `dsh-commands` keep everything else.
  */
 export const inject = ['tools', 'systemPrompt']
-
-/**
- * The host's own `/name` gesture for invoking a skill from a message body.
- *
- * Copied from `dsh-tool-skill` (`SKILL_GESTURE` in its `lib/index.js`) rather
- * than invented, because the panel's claim is "this session loaded this skill".
- * If the two rules drifted, the panel would either invent loads the host never
- * performed or miss ones it did. The boundary lookarounds keep file paths
- * (`/usr/bin`) and fractions (`5/8`) out, exactly as they do upstream.
- */
-const SKILL_GESTURE = /(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g
 
 export { Config }
 
@@ -194,62 +198,6 @@ export function apply(ctx, config) {
   const usedInSession = new Map()
 
   /**
-   * Per-agent transcripts, for the panel.
-   *
-   * Populated from the same `session/event` stream the detector reads, so the
-   * panel describes the session this process is actually running rather than
-   * whatever the on-disk log last flushed.
-   */
-  const transcripts = new TranscriptStore()
-
-  /**
-   * MCP tool names seen this session.
-   *
-   * A configured server that never connected contributes no tool calls, and the
-   * panel's job is to describe what is available — so presence is proved by
-   * traffic, not by reading the connector's own configuration.
-   *
-   * @type {Set<string>}
-   */
-  const mcpToolsSeen = new Set()
-
-  /**
-   * A single recency clock for everything the panel lists as "used".
-   *
-   * Skills already carry recency through `loadedInSession` insertion order, but
-   * that order cannot be compared with an MCP server's order: the panel now lists
-   * skills and MCP servers in one stream, so both need the same unit. One counter,
-   * one map, keyed by what was used rather than by which list it belongs to.
-   */
-  const recentUse = new Map()
-  let useSequence = 0
-
-  /**
-   * Skill names this session actually loaded, for the panel's skill module.
-   *
-   * The module answers "what has this session used", not "what could it use", so
-   * this is a record of two events only: a `skill` tool call, and a `/name`
-   * gesture in a human message. It is deliberately a different map from
-   * `usedInSession`, which drives catalog truncation — the panel must stay
-   * correct when that feature is switched off.
-   *
-   * Dropped when the session closes, so it cannot grow with host uptime.
-   *
-   * One map, not two: a skill can arrive by either path, and the panel answers
-   * "most recently loaded first" across both. Two parallel sets cannot express
-   * that — a union of `[...tool, ...gesture]` sorts every gesture load after
-   * every tool load, so reloading a tool skill would still list a later gesture
-   * above it. Insertion order here is the single source of recency, and the
-   * value records which path granted the load because the two paths do not grant
-   * the same permission: the `skill` tool loads what the host advertises as
-   * model-invocable, while a gesture is filtered by `isUserInvocable` and
-   * injects nothing when it fails.
-   *
-   * @type {Map<string, Map<string, 'tool' | 'gesture'>>}
-   */
-  const loadedInSession = new Map()
-
-  /**
    * Open observation windows, one per agent, opened when a skill is loaded.
    *
    * Separate from the counters in `registry.json` because a count answers "was
@@ -259,26 +207,6 @@ export function apply(ctx, config) {
    */
   const outcomes = new OutcomeStore()
 
-
-  /**
-   * Settings the panel changed for this process only.
-   *
-   * The host owns the config file. A plugin that rewrote it could corrupt the
-   * settings of every other plugin in the profile, so panel switches live here
-   * until restart and the panel says so.
-   *
-   * @type {Record<string, unknown>}
-   */
-  const overrides = {}
-
-  /**
-   * The live config: the host's resolved values with panel overrides on top.
-   *
-   * @returns {object} the effective config.
-   */
-  function liveConfig() {
-    return Object.keys(overrides).length === 0 ? config : { ...config, ...overrides }
-  }
 
   /**
    * The skill root for a given agent.
@@ -648,8 +576,6 @@ export function apply(ctx, config) {
       deferred.delete(agentId)
       pacer.forget(agentId)
       usedInSession.delete(agentId)
-      loadedInSession.delete(agentId)
-      transcripts.forget(agentId)
       // An open window at disposal describes an observation that was cut short,
       // not a result. Writing it would put rows in the ledger whose counts
       // depend on when the person closed the window.
@@ -774,42 +700,6 @@ export function apply(ctx, config) {
     return countUse({ name: skillName, agent, agentId: typeof agentId === 'string' ? agentId : undefined })
   }))
 
-  // ----------------------------------------------------------- transcript --
-  //
-  // Feed the panel's per-turn record from the same event stream the detector
-  // reads.
-  //
-  // Registered for every event type because the panel needs four different
-  // ones (human message, assistant message, tool call, turn end) and the store
-  // itself decides what each means. The cost is one function call per event,
-  // and the store drops anything older than the last few turns — the panel only
-  // ever shows the turn that just ended.
-  //
-  // This runs regardless of `mode`: `off` means "do not interrupt the model",
-  // not "do not let the person see what happened". A panel that went blank
-  // because hints were silenced would be indistinguishable from a broken one.
-  ctx.on('session/event', safe('transcript', (session, event) => {
-    const agentId = session?.id
-    if (typeof agentId !== 'string' || agentId.length === 0) return
-    transcripts.record(agentId, event)
-
-    // Remember MCP tool names as they are dispatched. Bounded by the distinct
-    // tool names the connected servers actually expose in one session — the set
-    // is not cleared on disposal, so a long-lived host accumulates one short
-    // string per distinct `mcp__<server>__<tool>` it has ever dispatched.
-    if (event?.type !== 'tool/call') return
-    const toolName = event?.data?.name
-    if (typeof toolName !== 'string' || !toolName.startsWith('mcp__')) return
-    // The whole tool name, not just the server. The reader splits it, so this
-    // side never has to decide what a bare string means — and it can count how
-    // many tools each server actually contributed.
-    mcpToolsSeen.add(toolName)
-    const rest = toolName.slice('mcp__'.length)
-    const cut = rest.indexOf('__')
-    const server = cut > 0 ? rest.slice(0, cut) : ''
-    if (server.length > 0) recentUse.set(`mcp:${server}`, ++useSequence)
-  }))
-
   // Feed the post-load observation windows.
   //
   // A separate handler rather than another branch inside the transcript one:
@@ -824,348 +714,6 @@ export function apply(ctx, config) {
     // boundary for its own agent.
     if (closed.length > 0) return recordOutcome(closed[0])
   }))
-
-  // ----------------------------------------------------- visible skill use --
-  //
-  // The panel's skill module answers "what has this session actually loaded",
-  // and the host records a load on two paths that share nothing:
-  //
-  //   1. the model calls the `skill` tool -> a `tool/call` named `skill`;
-  //   2. a person types `/name` -> the host matches `SKILL_GESTURE`
-  //      (`/(^|\s)\/([a-z0-9]+(?:-[a-z0-9]+)*)(?=\s|$)/g`) against the text
-  //      blocks of a `user/message` whose `source.kind` is `user`, and injects
-  //      the body without dispatching any tool at all.
-  //
-  // Path 2 is why this cannot be folded into the usage counter above: that one
-  // is deliberately narrow (it also writes bookkeeping for skills this plugin
-  // owns) while this one is the panel's view and must see both. Scanning the
-  // same messages the host scans, with the same boundary rules, is the only way
-  // the panel agrees with what the session actually did.
-  ctx.on('session/event', safe('skills-visible', (session, event) => {
-    const agentId = session?.id
-    if (typeof agentId !== 'string' || agentId.length === 0) return
-
-    if (event?.type === 'tool/call') {
-      if (event?.data?.name !== 'skill') return
-      const name = readSkillArgument(event?.data?.arguments)
-      if (typeof name === 'string' && name.length > 0) rememberSkillUse(agentId, name, 'tool')
-      return
-    }
-
-    if (event?.type !== 'user/message') return
-    if (event?.data?.source?.kind !== 'user') return
-    const content = event?.data?.content
-    if (!Array.isArray(content)) return
-    for (const block of content) {
-      if (block?.type !== 'text' || typeof block.text !== 'string') continue
-      for (const match of block.text.matchAll(SKILL_GESTURE)) {
-        const name = match?.[2]
-        if (typeof name === 'string' && name.length > 0) rememberSkillUse(agentId, name, 'gesture')
-      }
-    }
-  }))
-
-  // ------------------------------------------------------------- panel api --
-  //
-  // The client half talks to the host over plain HTTP rather than a bespoke
-  // channel, because that is what `@michengai/dsh-skills-manager` does and it
-  // is the only client/host bridge this host version documents.
-  //
-  // The route is registered through `webServer`, which is an *optional*
-  // dependency: `dsh web` provides it, a headless `dsh run` does not. Reading
-  // it through `ctx.get` rather than declaring it required keeps the plugin
-  // loadable in a terminal session, where the panel is simply absent.
-  // Passed as functions, not as getters: both consumers *call* them, so a getter
-  // would hand a function to code expecting the value, and every request would
-  // read `undefined` instead of the live config.
-  const summariser = new Summariser({
-    config: () => liveConfig(),
-    llm: () => service('llm'),
-    log
-  })
-
-  // The panel's HTTP route is registered through `webServer`, which is an
-  // *optional* dependency: `dsh web` provides it, a headless `dsh run` does not.
-  //
-  // Reached through `ctx.inject` rather than declared in the module's `inject`
-  // array, so a terminal session keeps everything except the panel. Reading it
-  // eagerly through `service()` was wrong for a second reason: Cordis only hands
-  // back a service whose fiber is already active, so calling `register` from the
-  // plugin's own `apply` can see `undefined` and silently skip registration —
-  // the client then renders and every request 404s. `inject` defers the callback
-  // until the service is actually up.
-  ctx.inject(['webServer'], (webCtx) => {
-    const webServer = webCtx.webServer
-    if (webServer === undefined || webServer === null || typeof webServer.register !== 'function') return
-    const api = createPanelApi({
-      config: () => liveConfig(),
-
-      /** Panel switches, honoured for this process only. */
-      applyOverride(next) {
-        Object.assign(overrides, next)
-      },
-
-      transcripts,
-      summariser,
-
-      /** MCP server names observed in this session's tool traffic. */
-      mcpTools() {
-        return mcpToolsSeen
-      },
-
-      /** Recency sequence for skills and MCP servers, on one shared clock. */
-      recentUse() {
-        return recentUse
-      },
-
-      /**
-       * Skill names this session loaded, each with the path that loaded it.
-       *
-       * Handed to the panel as-is: which of them the host would actually have
-       * injected depends on the registry row, and `describeSkills` is the layer
-       * that holds the snapshot.
-       */
-      skillsUsed(agentId) {
-        return loadedInSession.get(agentId)
-      },
-
-      /**
-       * The route this session is running on.
-       *
-       * Read from the session's own folded `request/context` events rather than
-       * from the model catalogue: the session's route is proven reachable and
-       * authorised against this account, while a catalogue entry only proves an
-       * adapter advertised it. Summaries borrow this so the panel cannot fail on
-       * a route the conversation itself is not using.
-       */
-      routeFor(agentId) {
-        try {
-          const session = service('agents')?.get?.(agentId)?.session
-          const context = session?.requestContext?.()
-          if (typeof context?.provider === 'string' && typeof context?.model === 'string') {
-            return { provider: context.provider, model: context.model }
-          }
-        } catch {
-          /* a session that has not made its first request has no route yet */
-        }
-        return undefined
-      },
-
-      /**
-       * The host's own skill registry.
-       *
-       * Deliberately not a second discovery implementation: a separate walk of
-       * the skill roots would drift from what the model can actually load, and
-       * the panel's claim is "these are the skills this session has".
-       */
-      skills() {
-        return service('skills')
-      },
-
-      /** A scope object the host's skill APIs accept for one agent. */
-      execFor(agentId) {
-        const agent = service('agents')?.get?.(agentId)
-        return { scope: agent, cwd: workspaceFor(agent) }
-      },
-
-      cwdFor(agentId) {
-        return workspaceFor(service('agents')?.get?.(agentId))
-      },
-
-      /**
-       * Whether this plugin wrote a skill.
-       *
-       * Read from the file's own marker rather than from the registry: the
-       * registry reports where a skill came from, not who may rewrite it.
-       */
-      async isOwned(name) {
-        try {
-          const file = await readSkillFile(join(rootFor(undefined), name, SKILL_FILE))
-          return file?.data?.['evolved-by'] === OWNER_MARKER
-        } catch {
-          return false
-        }
-      },
-
-      /**
-       * Ask the model to propose a skill.
-       *
-       * The panel cannot file a candidate itself — only the model knows what
-       * the procedure was — so the button queues a hint into the next step and
-       * the model decides whether there is anything worth submitting.
-       */
-      requestProposal(agentId, skillName) {
-        // `off` means the plugin does nothing at all, and that has to include
-        // this path: a hint published here reaches the model through the same
-        // system-prompt contribution the detectors use, so allowing it would
-        // make "off" mean "no detection but still injected text".
-        if (config.mode === 'off') return 'off'
-        return hints.publish({
-          agentId,
-          signature: `panel:${skillName ?? 'any'}`,
-          // An empty list, not `0`: `publish` spreads steps into the shown
-          // list, and the panel's request is not a procedure — it has no steps
-          // to remember or to de-duplicate against.
-          steps: [],
-          text: [
-            'The person reading the sidebar asked whether this session produced a reusable skill.',
-            skillName === undefined ? '' : `They pointed at "${skillName}".`,
-            'If it did, call `skill_candidate_submit` with the name, a one-line description, the steps, and evidence quoted from this conversation.',
-            'If it did not, say so in one sentence and carry on — do not invent a skill.'
-          ].filter(Boolean).join(' '),
-          pointer: undefined,
-          kind: 'repeat'
-        })
-      },
-
-      /**
-       * The queue as rows, for the panel's hover card.
-       *
-       * `loadQueue()` is the annotated view: it recomputes staleness, so a row
-       * whose base file changed since it was proposed arrives marked. Passing the
-       * raw file through would show every row as live and let the card offer an
-       * approve that `approve()` is about to refuse.
-       */
-      async listCandidates() {
-        const queue = await loadQueue()
-        return queue.map((candidate) => ({
-          id: candidate.id,
-          name: candidate.name,
-          description: candidate.description,
-          kind: candidate.kind,
-          whenToUse: candidate.whenToUse,
-          body: candidate.body,
-          evidence: candidate.evidence,
-          stale: candidate.stale,
-        }))
-      },
-
-      /**
-       * Approve one candidate by name, exactly as `/skill-capture` does.
-       *
-       * `findByName` rather than a plain find: an older candidate for the same
-       * name may have gone stale while a newer live one waits behind it, and
-       * picking the first match would refuse an approval the queue is visibly
-       * offering.
-       *
-       * `id` wins when the card sends one. Two candidates can share a name — an
-       * older one goes stale and the model proposes the name again — and
-       * `findByName` always answers with the live one, so acting on the stale row
-       * by name would hit its live twin and leave the stale row in the queue.
-       * The name is resolved only when no id was supplied, which is how
-       * `/skill-capture` and older clients keep working. An id that matches
-       * nothing is a miss: falling back to the name there would act on a row the
-       * person never saw.
-       *
-       * @param {string} name - the candidate name.
-       * @param {string} [agentId] - the session doing the approving.
-       * @param {string} [id] - the exact candidate id, when the caller has it.
-       * @returns {Promise<object>} the outcome.
-       */
-      async approveCandidate(name, agentId, id) {
-        const queue = await loadQueue()
-        const candidate = byIdThenName(queue, id, name)
-        if (candidate === undefined) {
-          return { ok: false, code: 'not-found', error: `"${name || id || 'that candidate'}" is no longer in the candidate queue` }
-        }
-        const agent = agentId === undefined ? undefined : service('agents')?.get?.(agentId)
-        const result = await approve({ candidate, agent })
-        if (result?.ok === false) {
-          return { ok: false, code: 'refused', error: String(result.error ?? 'the candidate could not be approved') }
-        }
-        return {
-          ok: true,
-          // `staged` is the confirm handshake: nothing was written, the model is
-          // about to be asked for a final draft. The card has to say so, or a
-          // person sees the row disappear and assumes the file exists.
-          staged: result?.staged === true,
-          kind: result?.kind,
-          path: result?.path,
-        }
-      },
-
-      /**
-       * Discard one candidate by name.
-       *
-       * The filter runs inside the mutation lock. Filtering a snapshot read
-       * outside it would drop any candidate another session appended between the
-       * read and the write, which is the same defect the command branch carries a
-       * comment about.
-       *
-       * `id` first, for the same reason `approveCandidate` takes one: a stale row
-       * and a live row can share a name, and the card offers a ✕ on both.
-       *
-       * @param {string} name - the candidate name.
-       * @param {string} [id] - the exact candidate id, when the caller has it.
-       * @returns {Promise<object>} the outcome.
-       */
-      async discardCandidate(name, id) {
-        const queue = await loadQueue()
-        const candidate = byIdThenName(queue, id, name)
-        if (candidate === undefined) {
-          return { ok: false, code: 'not-found', error: `"${name || id || 'that candidate'}" is no longer in the candidate queue` }
-        }
-        const removed = await store.mutateCandidates(async (entries) => {
-          const next = entries.filter((entry) => entry.id !== candidate.id)
-          return { candidates: next, result: next.length !== entries.length }
-        })
-        // The row's own name, not the caller's: an id-only request carries an
-        // empty name, and writing that into the ledger would record a discard of
-        // nothing.
-        if (!removed) {
-          return { ok: false, code: 'not-found', error: `"${candidate.name}" was removed while it was being discarded` }
-        }
-        await store.record({ at: new Date().toISOString(), actor: 'user', action: 'discard', skill: candidate.name })
-        log(`panel: discarded ${candidate.name}`)
-        return { ok: true }
-      },
-
-      /**
-       * Candidates waiting for approval, for the panel's badge.
-       *
-       * Read from the queue on disk rather than from a counter kept in memory:
-       * a second session, a slash command and the panel all write the same
-       * file, and a cached count would be wrong the moment any of them ran.
-       */
-      async pendingCandidates() {
-        try {
-          const queue = await loadQueue()
-          return queue.filter((candidate) => candidate.stale === undefined).length
-        } catch (error) {
-          log('panel: could not read the candidate queue:', error instanceof Error ? error.message : String(error))
-          return 0
-        }
-      },
-
-      /**
-       * The routes a summary may be built with.
-       *
-       * Listed from the host's model registry rather than hard-coded, because
-       * which providers an account can actually call is the host's knowledge,
-       * not this plugin's.
-       */
-      modelCatalog() {
-        const llm = service('llm')
-        if (llm === undefined || typeof llm.listProviders !== 'function') return []
-        try {
-          return llm.listProviders().map((provider) => ({
-            provider: provider.id ?? provider.name,
-            models: (provider.models ?? []).map((model) => ({ id: model.id, name: model.name ?? model.id }))
-          }))
-        } catch (error) {
-          log('panel: could not list models:', error instanceof Error ? error.message : String(error))
-          return []
-        }
-      },
-
-      log
-    })
-
-    webCtx.effect(
-      () => webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: api }),
-      'skill-evolve: panel api'
-    )
-  })
 
   // ------------------------------------------------------------- catalog --
   //
@@ -1485,71 +1033,6 @@ export function apply(ctx, config) {
     }
   }
 
-  /**
-   * Remember that this session loaded a skill, for the panel's skill module.
-   *
-   * Separate from `usedInSession`, which exists to decide catalog truncation and
-   * is keyed by the same name but for a different question. Keeping them apart
-   * avoids one feature's bookkeeping silently changing another's behaviour —
-   * the panel must count a load the model performed even when the catalog
-   * rewrite is switched off.
-   *
-   * Bounded by the number of skills this session loads, which cannot exceed the
-   * size of the library.
-   *
-   * @param {string} agentId - the loading session.
-   * @param {string} name - the skill name.
-   * @param {'tool' | 'gesture'} via - the path that loaded it.
-   * @returns {void}
-   */
-  function rememberSkillUse(agentId, name, via) {
-    const names = loadedInSession.get(agentId) ?? new Map()
-    // Delete before adding, so a skill loaded twice moves to the back of the
-    // insertion order instead of keeping its first position. A Map keeps the
-    // position of an existing key, and the panel renders this order reversed as
-    // "most recently loaded first" — without the delete, the common
-    // alpha → beta → alpha sequence would still list beta first.
-    //
-    // The stored path only ever moves in one direction: gesture → tool. The two
-    // paths are held to different halves of the host's invocation policy (a
-    // gesture needs `userInvocable`, the tool needs `modelInvocable`), so a name
-    // that arrived through the tool stays loaded through it even if a human later
-    // types `/name` in passing. Writing the newest path unconditionally made that
-    // a downgrade: a model-only skill the model had loaded disappeared from the
-    // panel the moment its name followed a slash in someone's sentence. Recency
-    // and permission are separate facts — the move to the back is recency, and
-    // this line is permission, so it must not be able to lower.
-    const previous = names.get(name)
-    names.delete(name)
-    names.set(name, previous === 'tool' ? 'tool' : via)
-    loadedInSession.set(agentId, names)
-    recentUse.set(`skill:${name}`, ++useSequence)
-  }
-
-  /**
-   * Read the skill name out of a `skill` tool call.
-   *
-   * `tool/call` carries the model's raw, still-streaming argument text, so this
-   * is a string in the normal case and an object only when the host handed us
-   * a pre-parsed payload. Anything else — malformed JSON, a partial fragment
-   * captured mid-stream, the wrong field — is not a load and must not count.
-   *
-   * @param {unknown} raw - `event.data.arguments`.
-   * @returns {string | undefined} the skill name, when there is one.
-   */
-  function readSkillArgument(raw) {
-    let value = raw
-    if (typeof raw === 'string') {
-      try {
-        value = JSON.parse(raw)
-      } catch {
-        return undefined
-      }
-    }
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
-    const name = /** @type {Record<string, unknown>} */ (value).name
-    return typeof name === 'string' ? name.trim() : undefined
-  }
 
   /**
    * Record one load of a skill this plugin manages.
@@ -2157,6 +1640,164 @@ export function apply(ctx, config) {
       return rows.sort((a, b) => b.confidence - a.confidence)
     },
     log
+  })
+
+  // ------------------------------------------------------------- service --
+  //
+  // The panel lives in `@revxz/dsh-ui-evolve` now, and this is the seam between
+  // them: six queue functions, published under a name the panel reads with
+  // `ctx.get`. Deliberately a service rather than an import — the panel must
+  // install and render without this plugin, and a compile-time dependency would
+  // make that impossible.
+  //
+  // Every entry here delegates to the same function the tools and the slash
+  // commands use. A second implementation behind the panel would be a second set
+  // of rules for one file: `approve` alone carries the confirm handshake, the
+  // evidence gate and the digest check, and none of them would survive being
+  // re-derived.
+  //
+  // Nothing here decides anything. Each call re-reads the queue from disk,
+  // because a slash command, another session and the panel all write the same
+  // file and a cached answer would be wrong the moment any of them ran.
+  ctx.provide('skillEvolve', {
+    /**
+     * The queue, annotated, for the panel's candidate dialog.
+     *
+     * `loadQueue` recomputes staleness, so a row whose base file changed since
+     * it was proposed arrives marked. Handing the raw file over would show every
+     * row as live and offer an approve that `approve` is about to refuse.
+     *
+     * @returns {Promise<Array<object>>} the rows.
+     */
+    async listCandidates() {
+      const queue = await loadQueue()
+      return queue.map((candidate) => ({
+        id: candidate.id,
+        name: candidate.name,
+        description: candidate.description,
+        kind: candidate.kind,
+        whenToUse: candidate.whenToUse,
+        body: candidate.body,
+        evidence: candidate.evidence,
+        stale: candidate.stale
+      }))
+    },
+
+    /**
+     * Candidates still waiting for a person, for the panel's badge.
+     *
+     * Filtered here rather than in the panel because "waiting" is this side's
+     * definition: a stale row is still in the file, but nobody can act on it.
+     *
+     * @returns {Promise<number>} the count.
+     */
+    async pendingCandidates() {
+      const queue = await loadQueue()
+      return queue.filter((candidate) => candidate.stale === undefined || candidate.stale === null).length
+    },
+
+    /**
+     * Approve one candidate by id, then by name.
+     *
+     * The id wins when given: a stale row and a live row can share a name, and
+     * `findByName` prefers the live one — so resolving by name after the card
+     * pointed at a specific row would approve a candidate the person never saw.
+     *
+     * @param {string} name - the row's name, as a fallback.
+     * @param {any} [agent] - the approving agent, for the confirm handshake.
+     * @param {string} [id] - the row's id, when the card had one.
+     * @returns {Promise<object>} `{ ok, staged?, kind?, path?, code?, error? }`.
+     */
+    async approveCandidate(name, agent, id) {
+      const queue = await loadQueue()
+      const candidate = byIdThenName(queue, id, name)
+      if (candidate === undefined) {
+        return { ok: false, code: 'not-found', error: `"${name || id || 'that candidate'}" is no longer in the candidate queue` }
+      }
+      const result = await approve({ candidate, agent })
+      if (result.ok === false) {
+        return { ...result, code: result.staged === undefined ? 'refused' : undefined }
+      }
+      return { ok: true, staged: result.staged === true, kind: result.kind, path: result.path }
+    },
+
+    /**
+     * Discard one candidate by id, then by name.
+     *
+     * Same resolution rule as `approveCandidate`, and for the same reason: the
+     * card offers a ✕ on stale rows too, and a stale row discarded by name would
+     * take the live row with it.
+     *
+     * @param {string} name - the row's name, as a fallback.
+     * @param {string} [id] - the row's id, when the card had one.
+     * @returns {Promise<object>} `{ ok, code?, error? }`.
+     */
+    async discardCandidate(name, id) {
+      const queue = await loadQueue()
+      const candidate = byIdThenName(queue, id, name)
+      if (candidate === undefined) {
+        return { ok: false, code: 'not-found', error: `"${name || id || 'that candidate'}" is no longer in the candidate queue` }
+      }
+      const removed = await store.mutateCandidates(async (rows) => {
+        const next = rows.filter((entry) => entry.id !== candidate.id)
+        return next.length === rows.length ? { result: false } : { candidates: next, result: true }
+      })
+      if (removed !== true) {
+        return { ok: false, code: 'not-found', error: `"${candidate.name}" is no longer in the candidate queue` }
+      }
+      await store.record({ at: new Date().toISOString(), actor: 'user', action: 'discard', skill: candidate.name })
+      log(`discard: dropped ${candidate.name}`)
+      return { ok: true }
+    },
+
+    /**
+     * Whether this plugin wrote a skill.
+     *
+     * Asked of the file, not the registry: the registry lists every skill the
+     * host knows about, and only the ones carrying `OWNER_MARKER` are this
+     * plugin's to revise.
+     *
+     * @param {string} skillName - the skill name.
+     * @returns {Promise<boolean>} whether it is ours.
+     */
+    async isOwned(skillName) {
+      if (typeof skillName !== 'string' || skillName.length === 0) return false
+      try {
+        const parsed = await readSkillFile(join(rootFor(undefined), skillName, SKILL_FILE))
+        return parsed?.data?.['evolved-by'] === OWNER_MARKER
+      } catch {
+        return false
+      }
+    },
+
+    /**
+     * Ask the model to propose a skill for the turn that just ran.
+     *
+     * The panel cannot file a candidate itself — only the model knows what the
+     * procedure was — so the button publishes a hint into the next step and lets
+     * the model decide whether there is anything worth submitting.
+     *
+     * @param {string} agentId - the session.
+     * @param {string} [skillName] - the skill the person pointed at.
+     * @returns {'published' | 'duplicate' | 'exhausted' | 'held' | 'off'} what happened.
+     */
+    requestProposal(agentId, skillName) {
+      if (config.mode === 'off') return 'off'
+      return hints.publish({
+        agentId,
+        signature: `panel:${skillName ?? 'any'}`,
+        steps: [],
+        text: [
+          'The person looking at this session asked you to turn what just happened into a skill.',
+          'Only do it if the turn actually taught a procedure worth repeating; a thin turn deserves nothing.',
+          skillName === undefined
+            ? 'Use `skill_candidate_submit` for whichever skill the turn is really about.'
+            : `The one they pointed at is \`${skillName}\`; revise it if it exists, otherwise propose it.`
+        ].join(' '),
+        pointer: undefined,
+        kind: 'repeat'
+      })
+    }
   })
 
   // `commands` is reached through `ctx.inject` rather than the plugin's own

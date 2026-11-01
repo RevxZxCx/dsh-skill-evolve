@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { placeCards } from '../lib/gutter.js'
+import { placeCards } from '../packages/ui-evolve/lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -599,7 +599,7 @@ function boot(options) {
   )
 
 
-  const source = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+  const source = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
   const evaluate = new Function(
     'window',
     'document',
@@ -674,7 +674,7 @@ function boot(options) {
  */
 function panelRoutes() {
   return {
-    '/api/skill-evolve/panel': {
+    '/api/ui-evolve/panel': {
       ok: true,
       data: {
         turn: 7,
@@ -693,13 +693,13 @@ function panelRoutes() {
         files: [{ path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 }],
       },
     },
-    '/api/skill-evolve/config': {
+    '/api/ui-evolve/config': {
       ok: true,
       data: { panelSummary: true, panelSide: 'left', panelCollapsed: false },
     },
-    '/api/skill-evolve/models': { ok: true, data: { providers: [{ provider: 'p', models: [{ id: 'm', name: 'M' }] }] } },
-    '/api/skill-evolve/propose': { ok: true, data: { hinted: true } },
-    '/api/skill-evolve/candidates': { ok: true, data: { candidates: [] } },
+    '/api/ui-evolve/models': { ok: true, data: { providers: [{ provider: 'p', models: [{ id: 'm', name: 'M' }] }] } },
+    '/api/ui-evolve/propose': { ok: true, data: { hinted: true } },
+    '/api/ui-evolve/candidates': { ok: true, data: { candidates: [] } },
   }
 }
 
@@ -709,7 +709,7 @@ function panelRoutes() {
 
 const booted = boot()
 
-check('the bundle registers itself under the plugin id', booted.captured.id === 'dsh-skill-evolve', String(booted.captured.id))
+check('the bundle registers itself under the plugin id', booted.captured.id === '@revxz/dsh-ui-evolve', String(booted.captured.id))
 check('apply is exported as a function', typeof booted.module.apply === 'function')
 check('inject names the slots service', JSON.stringify(booted.module.inject) === '["slots"]', JSON.stringify(booted.module.inject))
 check(
@@ -743,7 +743,7 @@ check('three effects are declared', booted.effects.length === 3, String(booted.e
 for (const { spec } of booted.registrations) {
   const expected = spec.id.endsWith(':toggle') ? 'conversation.session.header.actions' : 'shell.overlay'
   check(`"${spec.id}" declares the slot it registers into`, spec.name === expected, `${spec.id} → ${spec.name}`)
-  check(`"${spec.id}" names this plugin as registrant`, spec.registrant === 'dsh-skill-evolve', String(spec.registrant))
+  check(`"${spec.id}" names this plugin as registrant`, spec.registrant === '@revxz/dsh-ui-evolve', String(spec.registrant))
   check(`"${spec.id}" carries a numeric order`, Number.isFinite(spec.order), String(spec.order))
   check(`"${spec.id}" exposes an inject function`, typeof spec.inject === 'function', typeof spec.inject)
 }
@@ -793,7 +793,7 @@ check(
   check('the toggle starts inactive', button?.props?.['data-active'] === 'false', String(button?.props?.['data-active']))
   check(
     'the toggle reads the config on mount so the side setting is honoured',
-    instance.calls.some((row) => row.url.endsWith('/api/skill-evolve/config')),
+    instance.calls.some((row) => row.url.endsWith('/api/ui-evolve/config')),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
 }
@@ -808,7 +808,7 @@ check(
     proseWidth: '920px',
     routes: {
       ...panelRoutes(),
-      '/api/skill-evolve/config': {
+      '/api/ui-evolve/config': {
         ok: true,
         data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
       },
@@ -841,7 +841,7 @@ check(
     proseWidth: '920px',
     routes: {
       ...panelRoutes(),
-      '/api/skill-evolve/config': () => configAnswer,
+      '/api/ui-evolve/config': () => configAnswer,
     },
   })
   instance.module.apply(instance.ctx)
@@ -884,7 +884,7 @@ check(
     proseWidth: '920px',
     routes: {
       ...panelRoutes(),
-      '/api/skill-evolve/config': {
+      '/api/ui-evolve/config': {
         ok: true,
         data: { panelSummary: true, panelSide: 'left', panelCollapsed: true },
       },
@@ -933,7 +933,7 @@ check(
     // The fake DOM does not parse CSS, so a claim about the background has to be
     // made against the stylesheet itself; asserting the element exists proves
     // nothing about its appearance.
-    const sheet = readFileSync(join(repo, 'lib', 'client.js'), 'utf8')
+    const sheet = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
     check('the top row carries a background, a border and a radius', /\.dsse-top-row\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet) && /\.dsse-top-row\{[^}]*border:1px solid/.test(sheet) && /\.dsse-top-row\{[^}]*border-radius:10px/.test(sheet), 'top-row rule')
   }
   check('the card header carries the call count', firstHead !== undefined && textOf(firstHead).includes('12'), textOf(tree).slice(0, 120))
@@ -974,7 +974,7 @@ check(
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/panel'] = {
+  routes['/api/ui-evolve/panel'] = {
     ok: true,
     data: {
       turn: 4,
@@ -1017,7 +1017,7 @@ check(
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/panel'] = {
+  routes['/api/ui-evolve/panel'] = {
     ok: true,
     data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
   }
@@ -1098,7 +1098,7 @@ check(
     proseWidth: '920px',
     routes: {
       ...panelRoutes(),
-      '/api/skill-evolve/config': {
+      '/api/ui-evolve/config': {
         ok: true,
         data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
       },
@@ -1180,7 +1180,7 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  const instance = boot({ routes: { ...panelRoutes(), '/api/skill-evolve/panel': new Error('the panel endpoint answered 500') } })
+  const instance = boot({ routes: { ...panelRoutes(), '/api/ui-evolve/panel': new Error('the panel endpoint answered 500') } })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
@@ -1193,7 +1193,7 @@ check(
 {
   // The handler answers 200 even when it produced the failure itself. Treating
   // the envelope as data would render an empty panel over a broken queue.
-  const instance = boot({ routes: { ...panelRoutes(), '/api/skill-evolve/panel': { ok: false, code: 'internal', error: 'queue unreadable' } } })
+  const instance = boot({ routes: { ...panelRoutes(), '/api/ui-evolve/panel': { ok: false, code: 'internal', error: 'queue unreadable' } } })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
@@ -1386,7 +1386,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = {
+  routes['/api/ui-evolve/candidates'] = {
     ok: true,
     data: {
       candidates: [
@@ -1460,7 +1460,7 @@ function byAction(node, action) {
   ]
   for (const item of cases) {
     const routes = panelRoutes()
-    routes['/api/skill-evolve/candidates'] = item.route
+    routes['/api/ui-evolve/candidates'] = item.route
     const instance = boot({ routes })
     instance.module.apply(instance.ctx)
     const toggle = instance.seat('toggle')
@@ -1481,7 +1481,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = {
+  routes['/api/ui-evolve/candidates'] = {
     ok: true,
     data: {
       candidates: [
@@ -1517,7 +1517,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = {
+  routes['/api/ui-evolve/candidates'] = {
     ok: true,
     data: {
       candidates: [
@@ -1526,7 +1526,7 @@ function byAction(node, action) {
       ],
     },
   }
-  routes['/api/skill-evolve/candidates'] = (init) => {
+  routes['/api/ui-evolve/candidates'] = (init) => {
     if (init?.method !== 'POST') return { ok: true, data: { candidates: [
       { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'BODY-A', whenToUse: '' },
       { id: 'b', name: 'office', description: '', kind: 'update', body: 'BODY-B', whenToUse: '' },
@@ -1557,7 +1557,7 @@ function byAction(node, action) {
     { id: 'stale', name: 'dup', description: 'stale one', kind: 'create', body: 'B', whenToUse: '', stale: { reason: 'expired' } },
   ]
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = (init) =>
+  routes['/api/ui-evolve/candidates'] = (init) =>
     init?.method === 'POST' ? { ok: true, data: { ok: true } } : { ok: true, data: { candidates: listed } }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
@@ -1590,7 +1590,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = (init) =>
+  routes['/api/ui-evolve/candidates'] = (init) =>
     init?.method === 'POST'
       ? { ok: true, data: { ok: true } }
       : { ok: true, data: { candidates: [{ id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' }] } }
@@ -1616,7 +1616,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'A', whenToUse: '' },
     { id: 'b', name: 'office', description: 'office documents', kind: 'update', body: 'B', whenToUse: '' },
   ] } }
@@ -1634,7 +1634,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
   ] } }
   const instance = boot({ routes })
@@ -1659,7 +1659,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
   ] } }
   const instance = boot({ routes })
@@ -1689,7 +1689,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
   ] } }
   const instance = boot({ routes })
@@ -1711,7 +1711,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = { ok: true, data: { candidates: [
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
     { id: 'a', name: 'pdf-tools', description: 'd', kind: 'create', body: 'B', whenToUse: '' },
   ] } }
   const instance = boot({ routes })
@@ -1783,7 +1783,7 @@ function byAction(node, action) {
 {
   const routes = panelRoutes()
   let reads = 0
-  routes['/api/skill-evolve/panel'] = () => {
+  routes['/api/ui-evolve/panel'] = () => {
     reads += 1
     if (reads > 1) throw new Error('panel temporarily offline')
     return { ok: true, data: {
@@ -1818,7 +1818,7 @@ function byAction(node, action) {
   // aimed at a stale row acts on its live twin instead.
   const sent = []
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = (init) => {
+  routes['/api/ui-evolve/candidates'] = (init) => {
     if (init?.method === 'POST') {
       sent.push(String(init.body))
       return { ok: true, data: { ok: true } }
@@ -1850,7 +1850,7 @@ function byAction(node, action) {
 {
   const slowA = deferred()
   const routes = panelRoutes()
-  routes['/api/skill-evolve/panel'] = (init, target) => {
+  routes['/api/ui-evolve/panel'] = (init, target) => {
     if (target.includes('agent=session-a')) return slowA.promise
     return { ok: true, data: {
       turn: 9, calls: 2, failed: 0, summary: { text: 'SESSION B' }, pendingCandidates: 0,
@@ -1879,7 +1879,7 @@ function byAction(node, action) {
   const slowFirst = deferred()
   let reads = 0
   const routes = panelRoutes()
-  routes['/api/skill-evolve/candidates'] = () => {
+  routes['/api/ui-evolve/candidates'] = () => {
     reads += 1
     if (reads === 1) return slowFirst.promise
     return { ok: true, data: { candidates: [{ id: 'new', name: 'new-queue', description: 'new', kind: 'create', body: 'NEW', whenToUse: '' }] } }
@@ -1906,7 +1906,7 @@ function byAction(node, action) {
   const firstSave = deferred()
   const secondSave = deferred()
   const routes = panelRoutes()
-  routes['/api/skill-evolve/config'] = (init) => {
+  routes['/api/ui-evolve/config'] = (init) => {
     if (init?.method !== 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
     const body = JSON.parse(String(init.body))
     return body.panelSummary === false ? firstSave.promise : secondSave.promise
@@ -1946,7 +1946,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/config'] = (init) => {
+  routes['/api/ui-evolve/config'] = (init) => {
     if (init?.method === 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false, ok: false, reason: 'settings are read only' } }
     return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
   }
@@ -1978,7 +1978,7 @@ function byAction(node, action) {
 {
   const slowEmpty = deferred()
   const routes = panelRoutes()
-  routes['/api/skill-evolve/panel'] = (init, target) => {
+  routes['/api/ui-evolve/panel'] = (init, target) => {
     if (target.includes('agent=empty-session')) return slowEmpty.promise
     return { ok: true, data: {
       turn: 4, calls: 3, failed: 0, summary: { text: 'SESSION FULL' }, pendingCandidates: 0,
@@ -2028,9 +2028,9 @@ function byAction(node, action) {
 {
   const slow = deferred()
   const routes = panelRoutes()
-  const firstAnswer = routes['/api/skill-evolve/panel']
+  const firstAnswer = routes['/api/ui-evolve/panel']
   let served = 0
-  routes['/api/skill-evolve/panel'] = () => {
+  routes['/api/ui-evolve/panel'] = () => {
     served += 1
     return served === 1 ? firstAnswer : slow.promise
   }
@@ -2111,7 +2111,7 @@ function byAction(node, action) {
   // it here left `settingsOpen` true, so it reappeared on its own once cards came
   // back. Reachability is not the issue — nobody can reopen a dialog they believe
   // is already open.
-  routes['/api/skill-evolve/panel'] = {
+  routes['/api/ui-evolve/panel'] = {
     ok: true,
     data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
   }
@@ -2132,7 +2132,7 @@ function byAction(node, action) {
 
 {
   const routes = panelRoutes()
-  routes['/api/skill-evolve/panel'] = {
+  routes['/api/ui-evolve/panel'] = {
     ok: true,
     data: { turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 3, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
   }
@@ -2143,6 +2143,29 @@ function byAction(node, action) {
   const tree = await instance.renderer.deepRender(cards)
   check('a queue with work in it keeps the header visible', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
   check('the queue button reports how much work there is', textOf(firstByClass(tree, 'dsse-queue')).includes('3'), textOf(tree).slice(0, 120))
+}
+
+{
+  // The route answers 200 with `{ ok: true, data: { ok: false, reason } }` when the
+  // skill half is not installed. `unwrap` only inspects the outer envelope, so the
+  // refusal has to be read again here — otherwise the button reports that a hint
+  // was queued when nothing was.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/propose'] = {
+    ok: true,
+    data: { ok: false, reason: 'the skill half is not installed' },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  firstByClass(await instance.renderer.deepRender(cards), 'dsse-propose').props.onClick()
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  const tree = await instance.renderer.deepRender(cards)
+  const refused = firstByClass(tree, 'dsse-err')
+  check('a refused proposal surfaces as an error', refused !== undefined, textOf(tree).slice(0, 200))
+  check('and the refusal text reaches the person', textOf(refused ?? tree).includes('skill half is not installed'), textOf(tree).slice(0, 200))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

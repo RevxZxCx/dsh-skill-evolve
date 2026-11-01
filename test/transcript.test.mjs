@@ -20,7 +20,7 @@ import {
   readPathArgument,
   readToolCallBlock,
   tallyNames
-} from '../lib/transcript.js'
+} from '../packages/ui-evolve/lib/transcript.js'
 
 let passed = 0
 let failed = 0

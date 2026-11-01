@@ -9,7 +9,7 @@
  * 2. spending its budget on procedures nobody asked about.
  */
 
-import { HintChannel, isSameHabit, isSubRun, renderHint } from '../lib/hint.js'
+import { HintChannel, isSameHabit, isSubRun, renderHint } from '../packages/skill-evolve/lib/hint.js'
 
 let pass = 0
 let fail = 0

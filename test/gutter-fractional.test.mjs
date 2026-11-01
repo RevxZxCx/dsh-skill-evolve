@@ -5,7 +5,7 @@
 // cases are the ones that were wrong before snapRect: column.left just under a
 // whole number, prose.left just over one, and a gutter that measures exactly the
 // handle width.
-import { placeCards, placeHandle, HANDLE_WIDTH } from '../lib/gutter.js'
+import { placeCards, placeHandle, HANDLE_WIDTH } from '../packages/ui-evolve/lib/gutter.js'
 
 let passed = 0
 let failed = 0

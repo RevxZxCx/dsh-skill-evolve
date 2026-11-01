@@ -16,8 +16,8 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, Config } from '../lib/index.js'
-import { readSkillFile, readState } from '../lib/skillfile.js'
+import { apply, Config } from '../packages/skill-evolve/lib/index.js'
+import { readSkillFile, readState } from '@revxz/dsh-evolve-core'
 
 let pass = 0
 let fail = 0
@@ -49,6 +49,13 @@ function fakeHost() {
     },
     effect(register) {
       return register()
+    },
+    provide(name, value) {
+      const scope = { [name]: value }
+      Object.assign(ctx, scope)
+      return () => {
+        delete ctx[name]
+      }
     },
     inject(names, callback) {
       return names.every((name) => ctx[name] !== undefined) ? callback(ctx) : undefined

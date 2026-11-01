@@ -7,7 +7,7 @@ import {
   corpusFromEvents,
   lanesFromEvents,
   ownCallIds
-} from '../lib/evidence.js'
+} from '@revxz/dsh-evolve-core'
 
 let pass = 0
 let fail = 0

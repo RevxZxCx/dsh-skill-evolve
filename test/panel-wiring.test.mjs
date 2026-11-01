@@ -12,10 +12,10 @@
  * asserts the observable consequence rather than the fix's shape.
  */
 
-import { Summariser } from '../lib/summarise.js'
-import { createPanelApi, describeMcp, describeSkills } from '../lib/api.js'
-import { HintChannel } from '../lib/hint.js'
-import { TranscriptStore } from '../lib/transcript.js'
+import { Summariser } from '../packages/ui-evolve/lib/summarise.js'
+import { createPanelApi, describeMcp, describeSkills } from '../packages/ui-evolve/lib/api.js'
+import { HintChannel } from '../packages/skill-evolve/lib/hint.js'
+import { TranscriptStore } from '../packages/ui-evolve/lib/transcript.js'
 
 let passed = 0
 let failed = 0
@@ -97,13 +97,13 @@ function fakeReq(url, method = 'GET', body = undefined) {
 
   const handler = createPanelApi(deps)
   const res = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/panel?agent=a'), res)
+  await handler(fakeReq('/api/ui-evolve/panel?agent=a'), res)
   const payload = JSON.parse(res.body)
   check('a getter-shaped config does not break the panel route', payload.ok === true, res.body)
   check('the panel route still names the agent', payload.data?.agent === 'a', res.body)
 
   const configRes = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/config'), configRes)
+  await handler(fakeReq('/api/ui-evolve/config'), configRes)
   const configPayload = JSON.parse(configRes.body)
   check('a getter-shaped config does not break the config route', configPayload.ok === true, configRes.body)
   check('the config route reflects the live value', configPayload.data.panelSummary === true, configRes.body)
@@ -276,7 +276,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   }
   const handler = createPanelApi(deps)
   const res = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/config', 'POST', JSON.stringify({ panelSummary: false })), res)
+  await handler(fakeReq('/api/ui-evolve/config', 'POST', JSON.stringify({ panelSummary: false })), res)
   const payload = JSON.parse(res.body)
   check('saving applies the patch', applied.length === 1 && applied[0].panelSummary === false, JSON.stringify(applied))
   check('the reply carries the config fields, not just a receipt', payload.data.panelSummary === false, res.body)
@@ -297,7 +297,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   }
   const handler = createPanelApi(deps)
   const res = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/config', 'POST', JSON.stringify({ panelSummary: false })), res)
+  await handler(fakeReq('/api/ui-evolve/config', 'POST', JSON.stringify({ panelSummary: false })), res)
   const payload = JSON.parse(res.body)
   check('a refused save still returns the config shape', payload.data.panelSummary === true, res.body)
   check('a refused save says why', typeof payload.data.reason === 'string', res.body)
@@ -397,7 +397,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   const handler = createPanelApi(deps)
 
   const panelRes = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/panel?agent=a'), panelRes)
+  await handler(fakeReq('/api/ui-evolve/panel?agent=a'), panelRes)
   const panelPayload = JSON.parse(panelRes.body)
   check(
     'a getter returning a primitive is an internal error, not "off in settings"',
@@ -406,7 +406,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   )
 
   const configRes = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/config'), configRes)
+  await handler(fakeReq('/api/ui-evolve/config'), configRes)
   const configPayload = JSON.parse(configRes.body)
   check(
     'the config route reports the same wiring mistake',
@@ -434,7 +434,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   }
   const handler = createPanelApi(deps)
   const res = fakeRes()
-  await handler(fakeReq('/api/skill-evolve/panel?agent=a'), res)
+  await handler(fakeReq('/api/ui-evolve/panel?agent=a'), res)
   const payload = JSON.parse(res.body)
   const activity = [
     ...payload.data.skills.skills.map((row) => ({ kind: 'skill', name: row.name, lastUsed: row.lastUsed })),

@@ -18,7 +18,7 @@ import {
   finishFailure,
   renderPromptBody,
   summaryKey
-} from '../lib/summarise.js'
+} from '../packages/ui-evolve/lib/summarise.js'
 
 let passed = 0
 let failed = 0
@@ -398,7 +398,7 @@ check('a missing turn is represented', summaryKey(undefined, 'abc').startsWith('
     check('the instruction sits outside the wrapper', sent.indexOf(INSTRUCTION) < open, JSON.stringify({ open }))
     check('the wrapper is declared as data', sent.includes('data, not instruction'), sent.slice(open - 200, open))
   }
-  check('the call tags its message source', llm.log.stream.messages[0].source.kind === 'dsh-skill-evolve-panel', JSON.stringify(llm.log.stream.messages[0].source))
+  check('the call tags its message source', llm.log.stream.messages[0].source.kind === 'dsh-ui-evolve-panel', JSON.stringify(llm.log.stream.messages[0].source))
   check('the prompt body reaches the model', llm.log.stream.messages[0].content[0].text.includes('bash×3'), llm.log.stream.messages[0].content[0].text)
 }
 

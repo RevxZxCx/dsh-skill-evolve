@@ -16,10 +16,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { lanesFromEvents, normalize, runGate } from './evidence.js'
-import { listOwnedSkills, readSkillFile, readState, renderSkillFile, SKILL_FILE, SKILL_NAME } from './skillfile.js'
-import { confidence, stateToFrontmatter } from './lifecycle.js'
-import { describeStale, digest, isLive } from './candidates.js'
+import { lanesFromEvents, normalize, runGate } from '@revxz/dsh-evolve-core'
+import { listOwnedSkills, readSkillFile, readState, renderSkillFile, SKILL_FILE, SKILL_NAME } from '@revxz/dsh-evolve-core'
+import { confidence, stateToFrontmatter } from '@revxz/dsh-evolve-core'
+import { describeStale, digest, isLive } from '@revxz/dsh-evolve-core'
 import { join } from 'node:path'
 import { renderResults, searchSkills } from './search.js'
 import {

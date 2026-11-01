@@ -12,7 +12,8 @@ import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, Config } from '../lib/index.js'
+import { apply, Config } from '../packages/skill-evolve/lib/index.js'
+import { apply as applyPanel, Config as PanelConfig } from '../packages/ui-evolve/lib/index.js'
 
 let pass = 0
 let fail = 0
@@ -148,6 +149,13 @@ function fakeHost(options = {}) {
     services: new Map(),
     get(name) {
       return ctx.services.has(name) ? ctx.services.get(name) : ctx[name]
+    },
+    // Cordis publishes a service so a sibling plugin can read it with `ctx.get`.
+    // The fixture stores it in the same map `get` consults, which is the whole
+    // contract the split relies on: the panel finds the queue or it does not.
+    provide(name, value) {
+      ctx.services.set(name, value)
+      return () => ctx.services.delete(name)
     }
   }
 
@@ -206,6 +214,49 @@ function fakeAgent(id, cwd) {
 }
 
 /**
+ * Mount both halves on one fake host.
+ *
+ * The panel used to be part of the detector, so every wiring assertion in this
+ * file could reach its route through the single `apply`. After the split the
+ * route lives in the other package, and mounting only the detector leaves
+ * `routes` empty — the assertions would then fail for a reason that has nothing
+ * to do with the behaviour they are named after.
+ *
+ * **The order does not matter, and that is a property worth having.** The panel
+ * looks `skillEvolve` up on every request (`skillHalf()` in
+ * `packages/ui-evolve/lib/index.js`), so a panel mounted first still answers with
+ * the queue once the detector arrives — no restart, no re-registration. An
+ * earlier version of this comment claimed the opposite; it was tested by
+ * mounting in both orders and watching `/propose` and `/candidates` behave
+ * identically.
+ *
+ * The default order below matches what a profile does (`skill-evolve` is listed
+ * before `ui-evolve`), so the common path is the one under test. The reverse
+ * order has its own assertions further down.
+ *
+ * @param {object} host - the fake from {@link fakeHost}.
+ * @returns {void}
+ */
+function mountBoth(host) {
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+}
+
+/**
+ * Mount the two halves in the opposite order.
+ *
+ * Used to prove the panel does not depend on being mounted second: it looks the
+ * service up per request, so a detector that arrives later still reaches it.
+ *
+ * @param {object} host - the fake from {@link fakeHost}.
+ * @returns {void}
+ */
+function mountPanelFirst(host) {
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  apply(host.ctx, Config({ mode: 'suggest' }))
+}
+
+/**
  * Build a tool/call event the way the host really emits it.
  */
 function toolCall(toolName, callId) {
@@ -227,6 +278,7 @@ try {
   const host = fakeHost()
   const config = Config({ mode: 'suggest', minRepeatCount: 2, minWindow: 3, maxHintsPerSession: 4 })
   apply(host.ctx, config)
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
 
   const agent = fakeAgent('session-abc', 'F:/some/project')
   host.agents.set(agent.id, agent)
@@ -235,7 +287,7 @@ try {
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
   check('seven tools registered', host.tools.size === 7, [...host.tools.keys()].join(','))
-  check('the panel routes are registered', host.routes.has('/api/skill-evolve') === true, [...host.routes.keys()].join(','))
+  check('the panel routes are registered', host.routes.has('/api/ui-evolve') === true, [...host.routes.keys()].join(','))
 
   // --- the panel's "suggest a skill" button, end to end ---------------------
   //
@@ -243,7 +295,7 @@ try {
   // `steps: 0`. `publish` spreads that value into the shown list, so every
   // press threw `0 is not iterable` and the route answered ok:false.
   {
-    const route = host.routes.get('/api/skill-evolve')
+    const route = host.routes.get('/api/ui-evolve')
     const res = {
       statusCode: undefined,
       writableEnded: false,
@@ -262,7 +314,7 @@ try {
     }
     const body = JSON.stringify({ agent: agent.id })
     const req = {
-      url: '/api/skill-evolve/propose',
+      url: '/api/ui-evolve/propose',
       method: 'POST',
       headers: { host: '127.0.0.1:19387', 'content-type': 'application/json', 'content-length': String(body.length) },
       async *[Symbol.asyncIterator]() {
@@ -303,7 +355,7 @@ try {
       time: Date.now(),
       data: { turn: 1, reason: { kind: 'completed' } }
     })
-    const route = host.routes.get('/api/skill-evolve')
+    const route = host.routes.get('/api/ui-evolve')
     const readPanel = async () => {
       const res = {
         statusCode: undefined,
@@ -321,7 +373,7 @@ try {
           return this
         }
       }
-      await route.handler({ url: `/api/skill-evolve/panel?agent=${agent.id}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+      await route.handler({ url: `/api/ui-evolve/panel?agent=${agent.id}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
       return JSON.parse(res.body)
     }
     const filled = await readPanel()
@@ -1808,9 +1860,13 @@ try {
   // fixture that provides it up front makes the eager read work by accident.
   const lateHost = fakeHost({ webServer: false })
   apply(lateHost.ctx, Config({ mode: 'suggest' }))
+  // The route this block waits for belongs to the panel package, so mounting
+  // only the detector would leave `lateRoutes` empty and the assertions below
+  // would fail for a reason unrelated to the late-service timing they test.
+  applyPanel(lateHost.ctx, PanelConfig({ panelSummary: false }))
   check(
     'a host without webServer at mount time does not register the panel route',
-    lateHost.routes.has('/api/skill-evolve') === false,
+    lateHost.routes.has('/api/ui-evolve') === false,
     [...lateHost.routes.keys()].join(',')
   )
 
@@ -1823,13 +1879,13 @@ try {
   })
   check(
     'the panel route is registered once webServer activates',
-    lateRoutes.has('/api/skill-evolve') === true,
+    lateRoutes.has('/api/ui-evolve') === true,
     [...lateRoutes.keys()].join(',')
   )
   check(
     'the late route is a prefix route, so the client can reach its subpaths',
-    lateRoutes.get('/api/skill-evolve')?.kind === 'prefix',
-    JSON.stringify(lateRoutes.get('/api/skill-evolve')?.kind)
+    lateRoutes.get('/api/ui-evolve')?.kind === 'prefix',
+    JSON.stringify(lateRoutes.get('/api/ui-evolve')?.kind)
   )
 
   // The route existing is not the same as the route answering. Before the fix
@@ -1840,7 +1896,7 @@ try {
   {
     const lateAgent = fakeAgent('session-late', 'F:/some/project')
     lateHost.agents.set(lateAgent.id, lateAgent)
-    const route = lateRoutes.get('/api/skill-evolve')
+    const route = lateRoutes.get('/api/ui-evolve')
     const res = {
       statusCode: undefined,
       writableEnded: false,
@@ -1861,7 +1917,7 @@ try {
     }
     await route.handler(
       {
-        url: `/api/skill-evolve/panel?agent=${encodeURIComponent(lateAgent.id)}`,
+        url: `/api/ui-evolve/panel?agent=${encodeURIComponent(lateAgent.id)}`,
         method: 'GET',
         headers: { host: '127.0.0.1:19387' }
       },
@@ -1882,7 +1938,7 @@ try {
   // normal use.
   {
     const skillHost = fakeHost()
-    apply(skillHost.ctx, Config({ mode: 'suggest' }))
+    mountBoth(skillHost)
     const skillAgent = fakeAgent('session-skill-card', 'F:/some/project')
     skillHost.agents.set(skillAgent.id, skillAgent)
     skillHost.ctx.skills = {
@@ -1908,7 +1964,7 @@ try {
     // nests one level further. Reading the envelope as the list made every
     // assertion below compare against an object's `.length` (undefined).
     const readSkills = async () => {
-      const route = skillHost.routes.get('/api/skill-evolve')
+      const route = skillHost.routes.get('/api/ui-evolve')
       const res = {
         statusCode: undefined,
         writableEnded: false,
@@ -1926,7 +1982,7 @@ try {
         }
       }
       await route.handler(
-        { url: `/api/skill-evolve/panel?agent=${encodeURIComponent(skillAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } },
+        { url: `/api/ui-evolve/panel?agent=${encodeURIComponent(skillAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } },
         res
       )
       return JSON.parse(res.body)
@@ -2237,7 +2293,7 @@ try {
   // have to advance the same recency clock. A mutation that stops recording MCP
   // calls would otherwise leave the merged list ordered by skill loads alone.
   const recencyHost = fakeHost()
-  apply(recencyHost.ctx, Config({ mode: 'suggest' }))
+  mountBoth(recencyHost)
   const recencyAgent = fakeAgent('session-recency', 'F:/some/project')
   recencyHost.agents.set(recencyAgent.id, recencyAgent)
   recencyHost.ctx.skills = {
@@ -2246,7 +2302,7 @@ try {
     },
   }
   const readPanel = async () => {
-    const route = recencyHost.routes.get('/api/skill-evolve')
+    const route = recencyHost.routes.get('/api/ui-evolve')
     const res = {
       statusCode: undefined,
       writableEnded: false,
@@ -2263,7 +2319,7 @@ try {
         return this
       },
     }
-    await route.handler({ url: `/api/skill-evolve/panel?agent=${encodeURIComponent(recencyAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+    await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(recencyAgent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
     return JSON.parse(res.body)
   }
   recencyHost.emit('session/event', recencyAgent.session, { type: 'tool/call', seq: 1, time: Date.now(), data: { turn: 1, step: 1, callId: 'r1', name: 'skill', arguments: '{"name":"alpha"}' } })
@@ -2277,6 +2333,51 @@ try {
   check('skill and MCP uses share one recency clock', JSON.stringify(activity.map((row) => row.name)) === '["beta","zeta","alpha"]', JSON.stringify(activity))
   check('an MCP use sits between two skill uses', activity[1].name === 'zeta' && activity[1].lastUsed > activity[2].lastUsed && activity[1].lastUsed < activity[0].lastUsed, JSON.stringify(activity))
 }
+
+// ---------------------------------------------------------------------------
+// Mount order
+// ---------------------------------------------------------------------------
+
+// The panel finds the queue by looking a service up on every request. That is the
+// property the split depends on, and the one thing a profile cannot be trusted to
+// preserve: plugin activation order belongs to cordis, not to this repository.
+{
+  const host = fakeHost()
+  mountPanelFirst(host)
+  check('a panel mounted first still registers its route', host.routes.has('/api/ui-evolve') === true, [...host.routes.keys()].join(','))
+
+  const agentId = 'panel-first-agent'
+  const route = host.routes.get('/api/ui-evolve')
+  const body = JSON.stringify({ agent: agentId })
+  const res = {
+    statusCode: undefined,
+    writableEnded: false,
+    once() {
+      return this
+    },
+    writeHead(code) {
+      this.statusCode = code
+      return this
+    },
+    end(payload) {
+      this.writableEnded = true
+      this.body = payload
+      return this
+    },
+  }
+  const req = {
+    url: '/api/ui-evolve/propose',
+    method: 'POST',
+    headers: { host: '127.0.0.1:19387', 'content-type': 'application/json', 'content-length': String(body.length) },
+    async *[Symbol.asyncIterator]() {
+      yield Buffer.from(body)
+    },
+  }
+  await route.handler(req, res)
+  const payload = JSON.parse(res.body)
+  check('a detector mounted second is still reachable per request', payload.data?.ok === true, res.body)
+}
+
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

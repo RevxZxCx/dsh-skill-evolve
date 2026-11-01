@@ -31,8 +31,8 @@ process.on('exit', () => {
   }
 })
 
-const { Config } = await import('../lib/config.js')
-const { apply } = await import('../lib/index.js')
+const { Config } = await import('../packages/skill-evolve/lib/config.js')
+const { apply } = await import('../packages/skill-evolve/lib/index.js')
 
 let passed = 0
 let failed = 0
@@ -79,6 +79,14 @@ function hostileHost(declared) {
       }
       throwFor.push(name + ':get')
       throw new Error('cannot get property "' + name + '" without inject')
+    },
+    // `provide` is not a service read: it publishes one. Cordis exposes it on
+    // the context itself, so a fake that throws for it would be testing a rule
+    // the host does not have.
+    provided: new Map(),
+    provide(name, value) {
+      base.provided.set(name, value)
+      return () => base.provided.delete(name)
     },
     inject(names, callback) {
       const missing = names.filter((name) => declared.includes(name) === false)

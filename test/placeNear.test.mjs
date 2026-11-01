@@ -4,7 +4,7 @@
 // neither layer leaves the viewport, and that the detail card is anchored to the
 // LIST rather than to the row (anchoring to the row drew the detail on top of
 // the list, because a row's right edge is inside the popover).
-import { placeNear, PANEL_WIDTH, DETAIL_WIDTH, POPOVER_GAP, EDGE_MARGIN } from '../lib/gutter.js'
+import { placeNear, PANEL_WIDTH, DETAIL_WIDTH, POPOVER_GAP, EDGE_MARGIN } from '../packages/ui-evolve/lib/gutter.js'
 
 let passed = 0
 let failed = 0

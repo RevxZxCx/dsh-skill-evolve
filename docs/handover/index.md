@@ -47,3 +47,17 @@ node scripts/mutate-checklist-panel.mjs # 清单卡片的变异
 - 本目录：给维护者看的骨架——状态、决策、缺陷、审查。
 
 三者不重复：README 说「是什么」，05 说「为什么这样设计」，本目录说「现在在哪、踩过什么、下次别踩」。
+
+## 仓库已拆分为 npm workspaces（2026-10-31 追加）
+
+上面提到的 `README.md`、`lib/` 路径在本节之后需按新布局理解：
+
+| 旧路径 | 新路径 |
+|---|---|
+| `README.md`（单包，896 行） | 根 `README.md`（套件总览）+ `packages/skill-evolve/README.md` + `packages/ui-evolve/README.md` |
+| `lib/*.js` | `packages/core/lib/`（共享库）、`packages/skill-evolve/lib/`、`packages/ui-evolve/lib/` |
+| `cordis.patch.yml` | `packages/skill-evolve/cordis.patch.yml` 与 `packages/ui-evolve/cordis.patch.yml`，根上那份已删 |
+
+`test/` 与 `scripts/` **不动**，仍在仓库根，四条命令照旧从根执行。`docs/01`–`docs/08` 仍在根 `docs/`；`docs/08-拆分解耦方案.md` 是拆分的原始方案，其结论已落地，读它时以 `02-decisions.md` 的 D-18/D-19/D-20 为准（方案里讨论过的发布步骤尚未执行）。
+
+拆分带来的三条新契约 —— 服务边界、路由前缀、bundle 注册 id —— 写在 `01-status.md` 的「更正 2026-10-31（六）」一节。

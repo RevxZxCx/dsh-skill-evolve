@@ -47,8 +47,27 @@ function valueOf(dependency) {
 
 const MAX_BODY_BYTES = 64 * 1024
 
-/** Prefix every route lives under. */
-const ROUTE_PREFIX = '/api/skill-evolve'
+/**
+ * Prefix every route lives under.
+ *
+ * Renamed from `/api/skill-evolve` when the panel and the detector became
+ * separate packages: the panel is about a session, not about skill evolution,
+ * and a route named after the other half is the kind of string that gets
+ * forgotten. The client keeps its own copy of this value inline (a bundle
+ * cannot import), so the two are held together by `test/route-prefix.test.mjs`
+ * rather than by hope.
+ */
+const ROUTE_PREFIX = '/api/ui-evolve'
+
+/**
+ * What the panel says when `@revxz/dsh-skill-evolve` is not installed.
+ *
+ * Named as a constant because four routes now have to say it, and because the
+ * wording is the only thing telling a person that the feature they are looking
+ * for belongs to a package they have not installed — rather than that their
+ * queue is empty.
+ */
+const THE_SKILL_HALF_IS_ABSENT = 'the skill half is not installed, so the candidate queue is not available here'
 
 /**
  * Write one JSON response.
@@ -433,6 +452,13 @@ async function readCandidates(deps) {
   }
   try {
     const rows = await deps.listCandidates()
+    // A wired-up dependency that answers `undefined` means the package that owns
+    // the queue is not installed. That is a different fact from "the queue is
+    // empty", and the card has a distinct state for it, so it must not be
+    // reported as `available: true` with zero rows.
+    if (Array.isArray(rows) === false) {
+      return { available: false, reason: THE_SKILL_HALF_IS_ABSENT, candidates: [] }
+    }
     return {
       available: true,
       candidates: rows.map((row) => ({
@@ -487,7 +513,9 @@ async function decideCandidate(deps, body, agentId) {
       return { ok: false, code: 'unavailable', error: 'discarding is not wired up' }
     }
     try {
-      return await deps.discardCandidate(name, id)
+      const outcome = await deps.discardCandidate(name, id)
+      if (outcome === undefined) return { ok: false, code: 'unavailable', error: THE_SKILL_HALF_IS_ABSENT }
+      return outcome
     } catch (error) {
       deps.log?.(`panel api discard ${name}: ${error?.message ?? error}`)
       return { ok: false, code: 'error.internal', error: String(error?.message ?? error) }
@@ -497,7 +525,9 @@ async function decideCandidate(deps, body, agentId) {
     return { ok: false, code: 'unavailable', error: 'approving is not wired up' }
   }
   try {
-    return await deps.approveCandidate(name, agentId, id)
+    const outcome = await deps.approveCandidate(name, agentId, id)
+    if (outcome === undefined) return { ok: false, code: 'unavailable', error: THE_SKILL_HALF_IS_ABSENT }
+    return outcome
   } catch (error) {
     // The evidence gate refuses with a message meant to be read by a person,
     // so it travels back as data rather than as a 500 the card would render as
@@ -618,6 +648,10 @@ function propose(deps, body, agentId) {
   if (deps.requestProposal === undefined) return { ok: false, reason: 'this host cannot deliver a hint to a running session' }
   try {
     const outcome = deps.requestProposal(id, typeof body?.skill === 'string' ? body.skill : undefined)
+    // `undefined` is "the package that queues hints is not installed", not one of
+    // the four refusals below. Without this branch it fell through to the success
+    // return and the button claimed a hint had been queued.
+    if (outcome === undefined) return { ok: false, reason: THE_SKILL_HALF_IS_ABSENT }
     // `publish` reports whether the text will actually be shown. Saying "ok"
     // for a hint that was held, deduplicated or refused leaves the person
     // watching the panel waiting for a model response that was never asked for.

@@ -13,7 +13,7 @@
 import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply, Config } from '../lib/index.js'
+import { apply, Config } from '../packages/skill-evolve/lib/index.js'
 
 let pass = 0
 let fail = 0
@@ -58,6 +58,13 @@ function fakeHost(options = {}) {
     },
     effect(register) {
       return register()
+    },
+    provide(name, value) {
+      const scope = { [name]: value }
+      Object.assign(ctx, scope)
+      return () => {
+        delete ctx[name]
+      }
     },
     inject(names, callback) {
       const missing = names.filter((name) => ctx[name] === undefined)

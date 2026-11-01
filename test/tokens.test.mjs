@@ -34,7 +34,7 @@ const listed = readFileSync(path.join(repo, 'test', 'host-tokens.txt'), 'utf8')
   .filter((line) => line.startsWith('--dsw-'))
 const defined = new Set(listed)
 
-const bundle = readFileSync(path.join(repo, 'lib', 'client.js'), 'utf8')
+const bundle = readFileSync(path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
 
 check('the host token list is not empty', defined.size > 100, `${defined.size} tokens`)
 check('the host token list has no duplicates', defined.size === listed.length, `${listed.length} lines, ${defined.size} unique`)

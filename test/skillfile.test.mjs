@@ -8,7 +8,7 @@ import {
   readSkillFile,
   readState,
   listOwnedSkills
-} from '../lib/skillfile.js'
+} from '@revxz/dsh-evolve-core'
 
 let pass = 0
 let fail = 0

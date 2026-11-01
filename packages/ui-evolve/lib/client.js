@@ -1,5 +1,5 @@
 window.__ModuleLoader__.load({
-  id: "dsh-skill-evolve",
+  id: "@revxz/dsh-ui-evolve",
   factory: (require) => {
     var module = { exports: {} }
     var exports = module.exports
@@ -8,7 +8,7 @@ window.__ModuleLoader__.load({
     const { jsx, jsxs } = require("react/jsx-runtime")
 
     /**
-     * Client half of dsh-skill-evolve.
+     * Client half of @revxz/dsh-ui-evolve.
      *
      * Draws a column of small cards beside the conversation: what the last turn
      * produced, what skills and MCP servers are on offer, and which files that
@@ -48,9 +48,9 @@ window.__ModuleLoader__.load({
      * page rather than as a blank panel.
      */
 
-    const NS = "dsh-skill-evolve"
-    const PANEL_ID = "dsh-skill-evolve:cards"
-    const TOGGLE_ID = "dsh-skill-evolve:toggle"
+    const NS = "@revxz/dsh-ui-evolve"
+    const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
+    const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
     const REFRESH_MS = 8000
     const CARD_WIDTH = 288
 
@@ -63,7 +63,7 @@ window.__ModuleLoader__.load({
      * strips the leading slash before resolving: `new URL("/api", base)` would
      * throw the prefix away, `new URL("api", base)` keeps it.
      *
-     * @param {string} path - an absolute-looking route, e.g. `/api/skill-evolve/panel`.
+     * @param {string} path - an absolute-looking route, e.g. `/api/ui-evolve/panel`.
      * @returns {string} a URL usable from this page.
      */
     function resolveUrl(path) {
@@ -104,12 +104,12 @@ window.__ModuleLoader__.load({
     /**
      * Call one of the plugin's routes.
      *
-     * @param {string} path - the route below `/api/skill-evolve`.
+     * @param {string} path - the route below `/api/ui-evolve`.
      * @param {object} [options] - fetch options.
      * @returns {Promise<any>} the payload.
      */
     async function call(path, options) {
-      const response = await fetch(resolveUrl(`/api/skill-evolve${path}`), {
+      const response = await fetch(resolveUrl(`/api/ui-evolve${path}`), {
         credentials: "same-origin",
         ...options,
       })
@@ -1492,11 +1492,19 @@ window.__ModuleLoader__.load({
       const propose = async () => {
         setBusy(true)
         try {
-          await call("/propose", {
+          const outcome = await call("/propose", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ agent: sessionId }),
           })
+          // `unwrap` only knows the outer envelope. A refusal travels inside
+          // `data` as `{ ok: false, reason }` — the host reached the route, the
+          // work did not happen — so reporting success here would be reporting
+          // that a hint was queued when nothing was.
+          if (outcome?.ok === false) {
+            setError(String(outcome.reason ?? "the hint could not be queued"))
+            return
+          }
           setError("")
           load(true)
         } catch (failure) {

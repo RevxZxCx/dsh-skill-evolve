@@ -1,4 +1,4 @@
-import { createDetector, renderSteps } from '../lib/signal.js'
+import { createDetector, renderSteps } from '../packages/skill-evolve/lib/signal.js'
 
 let pass = 0
 let fail = 0

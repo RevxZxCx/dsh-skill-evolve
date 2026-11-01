@@ -113,3 +113,28 @@ DSH 插件。在会话进行中观察，识别值得复用的流程，把候选�
 **更正 2026-10-30（五）**：第二轮界面五项改动（m22337）完成并收敛。新增 `Clip` 组件（`useLayoutEffect` 量测溢出后决定是否渐隐）、`Card` 的可选 `props.head`、顶栏重排为刷新/设置/建议。修掉三个由审查发现的真实缺陷：DEF-28「渐隐恒定渲染压暗短摘要」、DEF-29「空态卸载设置弹窗后自行复活」、以及「有待审候选时入口一起消失」。最终 `node test/run.mjs` 为 **1791 passed / 0 failed**；变异套件 `scripts/mutate-checklist-panel.mjs` **41 killed / 0 survived / 0 not applied**、`test/mutate-panel.mjs` 14/14、`scripts/mutate-guards.mjs` 11/11。
 
 本轮的三条可复用教训记在 R-10：新写的回归测试必须做一次「把修复改回去」的反向验证；断言一个被写死的常量不会失败，只会阻止别人修好它；渲染分支的短路不能吞掉由 state 驱动的兄弟节点。
+
+**更正 2026-10-31（六）—— 仓库拆分为 npm workspaces**
+
+单一包已拆成四个：`packages/core`（`@revxz/dsh-evolve-core`，共享库，无插件入口）、`packages/skill-evolve`（`@revxz/dsh-skill-evolve`）、`packages/ui-evolve`（`@revxz/dsh-ui-evolve`）、`packages/mcp-evolve`（`@revxz/dsh-mcp-evolve`，占位，`apply()` 故意抛错）。
+
+**代码位置变了，文档里的旧路径一律作废**：
+
+| 旧 | 新 |
+|---|---|
+| `lib/candidates.js` `evidence.js` `lifecycle.js` `outcome.js` `paths.js` `skillfile.js` `store.js` | `packages/core/lib/` |
+| `lib/catalog.js` `command.js` `commands.js` `hint.js` `market.js` `reflection.js` `search.js` `signal.js` `tools.js` `index.js` `config.js` | `packages/skill-evolve/lib/` |
+| `lib/api.js` `client.js` `gutter.js` `summarise.js` `transcript.js` | `packages/ui-evolve/lib/` |
+
+`lib/` 目录已不存在。`cordis.patch.yml` 从仓库根移到两个插件包内，根上那份已删除。`test/` 与 `scripts/` 留在根：大量断言跨包（一次 `apply()` 挂两个插件，把候选从检测驱动到落盘），放进包里会变成易碎的跨仓测试。
+
+**新增契约，后续修改者必须知道**：
+
+- 两个插件在运行时只通过一条服务相连：skill 侧 `ctx.provide('skillEvolve', {...六成员...})`，ui 侧每次请求现读 `service('skillEvolve')`（不缓存 —— cordis 可能在之后才激活兄弟插件）。取不到时面板**少画一个「建议」按钮**，而不是报错。
+- 路由前缀从 `/api/skill-evolve` 改成 `/api/ui-evolve`。宿主侧 `ROUTE_PREFIX`（`packages/ui-evolve/lib/api.js:60`）与浏览器侧字面量无法共享常量（bundle 无 `import` 无构建），由 `test/route-prefix.test.mjs` 锁住两者相等。这是本插件最安静的一种失败：客户端挂载、渲染、每个请求 404，看起来和「这个会话没东西可看」一模一样。
+- 客户端 bundle 的注册 id 必须是**包名全称** `@revxz/dsh-ui-evolve`。宿主 `dsh-client-modules` 对不匹配的 id 报 `bundle ... loaded without registering "<id>"`，对重复 id 直接抛错。
+- 配置键一分为二：skill 侧 28 键（原样）、ui 侧 5 键（`panelSummary`/`summaryProvider`/`summaryModel`/`panelSide`/`panelCollapsed`）。合计仍是 33。
+
+**安装方式变了**：profile 不再 link 仓库根。`C:/Users/26903/.dsh/profiles/desktop/package.json` 现在 link 两个包目录，`dsh.profile.bundles` 里也是两条（`@revxz/dsh-skill-evolve`、`@revxz/dsh-ui-evolve`）。旧条目 `dsh-skill-evolve: link:F:/dsh-plugin/dsh-skill-evolve` 会让宿主启动失败，因为仓库根已经不是插件。
+
+**当前状态**：`node test/run.mjs` → **1805 passed / 0 failed**（30 套件）；`scripts/mutate-guards.mjs` 11/11、`test/mutate-panel.mjs` 14/14、`scripts/mutate-checklist-panel.mjs` 41 killed / 0 survived / 0 not applied；全仓 `packages/*/lib/*.js`、`test/*.mjs`、`scripts/*.mjs` 纯 LF。`test/route-prefix.test.mjs` 14 条（新增）。

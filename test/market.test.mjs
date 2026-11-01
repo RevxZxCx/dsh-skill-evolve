@@ -28,7 +28,7 @@ import {
   renderPreview,
   renderSearch,
   searchMarket
-} from '../lib/market.js'
+} from '../packages/skill-evolve/lib/market.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -374,7 +374,7 @@ check(
 // source means a comment mentioning "confirm" cannot satisfy it, and a real
 // parameter cannot hide behind one.
 {
-  const { createTools } = await import('../lib/tools.js')
+  const { createTools } = await import('../packages/skill-evolve/lib/tools.js')
   const tools = createTools({
     config: {},
     store: {},

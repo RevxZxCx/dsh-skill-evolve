@@ -128,3 +128,20 @@
 3. **DOM 卸载与状态不同步是最难看见的一类缺陷。** 设置弹窗 `settingsOpen` 状态仍在，DOM 被 `return null` 带走，等数据回来就复活。这类问题的共同形状是：**渲染分支的短路把 state 驱动的东西一起吞掉**。凡是「由状态驱动、但渲染在别的分支里」的节点，都要问一句它会不会被兄弟分支短路。
 
 **收敛判据**：`node test/run.mjs` **1791 passed / 0 failed**；`scripts/mutate-checklist-panel.mjs` **41 killed / 0 survived / 0 not applied**；`test/mutate-panel.mjs` 14/14；`scripts/mutate-guards.mjs` 11/11。真实 Chrome 复验：短摘要 `data-clipped=false`、`::after` 的 `content:none`；长摘要 `data-clipped=true`、34px 渐隐。浅色/深色截图确认顶栏有独立背景、标题栏统计与提炼按钮排版正确、技能图标可辨识为书本。
+
+## R-11 拆包工程（2026-10-31）
+
+**做法**：先量依赖图（23 个模块的双向 import，脚本实测，不靠阅读猜测），再按功能归属 `git mv`，然后逐个修断掉的 import。**没有一步是「先改结构再跑测试」** —— 每移动一批就跑一次，行尾、锚点、假 host 的缺口都在当时暴露。
+
+**这一轮最值得记的四件事**：
+
+1. **名字冲突暴露了两个语义相反的 `ageInDays`。** `core/candidates.js` 的版本时间戳不可解析时返回 `0`（不会过期），`core/lifecycle.js` 的版本返回 `Number.POSITIVE_INFINITY`（已超期），各有测试断言。合并会静默改变过期行为。处理是改名 `candidateAgeInDays` 并同时导出两者。**同类名不等于同语义，且只有 barrel 会把它们放进同一个命名空间。**
+
+2. **`ctx.provide` 不是服务读取。** `test/service.test.mjs` 的 `ctx` 是 Proxy，不在声明列表里的 key 一律抛错，用来证明 `service()` 必走 `ctx.get`。加上 `provide` 后它直接抛 `cannot get property "provide" without inject`。**发布和读取是两种权限，测试替身只实现了其中一种时，看起来像产品代码错。**
+
+3. **客户端的 `/api/...` 前缀是本插件最安静的失败点。** 宿主侧改了之后，客户端不改，表现不是报错而是「面板永远空」。`test/route-prefix.test.mjs` 就是为了让这个失败变成红的——它在变异下真的会红（把 client 改回旧前缀 → 11 passed / 3 failed）。
+
+4. **Python 里写含反斜杠的锚点会静默失配。** 用双引号包的 `'
+'` 变成真换行、`''` 变成退格字节（`od -c` 才看得出），`matchAll` 返回空、断言报「found none」，而同样的表达式在 `node -e` 里是好的。**改代码的脚本本身必须被验证，否则它会把「没匹配上」伪装成「不需要改」。**
+
+**收敛判据**：`node test/run.mjs` **1805 passed / 0 failed**（30 套件）；三个变异套件 11/11、14/14、41/41 全部 killed 且 0 not applied；`scripts/sync-gutter.mjs` 与 `scripts/extract-host-tokens.mjs` 重跑后漂移测试仍绿。

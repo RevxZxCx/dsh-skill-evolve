@@ -17,9 +17,9 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { createDetector } from '../lib/signal.js'
-import { stepsFor } from '../lib/command.js'
-import { HintChannel } from '../lib/hint.js'
+import { createDetector } from '../packages/skill-evolve/lib/signal.js'
+import { stepsFor } from '../packages/skill-evolve/lib/command.js'
+import { HintChannel } from '../packages/skill-evolve/lib/hint.js'
 
 const path = process.argv[2]
 if (path === undefined) {

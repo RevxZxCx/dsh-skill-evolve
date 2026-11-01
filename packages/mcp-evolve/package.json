@@ -1,0 +1,22 @@
+{
+  "name": "@revxz/dsh-mcp-evolve",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Reserved: MCP server self-evolution on top of @revxz/dsh-evolve-core. Not implemented yet.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js"
+  ],
+  "dependencies": {
+    "@revxz/dsh-evolve-core": "0.2.0"
+  }
+}

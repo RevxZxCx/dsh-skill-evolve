@@ -6,8 +6,8 @@
  * and windows where the same command repeats.
  */
 
-import { signatureOf, stepsFor, stripHeredocs, SHELL_TOOLS } from '../lib/command.js'
-import { createDetector } from '../lib/signal.js'
+import { signatureOf, stepsFor, stripHeredocs, SHELL_TOOLS } from '../packages/skill-evolve/lib/command.js'
+import { createDetector } from '../packages/skill-evolve/lib/signal.js'
 
 let passed = 0
 let failed = 0

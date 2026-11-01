@@ -340,3 +340,23 @@ const error = new Error(`cannot get property "${name}" without declaring it in i
 **修法**：空态返回 `settings` 而不是 `null`。顶栏与卡片不渲染，弹窗保留。同时 `hasAnyCard` 纳入 `pendingCandidates > 0`：那个按钮是面板里通往候选审核的唯一入口，队列里有活时把它藏掉等于让工作不可达。
 
 **为什么测试没抓到**：空态断言只检查「没有 rail」，设置弹窗的存活从未被断言；而「能不能打开弹窗」与「弹窗会不会被别的东西带走」是两件事。
+
+## DEF-30 `agent/disposed` 的载荷形状在拆分时被写错
+
+**现象**：会话关闭后，面板上的技能列表与 transcript 留在屏幕上不消失。测试 `disposal releases the transcript`、`disposal forgets which skills this session loaded` 变红。
+
+**根因**：宿主发的载荷是 `{ agent }`，检测器侧一直是 `safe('disposal', ({ agent }) => ...)`。新写的 `packages/ui-evolve/lib/index.js` 收的是裸 `agent`，于是 `agent?.session` 恒为 `undefined`，`agentId` 取不出来，函数第一行 `return` 掉。
+
+**修法**：`const agent = payload?.agent ?? payload`，两种形状都接受。
+
+**为什么测试没抓到**：不是没抓到——它抓到了，而且只有那两条断言变红。但这个缺陷值得记，因为它说明**拆分时复制的是函数的形状，不是函数的契约**。`({ agent }) => ...` 那个解构本身就是文档，我在新文件里省略它，等于省略了「宿主发什么」这条信息，而语法上完全合法。
+
+## DEF-31 客户端 bundle 的注册 id 必须是包名全称
+
+**现象**：拆包后如果只改 `package.json` 的 name 而不改 bundle 里的 `id`，宿主在模块加载期抛错。
+
+**根因**：宿主 `dsh-client-modules` 的 `:709` 是 `throw new Error(\`client-modules: duplicate factory registration for "${registrationName}" ...\`)`，`:875` 是 `if (!this.factories.has(id)) throw new Error(\`client-modules: bundle ${url} loaded without registering "${id}" ...\`)`。注册 id 必须等于包名。
+
+**修法**：`packages/ui-evolve/lib/client.js` 五处同步 —— `id: "@revxz/dsh-ui-evolve"`、`NS`、`PANEL_ID`、`TOGGLE_ID`，以及文件头注释。
+
+**为什么测试没抓到**：`test/client.test.mjs` 里原本断言 `booted.captured.id === 'dsh-skill-evolve'`，拆包后这条断言会把旧名字固化下来——它会一直绿，直到有人在真实宿主里装上新包。**断言一个名字不会发现名字错了。** 已改为断言新全名；真正把契约钉住的是 `spec.registrant === NS` 那一类交叉断言。

@@ -85,7 +85,7 @@ export function contentDigest(draft) {
  * @param {Date} now - the current time.
  * @returns {number} age in days, or 0 when the timestamp is unreadable.
  */
-export function ageInDays(createdAt, now) {
+export function candidateAgeInDays(createdAt, now) {
   const then = Date.parse(String(createdAt ?? ''))
   if (!Number.isFinite(then)) return 0
   return Math.max(0, (now.getTime() - then) / DAY_MS)
@@ -108,7 +108,7 @@ export async function evaluateStaleness(candidate, options) {
 
   // The cheap checks come first: age needs nothing but the clock, and it is the
   // reason most queues go bad.
-  const age = ageInDays(candidate.createdAt, now)
+  const age = candidateAgeInDays(candidate.createdAt, now)
   if (age > options.ttlDays) {
     return {
       reason: 'expired',

@@ -25,7 +25,7 @@ import { fileURLToPath } from 'node:url'
 // from anywhere else used to mutate one gutter.js and test another, which is how
 // a mutation that genuinely fails the suite was reported SURVIVED.
 const repo = fileURLToPath(new URL('..', import.meta.url))
-const gutter = path.join(repo, 'lib', 'gutter.js')
+const gutter = path.join(repo, 'packages', 'ui-evolve', 'lib', 'gutter.js')
 const original = fs.readFileSync(gutter, 'utf8')
 
 function run(cmd) {
@@ -45,11 +45,11 @@ function failures(output) {
 // mid-flight. Continuing from it produces a cascade of ANCHOR MISSING that looks
 // like stale anchors when the file is simply still mutated.
 try {
-  const head = execFileSync('git', ['show', 'HEAD:lib/gutter.js'], { cwd: repo, encoding: 'utf8', stdio: 'pipe' })
+  const head = execFileSync('git', ['show', 'HEAD:packages/ui-evolve/lib/gutter.js'], { cwd: repo, encoding: 'utf8', stdio: 'pipe' })
   if (head !== original) {
-    console.error('lib/gutter.js differs from HEAD before any mutation ran.')
+    console.error('packages/ui-evolve/lib/gutter.js differs from HEAD before any mutation ran.')
     console.error('A previous run was probably interrupted holding a mutated file. Restore it first:')
-    console.error('  git checkout -- lib/gutter.js && node scripts/sync-gutter.mjs')
+    console.error('  git checkout -- packages/ui-evolve/lib/gutter.js && node scripts/sync-gutter.mjs')
     process.exit(1)
   }
 } catch {

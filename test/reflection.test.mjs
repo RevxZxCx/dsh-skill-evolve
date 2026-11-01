@@ -11,7 +11,7 @@
  * 3. Reflecting forever in a long session, which turns a checkpoint into noise.
  */
 
-import { ReflectionPacer, renderReflection } from '../lib/reflection.js'
+import { ReflectionPacer, renderReflection } from '../packages/skill-evolve/lib/reflection.js'
 
 let pass = 0
 let fail = 0

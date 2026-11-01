@@ -39,8 +39,8 @@ if (entry === undefined) {
 }
 
 const { Context, Service } = await import(pathToFileURL(entry).href)
-const { Config } = await import('../lib/config.js')
-const { apply, inject } = await import('../lib/index.js')
+const { Config } = await import('../packages/skill-evolve/lib/config.js')
+const { apply, inject } = await import('../packages/skill-evolve/lib/index.js')
 
 let passed = 0
 let failed = 0

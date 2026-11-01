@@ -4,7 +4,8 @@
 import { join } from 'node:path'
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { apply, Config } from '../lib/index.js'
+import { apply, Config } from '../packages/skill-evolve/lib/index.js'
+import { apply as applyPanel, Config as PanelConfig } from '../packages/ui-evolve/lib/index.js'
 
 let pass = 0
 let fail = 0
@@ -65,6 +66,7 @@ function fakeHost() {
   const contexts = []
   const agents = new Map()
   const handlers = new Map()
+  const provided = new Map()
   const deferred = []
   const routes = []
   const ctx = {
@@ -74,7 +76,12 @@ function fakeHost() {
     // The panel's only way in. `register` records the handler so a test can
     // drive a real request through it instead of reaching past the HTTP layer.
     webServer: { register: (route) => (routes.push(route), () => {}) },
-    get: (name) => (name === 'agents' ? { get: (id) => agents.get(id) } : undefined),
+    provide(name, value) {
+      provided.set(name, value)
+      return () => provided.delete(name)
+    },
+    get: (name) =>
+      name === 'agents' ? { get: (id) => agents.get(id) } : provided.get(name),
     // Mirrors cordis: the callback runs once every named service resolves. A
     // missing service defers instead of failing, which is the timing that made
     // the panel register no routes on a cold start.
@@ -356,13 +363,14 @@ async function post(route, path, payload) {
   const root = await makeRoot('skill-evolve-off-proposal-')
   const host = fakeHost()
   apply(host.ctx, Config({ mode: 'off' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
   const agent = fakeAgent('session-off', 'F:/proj')
   host.agents.set(agent.id, agent)
 
-  const route = host.routes.find((entry) => entry.path === '/api/skill-evolve')
+  const route = host.routes.find((entry) => entry.path === '/api/ui-evolve')
   check('off setup: the panel route is registered', route !== undefined, JSON.stringify(host.routes.map((r) => r.path)))
 
-  const res = await post(route, '/api/skill-evolve/propose', { agent: 'session-off', skill: 'anything' })
+  const res = await post(route, '/api/ui-evolve/propose', { agent: 'session-off', skill: 'anything' })
   check('off refuses the panel proposal', res.statusCode === 200 && res.body?.data?.ok === false, JSON.stringify(res.body))
   check(
     'off says why the proposal was refused',
@@ -600,7 +608,8 @@ async function post(route, path, payload) {
   const root = await makeRoot('skill-evolve-same-name-')
   const host = fakeHost()
   apply(host.ctx, Config({ mode: 'suggest' }))
-  const route = host.routes.find((entry) => entry.path === '/api/skill-evolve')
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  const route = host.routes.find((entry) => entry.path === '/api/ui-evolve')
   check('same-name setup: the panel route was registered', route !== undefined, JSON.stringify(host.routes.map((entry) => entry.path)))
 
   const dir = join(root, 'plugin-data', 'skill-evolve')
@@ -617,7 +626,7 @@ async function post(route, path, payload) {
     'utf8'
   )
 
-  const res = await post(route, '/api/skill-evolve/candidates?agent=session-panel', { id: 'row-stale', name: 'dup-name', action: 'discard' })
+  const res = await post(route, '/api/ui-evolve/candidates?agent=session-panel', { id: 'row-stale', name: 'dup-name', action: 'discard' })
   check('same-name: the discard is accepted', res.statusCode === 200 && res.body?.ok === true, JSON.stringify(res.body))
 
   const left = JSON.parse(await readFile(join(dir, 'candidates.json'), 'utf8'))
@@ -628,7 +637,7 @@ async function post(route, path, payload) {
   // already discarded. An id that is no longer in the queue must be reported as
   // gone. Resolving the name instead would delete (or publish) the live twin the
   // person never looked at.
-  const missed = await post(route, '/api/skill-evolve/candidates?agent=session-panel', { id: 'row-vanished', name: 'dup-name', action: 'discard' })
+  const missed = await post(route, '/api/ui-evolve/candidates?agent=session-panel', { id: 'row-vanished', name: 'dup-name', action: 'discard' })
   check('same-name: an id that is gone is refused', missed.body?.data?.ok === false, JSON.stringify(missed.body))
   check('same-name: the refusal says not-found', missed.body?.data?.code === 'not-found', JSON.stringify(missed.body))
 

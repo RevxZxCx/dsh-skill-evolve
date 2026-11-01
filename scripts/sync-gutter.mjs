@@ -1,4 +1,5 @@
-// Inline the geometry from lib/gutter.js into lib/client.js between markers.
+// Inline the geometry from packages/ui-evolve/lib/gutter.js into that package's
+// client.js between markers.
 //
 // Why this exists: the client bundle is a browser script with no import
 // mechanism, so it cannot `import` gutter.js. But the geometry is the part worth
@@ -14,8 +15,8 @@ import { fileURLToPath } from 'node:url'
 // Resolved from this file, not from a hard-coded checkout path: the whole point of
 // a checked-in script is that it runs after a clone.
 const repo = fileURLToPath(new URL('..', import.meta.url))
-const GUTTER = join(repo, 'lib', 'gutter.js')
-const CLIENT = join(repo, 'lib', 'client.js')
+const GUTTER = join(repo, 'packages', 'ui-evolve', 'lib', 'gutter.js')
+const CLIENT = join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
 
 /** Where the generated block starts inside lib/client.js. */
 export const OPEN = '// <gutter>'

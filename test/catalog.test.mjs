@@ -23,8 +23,8 @@ import {
   sortRows,
   shrinkCatalog,
   CATALOG_NOTE
-} from '../lib/catalog.js'
-import { Store } from '../lib/store.js'
+} from '../packages/skill-evolve/lib/catalog.js'
+import { Store } from '@revxz/dsh-evolve-core'
 
 let passed = 0
 let failed = 0

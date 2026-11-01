@@ -13,8 +13,8 @@
  */
 
 import { readFileSync } from 'node:fs'
-import { createDetector, renderSteps } from '../lib/signal.js'
-import { HintChannel } from '../lib/hint.js'
+import { createDetector, renderSteps } from '../packages/skill-evolve/lib/signal.js'
+import { HintChannel } from '../packages/skill-evolve/lib/hint.js'
 
 const path = process.argv[2] ?? 'F:/dsh-plugin/.research/session_dump.jsonl'
 const maxHintsPerSession = Number(process.argv[3] ?? 4)

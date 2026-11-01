@@ -9,7 +9,7 @@ import {
   invertBody,
   unwrapInverted,
   summarize
-} from '../lib/lifecycle.js'
+} from '@revxz/dsh-evolve-core'
 
 let pass = 0
 let fail = 0

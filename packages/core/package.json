@@ -1,0 +1,25 @@
+{
+  "name": "@revxz/dsh-evolve-core",
+  "version": "0.2.0",
+  "type": "module",
+  "description": "Shared engine for the DSH evolve plugins: skill file I/O, the candidate queue, the evidence gate, lifecycle aging, and the outcome ledger.",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "skill",
+    "self-evolution"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/*.js"
+  ]
+}

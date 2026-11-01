@@ -37,7 +37,7 @@ function check(label, condition, detail) {
   }
 }
 import { readFileSync } from 'node:fs'
-import { gutters, placeCards, placeHandle, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH, EDGE_MARGIN } from '../lib/gutter.js'
+import { gutters, placeCards, placeHandle, MIN_CARD_WIDTH, MAX_CARD_WIDTH, CARD_GAP, TOP_INSET, BOTTOM_INSET, HANDLE_WIDTH, EDGE_MARGIN } from '../packages/ui-evolve/lib/gutter.js'
 
 /**
  * The default 1920px layout, which is what the screenshots were taken on.
@@ -476,7 +476,7 @@ function defaultLayout() {
 }
 {
   // HANDLE_WIDTH is geometry, so it has to equal what the bundle draws.
-  const bundle = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+  const bundle = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
   const css = /[.]dsse-handle[{][^}]*width:([0-9]+)px/.exec(bundle)
   check('the handle width constant matches the CSS', css !== null && Number(css[1]) === HANDLE_WIDTH, css === null ? 'no rule found' : `css ${css[1]} vs const ${HANDLE_WIDTH}`)
 }

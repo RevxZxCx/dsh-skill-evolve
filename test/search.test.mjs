@@ -17,8 +17,8 @@
 import { mkdtemp, rm, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { renderResults, scoreSkill, searchSkills, terms } from '../lib/search.js'
-import { createTools } from '../lib/tools.js'
+import { renderResults, scoreSkill, searchSkills, terms } from '../packages/skill-evolve/lib/search.js'
+import { createTools } from '../packages/skill-evolve/lib/tools.js'
 
 let passed = 0
 let failed = 0

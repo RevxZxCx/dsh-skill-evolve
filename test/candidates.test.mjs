@@ -7,14 +7,14 @@
  */
 import assert from 'node:assert/strict'
 import {
-  ageInDays,
+  candidateAgeInDays,
   annotateQueue,
   describeStale,
   digest,
   evaluateStaleness,
   findByName,
   isLive
-} from '../lib/candidates.js'
+} from '@revxz/dsh-evolve-core'
 
 let passed = 0
 let failed = 0
@@ -60,12 +60,12 @@ console.log('digest')
   check('handles undefined', /^[0-9a-f]{8}$/.test(digest(undefined)))
 }
 
-console.log('ageInDays')
+console.log('candidateAgeInDays')
 {
-  check('counts whole days', ageInDays(daysAgo(10), NOW) === 10)
-  check('handles today', ageInDays(NOW.toISOString(), NOW) === 0)
-  check('returns zero for junk rather than NaN', ageInDays('not a date', NOW) === 0)
-  check('never goes negative for a future timestamp', ageInDays(daysAgo(-5), NOW) === 0)
+  check('counts whole days', candidateAgeInDays(daysAgo(10), NOW) === 10)
+  check('handles today', candidateAgeInDays(NOW.toISOString(), NOW) === 0)
+  check('returns zero for junk rather than NaN', candidateAgeInDays('not a date', NOW) === 0)
+  check('never goes negative for a future timestamp', candidateAgeInDays(daysAgo(-5), NOW) === 0)
 }
 
 console.log('evaluateStaleness: expiry')
