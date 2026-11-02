@@ -93,9 +93,26 @@ packages/ui-evolve/       plugin: cards, dialog, settings, client bundle
 packages/mcp-evolve/      placeholder that refuses to load
 test/                     every suite, across packages
 scripts/                  generators and mutation harnesses
-docs/                     research, design, reviews — and docs/handover/
+docs/                     research, design, reviews — start at docs/00-文档索引.md
+docs/handover/            state, decisions, defects, review log — append only
 prototypes/               static HTML prototypes used to settle the panel's layout
 ```
+
+Each package carries its own `README.md`: what it owns, how to configure it, and
+what it deliberately does not do. Start with the package you are changing.
+
+- [`packages/core/README.md`](packages/core/README.md) — the shared engine, and
+  the two `ageInDays` that must stay separate
+- [`packages/skill-evolve/README.md`](packages/skill-evolve/README.md) — detection,
+  the hint channel, the evidence gate, lifecycle, 28 config keys
+- [`packages/ui-evolve/README.md`](packages/ui-evolve/README.md) — the cards, the
+  panel routes, the theme contract, 5 config keys
+- [`packages/mcp-evolve/README.md`](packages/mcp-evolve/README.md) — why the
+  placeholder is empty and what it would take to fill it
+
+[`docs/00-文档索引.md`](docs/00-文档索引.md) maps the numbered documents by
+purpose and marks which ones predate the split, so nobody reads a `lib/index.js`
+path as current.
 
 Tests live at the root rather than inside each package because a large share of them
 cross package boundaries: they boot both plugins against one fake host and drive a
