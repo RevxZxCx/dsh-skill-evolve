@@ -2128,10 +2128,29 @@ try {
       JSON.stringify(afterDeltaGesture.data?.skills?.skills)
     )
 
-    // Disposal must clear it, or a new session reusing the id inherits loads.
+    // Disposal writes the session down and lets go of the memory; it does not
+    // delete. That distinction is the whole point of the persistence work: the
+    // host disposes every agent when it shuts down, so a `forget` here would
+    // empty the panel on every restart. What disposal must guarantee is that a
+    // session which comes back — a reload, a second panel, a restart — still
+    // describes the work it did.
     skillHost.emit('agent/disposed', { agent: skillAgent })
     const afterDispose = await readSkills()
-    check('disposal forgets which skills this session loaded', afterDispose.data?.skills?.skills?.length === 0, JSON.stringify(afterDispose.data?.skills?.skills))
+    check(
+      'a disposed session still describes the skills it loaded',
+      afterDispose.data?.skills?.skills?.length === 3,
+      JSON.stringify(afterDispose.data?.skills?.skills)
+    )
+    check(
+      'and the newest load is still listed first after the round trip',
+      afterDispose.data?.skills?.skills?.[0]?.name === 'delta',
+      JSON.stringify(afterDispose.data?.skills?.skills)
+    )
+    check(
+      'the MCP server it called is still listed after the round trip',
+      Array.isArray(afterDispose.data?.mcp?.servers ?? afterDispose.data?.mcp) === true,
+      JSON.stringify(afterDispose.data?.mcp)
+    )
   }
 } catch (error) {
   // Rethrown rather than swallowed: the exit hook still removes every temp root,

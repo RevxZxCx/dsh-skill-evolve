@@ -165,20 +165,20 @@ window.__ModuleLoader__.load({
 .dsse-queue:hover{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.13));border-color:var(--dsw-alias-state-business-primary,rgba(77,107,254,.5))}
 .dsse-review-root{display:contents}
 .dsse-count{display:inline-block;min-width:22px;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8);font-size:max(.85em,11px);text-align:center}
+.dsse-card[data-clickable="true"]{cursor:pointer}
+.dsse-card[data-clickable="true"]:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
 .dsse-card{flex:0 0 auto;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:11px;box-shadow:0 2px 8px rgba(15,17,21,.04);overflow:hidden}
-.dsse-card-head{display:flex;align-items:center;gap:8px;min-height:42px;padding:9px 11px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07))}
+.dsse-card-head{display:flex;align-items:baseline;gap:8px;min-height:42px;padding:9px 11px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07))}
 .dsse-card-title{margin:0;font-size:.94em;line-height:1.4;font-weight:600;white-space:nowrap}
 .dsse-card-meta{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:right}
-.dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px}
-.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
+.dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}
+.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
 .dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px}
 .dsse-head-stat b{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;font-variant-numeric:tabular-nums}
-.dsse-head-btn{flex:0 0 auto;min-height:26px;display:inline-flex;align-items:center;gap:5px;margin-left:8px;padding:2px 9px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:7px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-size:max(.85em,11px);font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color 160ms ease,opacity 160ms ease}
-.dsse-head-btn:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
-.dsse-head-btn:disabled{opacity:.5;cursor:default}
 .dsse-clip{position:relative;overflow:hidden}
-.dsse-clip[data-clipped="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
-.dsse-clip .dsse-text{max-height:5.2em;overflow:hidden}
+.dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
+.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}
+.dsse-clip[data-expanded="true"] .dsse-text{max-height:none}
 .dsse-card-body{padding:11px}
 .dsse-text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .dsse-summary-title{margin:0 0 6px;font-size:1em;line-height:1.45;font-weight:500}
@@ -400,11 +400,17 @@ window.__ModuleLoader__.load({
     const EDGE_MARGIN = 8
 
     /**
-     * Width of the candidate list that opens off the propose button.
+     * Width of the candidate review list.
      *
      * Wide enough for a kebab-case skill name plus a one-line description, which
      * is what the list row shows. Narrower and every row truncates the name, which
      * is the one field a person needs in order to decide.
+     *
+     * Named for the panel, not for a control that opens it. An earlier version named
+     * a button that has since been deleted, and the sentence outlived it: the comment
+     * kept pointing at something the code no longer had, and it survived review
+     * because a stale noun is not a behavior. A comment that names no trigger cannot
+     * go stale when the trigger is renamed or removed.
      */
     const PANEL_WIDTH = 320
 
@@ -924,10 +930,20 @@ window.__ModuleLoader__.load({
      * mask, so drawing it unconditionally washes out text that was never
      * truncated. Whether there is more to see is a layout fact, so it is measured
      * after paint rather than assumed.
+     *
+     * `expanded` lifts the cap; it arrives as a prop because the card, not this
+     * box, is what the pointer and the click land on.
+     *
+     * Growth is not animated. The uncapped height is only known to layout and
+     * `max-height` cannot be transitioned to `none`; the usual dodge — a sentinel
+     * like `max-height:200em` — makes the duration proportional to how much text
+     * happens to be hidden, so a two-line overrun snaps while a forty-line one
+     * crawls. Instant is the honest version of "it grew".
      */
     function Clip(props) {
       const ref = React.useRef(null)
       const [overflowing, setOverflowing] = React.useState(false)
+      const expanded = props.expanded === true
       // Measure before paint, not after. A passive effect runs after the browser has
       // already painted the frame, so a clipped summary would show one frame with
       // its text cut and no fade over it — a visible flicker on every first render.
@@ -935,14 +951,27 @@ window.__ModuleLoader__.load({
       // and any environment that only implements the passive hook).
       const useLayout = typeof React.useLayoutEffect === 'function' ? React.useLayoutEffect : React.useEffect
       useLayout(() => {
+        // Skipped while expanded, and this is the load-bearing part: with the cap
+        // lifted `scrollHeight` and `clientHeight` agree by construction, so the
+        // comparison would answer "nothing is hidden" and overwrite the one fact
+        // that makes the card expandable at all. The last capped reading stands
+        // until the card collapses and measures again.
+        if (expanded) return
         const node = ref.current
         if (node === null) return
         const hidden = node.scrollHeight > node.clientHeight + 1
         setOverflowing(hidden)
+        // The parent owns the click, so it needs the same answer this box uses to
+        // decide whether there is anything to reveal. Reported rather than
+        // re-measured there: two measurements of the same box would eventually
+        // disagree, and the one that drives `aria-expanded` should be the one that
+        // drives the fade.
+        if (props.onClipped !== undefined) props.onClipped(hidden)
       })
       return jsx('div', {
         className: 'dsse-clip',
         'data-clipped': overflowing === true ? 'true' : 'false',
+        'data-expanded': expanded === true ? 'true' : 'false',
         children: jsx('p', { ref, className: 'dsse-text dsse-tiny', children: props.text }),
       })
     }
@@ -1343,8 +1372,41 @@ window.__ModuleLoader__.load({
     }
 
     function Card(props) {
+      // Only 上一轮 passes these; the other two cards leave them undefined, which
+      // React treats as "no listener" instead of a prop to forward.
+      //
+      // `clickable` is the caller saying there is something to reveal. A card whose
+      // summary already fits gets no pointer cursor, no tab stop and no role, so the
+      // panel never invites a click that would change nothing visible.
+      //
+      // `onClick` is gated too, and that is not tidiness. Forwarding it while the rest
+      // of the interaction was suppressed let a click on a short summary flip the
+      // caller's pin with nothing on screen to show for it; the pin outlived the turn,
+      // and the next turn's long summary arrived already open but impossible to close
+      // (no pointer cursor, no tab stop, no role) — the same dead end the measurement
+      // guard exists to prevent, reached through the other door. A control that looks
+      // inert has to be inert.
+      const interactive = typeof props.onClick === 'function' && props.clickable === true
       return jsxs('section', {
         className: 'dsse-card',
+        'data-clickable': interactive === true ? 'true' : 'false',
+        onMouseEnter: props.onMouseEnter,
+        onMouseLeave: props.onMouseLeave,
+        onClick: interactive === true ? props.onClick : undefined,
+        // A card that answers only to a mouse is unreachable for anyone driving
+        // this panel from the keyboard. Enter and Space are what a button answers
+        // to, so the same handler runs for both.
+        onKeyDown: interactive === false
+          ? undefined
+          : (event) => {
+              if (event === null || event === undefined) return
+              if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+              if (typeof event.preventDefault === 'function') event.preventDefault()
+              props.onClick()
+            },
+        tabIndex: interactive === true ? 0 : undefined,
+        role: interactive === true ? 'button' : undefined,
+        'aria-expanded': interactive === true ? props.expanded : undefined,
         children: [
           jsxs('header', {
             className: 'dsse-card-head',
@@ -1375,8 +1437,33 @@ window.__ModuleLoader__.load({
       const [state, setState] = React.useState({ status: "loading" })
       const [config, setConfig] = React.useState(undefined)
       const [models, setModels] = React.useState([])
-      const [busy, setBusy] = React.useState(false)
       const [error, setError] = React.useState("")
+      // Two write-paths, not one, because hover and click are independent reasons for
+      // the 上一轮 card to be open and a click must not disturb the pointer's reason.
+      // The pointer writes only `turnHover`, the click writes only `pinnedTurn`. A
+      // single slot would make a click while hovering close the card under the
+      // pointer — exactly the conflict this split exists to prevent.
+      //
+      // Every one of these three is stored *with the turn it describes* rather than
+      // as a bare boolean, and that includes the pointer. A reason for being open
+      // that outlives the text it was about opens something nobody asked for — and
+      // when the next measurement says that text had nothing to reveal, it opens on
+      // a card with no pointer cursor, no tab stop and no click handler: open, with
+      // no way to close it.
+      //
+      // Hover needs the tag for the same reason as the click, and the reason is not
+      // obvious: the pointer cannot un-hover a card it is no longer over. Refreshing
+      // unmounts the 上一轮 card while `status` is `loading`, so the `onMouseLeave`
+      // that would have cleared a bare boolean never fires, and the next turn's card
+      // arrived already open under a pointer that had left long ago.
+      //
+      // `clippedTurn` is a measurement, not a reason to expand: it only says whether
+      // expanding would reveal anything, and which turn it looked at. "Measured and
+      // nothing hidden" is stored as no tag at all, so one string carries both facts
+      // and they cannot disagree.
+      const [hoverTurn, setHoverTurn] = React.useState("")
+      const [pinnedTurn, setPinnedTurn] = React.useState("")
+      const [clippedTurn, setClippedTurn] = React.useState("")
       const [filesOpen, setFilesOpen] = React.useState(false)
       const [settingsOpen, setSettingsOpen] = React.useState(false)
       const [settingsEpoch, setSettingsEpoch] = React.useState(0)
@@ -1429,6 +1516,16 @@ window.__ModuleLoader__.load({
       React.useEffect(() => {
         setState((prior) => ({ ...prior, status: 'loading' }))
         setError('')
+        // The three turn tags are scoped by name, and a turn number is only unique
+        // inside its own session: each transcript counts from zero, so two sessions
+        // at turn 7 is ordinary. Left alone, a tag written in one session matches a
+        // turn in the next and opens a card for a conversation nobody is looking at
+        // — and since an open card skips the measurement, that stale tag is never
+        // measured away. Clearing here is not the "compare against last render" that
+        // D-23 ruled out: switching sessions is one event, not a per-render question.
+        setHoverTurn("")
+        setPinnedTurn("")
+        setClippedTurn("")
       }, [sessionId])
 
       React.useEffect(() => {
@@ -1488,31 +1585,21 @@ window.__ModuleLoader__.load({
         }
       }
 
-      /** Ask the plugin to hint the model about capturing a skill. */
-      const propose = async () => {
-        setBusy(true)
-        try {
-          const outcome = await call("/propose", {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ agent: sessionId }),
-          })
-          // `unwrap` only knows the outer envelope. A refusal travels inside
-          // `data` as `{ ok: false, reason }` — the host reached the route, the
-          // work did not happen — so reporting success here would be reporting
-          // that a hint was queued when nothing was.
-          if (outcome?.ok === false) {
-            setError(String(outcome.reason ?? "the hint could not be queued"))
-            return
-          }
-          setError("")
-          load(true)
-        } catch (failure) {
-          setError(String(failure?.message ?? failure))
-        } finally {
-          setBusy(false)
-        }
-      }
+      // The tag that scopes every reason for being open to one turn. An empty
+      // string never matches, so a session that has not reported a turn yet cannot
+      // inherit anything from the one before it.
+      const turnId = state.status === "ready" ? String(state.data?.turn ?? "") : ""
+      const turnHovered = turnId !== "" && hoverTurn === turnId
+      const turnPinned = turnId !== "" && pinnedTurn === turnId
+      const turnExpandable = turnId !== "" && clippedTurn === turnId
+      // Expanded is gated on the measurement, not just on a reason to open. Without
+      // that gate the two channels disagree: `turnExpandable` alone decided whether
+      // the card got a click handler, so any stale reason for being open produced a
+      // card that rendered open and offered nothing to close it with. Requiring the
+      // measurement makes "open implies closable" hold by construction rather than by
+      // every write path staying correct. A card with nothing hidden loses nothing:
+      // expanding it would not have revealed anything.
+      const expanded = turnExpandable === true && (turnHovered === true || turnPinned)
 
       const data = state.status === "ready" ? state.data : undefined
       const summary = data?.summary
@@ -1726,22 +1813,32 @@ window.__ModuleLoader__.load({
             ? null
             : jsxs(Card, {
                 title: '上一轮',
+                // Hover and click are wired separately on purpose. Both arrive on
+                // the same element, and neither handler reads the other's state.
+                onMouseEnter: () => setHoverTurn(turnId),
+                onMouseLeave: () => setHoverTurn(""),
+                onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),
+                expanded,
+                clickable: turnExpandable,
                 head: jsxs('div', {
                   className: 'dsse-head-stats',
                   children: [
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(commands) }), jsx('span', { children: '命令' })] }),
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(ordered.length) }), jsx('span', { children: '文件' })] }),
-                    jsxs('button', {
-                      className: 'dsse-head-btn dsse-propose',
-                      type: 'button',
-                      disabled: busy || sessionId === '',
-                      onClick: propose,
-                      children: [jsx(Icon, { name: 'spark' }), busy ? '已发送' : '提炼'],
-                    }),
                   ],
                 }),
-                children: jsx(Clip, { text: summaryText }),
+                children: jsx(Clip, {
+                  text: summaryText,
+                  expanded,
+                  // The measurement is reported with the turn it measured, so a late
+                  // report cannot describe text that is no longer on screen. A hidden
+                  // report still records the turn: "measured, and nothing hidden" is a
+                  // fact about this turn, and the empty tag is what says so.
+                  onClipped: (hidden) => {
+                    setClippedTurn(hidden === true ? turnId : "")
+                  },
+                }),
               }),
           showActivity === false
             ? null

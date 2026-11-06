@@ -114,21 +114,21 @@ const cases = [
     // Map keeps the first position, so alpha -> beta -> alpha still lists beta
     // first.
     label: 'reloading a skill no longer moves it to the front',
-    file: 'packages/ui-evolve/lib/index.js',
-    from: `    const previous = names.get(name)
-    names.delete(name)
-    names.set(name, previous === 'tool' ? 'tool' : via)`,
-    to: `    const previous = names.get(name)
-    names.set(name, previous === 'tool' ? 'tool' : via)`,
+    // The bookkeeping moved from `lib/index.js` into `lib/session-state.js`
+    // when the accumulators became per-session; the anchor moved with it.
+    file: 'packages/ui-evolve/lib/session-state.js',
+    from: `    entry.skills.delete(name)
+    entry.skills.set(name, { via: previous?.via === 'tool' ? 'tool' : via, at: ++entry.sequence })`,
+    to: `    entry.skills.set(name, { via: previous?.via === 'tool' ? 'tool' : via, at: ++entry.sequence })`,
     test: 'test/index.test.mjs',
   },
   {
     // Writing the newest path unconditionally demotes a tool load to a gesture
     // one, and describeSkills then drops a model-only skill the session is using.
     label: 'a later gesture demotes a tool load',
-    file: 'packages/ui-evolve/lib/index.js',
-    from: `    names.set(name, previous === 'tool' ? 'tool' : via)`,
-    to: `    names.set(name, via)`,
+    file: 'packages/ui-evolve/lib/session-state.js',
+    from: `    entry.skills.set(name, { via: previous?.via === 'tool' ? 'tool' : via, at: ++entry.sequence })`,
+    to: `    entry.skills.set(name, { via, at: ++entry.sequence })`,
     test: 'test/index.test.mjs',
   },
   {

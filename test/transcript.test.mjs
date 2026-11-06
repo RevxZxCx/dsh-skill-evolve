@@ -372,6 +372,62 @@ check(
   check('the snapshot text stays bounded', full.snapshot().said.length <= 1200, String(full.snapshot().said.length))
 }
 
+// ---------------------------------------------------------------------------
+// Installing a stored session
+// ---------------------------------------------------------------------------
+
+{
+  // A file read takes milliseconds and events arrive during it. Whatever arrived
+  // is newer than the file, so the file loses on the finished turn — but it is
+  // the only record of the turns before the restart, and this process started
+  // counting at zero. Refusing the file outright made the panel announce turn 1
+  // for a conversation that had reached turn 7.
+  const store = new TranscriptStore()
+  store.record('a', human('one'))
+  store.record('a', human('two'))
+  const created = store.hydrate('a', { turns: 9, previous: { turn: 8, calls: 4, said: 'from another process' } })
+  check('a stored count is added to the count from live events', created === true, String(created))
+  check('and the sum is what the panel counts', store.view('a').turns === 11, String(store.view('a').turns))
+  check(
+    'and the stored turn is shown, because nothing has finished here yet',
+    store.view('a').previous?.turn === 8,
+    JSON.stringify(store.view('a').previous),
+  )
+  check('a second read does not add the count again', store.hydrate('a', { turns: 9 }) === false, 'added again')
+  check('and the count did not move', store.view('a').turns === 11, String(store.view('a').turns))
+}
+
+{
+  // The case the whole feature exists for: this process has no memory of the
+  // session, and the file is the only thing that knows it happened.
+  const store = new TranscriptStore()
+  const created = store.hydrate('a', { turns: 7, previous: { turn: 6, calls: 3, paths: ['a.js'], commands: [], tools: [], said: 'earlier' } })
+  check('an unstarted transcript accepts a stored one', created === true, String(created))
+  check('the stored turn is the one the panel shows', store.view('a').previous?.turn === 6, JSON.stringify(store.view('a').previous))
+  check('the turn counter comes back with it', store.view('a').turns === 7, String(store.view('a').turns))
+}
+
+{
+  const store = new TranscriptStore()
+  store.hydrate('a', { previous: { turn: 4, calls: 0, paths: [], commands: [], tools: [], said: '' } })
+  check('a stored turn without a counter still sets the counter', store.view('a').turns === 4, String(store.view('a').turns))
+}
+
+{
+  // A count is worth keeping on its own: a session whose last turn was abandoned
+  // has no finished turn — an abandoned turn is deliberately not summarised —
+  // but it still reached turn N, and the panel prints N. Refusing the state for
+  // want of `previous` threw the count away and the panel reported turn 0 for a
+  // conversation that had reached turn 4.
+  const store = new TranscriptStore()
+  check('a stored count with no finished turn is installed', store.hydrate('a', { turns: 3 }) === true, 'installed nothing')
+  check('and the panel shows the turn it reached', store.view('a').turns === 3, String(store.view('a')?.turns))
+  check('and there is no turn to present', store.view('a').previous === undefined, JSON.stringify(store.view('a')?.previous))
+  check('a stored state that is not a record installs nothing', store.hydrate('b', { previous: 7 }) === false, 'installed a number')
+  check('no record is created for that either', store.view('b') === undefined, JSON.stringify(store.view('b')))
+  check('an empty stored state installs nothing', store.hydrate('c', { turns: 0 }) === false, 'installed nothing to say')
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

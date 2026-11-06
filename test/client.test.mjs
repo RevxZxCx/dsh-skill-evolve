@@ -943,7 +943,7 @@ check(
     check('the card header carries the command count', headStats.some((row) => /^0\s*命令$/.test(row)), JSON.stringify(headStats))
     check('the card header carries the file count', headStats.some((row) => /^1\s*文件$/.test(row)), JSON.stringify(headStats))
     check('the old stat strip is gone', firstByClass(tree, 'dsse-facts') === undefined, textOf(tree).slice(0, 160))
-    check('the propose button moved into the header', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') !== undefined, textOf(tree).slice(0, 160))
+    check('the header carries no action button', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') === undefined && firstByClass(firstHead, 'dsse-head-btn') === undefined, textOf(tree).slice(0, 160))
     // Cards without a `head` still get their metadata from `meta`. Both paths have
     // to be pinned: removing the fallback would silently empty two headers.
     const metas = byClass(tree, 'dsse-card-meta').map((node) => textOf(node))
@@ -1254,25 +1254,6 @@ check(
     post !== undefined && String(post.init.body).includes('"summaryProvider":"p"') && String(post.init.body).includes('"summaryModel":"m"'),
     String(post?.init?.body),
   )
-}
-
-// ---------------------------------------------------------------------------
-// The propose button
-// ---------------------------------------------------------------------------
-
-{
-  const instance = boot({ routes: panelRoutes() })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const tree = await instance.renderer.deepRender(cards)
-  const propose = firstByClass(tree, 'dsse-propose')
-  check('the propose button exists', propose !== undefined && textOf(propose).includes('提炼'), textOf(tree).slice(0, 120))
-  propose.props.onClick()
-  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  const post = instance.calls.find((row) => row.url.endsWith('/propose') && row.init?.method === 'POST')
-  check('proposing posts the agent', post !== undefined && String(post.init.body).includes('session-a'), String(post?.init?.body))
 }
 
 // ---------------------------------------------------------------------------
@@ -2088,6 +2069,697 @@ function byAction(node, action) {
 }
 
 // ---------------------------------------------------------------------------
+// The 上一轮 card opens for two separate reasons
+//
+// A pointer resting on the card opens it, and a click pins it open. Those are two
+// independent facts, so the drop tests are not "the card is open" but "which
+// reason is still standing": a click while hovering must not clear the pointer's
+// reason and collapse the card under the pointer, and moving away while pinned
+// must not clear the click's. The mutation that merges the two booleans is the
+// one these assertions exist to kill, and it does not fail any test that only
+// inspects "open".
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+
+  // The harness renders a child component in a pass of its own, so the clip's
+  // measurement reaches `Cards` one render after the clip reports it. React does
+  // not have that gap — a layout effect and the state it sets land in the same
+  // commit — so this is the harness catching up, not the component settling.
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  /**
+   * Click the 上一轮 card, or fail the check that says it was clickable at all.
+   *
+   * A suite that throws prints no FAIL line and the mutation runner counts FAIL
+   * lines, so an unguarded call turns every mutation that removes the handler into
+   * a phantom survivor. The guard keeps the failure visible as a FAIL.
+   *
+   * @param {object} tree - the rendered panel.
+   * @returns {boolean} whether a handler was there to call.
+   */
+  const press = (tree) => {
+    const handler = turnCard(tree)?.props?.onClick
+    check('the card answers a click', typeof handler === 'function', String(typeof handler))
+    if (typeof handler !== 'function') return false
+    handler()
+    return true
+  }
+
+  const begin = await settle()
+  check('a tall summary starts collapsed', expandedOf(begin) === 'false', textOf(begin).slice(0, 120))
+  check('a collapsed summary with more to show fades', firstByClass(begin, 'dsse-clip')?.props?.['data-clipped'] === 'true', textOf(begin).slice(0, 120))
+  check('a card with more to show invites a click', turnCard(begin)?.props?.['data-clickable'] === 'true', String(turnCard(begin)?.props?.['data-clickable']))
+  check('and it is reachable from the keyboard', turnCard(begin)?.props?.tabIndex === 0 && turnCard(begin)?.props?.role === 'button', JSON.stringify([turnCard(begin)?.props?.tabIndex, turnCard(begin)?.props?.role]))
+  check('a collapsed card says it is not expanded', turnCard(begin)?.props?.['aria-expanded'] === false, String(turnCard(begin)?.props?.['aria-expanded']))
+
+  // Hover opens it.
+  turnCard(begin).props.onMouseEnter()
+  const hovered = await instance.renderer.deepRender(cards)
+  check('hovering opens a clipped summary', expandedOf(hovered) === 'true', textOf(hovered).slice(0, 120))
+  check('an open summary keeps its measurement', firstByClass(hovered, 'dsse-clip')?.props?.['data-clipped'] === 'true', 'the measurement should survive the expansion')
+  check('an open summary draws no fade', firstByClass(hovered, 'dsse-clip')?.props?.['data-expanded'] === 'true', 'the fade is gated on data-expanded, so that is what says whether it is drawn')
+  check('and it reports itself expanded', turnCard(hovered)?.props?.['aria-expanded'] === true, String(turnCard(hovered)?.props?.['aria-expanded']))
+
+  // Clicking while hovering pins it: the click is its own reason, so the pointer
+  // leaving must not close it. This is the case a single shared boolean gets wrong.
+  press(hovered)
+  const pinned = await instance.renderer.deepRender(cards)
+  check('clicking while hovering keeps it open', expandedOf(pinned) === 'true', textOf(pinned).slice(0, 120))
+  turnCard(pinned).props.onMouseLeave()
+  const stillPinned = await instance.renderer.deepRender(cards)
+  check('the pointer leaving does not close a clicked card', expandedOf(stillPinned) === 'true', textOf(stillPinned).slice(0, 120))
+
+  // Still a toggle while it is open. The clip deliberately stops measuring once
+  // the cap is lifted — a re-measure there would read "nothing hidden" and take the
+  // card's interactivity away from under the person using it.
+  check('an open card still invites the click that closes it', turnCard(stillPinned)?.props?.['data-clickable'] === 'true', String(turnCard(stillPinned)?.props?.['data-clickable']))
+  check('and it keeps its keyboard affordances while open', turnCard(stillPinned)?.props?.tabIndex === 0 && turnCard(stillPinned)?.props?.role === 'button', JSON.stringify([turnCard(stillPinned)?.props?.tabIndex, turnCard(stillPinned)?.props?.role]))
+  check('and it still reports itself expanded', turnCard(stillPinned)?.props?.['aria-expanded'] === true, String(turnCard(stillPinned)?.props?.['aria-expanded']))
+  check('an open summary keeps its clipped reading', firstByClass(stillPinned, 'dsse-clip')?.props?.['data-clipped'] === 'true', String(firstByClass(stillPinned, 'dsse-clip')?.props?.['data-clipped']))
+
+  // A second click releases the pin, and with no pointer on the card it closes.
+  press(stillPinned)
+  const released = await instance.renderer.deepRender(cards)
+  check('clicking again lets go of the pin', expandedOf(released) === 'false', textOf(released).slice(0, 120))
+}
+
+{
+  // The other half of the split: hovering a card that was pinned, then clicking,
+  // must leave the pointer's reason intact — the card stays open until the
+  // pointer actually leaves.
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+
+  // The harness renders a child component in a pass of its own, so the clip's
+  // measurement reaches `Cards` one render after the clip reports it. React does
+  // not have that gap — a layout effect and the state it sets land in the same
+  // commit — so this is the harness catching up, not the component settling.
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  const start = await settle()
+  // Guarded for the same reason as the block above: a mutation that removes the
+  // handler must fail a check, not throw past the runner's FAIL-line count.
+  const pressStart = turnCard(start)?.props?.onClick
+  check('a clipped card answers a click', typeof pressStart === 'function', String(typeof pressStart))
+  if (typeof pressStart === 'function') pressStart()
+  const clicked = await instance.renderer.deepRender(cards)
+  check('a click opens the card with no pointer on it', expandedOf(clicked) === 'true', textOf(clicked).slice(0, 120))
+
+  if (typeof turnCard(clicked)?.props?.onMouseEnter === 'function') turnCard(clicked).props.onMouseEnter()
+  const hovered = await instance.renderer.deepRender(cards)
+  check('hovering a pinned card leaves it open', expandedOf(hovered) === 'true', textOf(hovered).slice(0, 120))
+
+  if (typeof turnCard(hovered)?.props?.onMouseLeave === 'function') turnCard(hovered).props.onMouseLeave()
+  const afterLeave = await instance.renderer.deepRender(cards)
+  check('moving away from a pinned card leaves it open', expandedOf(afterLeave) === 'true', textOf(afterLeave).slice(0, 120))
+}
+
+{
+  // A summary that already fits has nothing to reveal, so the card must not offer
+  // a click that changes nothing: no tab stop, no pointer cursor, no button role.
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  // The harness renders a child component in a pass of its own, so the clip's
+  // measurement reaches `Cards` one render after the clip reports it. React does
+  // not have that gap — a layout effect and the state it sets land in the same
+  // commit — so this is the harness catching up, not the component settling.
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  const tree = await settle()
+  const card = byClass(tree, 'dsse-card')[0]
+  check('a summary that fits is not clickable', card?.props?.['data-clickable'] === 'false', String(card?.props?.['data-clickable']))
+  check('and it takes no tab stop', card?.props?.tabIndex === undefined, String(card?.props?.tabIndex))
+  check('and it claims no button role', card?.props?.role === undefined, String(card?.props?.role))
+
+  // The pointer handlers are attached whatever the measurement says — a card cannot
+  // know it has nothing to reveal until after layout, and hover arrives before that.
+  // So the measurement gate on `expanded` is the only thing standing between a
+  // hovered-but-empty card and the state that must never exist: expanded, with no
+  // click handler, no tab stop and no role to close it with. Being open is decided
+  // by whether there is anything to open, not by whether someone pointed at it.
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  card?.props?.onMouseEnter?.()
+  const hovered = await settle()
+  check('pointing at a card with nothing to reveal does not open it', expandedOf(hovered) === 'false', String(expandedOf(hovered)))
+  check('and it is still not offering a way to close', byClass(hovered, 'dsse-card')[0]?.props?.['data-clickable'] === 'false', String(byClass(hovered, 'dsse-card')[0]?.props?.['data-clickable']))
+}
+
+{
+  // The keyboard has to be able to do what the mouse does, and only Enter and
+  // Space — a card that toggles on every keypress is a card that fights scrolling.
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  // The harness renders a child component in a pass of its own, so the clip's
+  // measurement reaches `Cards` one render after the clip reports it. React does
+  // not have that gap — a layout effect and the state it sets land in the same
+  // commit — so this is the harness catching up, not the component settling.
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  const start = await settle()
+  const key = async (tree, name) => {
+    let prevented = false
+    // Guarded rather than called straight: a card whose handler went missing must
+    // fail an assertion here. Calling it unguarded threw, and a thrown suite
+    // prints no FAIL line — which made the mutation that removes the handler look
+    // like a survivor.
+    const handler = byClass(tree, 'dsse-card')[0]?.props?.onKeyDown
+    check(`the card answers ${name} at all`, typeof handler === 'function', String(typeof handler))
+    if (typeof handler !== 'function') return { prevented, next: tree }
+    handler({ key: name, preventDefault: () => { prevented = true } })
+    const next = await instance.renderer.deepRender(cards)
+    return { prevented, next }
+  }
+
+  const ignored = await key(start, 'a')
+  check('a letter does not toggle the card', expandedOf(ignored.next) === 'false', textOf(ignored.next).slice(0, 120))
+
+  const enter = await key(ignored.next, 'Enter')
+  check('Enter opens the card', expandedOf(enter.next) === 'true', textOf(enter.next).slice(0, 120))
+  check('and Enter does not also scroll the page', enter.prevented === true, 'preventDefault was not called')
+
+  const space = await key(enter.next, ' ')
+  check('Space closes it again', expandedOf(space.next) === 'false', textOf(space.next).slice(0, 120))
+}
+
+// ---------------------------------------------------------------------------
+// An open card must not re-measure itself shut
+//
+// Lifting the cap is a CSS change, so in a browser `scrollHeight` and
+// `clientHeight` agree the moment the card is open. A clip that measures while
+// expanded therefore reads "nothing is hidden" and overwrites the one fact that
+// makes the card a toggle — it stays open but stops being clickable, stops taking
+// a tab stop, and stops reporting `aria-expanded`, so the keyboard user who just
+// opened it can no longer close it.
+//
+// Reproducing that needs a node whose `scrollHeight` follows the cap. The shared
+// `fakeNode` reports a fixed overflow, which models the collapsed state only —
+// against a fixed node the guard is invisible, and the mutation that deletes it
+// survives.
+// ---------------------------------------------------------------------------
+
+{
+  let capped = true
+  let shrink = false
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef({
+    ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }),
+    get scrollHeight() {
+      // Uncapped, the box grows to fit: nothing is hidden, by construction.
+      if (!capped) return 300
+      // Capped and short: the case that only a fresh measurement can notice.
+      return shrink ? 300 : 900
+    },
+    clientHeight: 300,
+  })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
+  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  const collapsed = await settle()
+  check('the capped summary measures as clipped', clipOf(collapsed)?.props?.['data-clipped'] === 'true', String(clipOf(collapsed)?.props?.['data-clipped']))
+
+  // Opening lifts the cap, which is what makes the box stop overflowing.
+  capped = false
+  turnCard(collapsed).props.onMouseEnter()
+  const opened = await settle()
+  check('opening the card keeps its clipped reading', clipOf(opened)?.props?.['data-clipped'] === 'true', String(clipOf(opened)?.props?.['data-clipped']))
+  check('opening the card keeps it clickable', turnCard(opened)?.props?.['data-clickable'] === 'true', String(turnCard(opened)?.props?.['data-clickable']))
+  check('opening the card keeps its expanded report', turnCard(opened)?.props?.['aria-expanded'] === true, String(turnCard(opened)?.props?.['aria-expanded']))
+
+  // Closing restores the cap, and with it the measurement starts running again.
+  //
+  // Proving that needs the new measurement to give a *different* answer. Leaving it
+  // at 900 would be answered 'true' by the reading already on screen, so a component
+  // that measured once and never again would pass — the assertion would be about the
+  // old reading, not about measuring. Shrink the text instead, so only a clip that
+  // actually re-runs the comparison can report 'false'.
+  capped = true
+  shrink = true
+  turnCard(opened).props.onMouseLeave()
+  const closed = await settle()
+  check('closing the card measures it again', clipOf(closed)?.props?.['data-clipped'] === 'false', String(clipOf(closed)?.props?.['data-clipped']))
+  check('and it collapses', clipOf(closed)?.props?.['data-expanded'] === 'false', String(clipOf(closed)?.props?.['data-expanded']))
+}
+
+// ---------------------------------------------------------------------------
+// A card that is not interactive is inert, right down to its click
+//
+// The first version gated the cursor, the tab stop, the role and the keyboard but
+// forwarded `onClick` unconditionally. That looked harmless — the card had nothing
+// to reveal, so nothing appeared to happen — but the click still flipped the
+// caller's pin, invisibly. The pin then outlived the turn: the next summary
+// arrived long enough to truncate, so it rendered already open on a card the
+// measurement marked as not expandable, which means open with no way to close it.
+//
+// Two assertions, because the defect had two halves: the click must not reach the
+// handler at all, and a pin must not survive a change of turn.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  // Nothing hidden, so nothing to reveal.
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settleInto = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+
+  const resting = await settleInto()
+  const card = byClass(resting, 'dsse-card')[0]
+  check('a card with nothing to reveal carries no click handler', card?.props?.onClick === undefined, String(card?.props?.onClick))
+
+  // Even if a click does arrive — a stray event, a host that replays one — the
+  // card must not end up expanded.
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  card?.props?.onClick?.()
+  const afterClick = await settleInto()
+  check('a click on an inert card does not expand it', expandedOf(afterClick) === 'false', String(expandedOf(afterClick)))
+}
+
+{
+  // The pin belongs to the turn it was set on. A click on turn 7 must not open the
+  // summary that arrives as turn 8.
+  const routes = panelRoutes()
+  let turn = 7
+  let text = 'SHORT'
+  const original = routes['/api/ui-evolve/panel']
+  // Serve a different turn, and a different summary, on demand.
+  const responder = () => ({
+    ok: true,
+    data: { ...original.data, turn, summary: { text } },
+  })
+  Object.defineProperty(routes, '/api/ui-evolve/panel', { get: responder, enumerable: true, configurable: true })
+
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300 }))
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settleInto = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+  const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
+  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+
+  // Turn 7 shows a long summary; the card is expandable and gets pinned open.
+  turn = 7
+  text = 'LONG'
+  const longNode = { ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }), scrollHeight: 900, clientHeight: 300 }
+  instance.renderer.setNodeForRef(longNode)
+  const first = await settleInto()
+  check('the long summary on turn seven is expandable', cardOf(first)?.props?.['data-clickable'] === 'true', String(cardOf(first)?.props?.['data-clickable']))
+  // A suite that throws prints no FAIL line, and the mutation runner counts FAIL
+  // lines — so an unguarded call here would turn every mutation that removes the
+  // measurement into a phantom survivor instead of a kill.
+  const pin = cardOf(first)?.props?.onClick
+  check('the expandable card answers a click', typeof pin === 'function', String(typeof pin))
+  if (typeof pin === 'function') pin()
+  const pinned = await settleInto()
+  check('clicking pins turn seven open', expandedOf(pinned) === 'true', String(expandedOf(pinned)))
+
+  // Turn 8 arrives with more text still, and a fresh measurement that also says
+  // there is more to show. The pin from turn 7 must be gone all the same: nobody
+  // asked to open this one.
+  turn = 8
+  text = 'LONGER'
+  // The panel only re-reads when asked; without this the old answer stays and the
+  // turn never changes, which would make the assertion describe turn 7 twice.
+  firstByClass(pinned, 'dsse-refresh').props.onClick()
+  const refreshed = await settleInto()
+  check('a new turn does not inherit the previous pin', expandedOf(refreshed) === 'false', String(expandedOf(refreshed)))
+}
+
+{
+  // The measurement is turn-scoped too: a report about the old summary must not
+  // make the new card look expandable before anyone has measured it.
+  const routes = panelRoutes()
+  let turn = 7
+  const original = routes['/api/ui-evolve/panel']
+  Object.defineProperty(routes, '/api/ui-evolve/panel', {
+    get: () => ({ ok: true, data: { ...original.data, turn } }),
+    enumerable: true,
+    configurable: true,
+  })
+
+  const instance = boot({ routes })
+  // The harness binds a ref once and never rebinds it, so swapping the node for a
+  // shorter one would leave the clip measuring the old object — the assertion would
+  // pass or fail for the wrong reason. Keep one node and change what it reports.
+  let overflow = 900
+  instance.renderer.setNodeForRef({
+    ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }),
+    get scrollHeight() { return overflow },
+    clientHeight: 300,
+  })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settleInto = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+
+  const measured = await settleInto()
+  check('a measured overflow makes the card expandable', cardOf(measured)?.props?.['data-clickable'] === 'true', String(cardOf(measured)?.props?.['data-clickable']))
+
+  // A new turn whose summary fits: the old measurement said "there is more", and
+  // it must not be applied to text it never saw.
+  turn = 8
+  overflow = 300
+  // Ask for the new answer; otherwise this still describes turn 7.
+  firstByClass(measured, 'dsse-refresh').props.onClick()
+  const remeasured = await settleInto()
+  check('a new turn re-measures before offering a click', cardOf(remeasured)?.props?.['data-clickable'] === 'false', String(cardOf(remeasured)?.props?.['data-clickable']))
+}
+
+{
+  // Hover is not turn-scoped, but the measurement still is. While the pointer is
+  // on the card the clip stops measuring — that is the whole point of the guard —
+  // so a turn change under a hovering pointer is the one moment where an old
+  // measurement has nowhere to be corrected. It must not be reused: a card that
+  // offers a click on text that fits offers a click that does nothing.
+  const routes = panelRoutes()
+  const original = routes['/api/ui-evolve/panel']
+  let turn = 7
+  Object.defineProperty(routes, '/api/ui-evolve/panel', {
+    get: () => ({ ok: true, data: { ...original.data, turn } }),
+    enumerable: true,
+    configurable: true,
+  })
+
+  const instance = boot({ routes })
+  // Tall to begin with, so the first measurement says there is more to show.
+  let overflow = 900
+  instance.renderer.setNodeForRef({
+    ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }),
+    get scrollHeight() { return overflow },
+    clientHeight: 300,
+  })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settleInto = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+
+  const measured = await settleInto()
+  check('the tall summary is expandable', cardOf(measured)?.props?.['data-clickable'] === 'true', String(cardOf(measured)?.props?.['data-clickable']))
+
+  // Hover, then hand the panel a summary that fits. The clip is open, so it does
+  // not measure; the only thing that can tell the card it has nothing to reveal is
+  // the turn tag on the old measurement going stale.
+  if (typeof cardOf(measured)?.props?.onMouseEnter === 'function') cardOf(measured).props.onMouseEnter()
+  turn = 8
+  overflow = 300
+  // The panel re-reads on request only. The pointer is still on the card, so the
+  // hover survives this refresh — which is exactly the window being tested.
+  firstByClass(measured, 'dsse-refresh').props.onClick()
+  const refreshed = await settleInto()
+  check('a stale measurement does not survive into a turn it never saw', cardOf(refreshed)?.props?.['data-clickable'] === 'false', String(cardOf(refreshed)?.props?.['data-clickable']))
+}
+
+{
+  // A panel that has not reported a turn yet has no turn id. An empty id must not
+  // match the empty "nothing pinned" value — that would read as "this card was
+  // pinned" and render every such panel open.
+  const routes = panelRoutes()
+  const original = routes['/api/ui-evolve/panel']
+  Object.defineProperty(routes, '/api/ui-evolve/panel', {
+    // No `turn` field at all, as a half-built or older payload would look.
+    get: () => {
+      const { turn, ...rest } = original.data
+      return { ok: true, data: rest }
+    },
+    enumerable: true,
+    configurable: true,
+  })
+
+  const instance = boot({ routes })
+  instance.renderer.setNodeForRef({ ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }), scrollHeight: 900, clientHeight: 300 })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  await instance.renderer.deepRender(cards)
+  const settled = await instance.renderer.deepRender(cards)
+  check('a panel with no turn id does not render itself pinned open', firstByClass(settled, 'dsse-clip')?.props?.['data-expanded'] === 'false', String(firstByClass(settled, 'dsse-clip')?.props?.['data-expanded']))
+}
+
+{
+  // The pointer cannot leave a card that no longer exists.
+  //
+  // A refresh empties the panel while it asks, so the 上一轮 card unmounts and the
+  // `onMouseLeave` that would clear a bare hover boolean never fires. If hover is a
+  // plain `true`, the next turn's card inherits it and renders open — under a pointer
+  // that left the card several seconds ago, and with nothing to close it: a card the
+  // measurement says has nothing hidden gets no click handler, no tab stop and no
+  // role. Open, and unfixable by the person looking at it.
+  //
+  // Two separate things have to hold for this to stay fixed, and each has been
+  // broken on its own during development, so both get an assertion: the hover tag
+  // must belong to a turn, and being open must depend on the measurement.
+  const routes = panelRoutes()
+  const original = routes['/api/ui-evolve/panel']
+  let turn = 7
+  let text = 'LONG'
+  Object.defineProperty(routes, '/api/ui-evolve/panel', {
+    get: () => ({ ok: true, data: { ...original.data, turn, summary: { text } } }),
+    enumerable: true,
+    configurable: true,
+  })
+
+  const instance = boot({ routes })
+  // The window is capped, so the summary really is too tall for it. One node whose
+  // height follows the text: a fresh object per turn would not be rebound, since the
+  // harness binds a ref once.
+  let overflow = 900
+  instance.renderer.setNodeForRef({
+    ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }),
+    get scrollHeight() { return overflow },
+    clientHeight: 300,
+  })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settleInto = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+  const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
+  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+
+  const begin = await settleInto()
+  check('the long summary measures as too tall for its box', clipOf(begin)?.props?.['data-clipped'] === 'true', String(clipOf(begin)?.props?.['data-clipped']))
+  check('and so it invites a click', cardOf(begin)?.props?.['data-clickable'] === 'true', String(cardOf(begin)?.props?.['data-clickable']))
+
+  // Hover it, then take the card away without letting the pointer leave: refresh
+  // into a turn whose summary fits.
+  cardOf(begin)?.props?.onMouseEnter?.()
+  const hovered = await settleInto()
+  check('hovering opens the card', clipOf(hovered)?.props?.['data-expanded'] === 'true', String(clipOf(hovered)?.props?.['data-expanded']))
+
+  turn = 8
+  text = 'ALSO LONG'
+  firstByClass(hovered, 'dsse-refresh').props.onClick()
+  const swapped = await settleInto()
+  check('a hover that outlived its turn does not open the next card', clipOf(swapped)?.props?.['data-expanded'] === 'false', String(clipOf(swapped)?.props?.['data-expanded']))
+  // The card must still offer the click, or the assertion above would be answered by
+  // "there was nothing to open" instead of by the hover tag.
+  check('the next card is still expandable in its own right', cardOf(swapped)?.props?.['data-clickable'] === 'true', String(cardOf(swapped)?.props?.['data-clickable']))
+
+  // The invariant the two halves of this defect exist to protect: a card that
+  // renders open can always be closed. Asserted as a pairing rather than as "it is
+  // closed", because the way this went wrong was an open card with no way out —
+  // `aria-expanded` true while `data-clickable`, the tab stop, the role and the click
+  // handler were all absent.
+  const openPairs = [
+    ['after the turn changed', swapped],
+    ['after pointing at it', await (async () => { cardOf(swapped)?.props?.onMouseEnter?.(); return settleInto() })()],
+  ]
+  for (const [when, tree] of openPairs) {
+    const clip = clipOf(tree)
+    const card = cardOf(tree)
+    if (clip?.props?.['data-expanded'] !== 'true') continue
+    check(`an open card can be closed ${when}`, card?.props?.['data-clickable'] === 'true' && card?.props?.tabIndex === 0 && card?.props?.role === 'button' && typeof card?.props?.onClick === 'function', `${String(card?.props?.['data-clickable'])}/${String(card?.props?.tabIndex)}/${String(card?.props?.role)}/${typeof card?.props?.onClick}`)
+  }
+}
+
+{
+  // A turn number is only unique inside its own session.
+  //
+  // Every transcript counts from zero, so two conversations sitting at turn 7 is
+  // ordinary — and a tag written in the first one then matches the second. The card
+  // opens for a reason that belongs to a conversation nobody is looking at. An open
+  // card skips the measurement, so the stale tag is never measured away, and the
+  // card stays open until someone happens to click it.
+  //
+  // Both halves of the fixture matter. The shared turn number is what lets a stale
+  // tag match at all; the summary that fits is what makes the wrong state visible,
+  // since a card that genuinely has more to show is supposed to open.
+  const routes = panelRoutes()
+  const base = routes['/api/ui-evolve/panel'].data
+  routes['/api/ui-evolve/panel'] = (init, url) => ({
+    ok: true,
+    data: {
+      ...base,
+      summary: { text: String(url).includes('agent=session-a') ? 'Long enough that the box cuts it.' : 'One line.', model: 'p/m' },
+    },
+  })
+
+  const instance = boot({ routes })
+  // One node for both conversations, with a height the test can change. A fresh
+  // node would be an easy way out of the defect: the clip would remount, measure
+  // again and quietly replace the stale answer. Keeping the node fixed to the
+  // layout means the only thing that can clear the stale tag is the code.
+  let overflow = 900
+  instance.renderer.setNodeForRef({
+    ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }),
+    get scrollHeight() {
+      return overflow
+    },
+    clientHeight: 300,
+  })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  const toggle = instance.seat('toggle')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+
+  const settle = async () => {
+    await instance.renderer.deepRender(cards)
+    return instance.renderer.deepRender(cards)
+  }
+  const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
+  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+
+  const begin = await settle()
+  check('the first conversation has more to show than the box holds', clipOf(begin)?.props?.['data-clipped'] === 'true', String(clipOf(begin)?.props?.['data-clipped']))
+  cardOf(begin)?.props?.onMouseEnter?.()
+  const hovered = await settle()
+  check('and pointing at it opens it', clipOf(hovered)?.props?.['data-expanded'] === 'true', String(clipOf(hovered)?.props?.['data-expanded']))
+
+  // The next conversation is also on turn 7, and its summary fits.
+  overflow = 300
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  const switched = await settle()
+  check('a tag from one conversation does not open a card in the next', clipOf(switched)?.props?.['data-expanded'] === 'false', String(clipOf(switched)?.props?.['data-expanded']))
+  check('and the new card is measured instead of inheriting the old answer', clipOf(switched)?.props?.['data-clipped'] === 'false', String(clipOf(switched)?.props?.['data-clipped']))
+  check('with nothing to reveal, it stops offering a click', cardOf(switched)?.props?.['data-clickable'] === 'false', String(cardOf(switched)?.props?.['data-clickable']))
+}
+
+// ---------------------------------------------------------------------------
+// The cap is five lines, and only the parts that agree on that
+//
+// The rule is a single declaration, so the guard is a source assertion rather
+// than a rendered one: `.dsse-tiny` sets line-height:1.55 with a font-size of
+// .9em, which makes one line box 1.55em of this element, so five lines is
+// 7.75em. The old 5.2em was 3.35 lines — an odd place to cut, since the last
+// line came out shaved rather than omitted.
+// ---------------------------------------------------------------------------
+
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  check('the summary is capped at five lines', source.includes('.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}'), 'the cap is not 7.75em')
+  check('the old three-line cap is gone', source.includes('max-height:5.2em') === false, 'a 5.2em cap survives somewhere')
+  check('one line box is still 1.55em', /\.dsse-tiny\{[^}]*line-height:1\.55/.test(source), 'the line box changed, so 7.75em is no longer five lines')
+  check('the fade is gated on not being expanded', source.includes('.dsse-clip[data-clipped="true"][data-expanded="false"]::after{'), 'the fade ignores the expanded state')
+  check('expanding lifts the cap', source.includes('.dsse-clip[data-expanded="true"] .dsse-text{max-height:none}'), 'expanding does not lift the cap')
+}
+
+// ---------------------------------------------------------------------------
+// The card header lines up with its title
+//
+// Centring the row put the stats' optical centre on the title's box centre, which
+// reads as a few pixels low because the digits sit on a smaller line box. Baseline
+// alignment is what makes them share a line. The stats also stop being pushed to
+// the right edge: they belong to the title as one group, which is what "aligned
+// with the title" means here.
+// ---------------------------------------------------------------------------
+
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  check('the card header aligns on the baseline', source.includes('.dsse-card-head{display:flex;align-items:baseline;'), 'the header still centres its row')
+  check('the header no longer centres', source.includes('.dsse-card-head{display:flex;align-items:center;') === false, 'a centring header survives')
+  check('the stats sit beside the title rather than at the far edge', source.includes('.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:4px;'), 'the stats are still pushed right')
+  check('the icon buttons keep their own centring', source.includes('.dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}'), 'the icon buttons lost their vertical placement')
+}
+
+// ---------------------------------------------------------------------------
+// The 提炼 button is gone, and the route it called is not
+//
+// Only the client lost the button. `POST /api/ui-evolve/propose` still exists and
+// is still covered by the api suite; deleting the route would break a host that
+// has the skill half installed and calls it from somewhere else.
+// ---------------------------------------------------------------------------
+
+{
+  const client = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  check('the client no longer draws a propose button', client.includes('dsse-propose') === false, 'a propose button survives in the client')
+  check('the client no longer posts to the propose route', client.includes('"/propose"') === false, 'the client still calls the propose route')
+  check('and it keeps no state for it', client.includes('setBusy(true)') === false, 'propose state survives in the client')
+}
+
+// ---------------------------------------------------------------------------
 // Hidden chrome must not take the settings dialog with it
 //
 // The dialog is state-driven. Unmounting it while `settingsOpen` stays true means
@@ -2143,29 +2815,6 @@ function byAction(node, action) {
   const tree = await instance.renderer.deepRender(cards)
   check('a queue with work in it keeps the header visible', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
   check('the queue button reports how much work there is', textOf(firstByClass(tree, 'dsse-queue')).includes('3'), textOf(tree).slice(0, 120))
-}
-
-{
-  // The route answers 200 with `{ ok: true, data: { ok: false, reason } }` when the
-  // skill half is not installed. `unwrap` only inspects the outer envelope, so the
-  // refusal has to be read again here — otherwise the button reports that a hint
-  // was queued when nothing was.
-  const routes = panelRoutes()
-  routes['/api/ui-evolve/propose'] = {
-    ok: true,
-    data: { ok: false, reason: 'the skill half is not installed' },
-  }
-  const instance = boot({ routes })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  firstByClass(await instance.renderer.deepRender(cards), 'dsse-propose').props.onClick()
-  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
-  const tree = await instance.renderer.deepRender(cards)
-  const refused = firstByClass(tree, 'dsse-err')
-  check('a refused proposal surfaces as an error', refused !== undefined, textOf(tree).slice(0, 200))
-  check('and the refusal text reaches the person', textOf(refused ?? tree).includes('skill half is not installed'), textOf(tree).slice(0, 200))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

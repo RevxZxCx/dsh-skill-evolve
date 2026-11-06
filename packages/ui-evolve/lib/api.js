@@ -11,9 +11,10 @@
  *    explain, and an error dialog in a sidebar is useless. Endpoints that cannot
  *    answer return `{ ok: true, data: { available: false, reason } }`.
  * 3. **Nothing here mutates.** The panel reads; the model writes through its
- *    tools. The single exception is the "propose a skill" button, which writes a
+ *    tools. The one route that writes anything is `POST /propose`, which places a
  *    hint into the next turn rather than touching the queue directly — the same
- *    path a detected hint takes, so it passes the same evidence gate.
+ *    path a detected hint takes, so it passes the same evidence gate. The panel has
+ *    no button for it any more; the route is kept as part of the service contract.
  */
 
 import { join } from 'node:path'
@@ -351,8 +352,10 @@ function describeMcp(seen, recency) {
  *   the route the session is running on, so a summary can borrow a known-good one.
  * @param {(agentId: string) => Map<string, 'tool' | 'gesture'> | undefined}
  *   [deps.skillsUsed] - names this session loaded, each with its path.
+ * @param {(agentId: string) => Map<string, number> | undefined} [deps.recentUse] -
+ *   the recency clock this session's skills and MCP servers share.
  * @param {(agentId: string, skill: string) => void} deps.requestProposal - queue a hint.
- * @param {() => Set<string>} deps.mcpTools - MCP tool names seen this session.
+ * @param {(agentId: string) => Set<string>} deps.mcpTools - MCP tool names this session called.
  * @param {() => Array<{ provider: string, models: Array<{ id: string, name: string }> }>} deps.modelCatalog - available routes.
  * @param {() => Promise<number>} [deps.pendingCandidates] - how many candidates await approval.
  * @param {() => Promise<Array<object>>} [deps.listCandidates] - the queue, shaped for the card.
@@ -361,6 +364,7 @@ function describeMcp(seen, recency) {
  *   whichever row `findByName` prefers, which is not always the one on screen.
  * @param {(name: string, id?: string) => Promise<object>} [deps.discardCandidate] - discard one candidate.
  *   Same id-then-name rule as `approveCandidate`.
+ * @param {any} [deps.sessionState] - the persisted per-session state, read when memory has nothing.
  * @param {(message: string) => void} [deps.log] - diagnostics.
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>} the handler.
  */
@@ -553,6 +557,48 @@ function clampText(value, limit) {
 }
 
 /**
+ * One session's panel view, from memory or from the last snapshot written.
+ *
+ * The fallback is what makes the panel describe a conversation rather than a
+ * process. A host restart, a reload, a panel opened on a session that has not
+ * emitted an event since this process started: in all three the transcript map
+ * has nothing, and answering "no completed turn yet" for a conversation with
+ * twenty turns is the bug this exists to remove.
+ *
+ * Disk is read once per session, not once per request. The load installs what it
+ * found into the transcript store, so the second poll finds it in memory like
+ * any other live session — and a session that had nothing stored is remembered
+ * as empty rather than re-read on every poll.
+ *
+ * A failure here is not a panel failure: the conversation is still there, so the
+ * view degrades to whatever memory has and the poll answers.
+ *
+ * @param {object} deps - the API dependencies.
+ * @param {string} agentId - the session.
+ * @returns {Promise<object | undefined>} the view, or undefined when nothing is known.
+ */
+async function viewOf(deps, agentId) {
+  const state = deps.sessionState
+  if (state === undefined || typeof state.load !== 'function') return deps.transcripts.view(agentId)
+  // Nothing here asks whether memory already holds a transcript. It almost
+  // always does: `record()` builds one from the first event, and the host
+  // replays a session's events before anything polls the panel. Answering from
+  // memory in that case skipped the read for the rest of the process, so a
+  // conversation that had reached turn seven showed as turn one until its next
+  // turn ended — the exact window in which someone opens the panel.
+  //
+  // `load()` is the one that knows whether the disk still needs reading: it
+  // returns false for a record that has already read, so every poll after the
+  // first one costs a map lookup.
+  try {
+    await state.load(agentId)
+  } catch (error) {
+    if (typeof deps.log === 'function') deps.log(`panel: could not read the stored state — ${error?.message ?? error}`)
+  }
+  return deps.transcripts.view(agentId)
+}
+
+/**
  * Assemble everything the panel draws.
  *
  * One request rather than three: the three modules share a turn number, and
@@ -566,7 +612,7 @@ function clampText(value, limit) {
 async function readPanel(deps, agentId) {
   const config = valueOf(deps.config)
   const id = agentId ?? ''
-  const view = id.length > 0 ? deps.transcripts.view(id) : undefined
+  const view = id.length > 0 ? await viewOf(deps, id) : undefined
   const previous = view?.previous
 
   let summary = { enabled: config.panelSummary === true, reason: 'no completed turn yet' }
@@ -580,7 +626,7 @@ async function readPanel(deps, agentId) {
     summary = { enabled: false, reason: 'turned off in settings' }
   }
 
-  const recency = typeof deps.recentUse === 'function' ? deps.recentUse() : undefined
+  const recency = typeof deps.recentUse === 'function' ? deps.recentUse(id) : undefined
   const skills = await describeSkills({
     skills: deps.skills(),
     exec: id.length > 0 ? deps.execFor(id) : undefined,
@@ -595,7 +641,7 @@ async function readPanel(deps, agentId) {
     turn: view?.turns ?? 0,
     summary,
     skills,
-    mcp: describeMcp(deps.mcpTools(), recency),
+    mcp: describeMcp(typeof deps.mcpTools === 'function' ? deps.mcpTools(id) : new Set(), recency),
     files,
     commands: previous?.commands ?? [],
     tools: previous?.tools ?? [],

@@ -52,11 +52,17 @@ export const HANDLE_WIDTH = 16
 export const EDGE_MARGIN = 8
 
 /**
- * Width of the candidate list that opens off the propose button.
+ * Width of the candidate review list.
  *
  * Wide enough for a kebab-case skill name plus a one-line description, which
  * is what the list row shows. Narrower and every row truncates the name, which
  * is the one field a person needs in order to decide.
+ *
+ * Named for the panel, not for a control that opens it. An earlier version named
+ * a button that has since been deleted, and the sentence outlived it: the comment
+ * kept pointing at something the code no longer had, and it survived review
+ * because a stale noun is not a behavior. A comment that names no trigger cannot
+ * go stale when the trigger is renamed or removed.
  */
 export const PANEL_WIDTH = 320
 

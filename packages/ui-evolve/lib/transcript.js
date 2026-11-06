@@ -148,6 +148,16 @@ class Transcript {
     this.previous = undefined
     /** How many human turns this transcript has seen. */
     this.turns = 0
+    /**
+     * Whether the count in `turns` already includes what a stored file knew.
+     *
+     * The count is local by design: `beginTurn` numbers from zero so the panel
+     * can promise "the turn before this one" instead of the host's absolute
+     * number. That makes a live count and a stored count measure different
+     * spans, and they can only be added once. Without this flag the second
+     * `hydrate` for the same agent would add the file's turns in again.
+     */
+    this.hydrated = false
   }
 
   /**
@@ -321,6 +331,64 @@ class TranscriptStore {
       this.byAgent.set(agentId, transcript)
     }
     return transcript
+  }
+
+  /**
+   * Install a snapshot read back from disk.
+   *
+   * The snapshot is the panel's own description of a finished turn, so it goes
+   * straight into `previous` — the field the live path fills at `turn/end` —
+   * and `turns` carries the count the session had reached. Nothing else is
+   * restored, because nothing else is on disk: the open turn's calls and text
+   * are deliberately not persisted, since a turn that was still running when
+   * the host stopped did not finish and the panel does not describe half a
+   * turn.
+   *
+   * A transcript that already holds live events is not replaced, but it is not
+   * ignored either. Live events are always more current than a file, so the
+   * file loses on `previous`; the turn *count* is the one thing that cannot be
+   * recovered from events, because this process started counting at zero. A
+   * restart therefore lands here with `turns: 1` in memory and `turns: 7` on
+   * disk, and refusing the file made the panel announce turn 1 for a
+   * conversation that had reached turn 7. So the counts are added, once — see
+   * `hydrated` — and `previous` is taken only when memory has no finished turn
+   * to describe.
+   *
+   * `previous` is optional, because a finished turn is not the only thing worth
+   * remembering. A session whose last turn was abandoned keeps its count and has
+   * no turn to describe — the host never completed the work, so there is nothing
+   * honest to summarise — and the file records exactly that. Demanding `previous`
+   * threw the count away with it, and the panel then reported turn 0 for a
+   * conversation that had reached turn 4.
+   *
+   * @param {string} agentId - the agent id.
+   * @param {{ turn?: number, turns?: number, previous?: object }} state - what was stored.
+   * @returns {boolean} true when something was taken from `state`.
+   */
+  hydrate(agentId, state) {
+    const raw = state?.previous
+    const previous = raw !== undefined && raw !== null && typeof raw === 'object' && Array.isArray(raw) === false ? raw : undefined
+    const turns = Number.isFinite(state?.turns) ? state.turns : Number.isFinite(previous?.turn) ? previous.turn : 0
+    if (previous === undefined && turns === 0) return false
+
+    const existing = this.byAgent.get(agentId)
+    if (existing === undefined) {
+      const transcript = new Transcript()
+      transcript.previous = previous
+      transcript.turns = turns
+      transcript.hydrated = true
+      this.byAgent.set(agentId, transcript)
+      return true
+    }
+
+    // Events have arrived since the restart. They own `previous` — whatever
+    // finished while this process was running is newer than anything on disk —
+    // but they know nothing about the turns before it.
+    if (existing.hydrated === true) return false
+    existing.hydrated = true
+    existing.turns += turns
+    if (existing.previous === undefined) existing.previous = previous
+    return true
   }
 
   /**

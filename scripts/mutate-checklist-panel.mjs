@@ -221,9 +221,12 @@ const mutations = [
   },
   {
     label: 'MCP tool calls stop updating recency',
-    file: 'packages/ui-evolve/lib/index.js',
-    from: 'if (server.length > 0) recentUse.set(`mcp:${server}`, ++useSequence)',
-    to: 'if (false) recentUse.set(`mcp:${server}`, ++useSequence)',
+    // The server-name parsing and the recency stamp moved into
+    // `lib/session-state.js`; `lib/index.js` now just hands over the full tool
+    // name. The anchor moved with the code rather than being loosened.
+    file: 'packages/ui-evolve/lib/session-state.js',
+    from: '    if (server.length > 0) entry.servers.set(server, ++entry.sequence)',
+    to: '    if (false) entry.servers.set(server, ++entry.sequence)',
     suites: ['test/index.test.mjs'],
   },
   {
@@ -338,11 +341,163 @@ const mutations = [
     to: '    if (false) return { ok: false, reason: THE_SKILL_HALF_IS_ABSENT }',
     suites: ['test/api.test.mjs'],
   },
+  // Round three: the 上一轮 card grew two reasons to open, the header lost its
+  // button, and the cap moved from three lines to five.
   {
-    label: 'the client treats a refused proposal as a queued one',
+    label: 'the summary is capped at three lines again',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '          if (outcome?.ok === false) {',
-    to: '          if (false) {',
+    from: '.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}',
+    to: '.dsse-clip .dsse-text{max-height:5.2em;overflow:hidden}',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'expanding no longer lifts the cap',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-clip[data-expanded="true"] .dsse-text{max-height:none}',
+    to: '.dsse-clip[data-expanded="true"] .dsse-text{max-height:7.75em}',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the fade is drawn over an expanded summary too',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-clip[data-clipped="true"][data-expanded="false"]::after{',
+    to: '.dsse-clip[data-clipped="true"]::after{',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the click writes the pointer tag, so moving away unpins the card',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),',
+    to: 'onClick: () => setHoverTurn(turnPinned === false ? "" : turnId),',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'hovering no longer expands the card',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'onMouseEnter: () => setHoverTurn(turnId),',
+    to: 'onMouseEnter: () => undefined,',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'leaving the card leaves it expanded',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'onMouseLeave: () => setHoverTurn(""),',
+    to: 'onMouseLeave: () => undefined,',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a card with nothing hidden still invites a click',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'clickable: turnExpandable,',
+    to: 'clickable: true,',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the clip reports its measurement to nobody',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'if (props.onClipped !== undefined) props.onClipped(hidden)',
+    to: 'if (false) props.onClipped(hidden)',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an expanded summary is measured anyway and forgets it was clipped',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '        // until the card collapses and measures again.\n        if (expanded) return',
+    to: '        // until the card collapses and measures again.\n        if (false) return',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the keyboard cannot reach the card',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: "if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return",
+    to: 'return',
+    suites: ['test/client.test.mjs'],
+  },
+  // Round three: what the first review found. A control that looks inert has to be
+  // inert, and the click's reason for being open has to belong to one turn.
+  {
+    label: 'an inert card still swallows the click and flips a pin nobody can see',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '        onClick: interactive === true ? props.onClick : undefined,',
+    to: '        onClick: props.onClick,',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the pin outlives the turn it was set on',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const turnPinned = turnId !== "" && pinnedTurn === turnId',
+    to: 'const turnPinned = pinnedTurn !== ""',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the pin is never recorded, so a click cannot hold the card open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),',
+    to: 'onClick: () => setPinnedTurn(""),',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a measurement of the old summary decides the new card is expandable',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const turnExpandable = turnId !== "" && clippedTurn === turnId',
+    to: 'const turnExpandable = turnId !== ""',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a measurement of nothing hidden never clears, so the card stays clickable',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'setClippedTurn(hidden === true ? turnId : "")',
+    to: 'setClippedTurn(turnId)',
+    suites: ['test/client.test.mjs'],
+  },
+  // Round four: what the second review found. The pointer needed the same turn tag
+  // the click got, and being open had to depend on the measurement rather than only
+  // on a reason for wanting it open.
+  {
+    label: 'a hover outlives its turn and opens a card nobody is pointing at',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const turnHovered = turnId !== "" && hoverTurn === turnId',
+    to: 'const turnHovered = hoverTurn !== ""',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'hovering records no turn, so the tag can never match',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'onMouseEnter: () => setHoverTurn(turnId),',
+    to: 'onMouseEnter: () => setHoverTurn(""),',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a stale reason to open survives because being open ignores the measurement',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const expanded = turnExpandable === true && (turnHovered === true || turnPinned)',
+    to: 'const expanded = turnHovered === true || turnPinned',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a pin ignores which turn it was set on',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const turnPinned = turnId !== "" && pinnedTurn === turnId',
+    to: 'const turnPinned = turnId !== "" && pinnedTurn !== ""',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the measurement is reported without the turn it measured',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'setClippedTurn(hidden === true ? turnId : "")',
+    to: 'setClippedTurn("")',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A turn number is only unique inside its own session. Without the clear, a tag
+    // from one conversation matches the same-numbered turn in the next, and because
+    // an open card skips the measurement, nothing ever measures the stale tag away.
+    label: 'a turn tag survives into the next conversation',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        setHoverTurn("")
+        setPinnedTurn("")
+        setClippedTurn("")`,
+    to: '',
     suites: ['test/client.test.mjs'],
   },
 ]

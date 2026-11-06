@@ -1,8 +1,16 @@
 # @revxz/dsh-ui-evolve
 
 A DeepSeek Harness plugin that puts three cards in the empty space beside the
-conversation, showing what the turn you just finished actually did: a summary of
-the previous turn, the skills and MCP tools it touched, and the files it changed.
+conversation, showing the state of **this conversation**: a summary of the last
+finished turn, the skills and MCP servers it touched, and the files it changed.
+
+That state survives a restart. It is written to
+`$DSH_HOME/plugin-data/skill-evolve/sessions/<sessionId>.json`, one file per
+conversation, and read back when the panel is opened in a conversation this
+process has not seen before. The file is deleted when the conversation is
+archived or deleted from the host, so what the plugin keeps never outlives what
+it describes. See **What the panel remembers** below for the shape and the
+cleanup rules.
 
 It is the presentation half of the `dsh-evolve` suite. It reads the session and
 never writes to the skill directory; when the skill half is installed it also
@@ -57,6 +65,71 @@ literal in both files. `test/route-prefix.test.mjs` is what keeps them equal, an
 exists because a mismatch is the quietest failure this plugin can have: the client
 mounts, renders, and gets a 404 on every request, which looks exactly like a session
 with nothing to show.
+
+## What the panel remembers
+
+Three kinds of fact, all describing one conversation, all in one file:
+
+| Fact | Why it is kept |
+|---|---|
+| The skills this session loaded, and by which path | the second card; a "load" is either the `skill` tool or a `/name` gesture |
+| The MCP tool names this session called | the second card; server names are parsed out of `mcp__<server>__<tool>` |
+| The last finished turn's snapshot | the first and third cards; counts, commands, paths, the prose source |
+
+The file also carries the shared recency clock those rows sort by, so the order a
+person saw is the order they see again.
+
+**One file per conversation**, at
+`$DSH_HOME/plugin-data/skill-evolve/sessions/<sessionId>.json` — beside
+`candidates.json` and `ledger.jsonl`, which the core package already writes
+there. The name is the host's own session id, checked against an allowlist
+before it is used as a path: an id that cannot be stored safely is refused rather
+than escaped, which costs that one conversation's panel state and cannot write
+outside the directory.
+
+**A file this build cannot read is left alone.** `read` answering "nothing" covers
+two different facts: there is no file, and there is a file this build refuses —
+a newer `state` version, a torn body, a name inside that is not this session. The
+two must not be merged, because the delete that follows an empty read is only
+authorised by the first one. A build that treats "I cannot read it" as "it is
+not there" erases every session the first time a user rolls back to it, one
+shutdown at a time. So the loader asks the filesystem separately whether
+something is there, and when it is, the record it installs owns the id without
+owning the file: it writes nothing over it, and the shutdown delete does not
+apply.
+
+**Written by overwrite, not by journal.** There is one copy of the state and it
+is replaced whole on each write: write a temporary file, rename it over the old
+one. No `.bak`, no version directory, no history. The panel shows a state, not a
+ledger, and the cost of that choice is stated plainly — a process killed mid-write
+loses the last change to that turn, not "the last known good version".
+
+Writes are coalesced rather than issued per event. A turn produces a tool call
+per file read; writing per call would put a disk write inside the event loop for
+work nobody has asked to see yet. An event marks the session dirty and schedules
+one write a second later; the two moments that must be on disk before the
+process goes away — a turn ending and an agent being disposed — flush
+immediately. A panel read is *not* one of them: it loads the stored state into
+memory and answers from there, so a poll every few seconds would otherwise be a
+write every few seconds. The timer is `unref`'d, so a pending write never keeps
+the host alive.
+
+**Deleted when the conversation is archived or deleted.** The host does not emit
+an archive or delete event, and `session/disposed` is *not* a delete signal — it
+also fires on a normal host shutdown, so using it would clear the panel on every
+restart. The two real signals are `workspaceRegistry.archivedSessionIds` and
+`workspaceRegistry.sessionKnown(id)`, read every minute through `ctx.effect` and
+throttled to one sweep per five minutes. `sessionKnown` reports `false` only on a
+*definite* miss — the host's own contract says a storage fault propagates rather
+than masquerading as an unknown session — so a fault keeps everything. Two more
+rules follow from that: if neither signal can be obtained, nothing is deleted at
+all; and a cap of 500 files, applied independently of the host answers, drops the
+oldest so the directory cannot grow with every conversation ever held.
+
+Disposal is not deletion. When an agent is disposed the in-memory entry is
+released and flushed but the **file stays** — the host disposes every agent on
+shutdown, so deleting there would wipe the panel on each restart, which is the
+whole thing this is meant to prevent.
 
 ## Theme contract
 
@@ -138,14 +211,23 @@ Three modules, top to bottom:
    added and removed line counts. Sourced from the same turn transcript the
    other two modules read, so all three agree on which turn they describe.
 
+Reading the panel may touch the disk: `GET /panel` falls back to the stored
+session state when this process holds nothing for that conversation yet, so the
+first open after a restart answers from the file rather than from an empty
+transcript. The read is per conversation and happens once — the loaded document
+is installed into the in-memory store, so a polled panel does not re-read.
+
 The panel can write, but only through the routes that already had a gate behind
-them. It calls `GET /api/skill-evolve/panel` to read the three modules,
-`GET /api/skill-evolve/candidates` to read the queue, `POST /config` for its own
-switches, `POST /propose` to open a draft conversation, and
-`POST /candidates` to approve or discard one candidate. That last route does not
-implement approval: it calls the same `approve()` the `/skill-capture` command
-calls, so the evidence gate and the confirm handshake are not re-implemented
-behind a second entrance. A route that wrote the skill file itself would be a way
+them. It calls `GET /api/ui-evolve/panel` to read the three modules,
+`GET /api/ui-evolve/candidates` to read the queue, `POST /config` for its own
+switches, and `POST /candidates` to approve or discard one candidate. The panel
+itself no longer calls `POST /propose` — the button that did is gone, because a
+hint into the next turn is not something a person reaches for while reading the
+card. The route stays: it is part of the service contract and other callers may
+use it. `POST /candidates` does not
+implement approval either: it calls the same `approve()` the `/skill-capture`
+command calls, so the evidence gate and the confirm handshake are not
+re-implemented behind a second entrance. A route that wrote the skill file itself would be a way
 in that skips both.
 
 ### Candidate review and panel settings
@@ -167,19 +249,46 @@ whole row sits on its own card surface — border, radius, background — instea
 three bare buttons floating over the conversation.
 
 The last-turn card carries its counts in the header, not in a strip below the
-text: calls, commands, and files as labelled numbers, with **propose** as a small
-button beside them. That button writes a hint into this conversation; it does not
-create anything. The summary below it is capped at 5.2em and fades out when — and
-only when — there is more text than the cap shows.
+text: calls, commands, and files as labelled numbers, aligned on the title's
+baseline so the row reads as one line rather than two that happen to sit at the
+same height. The stats sit beside the title, not against the right edge — they
+qualify the title, so they belong to it. The header carries no action button. It
+used to hold a **propose** button that wrote a hint into the conversation; it was
+removed because the hint is not something a person reaches for while reading the
+card, and a button nobody presses is a button that steals width from the counts.
+
+The summary below the header is capped at five lines (7.75em, against a 1.55em
+line box) and fades out when — and only when — there is more text than the cap
+shows. Five rather than three: at three, a summary that had found something to say
+was usually cut mid-thought, and the card is the only place that summary is
+readable.
+
+The cap lifts for two independent reasons. Hovering the card opens it and moving
+away closes it. Clicking pins it open until it is clicked again. They are tracked
+as two booleans, not one: the card reads `hover || pinned`, the pointer only ever
+writes `hover`, and the click only ever writes `pinned`. A single shared boolean
+collapses under the obvious gesture — hovering to read, then clicking, then moving
+the pointer away — because the click and the pointer would be writing the same
+slot, and the card would shut under the pointer that was still there. A card with
+nothing hidden does not offer the interaction at all: no pointer cursor, no tab
+stop, no `role="button"`.
 
 The fade is measured, not assumed. A `Clip` component compares `scrollHeight`
 against `clientHeight` in a layout effect and sets `data-clipped` on the result;
-the stylesheet draws the gradient only for `data-clipped="true"`. Two things go
-wrong when the flag is hard-coded instead: a one-line summary shorter than the
-34px mask gets washed out by a fade covering text that was never truncated, and a
-long summary is cut with no indication that anything follows. A layout effect
-rather than a passive one, because a passive effect runs after the browser has
-painted — every first render would show one frame with clipped text and no fade.
+the stylesheet draws the gradient only for `data-clipped="true"` and, now, only
+while the card is collapsed. Two things go wrong when the flag is hard-coded
+instead: a one-line summary shorter than the 34px mask gets washed out by a fade
+covering text that was never truncated, and a long summary is cut with no
+indication that anything follows. A layout effect rather than a passive one,
+because a passive effect runs after the browser has painted — every first render
+would show one frame with clipped text and no fade.
+
+The measurement stops while the card is open, deliberately. Lifting the cap is a
+CSS change, so `scrollHeight` and `clientHeight` agree the moment the card opens;
+a clip that measured there would read "nothing is hidden" and overwrite the one
+fact that makes the card a toggle. The card would stay open but stop being
+clickable, stop taking focus, and stop reporting `aria-expanded` — the keyboard
+user who just opened it could no longer close it.
 
 Candidate review is a click-open modal, not a pair of hover cards. The queue is on
 the left and the selected candidate's description, body, `whenToUse`, and evidence

@@ -36,6 +36,7 @@ import { Config } from './config.js'
 import { TranscriptStore } from './transcript.js'
 import { Summariser } from './summarise.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
+import { SessionState } from './session-state.js'
 import { SKILL_GESTURE, readSkillArgument } from '@revxz/dsh-evolve-core'
 
 /** Cordis plugin name. */
@@ -169,44 +170,37 @@ export function apply(ctx, config) {
   const transcripts = new TranscriptStore()
 
   /**
-   * MCP tool names seen this session.
+   * What the panel remembers about each conversation.
    *
-   * A configured server that never connected contributes no tool calls, and the
-   * panel's job is to describe what is available — so presence is proved by
-   * traffic, not by reading the connector's own configuration.
+   * Three accumulators used to live here as process-wide containers: the MCP
+   * tool names ever dispatched, a recency clock, and the skills each session
+   * loaded. Being process-wide made them wrong before it made them slow — with
+   * two conversations open, each panel listed the other's work — and it is also
+   * what stood in the way of writing any of it down, since a file per session
+   * needs state per session.
    *
-   * @type {Set<string>}
+   * They now live in `SessionState`, keyed by session id, written behind a
+   * one-second coalescing delay and read back when this process has not seen the
+   * conversation (a restart, a reload, a panel opened on an older session).
+   * What stays in this file is only the wiring: which host event means which
+   * fact.
    */
-  const mcpToolsSeen = new Set()
-
-  /**
-   * A single recency clock for everything the panel lists as "used".
-   *
-   * Skills already carry recency through `loadedInSession` insertion order, but
-   * that order cannot be compared with an MCP server's order: the panel lists
-   * skills and MCP servers in one stream, so both need the same unit. One
-   * counter, one map, keyed by what was used rather than by which list it
-   * belongs to.
-   */
-  const recentUse = new Map()
-  let useSequence = 0
-
-  /**
-   * Skill names this session actually loaded, for the panel's skill module.
-   *
-   * The module answers "what has this session used", not "what could it use", so
-   * this is a record of two events only: a `skill` tool call, and a `/name`
-   * gesture in a human message.
-   *
-   * One map, not two: a skill can arrive by either path, and the panel answers
-   * "most recently loaded first" across both. Two parallel sets cannot express
-   * that — a union of `[...tool, ...gesture]` sorts every gesture load after
-   * every tool load, so reloading a tool skill would still list a later gesture
-   * above it.
-   *
-   * @type {Map<string, Map<string, 'tool' | 'gesture'>>}
-   */
-  const loadedInSession = new Map()
+  const sessionState = new SessionState({
+    snapshotOf(sessionId) {
+      const view = transcripts.view(sessionId)
+      if (view === undefined) return undefined
+      return { turns: view.turns, previous: view.previous }
+    },
+    restore(sessionId, state) {
+      // Installs the finished turn this process never saw, and the count of turns
+      // before the restart. A transcript that already exists is not rejected any
+      // more: it keeps its own facts and takes the stored count on top, once, which
+      // is why the transcript carries a `hydrated` flag. Refusing outright was what
+      // let the first event of a restarted session overwrite the whole history.
+      transcripts.hydrate(sessionId, state)
+    },
+    log
+  })
 
   /**
    * The route this session is running on.
@@ -245,27 +239,12 @@ export function apply(ctx, config) {
    * @returns {void}
    */
   function rememberSkillUse(agentId, name, via) {
-    const names = loadedInSession.get(agentId) ?? new Map()
-    // Delete before adding, so a skill loaded twice moves to the back of the
-    // insertion order instead of keeping its first position. A Map keeps the
-    // position of an existing key, and the panel renders this order reversed as
-    // "most recently loaded first" — without the delete, the common
-    // alpha → beta → alpha sequence would still list beta first.
-    //
-    // The stored path only ever moves in one direction: gesture → tool. The two
-    // paths are held to different halves of the host's invocation policy (a
-    // gesture needs `userInvocable`, the tool needs `modelInvocable`), so a name
-    // that arrived through the tool stays loaded through it even if a human later
-    // types `/name` in passing. Writing the newest path unconditionally made that
-    // a downgrade: a model-only skill the model had loaded disappeared from the
-    // panel the moment its name followed a slash in someone's sentence. Recency
-    // and permission are separate facts — the move to the back is recency, and
-    // this line is permission, so it must not be able to lower.
-    const previous = names.get(name)
-    names.delete(name)
-    names.set(name, previous === 'tool' ? 'tool' : via)
-    loadedInSession.set(agentId, names)
-    recentUse.set(`skill:${name}`, ++useSequence)
+    // The one-directional rule (gesture → tool, never back) and the delete-then-
+    // set that moves a reload to the back of the recency order both live in
+    // `SessionState` now, because the same rules have to hold for a state read
+    // back off disk — a rule enforced only on the way in would be a rule that
+    // changes depending on whether the process had restarted.
+    sessionState.rememberSkill(agentId, name, via)
   }
 
   // ------------------------------------------------------------ transcript --
@@ -289,21 +268,22 @@ export function apply(ctx, config) {
     if (typeof agentId !== 'string' || agentId.length === 0) return
     transcripts.record(agentId, event)
 
-    // Remember MCP tool names as they are dispatched. Bounded by the distinct
-    // tool names the connected servers actually expose in one session — the set
-    // is not cleared on disposal, so a long-lived host accumulates one short
-    // string per distinct `mcp__<server>__<tool>` it has ever dispatched.
+    // A finished turn is the moment the panel has something worth writing down.
+    // Mid-turn events are not: the panel describes the turn that *ended*, and
+    // rewriting the file once per tool call would be a write per file read for a
+    // document that had not changed.
+    if (event?.type === 'turn/end') sessionState.rememberTurn(agentId)
+
+    // Remember MCP tool names as they are dispatched. Presence is proved by
+    // traffic: a configured server that never connected contributes no calls, and
+    // the panel's job is to describe what the session actually reached.
     if (event?.type !== 'tool/call') return
     const toolName = event?.data?.name
     if (typeof toolName !== 'string' || !toolName.startsWith('mcp__')) return
     // The whole tool name, not just the server. The reader splits it, so this
     // side never has to decide what a bare string means — and it can count how
     // many tools each server actually contributed.
-    mcpToolsSeen.add(toolName)
-    const rest = toolName.slice('mcp__'.length)
-    const cut = rest.indexOf('__')
-    const server = cut > 0 ? rest.slice(0, cut) : ''
-    if (server.length > 0) recentUse.set(`mcp:${server}`, ++useSequence)
+    sessionState.rememberTool(agentId, toolName)
   }))
 
   // ------------------------------------------------------ visible skill use --
@@ -355,7 +335,27 @@ export function apply(ctx, config) {
     const agent = payload?.agent ?? payload
     const agentId = agent?.session?.id ?? agent?.session?.header?.id ?? agent?.id
     if (typeof agentId !== 'string' || agentId.length === 0) return
-    loadedInSession.delete(agentId)
+    // Write the session down before dropping it. Disposal is not deletion: the
+    // host disposes every agent when it shuts down, so forgetting the file here
+    // would empty the panel on every restart — the exact failure this work
+    // removes. `release` flushes, then lets go of the memory.
+    //
+    // The transcript is dropped twice on purpose, and the two drops answer
+    // different problems.
+    //
+    // Now, because the panel is read as soon as disposal returns: a closed
+    // session that stays on screen until a promise settles is the bug this
+    // handler exists to fix, and the read does not wait for us.
+    //
+    // Again when the release settles, because `release` can await a read of the
+    // disk — a record that has never read must read before it writes — and that
+    // read ends in `restore`, which hands the stored turn back to the transcript.
+    // Dropping only afterwards would leave the closed session in memory for the
+    // life of the process; dropping only now would let that same restore put it
+    // back. Both paths drop it, so a failed write leaves nothing behind either.
+    void sessionState
+      .release(agentId)
+      .then(() => { transcripts.forget(agentId) }, () => { transcripts.forget(agentId) })
     transcripts.forget(agentId)
   }))
 
@@ -369,6 +369,91 @@ export function apply(ctx, config) {
     llm: () => service('llm'),
     log
   })
+
+  // ------------------------------------------------------------- the pruner --
+  //
+  // A state file outlives the process that wrote it, so something has to notice
+  // when its session is gone. Nothing announces that: the host emits no archive
+  // or delete event, and `session/disposed` fires on an ordinary shutdown as
+  // well, so listening to it would delete the file of every session on quit —
+  // the opposite of the point.
+  //
+  // So the pruner asks the host instead of waiting to be told. Two questions,
+  // both answered by the workspace registry:
+  //
+  //   * `archivedSessionIds` — sessions hidden from every grouping surface. The
+  //     host keeps their directory on disk, so this is the only record that a
+  //     person asked for them to go away.
+  //   * `sessionKnown(id)` — whether the session still exists at all. Its own
+  //     doc says a definite miss is the only thing that returns false, so a
+  //     storage fault is never mistaken for a deleted session.
+  //
+  // Asked on a timer rather than once at mount: a session can be archived while
+  // the host is running, and the file has to go then, not at the next restart.
+  // The store gates the work itself (`PRUNE_INTERVAL_MS`), so a frequent timer
+  // costs a timestamp comparison between sweeps.
+  const PRUNE_TICK_MS = 60 * 1000
+
+  /**
+   * The two questions, in the shape the store takes them.
+   *
+   * Read through `service()` on every sweep, never held: the registry may be
+   * activated after this plugin, and it is deliberately not in `inject` — an
+   * optional dependency declared there stops the whole panel loading on a host
+   * that does not have it, which is exactly the failure the panel's `inject`
+   * list exists to avoid.
+   *
+   * @returns {object} the sources. Total by construction: a question the
+   *   registry cannot answer yet is left out, and an unasked question removes
+   *   nothing.
+   */
+  function pruneSources() {
+    const registry = service('workspaceRegistry')
+    if (registry === null || typeof registry !== 'object') return {}
+    const sources = {}
+    // Assigning a closure cannot throw; `service()` already swallows a lookup
+    // that does. So the deletion check is always available.
+    if (typeof registry.sessionKnown === 'function') {
+      sources.known = (sessionId) => registry.sessionKnown(sessionId)
+    }
+    // This read is the one expression here that can throw. A cordis service is
+    // provided before its `init` resolves, and this getter refuses to answer
+    // until the registry's state is assigned — so "the service exists" does not
+    // yet mean "it can answer".
+    //
+    // The failure is contained to this question rather than to the whole sweep.
+    // Without an archive list there are no grounds to remove a file for being
+    // archived; but "does this session still exist" is a different question, and
+    // a session the host has deleted must not survive because a different
+    // question went unanswered on the same tick.
+    try {
+      const archived = registry.archivedSessionIds
+      if (Array.isArray(archived)) sources.archived = () => archived
+    } catch {
+      // Nothing to add. The deletion check above still runs.
+    }
+    return sources
+  }
+
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      // The sources are read here rather than inline as `prune`'s argument: an
+      // argument is evaluated before `.catch` can be attached, so anything that
+      // throws synchronously on the way in escapes the rejection guard and
+      // becomes an `uncaughtException` in the host process.
+      // `pruneSources` is total — it guards the one read able to throw — so this
+      // needs no try of its own. `prune` is not: the deletion check it calls can
+      // still fail asynchronously, and that is what the `.catch` below is for.
+      const sources = pruneSources()
+      // Never awaited by the tick: a slow sweep must not stack up behind itself.
+      void sessionState.prune(sources).catch((error) => {
+        log('session state: the sweep failed —', error instanceof Error ? error.message : String(error))
+      })
+    }, PRUNE_TICK_MS)
+    // A pending sweep is not a reason to keep the host alive.
+    if (typeof timer?.unref === 'function') timer.unref()
+    return () => clearInterval(timer)
+  }, 'ui-evolve: session state pruner')
 
   // ----------------------------------------------------------- panel route --
   //
@@ -438,15 +523,28 @@ export function apply(ctx, config) {
 
       transcripts,
       summariser,
+      sessionState,
 
-      /** MCP server names observed in this session's tool traffic. */
-      mcpTools() {
-        return mcpToolsSeen
+      /**
+       * MCP tool names this session called.
+       *
+       * Per session, not per process: two conversations in one host have
+       * different servers in play, and a panel that listed the union was
+       * describing the host rather than the conversation it belongs to.
+       */
+      mcpTools(agentId) {
+        return sessionState.toolsSeen(agentId)
       },
 
-      /** Recency sequence for skills and MCP servers, on one shared clock. */
-      recentUse() {
-        return recentUse
+      /**
+       * Recency sequence for skills and MCP servers, on one shared clock.
+       *
+       * Built on read rather than stored: the entry holds each thing's position,
+       * and deriving the map keeps a caller from mutating the record the next
+       * write will persist.
+       */
+      recentUse(agentId) {
+        return sessionState.recency(agentId)
       },
 
       /**
@@ -457,7 +555,7 @@ export function apply(ctx, config) {
        * that holds the snapshot.
        */
       skillsUsed(agentId) {
-        return loadedInSession.get(agentId)
+        return sessionState.skillsUsed(agentId)
       },
 
       routeFor,

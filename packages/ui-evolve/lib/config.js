@@ -10,9 +10,10 @@
  * Every field is optional so the bundle patch can mount the plugin with no
  * `config:` block at all.
  *
- * The summary route is deliberately *not* the session's own route by default:
- * see the `summaryProvider` doc below for why that is cheaper and more
- * predictable rather than merely lower quality.
+ * The summary route is borrowed from the session by default, because that route
+ * is proven callable for this account; the catalogue is only a last resort.
+ * See the `summaryProvider` doc below, and `lib/summarise.js` — which is the
+ * file that actually decides this — before changing either one.
  *
  * @module @revxz/dsh-ui-evolve/config
  */
@@ -34,11 +35,16 @@ export const Config = z.object({
   /**
    * Provider for the summary call. Set together with `summaryModel`.
    *
-   * Left empty, the summary uses the first model the first registered provider
-   * advertises. That is a deliberate choice to be cheap and predictable rather
-   * than good: a sidebar summary does not warrant the session's own route, and
-   * silently borrowing it would make the panel expensive in proportion to how
-   * much the conversation matters.
+   * Left empty, the summary borrows the route this session is already using,
+   * read from its own folded `request/context` events. That route is known to be
+   * reachable and authorised for this account, while a catalogue entry only
+   * proves some adapter advertised it. The catalogue is still consulted as a
+   * last resort — a session that has not made its first request has no route to
+   * borrow — and it walks every provider rather than the first one, because a
+   * provider is registered as soon as its adapter activates regardless of
+   * whether it has a model this account may call.
+   *
+   * Setting only one of this pair pins nothing: both are required.
    */
   summaryProvider: z.string().default(''),
 

@@ -583,6 +583,61 @@ function deps(overrides = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// Reading the stored state
+// ---------------------------------------------------------------------------
+
+{
+  // A cache that cannot be read is not a conversation that does not exist. The
+  // route has to answer: a panel that goes blank because a file was busy reads
+  // as "this session did nothing", which is a worse lie than an empty card.
+  const logged = []
+  let payload
+  try {
+    payload = await readPanel(
+      deps({
+        transcripts: { view: () => undefined },
+        sessionState: {
+          async load() {
+            throw new Error('storage unavailable')
+          },
+        },
+        log: (line) => logged.push(line),
+      }),
+      'agent-1',
+    )
+  } catch (error) {
+    // The fault is the point. Letting it reach here as a rejection would end the
+    // suite instead of failing the assertions that describe the contract.
+    payload = { rejected: String(error?.message ?? error) }
+  }
+  check('a fault reading the stored state still answers', payload?.turn === 0, JSON.stringify(payload))
+  check('and it says what went wrong', logged.some((line) => line.includes('could not read the stored state')) === true, JSON.stringify(logged))
+}
+
+{
+  // The facts are per session. Both lookups take the id; a panel that asked for
+  // "the" recency and "the" tool names would describe whatever the host happened
+  // to do most recently in some other conversation.
+  const asked = []
+  const payload = await readPanel(
+    deps({
+      recentUse: (agentId) => {
+        asked.push(`recentUse:${agentId}`)
+        return new Map()
+      },
+      mcpTools: (agentId) => {
+        asked.push(`mcpTools:${agentId}`)
+        return new Set()
+      },
+    }),
+    'agent-7',
+  )
+  check('the recency clock is read for this session', asked.includes('recentUse:agent-7') === true, JSON.stringify(asked))
+  check('the MCP tools are looked up for this session', asked.includes('mcpTools:agent-7') === true, JSON.stringify(asked))
+  check('and the answer is still a panel', payload.agent === 'agent-7', String(payload.agent))
+}
+
+// ---------------------------------------------------------------------------
 // Handler routing
 // ---------------------------------------------------------------------------
 
