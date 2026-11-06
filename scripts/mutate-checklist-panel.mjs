@@ -350,6 +350,27 @@ const mutations = [
   // Round three: the 上一轮 card grew two reasons to open, the header lost its
   // button, and the cap moved from three lines to five.
   {
+    label: 'the cards are hidden on every page that is not a conversation',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      if (phase === "hero") return null',
+    to: '      if (phase !== "active") return null',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the cards are hidden while a conversation is opening',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      if (phase === "hero") return null',
+    to: '      if (phase === "hero" || phase === "settling") return null',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the cards are drawn on the launcher as well',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      if (phase === "hero") return null',
+    to: '      if (phase === "nowhere") return null',
+    suites: ['test/client.test.mjs'],
+  },
+  {
     label: 'the summary is capped at three lines again',
     file: 'packages/ui-evolve/lib/client.js',
     from: '.dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}',

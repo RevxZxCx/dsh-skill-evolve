@@ -36,7 +36,6 @@ import { Config } from './config.js'
 import { TranscriptStore } from './transcript.js'
 import { Summariser } from './summarise.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
-import { LiveHub } from './live.js'
 import { SessionState } from './session-state.js'
 import { SKILL_GESTURE, readSkillArgument } from '@revxz/dsh-evolve-core'
 
@@ -248,37 +247,6 @@ export function apply(ctx, config) {
     sessionState.rememberSkill(agentId, name, via)
   }
 
-  // ------------------------------------------------------------------ live --
-  //
-  // What the panel shows changes while a turn runs: a tool call lands, a file is
-  // edited, a command finishes. The panel used to learn that by asking `/panel`
-  // every eight seconds, which is both slower than the facts and busier than
-  // they are — a session thinking for two minutes produced fifteen requests and
-  // no changes at all.
-  //
-  // The hub is the fan-out and nothing else: it carries the news that something
-  // moved, never what moved. What changed is a question for `/panel`, so there
-  // is still exactly one place that decides what the cards say.
-  const live = new LiveHub({ log })
-
-  /**
-   * Tell this session's streams that something it shows has changed.
-   *
-   * Called from the `session/event` handlers below, which run inside the host's
-   * own dispatch — so this must never throw. `publish` already contains a
-   * failing listener; the guard here covers the hub itself.
-   *
-   * @param {string} agentId - the session that moved.
-   * @returns {void}
-   */
-  function publish(agentId) {
-    try {
-      live.publish(agentId)
-    } catch (error) {
-      log('panel: could not publish a change:', error instanceof Error ? error.message : String(error))
-    }
-  }
-
   // ------------------------------------------------------------ transcript --
   //
   // Feed the panel's per-turn record from the same event stream the detector
@@ -299,13 +267,7 @@ export function apply(ctx, config) {
     const agentId = session?.id
     if (typeof agentId !== 'string' || agentId.length === 0) return
 
-    // Anything the panel draws can have moved. The five event types the store
-    // reads are exactly the ones that change a card — a tool call, its result,
-    // the human's message, the model's message, the end of a turn — and the
-    // store ignores the rest, so publishing on every event would wake the client
-    // for a token count it does not draw. `record` answers whether it used this
-    // one, and that answer is the whole reason it returns anything.
-    if (transcripts.record(agentId, event) === true) publish(agentId)
+    transcripts.record(agentId, event)
 
     // A finished turn is the moment the panel has something worth writing down.
     // Mid-turn events are not: the panel describes the turn that *ended*, and
@@ -563,7 +525,6 @@ export function apply(ctx, config) {
       transcripts,
       summariser,
       sessionState,
-      live,
 
       /**
        * MCP tool names this session called.

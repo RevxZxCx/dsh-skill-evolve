@@ -52,13 +52,6 @@ window.__ModuleLoader__.load({
     const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
     const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
     const REFRESH_MS = 8000
-    // The stream does not cover everything the panel shows. `pendingCandidates`
-    // counts a queue any session can add to, and the stream only speaks for the
-    // session that owns it, so a candidate proposed elsewhere reaches this panel
-    // through no event at all. A slow poll is the only thing that notices. It is
-    // far cheaper than the eight-second one that came before — one request a
-    // minute against a queue that moves a few times an hour.
-    const IDLE_REFRESH_MS = 60000
     const CARD_WIDTH = 288
 
     /**
@@ -121,59 +114,6 @@ window.__ModuleLoader__.load({
         ...options,
       })
       return unwrap(response)
-    }
-
-    /**
-     * Subscribe to the session's change stream.
-     *
-     * Returns a teardown function the caller must run on unmount. Everything
-     * here is best-effort by design: a host that does not serve the route, a
-     * browser without `EventSource`, or a stream that dies all leave the panel
-     * working, because the caller keeps its polling timer throughout — at its
-     * fast rate until `onOpen` fires, at its slow rate afterwards.
-     *
-     * The first `panel` event is not treated differently from the rest. The
-     * host publishes when a card-visible fact moves, and each of those is worth
-     * one fetch; de-duplicating them here would just mean a change arriving
-     * during a fetch gets dropped.
-     *
-     * @param {string} sessionId - the session to watch.
-     * @param {{ onChange: () => void, onOpen?: () => void }} handlers - callbacks.
-     * @returns {() => void} teardown.
-     */
-    function openLive(sessionId, handlers) {
-      if (typeof EventSource !== "function" || sessionId === "") return () => {}
-      let source
-      try {
-        source = new EventSource(resolveUrl(`/api/ui-evolve/live?agent=${encodeURIComponent(sessionId)}`))
-      } catch {
-        return () => {}
-      }
-      // The event name is what the server writes in `event:`. Listening for a
-      // named event rather than the default `message` also means the heartbeat
-      // comments never reach a handler at all.
-      source.addEventListener("panel", () => {
-        try {
-          handlers.onChange()
-        } catch {
-          // A throwing callback must not take the stream down with it: losing
-          // the stream costs the panel every later update.
-        }
-      })
-      source.addEventListener("open", () => handlers.onOpen?.())
-      // `EventSource` reconnects on its own after a network drop, so an error
-      // needs no handling here beyond not surfacing it: the panel keeps its last
-      // answer and the caller's timer is still running, either at its fast rate
-      // (never opened) or its slow one (dropped after opening). A stream that is
-      // gone for good is a stale panel within a minute, not a dead one.
-      source.addEventListener("error", () => {})
-      return () => {
-        try {
-          source.close()
-        } catch {
-          // Already closed.
-        }
-      }
     }
 
     /**
@@ -1620,42 +1560,12 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         load(false)
-        // The panel used to poll this route every eight seconds. That was both
-        // slower than the facts (the counts it shows change within a turn) and
-        // busier than they are (a session thinking for two minutes produced
-        // fifteen requests and nothing to show for them).
-        //
-        // The stream carries no payload — just "something moved for this
-        // session" — and the answer is still one `load`. The timer starts at
-        // `REFRESH_MS` because until the stream is open there is nothing else,
-        // and drops to `IDLE_REFRESH_MS` once it is.
-        //
-        // It does not stop. An earlier version cleared it on open and called the
-        // stream the normal path, which left two holes: `EventSource` gives up
-        // for good on a response it cannot use (a 404 while the plugin reloads,
-        // a proxy that strips `text/event-stream`), and the panel would then sit
-        // on stale counts until the session changed; and the candidate queue is
-        // global, so a proposal made in another session never produces an event
-        // here at all. Both are noticed by a timer and by nothing else.
-        let timer = setInterval(() => load(true), REFRESH_MS)
-        const slowDown = () => {
-          if (timer === undefined) return
-          clearInterval(timer)
-          timer = setInterval(() => load(true), IDLE_REFRESH_MS)
-        }
-        const stopPolling = () => {
-          if (timer === undefined) return
-          clearInterval(timer)
-          timer = undefined
-        }
-        const source = openLive(sessionId, {
-          onChange: () => load(true),
-          onOpen: slowDown,
-        })
-        return () => {
-          stopPolling()
-          source()
-        }
+        // A timer, not a subscription. The counts on these cards change when a
+        // turn ends and when a file on disk is touched, and neither of those is
+        // something this bundle can be told about: it renders from whatever
+        // `/panel` answers, and asks again every few seconds.
+        const timer = setInterval(() => load(true), REFRESH_MS)
+        return () => clearInterval(timer)
       }, [load, sessionId])
 
       React.useEffect(() => {

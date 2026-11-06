@@ -596,32 +596,6 @@ function boot(options) {
     }
   }
 
-  // `EventSource` is injected rather than left global for the same reason the
-  // timers are: the live stream is only real in a browser, and a global that
-  // does not exist would send every suite down the polling fallback without
-  // saying so. Each instance records the handlers it was given, so a fixture can
-  // open the stream, publish a change and close it by hand.
-  const eventSources = []
-  class EventSourceStub {
-    constructor(url) {
-      this.url = url
-      this.closed = false
-      this.handlers = new Map()
-      eventSources.push(this)
-    }
-    addEventListener(name, handler) {
-      const list = this.handlers.get(name) ?? []
-      list.push(handler)
-      this.handlers.set(name, list)
-    }
-    close() {
-      this.closed = true
-    }
-    fire(name) {
-      for (const handler of this.handlers.get(name) ?? []) handler({ type: name })
-    }
-  }
-
   // The overlay spans the frame, so its width is the window's — not the
   // conversation column's. Tests that describe a narrow window must narrow both.
   const frame = settings.frame ?? { left: 0, top: 0, width: 1920, height: 1000 }
@@ -648,7 +622,6 @@ function boot(options) {
     'setTimeout',
     'clearTimeout',
     'MutationObserver',
-    'EventSource',
     source,
   )
   // `setTimeout` is injected rather than left global because the hover grace
@@ -657,10 +630,9 @@ function boot(options) {
   // passes whether or not the code schedules anything. Fixtures either drive
   // these by hand or wait on the real clock.
   //
-  // `setInterval` gets the same treatment, and for a second reason: the panel
-  // now retires its fallback poll when the live stream opens, and "the poll
-  // stopped" is only observable if the stub kept a handle to clear. A stub that
-  // returned a constant proved nothing about either the poll or its retirement.
+  // `setInterval` gets the same treatment for a smaller reason: a fixture that
+  // wants to assert the panel's delay has to see the handle it asked for, and a
+  // stub returning a constant shows the delay to nobody.
   evaluate(
     windowStub,
     documentStub,
@@ -689,7 +661,6 @@ function boot(options) {
       ;(settings.clearTimeout ?? clearTimeout)(handle)
     },
     MutationObserverStub,
-    settings.eventSource === false ? undefined : EventSourceStub,
   )
 
   const module = captured.factory(moduleTable)
@@ -708,7 +679,6 @@ function boot(options) {
     hostStyle,
     hostWrites,
     mutationObservers,
-    eventSources,
     document: documentStub,
     conversation,
     captured,
@@ -2970,9 +2940,10 @@ function byAction(node, action) {
 // not a conversation is open. It used to find the conversation body and treat
 // that as proof of a conversation — but the host renders that element on every
 // page, including the launcher and the new-session hero. The host does publish
-// which page it is on (`data-content-phase`), so this suite pins the two things
-// that matter: a hero page draws nothing, and a host that says nothing keeps
-// working.
+// which page it is on (`data-content-phase`), so this suite pins all four
+// readings of it: an `active` conversation draws its cards, a `settling` one —
+// a conversation in the middle of opening — draws them too, a `hero` page draws
+// nothing, and a host that publishes no attribute at all keeps working.
 // ---------------------------------------------------------------------------
 
 {
@@ -2998,6 +2969,16 @@ function byAction(node, action) {
   const launcher = await launch('hero')
   check('the launcher page draws no cards at all', byClass(launcher, 'dsse-card').length === 0, textOf(launcher).slice(0, 140))
   check('and it does not draw a leftover rail either', firstByClass(launcher, 'dsse-rail') === undefined, textOf(launcher).slice(0, 140))
+
+  // `settling` is the middle phase — a conversation the person has already asked
+  // for, while the host is still assembling it. The cards belong on screen
+  // there: hiding them would make every switch start with a blank strip that
+  // fills in a moment later, which reads as a flicker rather than as a load.
+  // Only the launcher, which is not a conversation yet, is answered with
+  // nothing. `hero` alone is the rule; "anything that is not `active`" would
+  // take the panel away during the one second it is most expected.
+  const settling = await launch('settling')
+  check('a conversation being opened draws its cards', textOf(settling).includes('SESSION FULL'), textOf(settling).slice(0, 120))
 
   // A host that never publishes the attribute is not a launcher. Reading a
   // missing attribute as "not a conversation" would take the panel away from
@@ -3040,88 +3021,6 @@ function byAction(node, action) {
   phaseObserver.callback([{ type: 'attributes', attributeName: 'data-content-phase' }])
   const returnedTree = await watched.renderer.deepRender(watched.seat('cards'))
   check('and come back when it becomes a conversation again', textOf(returnedTree).includes('SESSION FULL'), textOf(returnedTree).slice(0, 140))
-}
-
-// ---------------------------------------------------------------------------
-// The panel learns about changes from a stream, not from a clock
-//
-// The old arrangement asked `/panel` every eight seconds. It was too slow for
-// the counts it draws (they move inside a turn) and too busy for a session that
-// is thinking rather than working. The stream says "something moved" and the
-// panel answers with one fetch, so the timer survives only as the fallback for a
-// host that cannot stream.
-// ---------------------------------------------------------------------------
-
-{
-  const routes = panelRoutes()
-  const instance = boot({ routes })
-  instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  await instance.renderer.deepRender(cards)
-
-  const stream = instance.eventSources.at(-1)
-  check('the panel opens one stream for its session', instance.eventSources.length === 1, String(instance.eventSources.length))
-  check('and it names the session it is watching', stream?.url.includes('agent=session-a') === true, String(stream?.url))
-
-  const polling = instance.timers.find((row) => row.ms === 8000)
-  check('the fallback poll starts before the stream is open', polling !== undefined && polling.cleared === false, JSON.stringify(polling === undefined ? null : polling.cleared))
-
-  instance.renderer.deepRender(cards)
-  stream.fire('open')
-  check('an open stream retires the fast poll', polling?.cleared === true, JSON.stringify(polling?.cleared))
-
-  // It retires the fast poll, not polling itself. Two things the stream cannot
-  // see: an `EventSource` that gives up for good (a 404 while the plugin
-  // reloads), and the candidate queue, which any session can add to while the
-  // stream only speaks for this one. A timer is the only thing that notices
-  // either, so clearing it on open would leave the panel stale until the person
-  // changed sessions — the bug this asserts against.
-  const slow = instance.timers.filter((row) => row.ms === 60000)
-  check('and leaves a slow poll behind', slow.length === 1 && slow[0].cleared === false, JSON.stringify(slow.map((row) => row.cleared)))
-  // Guarded like every other interaction here: a mutation that removes the slow
-  // timer must fail a check, not throw past the runner's FAIL-line count.
-  const beforeSlow = instance.calls.length
-  if (slow.length === 1 && typeof slow[0].fn === 'function') slow[0].fn()
-  await settle()
-  check('which still asks the panel for an answer', instance.calls.length > beforeSlow, `${beforeSlow} -> ${instance.calls.length}`)
-  check('and it is far slower than the one it replaced', (slow[0]?.ms ?? 0) > (polling?.ms ?? 0) * 5, `${slow[0]?.ms} vs ${polling?.ms}`)
-
-  const before = instance.calls.length
-  stream.fire('panel')
-  await settle()
-  check('a change on the stream pulls the panel again', instance.calls.length > before, `${before} -> ${instance.calls.length}`)
-}
-
-{
-  // The teardown matters as much as the subscription: a stream left open per
-  // session switch would pile up one connection per conversation the person
-  // visited, each of them waking a component that is no longer mounted.
-  const routes = panelRoutes()
-  const instance = boot({ routes })
-  instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  const toggle = instance.seat('toggle')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  await instance.renderer.deepRender(cards)
-  const first = instance.eventSources.at(-1)
-  await instance.renderer.render(toggle, { sessionId: 'session-b' })
-  await instance.renderer.deepRender(cards)
-  check('switching sessions closes the stream it was watching', first?.closed === true, String(first?.closed))
-}
-
-{
-  // A host whose browser has no `EventSource` (or whose page strips it) must
-  // still get live-ish cards. The fallback is the old timer, and it has to run.
-  const routes = panelRoutes()
-  const instance = boot({ routes, eventSource: false })
-  instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  await instance.renderer.deepRender(cards)
-  const polling = instance.timers.find((row) => row.ms === 8000)
-  check('a host without a stream keeps polling', polling !== undefined && polling.cleared === false, JSON.stringify(polling === undefined ? null : polling.cleared))
-  check('and it opens no stream it cannot have', instance.eventSources.length === 0, String(instance.eventSources.length))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

@@ -57,14 +57,9 @@ Five keys, all optional. They are the panel's own; the detection settings live i
 
 The panel talks to the host over a prefix route registered at
 `/api/ui-evolve`: `GET|HEAD /panel`, `GET /models`, `GET|POST /config`,
-`GET|POST /candidates`, `POST /propose`, and `GET /live` — a server-sent event
-stream that reports *that* a conversation changed, never what the change was.
+`GET|POST /candidates`, and `POST /propose`.
 
-Every route answers `HEAD` with a body-less 200, `/live` included. It has to be
-its own branch rather than falling through: `HEAD` reaching the stream handler
-would write SSE headers, register a subscription, and start a heartbeat on a
-response that nobody is going to read to the end, leaking one subscription per
-health check. So `GET` takes the stream and `HEAD` answers the probe.
+Every route answers `HEAD` with a body-less 200.
 
 The browser side and the host side cannot share a constant — `lib/client.js` is a
 hand-written bundle with no `import` and no build step — so the prefix appears as a
@@ -363,7 +358,7 @@ does not appear after restarting, the Plugins page names the reason per entry.
 
 **What it cannot do, on purpose.** Every number in the cards comes from the host
 route. The client holds no copy of the transcript; it re-reads `/panel` when the
-stream says the conversation changed, on open, and on a slow timer. A failed
+panel opens and on a timer thereafter. A failed
 background refresh keeps the last good cards visible beside the error instead of
 replacing them with an empty panel — and a *manual* refresh keeps them too: the
 loading state belongs to a session whose answer has never arrived, not to a reload
@@ -397,26 +392,19 @@ change triggers one re-measurement. It filters on attributes alone: a `childList
 observer on the conversation would fire once per streamed token, which is the one
 cost this overlay cannot pay.
 
-**Real time, with a fallback that does not retire.** The panel learns about
-changes from `GET /api/ui-evolve/live`, an `EventSource` stream of named `panel`
-events. The stream carries no payload — it says *that* this conversation changed,
-and the client answers by calling `/panel`, so there is only one place that
-decides what the panel looks like. The server publishes after each event the panel
-actually draws from (`transcript.record` returns a boolean for exactly this), so a
-token-count event wakes nobody.
+`settling` draws the cards. So does a host that publishes no attribute at all.
 
-Polling is not removed when the stream opens; it is slowed from 8 seconds to 60.
-Two reasons, and the second one is the less obvious:
+**How it learns: a timer.** The panel calls `GET /api/ui-evolve/panel` every eight
+seconds (`REFRESH_MS` in `lib/client.js`) and renders whatever comes back. There is
+no subscription and no server push; the numbers are re-derived on the host for each
+request, so there is nothing to invalidate and nothing to keep in sync.
 
-- `EventSource` reconnects after a network fault, but **not** after a response it
-  deems unusable — a 404, or a body whose type is not `text/event-stream`. While
-  the plugin is being reloaded the route is briefly absent, and a stream that gives
-  up there would leave the panel frozen for as long as the conversation stays open.
-- Even a healthy stream does not cover everything. The server publishes on *this
-  session's* events, while the pending-candidate count in the panel is read from a
-  **global** queue. Another conversation, or a slash command run elsewhere, adds a
-  candidate and this session's stream says nothing about it.
-
-So the timer is a fallback that keeps its own coverage, not a backup of the stream.
-Its 60 seconds are a floor on how stale an unrelated change can get, and that is
-the constant to raise or lower — not the stream to trust harder.
+An event stream was tried here and removed (`D-74`). It reported *that* this
+conversation changed, and the client answered with one `/panel` call — no payload,
+one place deciding what the panel looks like. It was taken out because the thing it
+replaced covered more than it did: the stream only spoke for one session, while the
+pending-candidate count is read from a **global** queue, and the touched-file sizes
+come from a `stat` taken at read time — a file changed by another process produced
+no event at all. Making the stream the fast path meant slowing the only channel that
+saw those changes from 8 seconds to 60, which is a narrower view of the world, not a
+fresher one.

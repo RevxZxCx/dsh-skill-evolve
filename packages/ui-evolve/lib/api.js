@@ -61,117 +61,6 @@ const MAX_BODY_BYTES = 64 * 1024
 const ROUTE_PREFIX = '/api/ui-evolve'
 
 /**
- * How often an idle live stream says something.
- *
- * Both ends of a quiet HTTP connection eventually forget it: the browser times
- * it out and a proxy between them closes it. A comment line every 25 seconds is
- * the smallest thing that resets those clocks, and the client ignores it.
- */
-const LIVE_PING_MS = 25 * 1000
-
-/**
- * Keep one response open and write a line to it whenever the session changes.
- *
- * The stream carries no payload, only the fact that something moved. The client
- * answers by asking `/panel` for the session, so there is exactly one place that
- * decides what the cards say. A stream that carried the cards would be a second
- * assembly path, and the two would eventually disagree.
- *
- * `text/event-stream` rather than a WebSocket because the host's web server
- * hands this plugin a plain `(req, res)` pair: no upgrade handshake, no second
- * protocol, and the browser reconnects on its own.
- *
- * This function returns only when the stream is set up. From then on the socket
- * belongs to the listeners below it, and the route dispatcher must not touch
- * `res` again.
- *
- * @param {object} deps - the API dependencies.
- * @param {import('node:http').IncomingMessage} req - the request.
- * @param {import('node:http').ServerResponse} res - the response.
- * @param {string | undefined} agentId - the session to watch.
- */
-function streamLive(deps, req, res, agentId) {
-  const hub = deps.live
-  if (hub === undefined || typeof hub.subscribe !== 'function') {
-    return json(res, 200, { ok: false, code: 'error.live.absent', error: 'this host cannot publish panel changes' })
-  }
-  if (typeof agentId !== 'string' || agentId.length === 0) {
-    return json(res, 400, { ok: false, code: 'error.agent.missing', error: 'the live stream needs a session id' })
-  }
-  if (!res || res.writableEnded || res.destroyed) return
-
-  // A response stream can error after headers are written; without a listener
-  // node treats it as an unhandled error and takes the process with it.
-  res.once('error', () => {})
-
-  try {
-    res.writeHead(200, {
-      'content-type': 'text/event-stream; charset=utf-8',
-      // `no-store` alone does not stop a proxy from buffering an event stream;
-      // `no-transform` and `x-accel-buffering` do, and neither costs anything
-      // when there is no proxy in front.
-      'cache-control': 'no-store, no-transform',
-      connection: 'keep-alive',
-      'x-accel-buffering': 'no',
-    })
-  } catch {
-    res.destroy?.()
-    return
-  }
-
-  /**
-   * Write one chunk and flush it.
-   *
-   * The flush is not decoration: node buffers small writes, and an event still
-   * in that buffer is an event the client does not have — which is the one
-   * failure this route exists to prevent.
-   *
-   * @param {string} text - the lines to send.
-   */
-  const write = (text) => {
-    if (res.writableEnded === true || res.destroyed === true) return
-    try {
-      res.write(text)
-      res.flush?.()
-    } catch {
-      // The socket went away between the check and the write. `close` below
-      // does the cleanup; there is nothing to do here.
-    }
-  }
-
-  // Until the first byte arrives the browser has not fired `open`, so the client
-  // cannot tell a working stream from one the host refused. A comment line opens
-  // it without meaning anything to the client.
-  write(': connected\n\n')
-
-  const stop = hub.subscribe(agentId, () => {
-    write(`event: panel\ndata: ${Date.now()}\n\n`)
-  })
-
-  const beat = setInterval(() => write(': ping\n\n'), LIVE_PING_MS)
-  // `unref` so a stream whose client vanished cannot hold the process open.
-  if (typeof beat.unref === 'function') beat.unref()
-
-  let closed = false
-  const close = () => {
-    if (closed === true) return
-    closed = true
-    clearInterval(beat)
-    stop()
-    // Ending the response is what tells the browser the stream is over; without
-    // it a closed socket looks like a network fault and the client reconnects
-    // in a loop against a session that has gone away.
-    try {
-      res.end()
-    } catch {
-      // Already gone.
-    }
-  }
-  req.once('close', close)
-  res.once('close', close)
-}
-
-/**
  * What the panel says when `@revxz/dsh-skill-evolve` is not installed.
  *
  * Named as a constant because four routes now have to say it, and because the
@@ -476,7 +365,6 @@ function describeMcp(seen, recency) {
  * @param {(name: string, id?: string) => Promise<object>} [deps.discardCandidate] - discard one candidate.
  *   Same id-then-name rule as `approveCandidate`.
  * @param {any} [deps.sessionState] - the persisted per-session state, read when memory has nothing.
- * @param {any} [deps.live] - the `LiveHub`; without it `/live` answers "not supported".
  * @param {(message: string) => void} [deps.log] - diagnostics.
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>} the handler.
  */
@@ -536,23 +424,6 @@ function createPanelApi(deps) {
         if (body.ok === false) return json(res, body.status, { ok: false, code: body.code, error: body.error })
         return json(res, 200, { ok: true, data: propose(deps, body.value, agentId) })
       }
-      // The live stream. A `GET` leaves this handler's normal shape entirely: it
-      // writes headers once and then keeps the socket open, so nothing below may
-      // touch `res` afterwards. See `streamLive`.
-      //
-      // `GET` only rather than `!== 'POST'`: the method whitelist above also
-      // admits HEAD, and a HEAD that reached this branch would write
-      // `text/event-stream` headers, register a hub subscription and start a
-      // heartbeat that never ends — one leaked subscription per probe until the
-      // socket times out. Proxies, health checks and `curl -I` all send HEAD.
-      if (path === `${ROUTE_PREFIX}/live` && req.method === 'GET') return streamLive(deps, req, res, agentId)
-      // HEAD is answered, but not by opening a stream: it reports that the route
-      // is here, with no body and no subscription. Falling through to the 404
-      // below would tell a health check the plugin is not installed, and every
-      // other route in this handler answers HEAD with a 200 and no body.
-      if (path === `${ROUTE_PREFIX}/live` && req.method === 'HEAD') {
-        return json(res, 200, { ok: true, data: { stream: true } }, true)
-      }
       if (path === `${ROUTE_PREFIX}/config` && req.method === 'POST') {
         const body = await readJsonBody(req)
         if (body.ok === false) return json(res, body.status, { ok: false, code: body.code, error: body.error })
@@ -565,7 +436,6 @@ function createPanelApi(deps) {
     }
   }
 }
-
 
 /**
  * The candidate queue, shaped for the hover card.

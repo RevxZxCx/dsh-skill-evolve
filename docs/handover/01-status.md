@@ -27,6 +27,7 @@
 | 2026-11-06 | 持久化第十二轮审查修复 | 谁有权相加（`viewOf` 读盘、回合数单一作者） |
 | 2026-11-06 | 持久化第十三轮审查修复 | 抽出来的判据，要走过去的人用（`keepsDocument`） |
 | 2026-11-06 | 界面六项需求 + 实时流 | 统计贴右、六行、点击才展开、加载提示、只在会话页显示；`LiveHub` + `/live` SSE，轮询降为 60 秒兜底；2355 断言全绿，五套变异 26/65/14/44/15 全杀 |
+| 2026-11-06 | 撤回实时流 | 删 `LiveHub`/`/live`/`EventSource`，轮询恢复唯一通道恒定 8 秒；`settling` 照常显示（D-75）；2264 断言全绿，五套变异 68/11/14/44/15 全杀 |
 
 ---
 
@@ -2212,3 +2213,95 @@ sync-gutter 连跑两次                  client.js sha256 恒定
 1. **启动器页面的「显示/隐藏」开关**：现在 `hero` 时直接隐藏，若用户想要「新会话页也显示一个空的占位」，那是另一个决定，需要先问。
 2. **`settling` 期间是否显示卡片**：目前只挡 `hero`，`settling` 照常显示。用户没提过，实测也没见到问题，但这是唯一没有被需求覆盖的一档。
 3. **轮询 60 秒这个数字**：它买的是「流死掉之后面板仍会自愈」，代价是安静会话每分钟一次请求。若真实使用中发现候选队列更新太慢，应调这个常量而不是删掉轮询。
+
+## 2026-11-06 · 撤回实时流：把「更快」收回成「更全」
+
+### 用户的决定
+
+> 那我决定放弃这个需求，你可以取消相关实现，不实时显示，我认为这样会占用资源，
+> 实际体验并不好。现在开始将这三个待办全部进行处理
+
+上一节（界面六项需求 + 实时流）刚给面板接上 SSE。这一节把它整个拆掉。
+
+### 拆掉了什么
+
+下表逐行对应 `git diff --name-status -- packages scripts test` 的 11 项，
+行尾的 `+/-` 来自 `git diff --numstat -- packages scripts test`，合计 71 / 1576。
+
+| 文件 | 动作 | +/- |
+|---|---|---|
+| `packages/ui-evolve/lib/live.js` | 删除（`LiveHub`，108 行） | −108 |
+| `test/live.test.mjs` | 删除（519 行） | −519 |
+| `scripts/mutate-live.mjs` | 删除（351 行） | −351 |
+| `packages/ui-evolve/README.md` | 路由表去掉 `/live`；「How it learns」改成定时器并说明撤回理由；删掉「按流重读 `/panel`」那句 | +19 / −31 |
+| `packages/ui-evolve/lib/api.js` | 删 `LIVE_PING_MS`、`streamLive()`、`/live` 的 GET 与 HEAD 两个分支、`deps.live` 的 JSDoc | −130 |
+| `packages/ui-evolve/lib/index.js` | 删 `LiveHub` 导入、live 段、`publish()`；`session/event` 回到无条件 `transcripts.record()` | +1 / −40 |
+| `packages/ui-evolve/lib/transcript.js` | `record()` 从返回 boolean 改回 void，八处 `return true/false`（5 真 3 假）清成裸 `return` | +7 / −16 |
+| `packages/ui-evolve/lib/client.js` | 删 `IDLE_REFRESH_MS`、`openLive()`、`slowDown`/`stopPolling`；轮询回到 `const timer = setInterval(() => load(true), REFRESH_MS)` | +6 / −96 |
+| `scripts/mutate-checklist-panel.mjs` | 补三条 phase 变异（`hero` 门控的三个方向），并修掉其中一条与另一条重叠的 | +21 |
+| `test/client.test.mjs` | 删 `EventSourceStub`、`eventSources`、`evaluate` 的 `EventSource` 形参，以及整块流断言（11 条 `check`） | +17 / −118 |
+| `test/persistence.test.mjs` | 删 `fakeHost().stream()` 与整块流端到端断言 | −167 |
+
+撤回本身（`packages/`、`scripts/`、`test/` 三棵子树，README 也在其中）净减少 **1505 行**——`git diff --shortstat -- packages scripts test` 实测 11 个文件、71 insertions / 1576 deletions。四份 handover 的追加不计在内。
+
+### 三条待办的处置
+
+1. **启动器页**：保持隐藏，代码不改。
+2. **`settling` 期间**：正常显示。补断言 `a conversation being opened draws its cards`，
+   并写成 D-75——这是唯一没有被任何需求覆盖过的一档。
+3. **60 秒轮询**：随流撤回而消解，`REFRESH_MS = 8000` 恢复为唯一恒定通道。
+
+### 为什么撤回是对的（技术上）
+
+流替面板做的事，比它拿走的少：
+
+- 流只替**一个会话**说话，而 `pendingCandidates` 读的是**全局**候选队列。
+- `files` 的 size/mtime 来自 `statTouchedFiles()` 的**现场 `stat`**，别的进程改文件
+  不产生任何会话事件——这条通道本来就不由事件驱动，只是过去 8 秒一次的定时器顺带覆盖了它。
+- 于是「让流当快路径」的真实代价是：**唯一覆盖这两件事的通道从 8 秒放慢到 60 秒**。
+  这不是更新鲜，是更窄。D-73 承认了这一点（降频而非停止），D-74 把结论走完。
+
+### 当前数字
+
+```
+node test/run.mjs                  2264 passed / 0 failed
+node test/client.test.mjs           317 passed / 0 failed
+node test/persistence.test.mjs       60 passed / 0 failed
+scripts/mutate-checklist-panel.mjs   68 killed / 0 survived / 0 not applied
+scripts/mutate-guards.mjs            11/11 killed
+scripts/mutate-persistence.mjs       44 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-session-store.mjs     15 killed / 0 survived / 0 not applied / 0 crashed
+test/mutate-panel.mjs                14/14 killed
+全仓 CRLF                            0（`git -c core.quotepath=false ls-files` 112 个，减掉本轮删掉的三项 = 磁盘上 109 个）
+sync-gutter 连跑两次                 client.js sha256 不变（幂等）
+```
+
+### 本轮踩的坑
+
+1. **`lines[N-1]` 才是第 N 行。** 三次按行号删除都靠 `print(repr())` 打首尾核对救回来；
+   只靠 `awk`/心算会多删少删。删 `openLive` 时第一次就算错了边界（`lines[117]` 是 `}`、
+   `lines[119]` 才是 `/**`）。
+2. **删测试 helper 要数清收尾花括号。** 删 `fakeHost().stream()` 时多删了 `  }` 与 `}`，
+   报 `SyntaxError: Unexpected identifier 'fakeSession'`。
+3. **变异重叠不等于覆盖。** `phase === undefined` 与 `phase === "nowhere"` 是同一个变异
+   （`place.phase ?? ""` 让 `phase` 永远不是 `undefined`），却被记成 `2 killed`。
+   这是「全绿但没测到」的第三种形态（DEF-36 断言空转、DEF-37 行为不可观察、DEF-38 变异重叠；
+   DEF-41 是本轮新增的第四种：数字无出处）。
+4. **删功能要 grep 两次。** 先 grep 技术名词（`stream`/`EventSource`/`/live`），
+   再 grep 它留下的**动词短语**（「按流重读」）——后者不含任何可搜的热词，最容易漏。
+5. **交叉引用没有机器检查。** README 引用 `D-74` 时该编号并不存在，测试、
+   变异、构建全都不会因此变红。
+6. **`git ls-files` 默认给中文路径加引号转义。** 默认 `core.quotepath=true` 会把
+   `docs/00-文档索引.md` 输出成带双引号的转义串——引号里面是 `\346\226\207` 这样的八进制字节，而不是汉字，
+   于是 `git ls-files | while read f; do [ -f "$f" ] && echo x; done` 对这 9 个中文
+   路径全部落空，112 数成 100。**把 `git ls-files` 的输出当路径用之前，先加
+   `-c core.quotepath=false`**（详见 DEF-42）。
+
+### 已知缺口（本轮未处理）
+
+- `REFRESH_MS = 8000` 没有任何测试或变异覆盖。撤回让它成为唯一通道之后，这个常量
+  更加无保护。
+- README 的「Every route answers `HEAD` with a body-less 200」对 `/propose` 不成立
+  （该路由只有 POST 分支，HEAD 落到 404）。这是 `c22ec9a` 就有的错误。
+- 文档里的 `D-xx`/`DEF-xx`/`R-xx` 交叉引用没有测试守着。若要根治，应当在
+  `test/` 下加一条「文档中出现的编号必须在对应索引表里存在」。
