@@ -26,6 +26,7 @@
 | 2026-11-06 | 持久化第十一轮审查修复 | 谁的数字，谁的证据 |
 | 2026-11-06 | 持久化第十二轮审查修复 | 谁有权相加（`viewOf` 读盘、回合数单一作者） |
 | 2026-11-06 | 持久化第十三轮审查修复 | 抽出来的判据，要走过去的人用（`keepsDocument`） |
+| 2026-11-06 | 界面六项需求 + 实时流 | 统计贴右、六行、点击才展开、加载提示、只在会话页显示；`LiveHub` + `/live` SSE，轮询降为 60 秒兜底；2355 断言全绿，五套变异 26/65/14/44/15 全杀 |
 
 ---
 
@@ -2132,3 +2133,82 @@ rewritten: true
 把一个可复现的反例留在了注释外。注释已按这个说法重写。
 
 第十五轮的整体判定是「这批修改可以算正确」，三处均为文档与注释的表述精度，不影响行为。
+
+---
+
+## 2026-11-06 · 界面六项需求与实时流：把「猜」换成「被告知」
+
+### 用户报的六件事
+
+基础功能验证通过、重启不丢数据之后，用户在真实宿主里逐条看了界面，报回六条：
+
+| # | 原话要点 | 落在哪 |
+| --- | --- | --- |
+| a | 上一轮卡片的「调用/命令/文件」统计应该贴右，不要紧挨标题 | `.dsse-head-stats` |
+| b | 这些数字能不能实时更新（当时是 8 秒轮询） | `/live` + `LiveHub` |
+| c | 标题下方什么都没有，却空出一条；另外两张卡也一样 | `.dsse-card-head` |
+| d | 字体再小些、行数 5→6、**不要 hover 展开**，改成 hover 显示提示、点击才展开，触发域越大越好 | `Card` / `.dsse-expand` |
+| e | 进对话区域时数据加载不全，加载时应该显示「正在加载」 | `Cards` 渲染门 |
+| f | 卡片会出现在非会话页面，应该只在会话界面显示 | `data-content-phase` |
+
+(a) 与上一轮的「统计紧挨标题」（`margin-left:4px`）相反，属于用户看到实物之后改主意，不是回归。
+
+### 六条各自的根因
+
+**(c) 是最有教育意义的一条**：`.dsse-card-head` 上写着 `min-height:42px`，那是为「从本轮提炼」按钮定的高度。按钮在前几轮被删掉，`min-height` 留了下来，于是标题行只剩一行字、下面空出约 40px。三张卡共用 `Card` 组件，一处遗留变成三处——用户说「其他两个卡片也有同样情况」时，原因是同一个。
+
+**(d) 的难点不是加提示，是改语义**。`expanded` 原写成 `turnExpandable === true && (turnHovered === true || turnPinned === true)`，加一个提示条很容易，但 hover 仍然会展开。改完立刻有 4 条断言变红——它们检查的正是旧语义，说明既有测试**按旧契约在找证据**，不是没测到。
+
+**(f) 先否定了一个想当然的判据**：「找得到 `[data-conversation-content]` 就是有会话」是恒真的，宿主在三种页面上都渲染那个元素。正解是读宿主自己在同一元素上发布的 `data-content-phase`（`active` / `settling` / `hero`）。
+
+**(e) 是第二版**。历史上这个问题被修过一次，当时改成「加载期间什么都不画」——那走得太远：面板整个消失，人看到空洞却分不清是在加载还是没有内容。往前那版更糟：画一整列空卡片加 reading…，随后整体消失，是闪烁。第三版只在会画出空白的那一行位上多一行「正在加载…」，判据 `data === undefined` 用来区分「还没答」与「答了但确实空」。
+
+**(b) 的做法是事件流**：服务端 `LiveHub` 在被消费的 `session/event` 之后 publish 一次，客户端 `EventSource` 订阅 `/api/ui-evolve/live?agent=<id>`。流里**没有载荷**，只有「这个会话动了」；内容仍由 `/panel` 唯一装配。`transcript.record()` 因此改成返回 boolean——宿主把每个事件都送进来，`session/token` 这类不会画出任何卡片的事件不该唤醒客户端。
+
+### 四轮审查改了什么
+
+| 轮 | 采纳 | 最值得记的一条 |
+| --- | --- | --- |
+| R-32 | 2 P2 + 5 P3 | HEAD 会进 SSE 分支并永不结束（每次探活泄漏一个订阅）；phase 变化没有独立触发源 |
+| R-33 | 1 P2 + 1 P3 | 流打开后**永久停掉**兜底轮询，而 `EventSource` 对不可用响应会放弃重连、全局候选队列也没人管了 |
+| R-34 | 1 P2 + 1 P3 | `openPairs` 的守卫在新交互下**静默空转了一整轮**，套件仍报 322 passed |
+| R-35 | 0 | 收敛 |
+
+**R-33 的第二层理由是我自己没想到的**：即使流健康也有洞——服务端只在本会话的事件上 publish，而 `/panel` 里的 `pendingCandidates` 读的是**全局**候选队列。别的会话写入候选时这里收不到任何通知，被删掉的轮询是它唯一的手段。所以修法不是「修好流的重连」，而是「降频到 60 秒、不删除」。
+
+**R-34 是本轮最贵的一课**：那段循环注释声明它保护「渲染成展开态的卡片一定有办法关掉」，但前提 `data-expanded === 'true'` 在 hover 不再展开之后恒不成立，两棵树都是关的，几条 `check` 一次都没执行。把 `client.js` 换回 HEAD 版跑同一条探针，输出 `false` / `true`——**说明这是我把它改成空转的**。修法是把前提本身变成断言：先点开、再取两棵树、每棵显式断言 `data-expanded === 'true'`，然后才断言可关闭性四要素。`client.test.mjs` 从 322 涨到 327，多出来的就是原来从没跑过的那几条。
+
+### 当前数字（2026-11-06 实测）
+
+```
+node test/run.mjs                   2355 passed / 0 failed
+node test/client.test.mjs            327 passed / 0 failed
+node test/live.test.mjs               70 passed / 0 failed   ← 新建
+node test/persistence.test.mjs        71 passed / 0 failed
+scripts/mutate-live.mjs               26 killed / 0 survived / 0 not applied / 0 crashed   ← 新建
+scripts/mutate-checklist-panel.mjs    65 killed / 0 survived / 0 not applied
+test/mutate-panel.mjs                 14/14 killed
+scripts/mutate-persistence.mjs        44 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-session-store.mjs      15 killed / 0 survived / 0 not applied / 0 crashed
+全仓 CRLF                             0（109 个 git 追踪文件，按字节扫）
+sync-gutter 连跑两次                  client.js sha256 恒定
+```
+
+组件测试从 286 条涨到 327 条，全量从 2233 涨到 2355 条。
+
+### 这一轮踩到并值得传下去的坑
+
+1. **带前提的断言必须让前提失败时也失败。** `continue`、`if (...) { check(...) }`、`?.` 后面跟的断言都有这个形状。空转与通过在这套 harness 里长得一样，都只是一行 tally，而且它对任何变异都不敏感——只会让所有变异都「存活」。
+2. **测试替身能表达的失败模式只有作者想到的那些。** `EventSourceStub` 只会 `fire('open')` / `fire('panel')`，从没有「打开后永久失败」这个动作，于是 DEF-34 那类缺陷在测试里不存在。
+3. **测试桩太省事会掩盖行为。** `setInterval` 桩写成 `() => 0` 时，「轮询被清掉」这件事在 harness 里根本无法观察——不是断言写错，是行为不存在。桩必须保留 handle。
+4. **判断「是 JSON 不是流」不能看响应头。** JSON 路径也调 `writeHead`。判据只能是「什么都没流出去」（`chunks.length === 0 && ended === true`）。
+5. **探针必须改行为，不能改结构。** `new MutationObserver(() => {})` 能拿到干净的 1 failed；换成 `phaseObserver = null` 会崩在 `observe` 上，一行 tally 都不打印，被变异脚本记成 CRASHED。
+6. **变异脚本要核对文件真的还原了。** `scripts/mutate-live.mjs` 每条之后重读文件比对原内容，不一致记 `CRASHED (file was not restored)`——这比一次失败严重，因为下一次运行读到的树已经不是被测的树。
+7. **`git ls-files | xargs grep -lU $'\r'` 在这套 bash 下会把全部文件误报成 CRLF。** 只能用 Node 按字节扫。
+8. **多行锚点用反引号模板串，不走 python。** 用 python `open(p,'w')` 写带 `\n` 的锚点时，heredoc 里的 `\n` 会变成真实换行，把字符串字面量拆断成 `SyntaxError`。这是本轮第二次踩。
+
+### 下一步的合理顺序
+
+1. **启动器页面的「显示/隐藏」开关**：现在 `hero` 时直接隐藏，若用户想要「新会话页也显示一个空的占位」，那是另一个决定，需要先问。
+2. **`settling` 期间是否显示卡片**：目前只挡 `hero`，`settling` 照常显示。用户没提过，实测也没见到问题，但这是唯一没有被需求覆盖的一档。
+3. **轮询 60 秒这个数字**：它买的是「流死掉之后面板仍会自愈」，代价是安静会话每分钟一次请求。若真实使用中发现候选队列更新太慢，应调这个常量而不是删掉轮询。

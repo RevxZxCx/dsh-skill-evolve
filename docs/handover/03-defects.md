@@ -28,6 +28,12 @@
 | DEF-22 | 2026-10-30 | 关闭动画期间重新打开会被旧关闭定时器再次关闭 | 关闭延迟在 Modal 内部，父组件无法取消 |
 | DEF-23 | 2026-10-30 | 侧向设置被拒绝后界面停留在被拒侧 | 位置立即写入 bridge，失败回滚只处理 config |
 | DEF-24 | 2026-10-30 | 字体变量写回根节点会再次触发 observer | observer 监听根节点 style，而写入目标正是根节点 style |
+| DEF-32 | 2026-11-06 | 头部空出一条：已删按钮的 `min-height` 留在三张卡上 | 假渲染器没有布局引擎，固定高度造成的空白不可观测 |
+| DEF-33 | 2026-11-06 | hover 仍然展开卡片，与「点击才展开」的契约不符 | 断言写在 `data-expanded` 上，而它在 hover 与 click 两条路径上都能变 true |
+| DEF-34 | 2026-11-06 | `EventSource` 遇到不可用响应会永久放弃重连，而轮询已被清掉 | 测试替身从不模拟「打开后永久失败」，只模拟过「打开」 |
+| DEF-35 | 2026-11-06 | HEAD `/live` 落到 404，探活把存在的路由报成不存在 | 只给 `/panel` 写过 HEAD 断言，新路由上线时没人补 |
+| DEF-36 | 2026-11-06 | 「开着的卡片能关掉」这条守卫静默空转了一轮 | 前提不成立时 `continue`，套件仍然全绿 |
+| DEF-37 | 2026-11-06 | 测试桩 `setInterval` 返回 0，轮询被清与否不可观察 | 桩的目的只是「不让进程挂着」，返回值被当成无关紧要 |
 
 ---
 
@@ -360,3 +366,71 @@ const error = new Error(`cannot get property "${name}" without declaring it in i
 **修法**：`packages/ui-evolve/lib/client.js` 五处同步 —— `id: "@revxz/dsh-ui-evolve"`、`NS`、`PANEL_ID`、`TOGGLE_ID`，以及文件头注释。
 
 **为什么测试没抓到**：`test/client.test.mjs` 里原本断言 `booted.captured.id === 'dsh-skill-evolve'`，拆包后这条断言会把旧名字固化下来——它会一直绿，直到有人在真实宿主里装上新包。**断言一个名字不会发现名字错了。** 已改为断言新全名；真正把契约钉住的是 `spec.registrant === NS` 那一类交叉断言。
+
+## DEF-32 头部空出一条：已删按钮的 `min-height` 留在三张卡上
+
+**现象**：用户报「上一轮标题的下方没有任何显示，却空出了一条」，并指出另外两张卡也有同样情况。
+
+**根因**：`packages/ui-evolve/lib/client.js` 的 `.dsse-card-head` 上留着 `min-height:42px`。那是为「从本轮提炼」按钮定的高度，按钮删掉之后没人回头改这个数字。三张卡共用 `Card` 组件，一处遗留变成三处。
+
+**修法**：删掉 `min-height`，`padding` 从 `9px 11px` 收到 `7px 11px`，头部高度回到由内容决定。
+
+**为什么测试没抓到**：假渲染器没有布局引擎。`test/client.test.mjs` 开头就声明「几何是否对齐是浏览器事实」，套件能断言的是属性与结构，而这条缺陷整个存在于「高度」这一个浏览器事实里。修完之后加的是**源码断言**（`min-height:` 不得出现在 `.dsse-card-head` 里）——这是本仓库对纯样式缺陷的既有做法，它能抓到「有人又写回去」，抓不到「写了个看起来对但实际不对的数字」。
+
+## DEF-33 hover 仍然展开卡片，与「点击才展开」的契约不符
+
+**现象**：需求改成「hover 只提示、点击才展开」之后，把指针移到卡片上，卡片仍然展开。
+
+**根因**：`expanded` 的定义还是 D-22 那版，写成 `turnExpandable === true && (turnHovered === true || turnPinned === true)`。改 hover 的**表现**（加提示条）很容易，改它**代表什么**要回到这个布尔上，而它藏在 `Cards` 的派生区，不在改样式时会看到的地方。
+
+**修法**：`const expanded = turnExpandable === true && turnPinned === true`，另加 `turnHinted` 只负责提示。
+
+**为什么测试没抓到**：这不是「测试没抓到」，是「测试也在按旧契约找证据」——既有断言检查 `data-expanded` 的取值，而旧实现下 hover 确实让它变 true，断言因此一直绿。真正抓到它的是**改完源码后重新跑一遍**：4 条断言（`hovering a clipped summary does not open it`、`and the offer says what the click will do`、`a hovered card still reports itself closed`、`and it does not open it`）立刻变红。教训是：**需求的语义变了，断言里对同一个属性的期望也要跟着变，而它们在同一个文件里**。已把 `expanded` 这行收进 `scripts/mutate-checklist-panel.mjs`。
+
+## DEF-34 `EventSource` 遇到不可用响应会永久放弃重连，而轮询已被清掉
+
+**现象**：第一版实时更新在 `open` 事件里 `clearInterval` 掉 8 秒轮询。插件重载期间 `/live` 短暂返回 404，流就此死掉，`error` 回调是空的，面板停在旧数字上直到人切会话。
+
+**根因**：两件事叠在一起。一是把「流是正常路径」当成了「流覆盖了轮询覆盖的全部」；二是 `EventSource` 的重连语义有个不显眼的例外——网络中断会重连，**响应本身不可用（404、`content-type` 不是 `text/event-stream`）不会**，它直接 `CLOSED` 并放弃。
+
+**修法**：`open` 时降频到 60 秒而不是删除（D-73）。同时查明第二层洞：`pendingCandidates` 读的是全局候选队列，而流只在本会话事件上 publish，所以即使流健康，别的会话写入候选也不通知这里——轮询不是备份，是唯一来源。
+
+**为什么测试没抓到**：测试替身 `EventSourceStub` 只会 `fire('open')`、`fire('panel')`，从来没有「打开后永久失败」这个动作，也没有「流不说话但别处变了」这个场景。**替身能表达的失败模式只有作者想到的那些**，而这次没想到的是「流自己不报错地不工作」。修完之后 `client.test.mjs` 断言的是定时器被**换掉**而不是被**清掉**（`slow.length === 1 && slow[0].cleared === false`），并有一条「慢轮询仍然会去问面板」。
+
+## DEF-35 HEAD `/live` 落到 404，探活把存在的路由报成不存在
+
+**现象**：`curl -I /api/ui-evolve/live?agent=x` 返回 404，而 `GET` 同一路径是 200 的流。
+
+**根因**：路由分支写的是 `req.method === 'GET'`（这个限定本身是对的，见下），但方法白名单放行 HEAD，于是 HEAD 穿过 `/live` 分支、落到文件末尾的 `error.route.unknown`。同文件里 `/panel`、`/models`、`/config`、`/candidates` 都对 HEAD 回 200 空体。
+
+**为什么 `=== 'GET'` 这个限定是对的**：上一版写的是 `!== 'POST'`，HEAD 因此会进 `streamLive`——写 SSE 头、注册订阅、挂 25 秒心跳、永不 `end()`，每个探活泄漏一个订阅直到 socket 超时。这是第一轮审查报的 P2，两件事必须分开处理：**不许进流，但也不许报不存在。**
+
+**修法**：GET 走 `streamLive`；HEAD 单独一支，`json(res, 200, { ok: true, data: { stream: true } }, true)`（第四参 `headOnly` 表示只写头不写体）。
+
+**为什么测试没抓到**：`/live` 是这一轮新增的路由，而 HEAD 的既有断言只写在 `/panel` 上（`test/api.test.mjs` 的 `a head request answers 200`）。**新路由不会自动继承别的路由的测试覆盖**——那条 HEAD 用例测的是 `/panel` 这个路径，不是「HEAD 一律 200」这条规则。已补 4 条断言（200 / 不流 / 不订阅 / 立即结束），变异脚本也加了两条（删掉 HEAD 分支、把 GET 放回 `!== 'POST'`）。
+
+## DEF-36 「开着的卡片能关掉」这条守卫静默空转了一轮
+
+**现象**：`test/client.test.mjs` 里有一段专门守「渲染成展开态的卡片一定有办法关掉」的循环，套件报全绿，但那几条 `check` 一次都没执行。
+
+**根因**：循环前提是 `clip?.props?.['data-expanded'] === 'true'`，不满足就 `continue`。它构造的两棵树分别在「换了一轮」和「指针移上去」之后取——而在 hover 不再展开卡片之后，这两棵树都是**关着**的。2026-11-06 之前的 `expandPairs` 是真在跑的，因为当时 hover 会展开。
+
+**为什么测试没抓到**：没有任何测试能抓到它。`continue` 让整个循环变成空转，而空转与通过在这套 harness 里长得一模一样：都只是一行 tally。这也是为什么变异脚本帮不上忙——空转的断言对任何变异都不敏感，它只会让所有变异都「存活」。
+
+**修法**：把前提本身变成断言，不再跳过。现在是先 `pressCard(swapped)`（并 check 处理器存在）点开，再取两棵树（点击后、指针离开后），每棵树显式断言 `data-expanded === 'true'`，然后才断言可关闭性四要素。`client.test.mjs` 从 322 条增加到 327 条，多出来的 5 条就是原来从没跑过的那几条。
+
+**探针**：把 `client.js` 的 `onClick: interactive === true ? props.onClick : undefined` 改成 `onClick: undefined` → 恰好这两条变红（`true/0/button/undefined`），303 passed / 24 failed。已收进 `scripts/mutate-checklist-panel.mjs`（第 65 条）。
+
+**这条的普遍教训**：**带前提的断言必须让前提失败时也失败。** `continue`、`if (...) { check(...) }`、`?.` 链后面跟着的断言，全都有这个形状。本仓库另一处同类问题是变异脚本里「测试崩溃不打印 FAIL 行」——两者都是「没有输出」被当成了「没有问题」。
+
+## DEF-37 测试桩 `setInterval` 返回 0，轮询被清与否不可观测
+
+**现象**：写「流打开后轮询被清掉」这条断言时，套件报 3 failed，而源码是对的。
+
+**根因**：`test/client.test.mjs` 的 `evaluate(...)` 里，`setInterval` 桩是 `() => 0`、`clearInterval` 是 `() => {}`。桩的原始目的只是「真实 interval 会让测试进程不退出」，返回值被当成无关紧要。于是 `instance.timers.find((row) => row.ms === 8000)` 永远是 `undefined`——**不是断言写错了，是这个行为在 harness 里根本不存在**。
+
+**修法**：桩改成与 `setTimeout` 桩同构：记下 `{ fn, ms, handle, cleared }`，返回真实 handle；`clearInterval` 桩查表把 `cleared` 置真再真正清。`clearInterval` 的实参也一并记进 `timers`，供「清的是不是同一个 handle」这类断言使用。
+
+**为什么测试没抓到**：这是测试基础设施的缺陷，不是产品的。它自己的失败表现很有误导性——3 条新断言全红，看起来像源码有问题。识别方法：**先确认待观测的行为在替身里有没有对应的可观测面**。`jest.useFakeTimers()` 之类的库替身会保留 handle，手写桩最容易省掉的就是这个。
+
+**同类教训**（本仓库第 7 条）：`snapshotOf: () => live` 返回同一引用，让陈旧值永不显得陈旧；`attachRefs` 只绑一次，跨轮复用同一节点时必须用可变 getter 才能观察重测。都是「替身太省事」这一类。

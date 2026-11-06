@@ -26,8 +26,10 @@ const mutations = [
   {
     label: 'an empty session still draws its chrome',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "if (hasAnyCard === false && error === '') return settings",
-    to: 'if (false) return settings',
+    from: `      if (hasAnyCard === false && error === '') {
+        return stillLoading === false`,
+    to: `      if (false) {
+        return stillLoading === false`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -309,8 +311,12 @@ const mutations = [
   {
     label: 'an empty rail takes the settings dialog down with it',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "if (hasAnyCard === false && error === '') return settings",
-    to: "if (hasAnyCard === false && error === '') return null",
+    from: `      if (hasAnyCard === false && error === '') {
+        return stillLoading === false
+          ? settings`,
+    to: `      if (hasAnyCard === false && error === '') {
+        return stillLoading === false
+          ? null`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -346,7 +352,7 @@ const mutations = [
   {
     label: 'the summary is capped at three lines again',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}',
+    from: '.dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}',
     to: '.dsse-clip .dsse-text{max-height:5.2em;overflow:hidden}',
     suites: ['test/client.test.mjs'],
   },
@@ -470,8 +476,20 @@ const mutations = [
   {
     label: 'a stale reason to open survives because being open ignores the measurement',
     file: 'packages/ui-evolve/lib/client.js',
-    from: 'const expanded = turnExpandable === true && (turnHovered === true || turnPinned)',
+    from: 'const expanded = turnExpandable === true && turnPinned === true',
     to: 'const expanded = turnHovered === true || turnPinned',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The watchdog for the defect the two cards above keep coming back to: a card
+    // that renders open has to be closable. It reached the point of passing for a
+    // round while checking nothing at all, because the pairs it compared were both
+    // closed once hover stopped opening cards. The assertion now states its own
+    // premise, so removing the way out has to fail rather than skip.
+    label: 'an open card renders without the click that would close it',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '        onClick: interactive === true ? props.onClick : undefined,',
+    to: '        onClick: undefined,',
     suites: ['test/client.test.mjs'],
   },
   {

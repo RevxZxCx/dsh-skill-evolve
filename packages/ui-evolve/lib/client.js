@@ -52,6 +52,13 @@ window.__ModuleLoader__.load({
     const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
     const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
     const REFRESH_MS = 8000
+    // The stream does not cover everything the panel shows. `pendingCandidates`
+    // counts a queue any session can add to, and the stream only speaks for the
+    // session that owns it, so a candidate proposed elsewhere reaches this panel
+    // through no event at all. A slow poll is the only thing that notices. It is
+    // far cheaper than the eight-second one that came before — one request a
+    // minute against a queue that moves a few times an hour.
+    const IDLE_REFRESH_MS = 60000
     const CARD_WIDTH = 288
 
     /**
@@ -117,6 +124,59 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Subscribe to the session's change stream.
+     *
+     * Returns a teardown function the caller must run on unmount. Everything
+     * here is best-effort by design: a host that does not serve the route, a
+     * browser without `EventSource`, or a stream that dies all leave the panel
+     * working, because the caller keeps its polling timer throughout — at its
+     * fast rate until `onOpen` fires, at its slow rate afterwards.
+     *
+     * The first `panel` event is not treated differently from the rest. The
+     * host publishes when a card-visible fact moves, and each of those is worth
+     * one fetch; de-duplicating them here would just mean a change arriving
+     * during a fetch gets dropped.
+     *
+     * @param {string} sessionId - the session to watch.
+     * @param {{ onChange: () => void, onOpen?: () => void }} handlers - callbacks.
+     * @returns {() => void} teardown.
+     */
+    function openLive(sessionId, handlers) {
+      if (typeof EventSource !== "function" || sessionId === "") return () => {}
+      let source
+      try {
+        source = new EventSource(resolveUrl(`/api/ui-evolve/live?agent=${encodeURIComponent(sessionId)}`))
+      } catch {
+        return () => {}
+      }
+      // The event name is what the server writes in `event:`. Listening for a
+      // named event rather than the default `message` also means the heartbeat
+      // comments never reach a handler at all.
+      source.addEventListener("panel", () => {
+        try {
+          handlers.onChange()
+        } catch {
+          // A throwing callback must not take the stream down with it: losing
+          // the stream costs the panel every later update.
+        }
+      })
+      source.addEventListener("open", () => handlers.onOpen?.())
+      // `EventSource` reconnects on its own after a network drop, so an error
+      // needs no handling here beyond not surfacing it: the panel keeps its last
+      // answer and the caller's timer is still running, either at its fast rate
+      // (never opened) or its slow one (dropped after opening). A stream that is
+      // gone for good is a stale panel within a minute, not a dead one.
+      source.addEventListener("error", () => {})
+      return () => {
+        try {
+          source.close()
+        } catch {
+          // Already closed.
+        }
+      }
+    }
+
+    /**
      * Format a byte count for a file row.
      *
      * @param {number} bytes - the size.
@@ -168,22 +228,24 @@ window.__ModuleLoader__.load({
 .dsse-card[data-clickable="true"]{cursor:pointer}
 .dsse-card[data-clickable="true"]:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
 .dsse-card{flex:0 0 auto;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:11px;box-shadow:0 2px 8px rgba(15,17,21,.04);overflow:hidden}
-.dsse-card-head{display:flex;align-items:baseline;gap:8px;min-height:42px;padding:9px 11px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07))}
+.dsse-card-head{display:flex;align-items:baseline;gap:8px;padding:7px 11px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07))}
 .dsse-card-title{margin:0;font-size:.94em;line-height:1.4;font-weight:600;white-space:nowrap}
 .dsse-card-meta{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:right}
 .dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}
-.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
+.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
 .dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px}
 .dsse-head-stat b{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;font-variant-numeric:tabular-nums}
 .dsse-clip{position:relative;overflow:hidden}
 .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
-.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}
+.dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}
 .dsse-clip[data-expanded="true"] .dsse-text{max-height:none}
 .dsse-card-body{padding:11px}
 .dsse-text{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .dsse-summary-title{margin:0 0 6px;font-size:1em;line-height:1.45;font-weight:500}
 .dsse-muted{color:var(--dsw-alias-label-secondary,#5b6270)}
-.dsse-tiny{font-size:.9em;line-height:1.55}
+.dsse-tiny{font-size:.86em;line-height:1.55}
+.dsse-expand{display:flex;align-items:center;justify-content:center;gap:5px;min-height:26px;padding:3px 10px;border-top:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07));color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);user-select:none;pointer-events:none}
+.dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
 .dsse-row{display:flex;align-items:center;gap:7px;min-width:0;min-height:36px;padding:5px 6px;border-radius:7px}
 .dsse-row:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
@@ -900,7 +962,18 @@ window.__ModuleLoader__.load({
       const originLeft = frame === null ? contentRect.left : contentRect.left - frame.left
       const originTop = frame === null ? contentRect.top : contentRect.top - frame.top
 
+      // Which of the host's three conversation states this is. The same element is
+      // drawn for all three — it is the conversation *body*, not the conversation —
+      // so its presence says nothing about whether someone is looking at a
+      // conversation. `data-content-phase` does: `active` for a real conversation,
+      // `settling` while one is being opened, `hero` for the launcher and the
+      // new-session page. Empty means the attribute is not published, which is a
+      // host whose layout we cannot read; callers must treat that as "unknown"
+      // rather than as one of the three.
+      const phase = content.getAttribute("data-content-phase") ?? ""
+
       return {
+        phase,
         // Relative to the overlay container, which is what absolute positioning
         // inside it uses.
         chatRect: {
@@ -1390,6 +1463,14 @@ window.__ModuleLoader__.load({
       return jsxs('section', {
         className: 'dsse-card',
         'data-clickable': interactive === true ? 'true' : 'false',
+        // Whether the expand hint is on screen. The attribute is what the tests
+        // read and what a future style rule could key on; the hint itself is
+        // mounted and unmounted with `expandHint` above. It does change the card's
+        // height — the hint sits under the summary — and that is accepted rather
+        // than avoided: the alternative was opening the summary on hover, which
+        // moved the text under the pointer by six lines instead of twenty-six
+        // pixels. Owner's call: a hint that appears, over a summary that does not.
+        'data-hint': props.expandHint === undefined ? 'false' : 'true',
         onMouseEnter: props.onMouseEnter,
         onMouseLeave: props.onMouseLeave,
         onClick: interactive === true ? props.onClick : undefined,
@@ -1418,6 +1499,15 @@ window.__ModuleLoader__.load({
             ],
           }),
           jsx('div', { className: 'dsse-card-body', children: props.children }),
+          // The hint is not a control of its own. It marks the whole card as one:
+          // a small button under the summary would be a target a few characters
+          // wide, and the card is already focusable and already handles the click,
+          // so the honest affordance is a label on the card rather than a second
+          // thing to hit. `pointer-events` is off for the same reason — a click on
+          // the label is a click on the card.
+          props.expandHint === undefined
+            ? null
+            : jsx('div', { className: 'dsse-expand', children: props.expandHint }),
         ],
       })
     }
@@ -1530,9 +1620,43 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         load(false)
-        const timer = setInterval(() => load(true), REFRESH_MS)
-        return () => clearInterval(timer)
-      }, [load])
+        // The panel used to poll this route every eight seconds. That was both
+        // slower than the facts (the counts it shows change within a turn) and
+        // busier than they are (a session thinking for two minutes produced
+        // fifteen requests and nothing to show for them).
+        //
+        // The stream carries no payload — just "something moved for this
+        // session" — and the answer is still one `load`. The timer starts at
+        // `REFRESH_MS` because until the stream is open there is nothing else,
+        // and drops to `IDLE_REFRESH_MS` once it is.
+        //
+        // It does not stop. An earlier version cleared it on open and called the
+        // stream the normal path, which left two holes: `EventSource` gives up
+        // for good on a response it cannot use (a 404 while the plugin reloads,
+        // a proxy that strips `text/event-stream`), and the panel would then sit
+        // on stale counts until the session changed; and the candidate queue is
+        // global, so a proposal made in another session never produces an event
+        // here at all. Both are noticed by a timer and by nothing else.
+        let timer = setInterval(() => load(true), REFRESH_MS)
+        const slowDown = () => {
+          if (timer === undefined) return
+          clearInterval(timer)
+          timer = setInterval(() => load(true), IDLE_REFRESH_MS)
+        }
+        const stopPolling = () => {
+          if (timer === undefined) return
+          clearInterval(timer)
+          timer = undefined
+        }
+        const source = openLive(sessionId, {
+          onChange: () => load(true),
+          onOpen: slowDown,
+        })
+        return () => {
+          stopPolling()
+          source()
+        }
+      }, [load, sessionId])
 
       React.useEffect(() => {
         let live = true
@@ -1592,14 +1716,23 @@ window.__ModuleLoader__.load({
       const turnHovered = turnId !== "" && hoverTurn === turnId
       const turnPinned = turnId !== "" && pinnedTurn === turnId
       const turnExpandable = turnId !== "" && clippedTurn === turnId
-      // Expanded is gated on the measurement, not just on a reason to open. Without
-      // that gate the two channels disagree: `turnExpandable` alone decided whether
-      // the card got a click handler, so any stale reason for being open produced a
-      // card that rendered open and offered nothing to close it with. Requiring the
-      // measurement makes "open implies closable" hold by construction rather than by
-      // every write path staying correct. A card with nothing hidden loses nothing:
-      // expanding it would not have revealed anything.
-      const expanded = turnExpandable === true && (turnHovered === true || turnPinned)
+      // Only the click opens the card now. Pointing at it used to open it, which
+      // made the card jump in height whenever the pointer crossed the column —
+      // motion the reader did not ask for and could not stop without moving away.
+      // Hover now offers instead of acting: it reveals a label on the card, and the
+      // card still has to be clicked.
+      //
+      // Expanded is still gated on the measurement, not just on the click. Without
+      // that gate the two channels disagree: `turnExpandable` alone decides whether
+      // the card gets a click handler, so any stale reason for being open would
+      // produce a card that rendered open and offered nothing to close it with.
+      // Requiring the measurement makes "open implies closable" hold by construction
+      // rather than by every write path staying correct. A card with nothing hidden
+      // loses nothing: expanding it would not have revealed anything.
+      const expanded = turnExpandable === true && turnPinned === true
+      // The hint exists only where it would lead somewhere: over a card with
+      // something hidden, while that card is still closed.
+      const turnHinted = turnExpandable === true && turnPinned === false && turnHovered === true
 
       const data = state.status === "ready" ? state.data : undefined
       const summary = data?.summary
@@ -1754,10 +1887,37 @@ window.__ModuleLoader__.load({
       // would leave those decisions reachable only through the slash command.
       const hasAnyCard = showTurn || showActivity || showFiles || pendingCandidates > 0
 
-      // Nothing to show and nothing wrong: draw nothing at all, chrome included.
-      // Leaving the three header buttons floating over an empty rail was the
-      // reported bug — an empty panel still looked like a panel.
-      if (hasAnyCard === false && error === '') return settings
+      // Nothing to show and nothing wrong: draw a single line saying so while the
+      // answer is still on its way, and nothing at all once it has arrived and the
+      // session genuinely produced nothing.
+      //
+      // This is narrower than the "loading counts as content" rule that was removed
+      // earlier. That one drew a whole column of empty cards around a "reading…"
+      // line, and the column then vanished a moment later — the flash that reads as
+      // a glitch. One line, in a rail that would otherwise be blank, has nothing to
+      // flash away from: opening the panel on a session that has not answered yet
+      // currently shows a stranger nothing at all, and the difference between "still
+      // reading" and "this conversation has done nothing" is worth one line.
+      const stillLoading = data === undefined
+      if (hasAnyCard === false && error === '') {
+        return stillLoading === false
+          ? settings
+          : jsxs('div', {
+              className: 'dsse-rail',
+              'data-dsse-rail': '1',
+              'data-side': props.place.side,
+              style: {
+                left: `${props.place.left}px`,
+                top: `${props.place.top}px`,
+                width: `${props.place.width}px`,
+                height: `${props.place.height}px`,
+              },
+              children: [
+                jsx('p', { className: 'dsse-loading', role: 'status', children: '正在加载…' }),
+                settings,
+              ],
+            })
+      }
 
       return jsxs('div', {
         className: 'dsse-rail',
@@ -1820,6 +1980,12 @@ window.__ModuleLoader__.load({
                 onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),
                 expanded,
                 clickable: turnExpandable,
+                // One wording, because there is only one reachable case: `turnHinted`
+                // requires `turnPinned === false` and `expanded` requires it true, so
+                // the two can never hold at once. An open card shows no hint at all —
+                // the owner asked for an offer to open, and a card that closes on the
+                // next click does not need to be told so while the pointer is on it.
+                expandHint: turnHinted === true ? '点击展开全文' : undefined,
                 head: jsxs('div', {
                   className: 'dsse-head-stats',
                   children: [
@@ -1941,7 +2107,7 @@ window.__ModuleLoader__.load({
           side: bridge.side,
           cardWidth: CARD_WIDTH,
         })
-        setPlace(next)
+        setPlace({ ...next, phase: geometry.phase })
         setHandle(placeHandle({ chatRect: geometry.chatRect, columnRect: geometry.columnRect, side: next.side }))
       }, [])
 
@@ -1972,6 +2138,27 @@ window.__ModuleLoader__.load({
         const onResize = () => remeasure()
         if (typeof window !== "undefined") window.addEventListener("resize", onResize)
 
+        // The host publishes which page it is on as an attribute of the
+        // conversation body, and that value decides whether the cards are drawn
+        // at all. `ResizeObserver` cannot see it: the same element stays mounted
+        // across the launcher, a settling conversation and a live one, and the
+        // three phases only restyle its children — so switching pages can change
+        // the attribute without changing the element's size. Without a listener
+        // for it, a session that became a conversation would stay hidden until
+        // something unrelated moved.
+        //
+        // Attributes only. A `childList` observer here would fire on every
+        // streamed token, which is the one thing this overlay must not pay for.
+        let phaseObserver = null
+        if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
+          phaseObserver = new MutationObserver(() => remeasure())
+          phaseObserver.observe(document.documentElement, {
+            attributes: true,
+            attributeFilter: ["data-content-phase"],
+            subtree: true,
+          })
+        }
+
         // The conversation can appear after this mounts (launcher -> session),
         // and `ResizeObserver` cannot watch an element that did not exist yet.
         // A slow poll is the cheap, boring answer; it costs one layout read per
@@ -1997,6 +2184,7 @@ window.__ModuleLoader__.load({
 
         return () => {
           if (observer !== null) observer.disconnect()
+          if (phaseObserver !== null) phaseObserver.disconnect()
           if (typeof window !== "undefined") window.removeEventListener("resize", onResize)
           if (timer !== null) clearInterval(timer)
         }
@@ -2008,6 +2196,17 @@ window.__ModuleLoader__.load({
       }, [remeasure, place.side])
 
       if (bridge.open !== true || bridge.sessionId === "") return null
+
+      // The overlay is mounted at the shell, so it is on screen on every page the
+      // host has, not only on a conversation. The conversation *body* element is
+      // drawn for all of them, which is why asking for it was not enough: on the
+      // launcher and the new-session page it is there, empty, and the cards floated
+      // over it. `phase` is the host's own answer, so the cards follow the page
+      // rather than guessing from the DOM. An unpublished phase is a host we cannot
+      // read; the cards stay, because hiding them on a version that does publish
+      // nothing would remove the feature entirely.
+      const phase = place.phase ?? ""
+      if (phase === "hero") return null
 
       if (bridge.collapsed === true || place.visible === false) {
         if (handle.visible === false) return jsx("div", { ref: hostRef, style: { display: "none" } })

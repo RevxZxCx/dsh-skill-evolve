@@ -14,9 +14,9 @@ cleanup rules.
 
 It is the presentation half of the `dsh-evolve` suite. It reads the session and
 never writes to the skill directory; when the skill half is installed it also
-offers a **Suggest** button that opens the candidate queue, because
+draws the **建议** entry in its header, which opens the candidate queue, because
 `@revxz/dsh-skill-evolve` publishes that queue as a service and this package only
-consumes it. Without that service the button is absent, not broken.
+consumes it. Without that service the entry is absent, not broken.
 
 ## Install
 
@@ -56,8 +56,15 @@ Five keys, all optional. They are the panel's own; the detection settings live i
 ## The routes
 
 The panel talks to the host over a prefix route registered at
-`/api/ui-evolve`: `GET /panel`, `GET /models`, `GET|POST /config`,
-`GET|POST /candidates`, `POST /propose`.
+`/api/ui-evolve`: `GET|HEAD /panel`, `GET /models`, `GET|POST /config`,
+`GET|POST /candidates`, `POST /propose`, and `GET /live` — a server-sent event
+stream that reports *that* a conversation changed, never what the change was.
+
+Every route answers `HEAD` with a body-less 200, `/live` included. It has to be
+its own branch rather than falling through: `HEAD` reaching the stream handler
+would write SSE headers, register a subscription, and start a heartbeat on a
+response that nobody is going to read to the end, leaking one subscription per
+health check. So `GET` takes the stream and `HEAD` answers the probe.
 
 The browser side and the host side cannot share a constant — `lib/client.js` is a
 hand-written bundle with no `import` and no build step — so the prefix appears as a
@@ -203,10 +210,11 @@ Three modules, top to bottom:
    path the host supports — the model calling the `skill` tool, and a person
    typing `/name` — but the two paths are not interchangeable. The host refuses
    a gesture at a skill whose `userInvocable` is false and injects nothing, so
-   that gesture is not a load and is not listed. Each row that looks like a
-   reusable procedure has a **propose** action: it opens a new conversation
-   pre-filled with the steps, so the skill is drafted with a full context rather
-   than from a one-line prompt.
+   that gesture is not a load and is not listed. Rows are read-only: a skill row
+   used to carry a **propose** action that opened a new conversation pre-filled
+   with the steps, and it was removed along with the header's propose button —
+   drafting the next turn is not what a person is doing while reading the card.
+   The route it called (`POST /propose`) remains part of the service contract.
 3. **Produced files.** Files this conversation wrote, newest first, with the
    added and removed line counts. Sourced from the same turn transcript the
    other two modules read, so all three agree on which turn they describe.
@@ -235,9 +243,25 @@ in that skips both.
 The three cards stay visible together: **Last turn**, **Skills and MCP**, and
 **Produced files**. A card with no content is hidden rather than drawn empty, and
 if none of the three has anything to say the rail hides entirely — header row
-included, because an empty panel with buttons on it still looks like a panel.
+included, because an empty panel with buttons on it still looks like a panel. The
+one thing that counts as content without being one of the three cards is a
+non-empty candidate queue: a session whose cards are all empty but whose queue
+holds work still draws the header, because that button is the panel's only way
+into the review dialog.
 Skills and MCP servers share one list ordered by most recent use on a single
 recency clock, with a different icon per type.
+
+There is one exception to that hiding, and it is a line rather than a column: while
+the first answer for a session has not arrived, the rail draws **正在加载…**. The
+history here is worth keeping. An earlier version drew a full column of empty cards
+plus a "reading…" label and then replaced all of it, which reads as a flicker; the
+correction after that drew *nothing at all* until the data landed, which goes too
+far in the other direction — the panel simply is not there, and a person cannot tell
+loading from empty. The narrow version keeps the answer honest: one line, only in
+the slot where an empty panel would otherwise be, and gone the moment the answer
+arrives. The distinction it relies on is `data === undefined` versus a data object
+with nothing in it: "has not answered" and "answered, and the answer is empty" are
+different states and must not share a rendering.
 
 The header row is ordered **refresh, settings, review**. The review entry is
 labelled with the word 建议 rather than an icon, and it carries the pending count
@@ -251,27 +275,45 @@ three bare buttons floating over the conversation.
 The last-turn card carries its counts in the header, not in a strip below the
 text: calls, commands, and files as labelled numbers, aligned on the title's
 baseline so the row reads as one line rather than two that happen to sit at the
-same height. The stats sit beside the title, not against the right edge — they
-qualify the title, so they belong to it. The header carries no action button. It
-used to hold a **propose** button that wrote a hint into the conversation; it was
-removed because the hint is not something a person reaches for while reading the
-card, and a button nobody presses is a button that steals width from the counts.
+same height. The stats sit against the right edge — they are a readout about the
+card, not a continuation of its title, and pushing them out leaves the title free
+to use the width it has. This reverses an earlier version that kept them beside
+the title; seeing the card in use settled it in favour of the edge. The header
+carries no action button. It used to hold a **propose** button that wrote a hint
+into the conversation; it was removed because the hint is not something a person
+reaches for while reading the card, and a button nobody presses is a button that
+steals width from the counts.
 
-The summary below the header is capped at five lines (7.75em, against a 1.55em
-line box) and fades out when — and only when — there is more text than the cap
-shows. Five rather than three: at three, a summary that had found something to say
-was usually cut mid-thought, and the card is the only place that summary is
-readable.
+The header has no fixed height. It had one once, `min-height: 42px`, sized for
+that propose button; when the button went the height stayed, and the title row —
+which is one line of text — sat above roughly 40px of nothing. Three cards share
+one `Card` component, so the leftover was in all three at once. Height now comes
+from the content: one line plus 7px of padding on each side.
 
-The cap lifts for two independent reasons. Hovering the card opens it and moving
-away closes it. Clicking pins it open until it is clicked again. They are tracked
-as two booleans, not one: the card reads `hover || pinned`, the pointer only ever
-writes `hover`, and the click only ever writes `pinned`. A single shared boolean
-collapses under the obvious gesture — hovering to read, then clicking, then moving
-the pointer away — because the click and the pointer would be writing the same
-slot, and the card would shut under the pointer that was still there. A card with
-nothing hidden does not offer the interaction at all: no pointer cursor, no tab
-stop, no `role="button"`.
+The summary below the header is capped at six lines (9.3em, against a 1.55em line
+box) at 0.86em, and fades out when — and only when — there is more text than the
+cap shows. The cap has been three lines, then five; five was still cutting
+mid-thought often enough to matter, and six fits a typical turn's closing
+paragraph. Smaller type is what pays for the extra line: the card sits beside the
+conversation and should read as annotation, not as a second column of prose.
+
+The cap lifts for exactly one reason: a click. Hovering does not open the card —
+it reveals a centred line below the summary that says what a click will do
+(`点击展开全文`), and clicking anywhere on the card opens it until it is clicked
+again. The hint is not a button of its own: it is a `div` with
+`pointer-events: none`, so a click on the hint is a click on the card beneath it,
+and the whole card is the target. Making it a real button would have meant a
+second thing to focus, a second click handler, and a second accessible name for
+what is really just a line of text explaining the card.
+
+That costs one deliberate trade. The hint is mounted and unmounted as the pointer
+enters and leaves, so the card grows by 26px on hover. The alternatives are worse:
+floating the hint over the text hides the line the person is reading, and lifting
+the cap on hover — which is what this used to do — pushes the text six lines down
+under the pointer. 26px is the cheaper surprise.
+
+A card with nothing hidden does not offer the interaction at all: no pointer
+cursor, no hint, no tab stop, no `role="button"`.
 
 The fade is measured, not assumed. A `Clip` component compares `scrollHeight`
 against `clientHeight` in a layout effect and sets `data-clipped` on the result;
@@ -320,14 +362,61 @@ graph is rebuilt, and editing `package.json` does not trigger that. If the panel
 does not appear after restarting, the Plugins page names the reason per entry.
 
 **What it cannot do, on purpose.** Every number in the cards comes from the host
-route. The client holds no copy of the transcript and re-reads `/panel` on open and
-on a timer, so the three modules always describe the same turn. A failed background
-refresh keeps the last good cards visible beside the error instead of replacing
-them with an empty panel — and a *manual* refresh keeps them too: the loading state
-belongs to a session whose answer has never arrived, not to a reload of an answer
-already on screen. Dropping the payload there emptied the whole rail for the length
-of the request, and an open settings dialog went with it. The rail still uses measured geometry: `measure()` falls
+route. The client holds no copy of the transcript; it re-reads `/panel` when the
+stream says the conversation changed, on open, and on a slow timer. A failed
+background refresh keeps the last good cards visible beside the error instead of
+replacing them with an empty panel — and a *manual* refresh keeps them too: the
+loading state belongs to a session whose answer has never arrived, not to a reload
+of an answer already on screen. Dropping the payload there emptied the whole rail
+for the length of the request, and an open settings dialog went with it. The rail
+still uses measured geometry: `measure()` falls
 back to the documented clamp formula when the host does not publish a width, and
 the placement function reports `no-room` rather than overlapping the text. On a
 narrow window the cards disappear and the handle remains, because a panel that
 cannot fit should not squeeze the thing it is annotating.
+
+### When the panel is shown, and how it learns
+
+**Only in a conversation.** The host renders `[data-conversation-content]` on
+*every* page — the conversation, the settling state while one opens, and the
+launcher for a new one — so "I found the conversation body" says nothing about
+which page this is. The same element carries `data-content-phase`, which the host
+sets to `active`, `settling`, or `hero`. The overlay reads that attribute during
+every measurement and draws nothing when it is `hero`.
+
+A missing attribute keeps the cards. The check is `phase === "hero"`, not
+`phase !== "active"`, and that asymmetry is deliberate: a host older than this
+plugin does not publish the attribute at all, and for that host the honest answer
+is to behave as it did before rather than to silently remove the panel everywhere.
+
+Sizes are watched with a `ResizeObserver`, but the phase is not a size — the host's
+three variants change the styles of children, not necessarily the rectangle of
+the element that carries the attribute. So a `MutationObserver` watches
+`documentElement` for attribute changes filtered to `data-content-phase`, and a
+change triggers one re-measurement. It filters on attributes alone: a `childList`
+observer on the conversation would fire once per streamed token, which is the one
+cost this overlay cannot pay.
+
+**Real time, with a fallback that does not retire.** The panel learns about
+changes from `GET /api/ui-evolve/live`, an `EventSource` stream of named `panel`
+events. The stream carries no payload — it says *that* this conversation changed,
+and the client answers by calling `/panel`, so there is only one place that
+decides what the panel looks like. The server publishes after each event the panel
+actually draws from (`transcript.record` returns a boolean for exactly this), so a
+token-count event wakes nobody.
+
+Polling is not removed when the stream opens; it is slowed from 8 seconds to 60.
+Two reasons, and the second one is the less obvious:
+
+- `EventSource` reconnects after a network fault, but **not** after a response it
+  deems unusable — a 404, or a body whose type is not `text/event-stream`. While
+  the plugin is being reloaded the route is briefly absent, and a stream that gives
+  up there would leave the panel frozen for as long as the conversation stays open.
+- Even a healthy stream does not cover everything. The server publishes on *this
+  session's* events, while the pending-candidate count in the panel is read from a
+  **global** queue. Another conversation, or a slash command run elsewhere, adds a
+  candidate and this session's stream says nothing about it.
+
+So the timer is a fallback that keeps its own coverage, not a backup of the stream.
+Its 60 seconds are a floor on how stale an unrelated change can get, and that is
+the constant to raise or lower — not the stream to trust harder.

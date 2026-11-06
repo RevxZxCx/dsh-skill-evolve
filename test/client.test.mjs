@@ -472,10 +472,22 @@ function boot(options) {
   }
 
   const code = rect === null ? null : {}
+  // A host changes page in place, without a navigation: the launcher sends its
+  // first message and the same document becomes a conversation. So the phase is
+  // mutable here and `setPhase` flips it, rather than being baked in at boot —
+  // a constant could only ever describe the first moment of the page's life.
+  let phaseValue = settings.phase
   const conversation =
     rect === null ? null : {
       getBoundingClientRect: () => ({ ...rect }),
       offsetWidth: rect.width,
+      // The host publishes which of its three pages this is on the conversation
+      // body. The fixture defaults to a real conversation, which is what most
+      // suites are describing; a suite that cares about the launcher passes
+      // `phase: 'hero'` or `phase: 'settling'`, and `phase: null` is a host that
+      // does not publish the attribute at all.
+      getAttribute: (name) => (name === 'data-content-phase' ? (phaseValue === null ? null : (phaseValue ?? 'active')) : null),
+      setPhase: (next) => { phaseValue = next },
       querySelector: (selector) => (selector === 'code, pre' ? code : null),
     }
 
@@ -584,6 +596,32 @@ function boot(options) {
     }
   }
 
+  // `EventSource` is injected rather than left global for the same reason the
+  // timers are: the live stream is only real in a browser, and a global that
+  // does not exist would send every suite down the polling fallback without
+  // saying so. Each instance records the handlers it was given, so a fixture can
+  // open the stream, publish a change and close it by hand.
+  const eventSources = []
+  class EventSourceStub {
+    constructor(url) {
+      this.url = url
+      this.closed = false
+      this.handlers = new Map()
+      eventSources.push(this)
+    }
+    addEventListener(name, handler) {
+      const list = this.handlers.get(name) ?? []
+      list.push(handler)
+      this.handlers.set(name, list)
+    }
+    close() {
+      this.closed = true
+    }
+    fire(name) {
+      for (const handler of this.handlers.get(name) ?? []) handler({ type: name })
+    }
+  }
+
   // The overlay spans the frame, so its width is the window's — not the
   // conversation column's. Tests that describe a narrow window must narrow both.
   const frame = settings.frame ?? { left: 0, top: 0, width: 1920, height: 1000 }
@@ -610,23 +648,34 @@ function boot(options) {
     'setTimeout',
     'clearTimeout',
     'MutationObserver',
+    'EventSource',
     source,
   )
-  // A fixed pair of interval stubs: the cards poll, and a real interval would keep
-  // the test process alive after it has finished asserting.
-  //
   // `setTimeout` is injected rather than left global because the hover grace
   // period is a real close delay: with the global timer and assertions that only
   // await microtasks, the deferred close never runs and every assertion about it
   // passes whether or not the code schedules anything. Fixtures either drive
   // these by hand or wait on the real clock.
+  //
+  // `setInterval` gets the same treatment, and for a second reason: the panel
+  // now retires its fallback poll when the live stream opens, and "the poll
+  // stopped" is only observable if the stub kept a handle to clear. A stub that
+  // returned a constant proved nothing about either the poll or its retirement.
   evaluate(
     windowStub,
     documentStub,
     fetchStub,
     computed,
-    () => 0,
-    () => {},
+    (fn, ms) => {
+      const handle = (settings.setInterval ?? setInterval)(fn, ms)
+      timers.push({ fn, ms, handle, cleared: false })
+      return handle
+    },
+    (handle) => {
+      const row = timers.find((entry) => entry.handle === handle)
+      if (row !== undefined) row.cleared = true
+      ;(settings.clearInterval ?? clearInterval)(handle)
+    },
     (fn, ms) => {
       // Recorded so a fixture can assert on the delay the bundle asked for, and
       // so a test can fire the callback itself instead of waiting on the clock.
@@ -640,6 +689,7 @@ function boot(options) {
       ;(settings.clearTimeout ?? clearTimeout)(handle)
     },
     MutationObserverStub,
+    settings.eventSource === false ? undefined : EventSourceStub,
   )
 
   const module = captured.factory(moduleTable)
@@ -658,7 +708,9 @@ function boot(options) {
     hostStyle,
     hostWrites,
     mutationObservers,
+    eventSources,
     document: documentStub,
+    conversation,
     captured,
     renderer,
     seat(name) {
@@ -1314,7 +1366,18 @@ check(
   check('open before teardown', (await instance.renderer.deepRender(cards)) !== null)
   for (const dispose of disposers) dispose()
   check('teardown closes the cards', (await instance.renderer.deepRender(cards)) === null)
-  check('teardown disconnects typography observers', instance.mutationObservers.every((observer) => observer.disconnected), JSON.stringify(instance.mutationObservers.map((observer) => observer.disconnected)))
+  const phaseObservers = instance.mutationObservers.filter((observer) =>
+    observer.targets.some((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase')))
+  const typographyObservers = instance.mutationObservers.filter((observer) => phaseObservers.includes(observer) === false)
+  check('teardown disconnects typography observers', typographyObservers.length > 0 && typographyObservers.every((observer) => observer.disconnected), JSON.stringify(typographyObservers.map((observer) => observer.disconnected)))
+  // The phase observer belongs to the overlay's own React effect, so it outlives
+  // the service teardown above by design and is released when the overlay
+  // unmounts. Two observers with two lifespans cannot share one assertion:
+  // asking `every` here reported "the typography observer leaked" about a
+  // component that was still mounted, which is the wrong sentence for the
+  // failure — and it also meant nothing tested the unmount path.
+  instance.renderer.unmount()
+  check('unmounting disconnects every observer the overlay opened', instance.mutationObservers.every((observer) => observer.disconnected), JSON.stringify(instance.mutationObservers.map((observer) => observer.disconnected)))
   check('teardown removes host typography variables', instance.hostStyle.size === 0, JSON.stringify([...instance.hostStyle.entries()]))
 }
 
@@ -1952,8 +2015,15 @@ function byAction(node, action) {
 //
 // The reported bug: while a session was still being read, the panel drew its
 // cards with placeholder text ("reading…") and then hid them a moment later, so
-// switching to an empty session looked like a glitch. Nothing has to be drawn
-// while the answer is in flight — the cards appear when it lands.
+// switching to an empty session looked like a glitch.
+//
+// The fix then was to draw nothing at all while the answer was in flight. That
+// went too far the other way: opening the panel on a session that had not
+// answered yet showed a stranger a blank column with no explanation, and "still
+// reading" is not the same fact as "this conversation has done nothing". The
+// narrow answer is one line, not one column: the loading line appears, the cards
+// and the header buttons do not, so there is nothing to flash away from when the
+// answer lands.
 // ---------------------------------------------------------------------------
 
 {
@@ -1976,11 +2046,9 @@ function byAction(node, action) {
 
   await instance.renderer.render(toggle, { sessionId: 'empty-session' })
   const during = await instance.renderer.deepRender(cards)
-  const duringHollow = during === null || (byClass(during, 'dsse-rail').length === 0 && byClass(during, 'dsse-card').length === 0)
-  check('a session still being read leaves only an empty wrapper', duringHollow, JSON.stringify(during === null ? null : during.props?.style))
+  check('a session still being read says so', textOf(during).includes('正在加载'), textOf(during).slice(0, 140))
   check('a session still being read draws no cards at all', byClass(during, 'dsse-card').length === 0, String(byClass(during, 'dsse-card').length))
   check('and it does not draw the header buttons over nothing', firstByClass(during, 'dsse-refresh') === undefined, textOf(during).slice(0, 120))
-  check('no loading placeholder is shown while it waits', textOf(during).includes('正在读取') === false, textOf(during).slice(0, 140))
 
   slowEmpty.resolve({ ok: true, data: {
     turn: 0, calls: 0, failed: 0, summary: { reason: 'no completed turn yet' }, pendingCandidates: 0,
@@ -1989,6 +2057,7 @@ function byAction(node, action) {
   await settle()
   const after = await instance.renderer.deepRender(cards)
   check('an empty session stays empty once the answer lands', byClass(after, 'dsse-card').length === 0, String(byClass(after, 'dsse-card').length))
+  check('and the loading line goes when the answer lands', textOf(after).includes('正在加载') === false, textOf(after).slice(0, 140))
   check('and it reveals no chrome afterwards either', firstByClass(after, 'dsse-refresh') === undefined, textOf(after).slice(0, 120))
 }
 
@@ -2125,23 +2194,45 @@ function byAction(node, action) {
   check('and it is reachable from the keyboard', turnCard(begin)?.props?.tabIndex === 0 && turnCard(begin)?.props?.role === 'button', JSON.stringify([turnCard(begin)?.props?.tabIndex, turnCard(begin)?.props?.role]))
   check('a collapsed card says it is not expanded', turnCard(begin)?.props?.['aria-expanded'] === false, String(turnCard(begin)?.props?.['aria-expanded']))
 
-  // Hover opens it.
+  // Hovering offers, it does not open. Pointing at the card used to open it, which
+  // moved the text under the pointer — motion the reader did not ask for and could
+  // not stop without moving away. The pointer now only reveals a label saying the
+  // card can be opened, and the card still has to be clicked.
   turnCard(begin).props.onMouseEnter()
   const hovered = await instance.renderer.deepRender(cards)
-  check('hovering opens a clipped summary', expandedOf(hovered) === 'true', textOf(hovered).slice(0, 120))
-  check('an open summary keeps its measurement', firstByClass(hovered, 'dsse-clip')?.props?.['data-clipped'] === 'true', 'the measurement should survive the expansion')
-  check('an open summary draws no fade', firstByClass(hovered, 'dsse-clip')?.props?.['data-expanded'] === 'true', 'the fade is gated on data-expanded, so that is what says whether it is drawn')
-  check('and it reports itself expanded', turnCard(hovered)?.props?.['aria-expanded'] === true, String(turnCard(hovered)?.props?.['aria-expanded']))
+  check('hovering a clipped summary does not open it', expandedOf(hovered) === 'false', textOf(hovered).slice(0, 120))
+  check('hovering offers to open it', turnCard(hovered)?.props?.['data-hint'] === 'true', String(turnCard(hovered)?.props?.['data-hint']))
+  check('and the offer says what the click will do', textOf(hovered).includes('点击展开全文'), textOf(hovered).slice(-80))
+  check('a hovered card still reports itself closed', turnCard(hovered)?.props?.['aria-expanded'] === false, String(turnCard(hovered)?.props?.['aria-expanded']))
 
-  // Clicking while hovering pins it: the click is its own reason, so the pointer
-  // leaving must not close it. This is the case a single shared boolean gets wrong.
-  press(hovered)
-  const pinned = await instance.renderer.deepRender(cards)
-  check('clicking while hovering keeps it open', expandedOf(pinned) === 'true', textOf(pinned).slice(0, 120))
-  turnCard(pinned).props.onMouseLeave()
+  // Leaving takes the offer away with it, and only the offer: being able to open
+  // the card is a fact about the text, not about the pointer. A card that lost
+  // its `data-clickable` here would be the "open with no way out" defect wearing
+  // a different hat — the pointer is not even over it any more.
+  turnCard(hovered).props.onMouseLeave()
+  const left = await instance.renderer.deepRender(cards)
+  check('leaving the card withdraws the offer', turnCard(left)?.props?.['data-hint'] === 'false', String(turnCard(left)?.props?.['data-hint']))
+  check('and the card can still be opened', turnCard(left)?.props?.['data-clickable'] === 'true', String(turnCard(left)?.props?.['data-clickable']))
+
+  // Point at it again so the click below happens on a hovered card, which is the
+  // arrangement whose two reasons must stay independent.
+  turnCard(left).props.onMouseEnter()
+  const rehovered = await instance.renderer.deepRender(cards)
+
+  // The click is what opens it.
+  press(rehovered)
+  const opened = await instance.renderer.deepRender(cards)
+  check('clicking a clipped summary opens it', expandedOf(opened) === 'true', textOf(opened).slice(0, 120))
+  check('an open summary keeps its measurement', firstByClass(opened, 'dsse-clip')?.props?.['data-clipped'] === 'true', 'the measurement should survive the expansion')
+  check('an open summary draws no fade', firstByClass(opened, 'dsse-clip')?.props?.['data-expanded'] === 'true', 'the fade is gated on data-expanded, so that is what says whether it is drawn')
+  check('and it reports itself expanded', turnCard(opened)?.props?.['aria-expanded'] === true, String(turnCard(opened)?.props?.['aria-expanded']))
+
+  // The pointer leaving must not close a card that was clicked open: the click is
+  // its own reason for being open, and this is the case a single shared boolean
+  // gets wrong.
+  turnCard(opened).props.onMouseLeave()
   const stillPinned = await instance.renderer.deepRender(cards)
   check('the pointer leaving does not close a clicked card', expandedOf(stillPinned) === 'true', textOf(stillPinned).slice(0, 120))
-
   // Still a toggle while it is open. The clip deliberately stops measuring once
   // the cap is lifted — a re-measure there would read "nothing hidden" and take the
   // card's interactivity away from under the person using it.
@@ -2322,17 +2413,31 @@ function byAction(node, action) {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
+  // A suite that throws prints no FAIL line, and the mutation runner counts FAIL
+  // lines, so an unguarded call turns every mutation that removes the handler into
+  // a phantom survivor. The guard keeps the failure visible as a FAIL.
+  const press = (tree) => {
+    const handler = turnCard(tree)?.props?.onClick
+    check('the card answers a click', typeof handler === 'function', String(typeof handler))
+    if (typeof handler !== 'function') return false
+    handler()
+    return true
+  }
 
   const collapsed = await settle()
   check('the capped summary measures as clipped', clipOf(collapsed)?.props?.['data-clipped'] === 'true', String(clipOf(collapsed)?.props?.['data-clipped']))
 
-  // Opening lifts the cap, which is what makes the box stop overflowing.
+  // Opening lifts the cap, which is what makes the box stop overflowing. The order
+  // matters: while the cap is still on the box overflows, so the card is expandable;
+  // the uncapping is a consequence of opening, not a precondition. Doing it first
+  // would let a fresh measurement report "nothing hidden" and take the click away
+  // before there was anything to click.
+  check('the card answers a click before it is opened', press(collapsed) === true, 'the collapsed card had no handler')
   capped = false
-  turnCard(collapsed).props.onMouseEnter()
-  const opened = await settle()
-  check('opening the card keeps its clipped reading', clipOf(opened)?.props?.['data-clipped'] === 'true', String(clipOf(opened)?.props?.['data-clipped']))
-  check('opening the card keeps it clickable', turnCard(opened)?.props?.['data-clickable'] === 'true', String(turnCard(opened)?.props?.['data-clickable']))
-  check('opening the card keeps its expanded report', turnCard(opened)?.props?.['aria-expanded'] === true, String(turnCard(opened)?.props?.['aria-expanded']))
+  const lifted = await settle()
+  check('opening the card keeps its clipped reading', clipOf(lifted)?.props?.['data-clipped'] === 'true', String(clipOf(lifted)?.props?.['data-clipped']))
+  check('opening the card keeps it clickable', turnCard(lifted)?.props?.['data-clickable'] === 'true', String(turnCard(lifted)?.props?.['data-clickable']))
+  check('opening the card keeps its expanded report', turnCard(lifted)?.props?.['aria-expanded'] === true, String(turnCard(lifted)?.props?.['aria-expanded']))
 
   // Closing restores the cap, and with it the measurement starts running again.
   //
@@ -2343,7 +2448,7 @@ function byAction(node, action) {
   // actually re-runs the comparison can report 'false'.
   capped = true
   shrink = true
-  turnCard(opened).props.onMouseLeave()
+  press(lifted)
   const closed = await settle()
   check('closing the card measures it again', clipOf(closed)?.props?.['data-clipped'] === 'false', String(clipOf(closed)?.props?.['data-clipped']))
   check('and it collapses', clipOf(closed)?.props?.['data-expanded'] === 'false', String(clipOf(closed)?.props?.['data-expanded']))
@@ -2617,12 +2722,14 @@ function byAction(node, action) {
   // into a turn whose summary fits.
   cardOf(begin)?.props?.onMouseEnter?.()
   const hovered = await settleInto()
-  check('hovering opens the card', clipOf(hovered)?.props?.['data-expanded'] === 'true', String(clipOf(hovered)?.props?.['data-expanded']))
+  check('hovering the card offers the click', cardOf(hovered)?.props?.['data-hint'] === 'true', String(cardOf(hovered)?.props?.['data-hint']))
+  check('and it does not open it', clipOf(hovered)?.props?.['data-expanded'] === 'false', String(clipOf(hovered)?.props?.['data-expanded']))
 
   turn = 8
   text = 'ALSO LONG'
   firstByClass(hovered, 'dsse-refresh').props.onClick()
   const swapped = await settleInto()
+  check('a hover that outlived its turn does not offer the next card', cardOf(swapped)?.props?.['data-hint'] === 'false', String(cardOf(swapped)?.props?.['data-hint']))
   check('a hover that outlived its turn does not open the next card', clipOf(swapped)?.props?.['data-expanded'] === 'false', String(clipOf(swapped)?.props?.['data-expanded']))
   // The card must still offer the click, or the assertion above would be answered by
   // "there was nothing to open" instead of by the hover tag.
@@ -2633,14 +2740,32 @@ function byAction(node, action) {
   // closed", because the way this went wrong was an open card with no way out —
   // `aria-expanded` true while `data-clickable`, the tab stop, the role and the click
   // handler were all absent.
+  //
+  // These pairs used to be read straight off trees that a hover had opened. Hover
+  // no longer opens anything — only a click does — so a pair built the old way
+  // would compare two closed cards and silently check nothing at all, which is
+  // what it did for one round. The premise is now asserted instead of skipped:
+  // if the interaction is redesigned again, an open card nobody can close has to
+  // fail here rather than quietly leave nothing to look at.
+  const pressCard = (tree, when) => {
+    const handler = cardOf(tree)?.props?.onClick
+    check(`a card answers a click ${when}`, typeof handler === 'function', String(typeof handler))
+    if (typeof handler === 'function') handler()
+  }
+
+  pressCard(swapped, 'while its summary is too tall for the box')
+  const opened = await settleInto()
+  cardOf(opened)?.props?.onMouseLeave?.()
+  const leftOpen = await settleInto()
+
   const openPairs = [
-    ['after the turn changed', swapped],
-    ['after pointing at it', await (async () => { cardOf(swapped)?.props?.onMouseEnter?.(); return settleInto() })()],
+    ['after a click', opened],
+    ['after the pointer left it again', leftOpen],
   ]
   for (const [when, tree] of openPairs) {
     const clip = clipOf(tree)
     const card = cardOf(tree)
-    if (clip?.props?.['data-expanded'] !== 'true') continue
+    check(`a card that renders open ${when} says it is open`, clip?.props?.['data-expanded'] === 'true', String(clip?.props?.['data-expanded']))
     check(`an open card can be closed ${when}`, card?.props?.['data-clickable'] === 'true' && card?.props?.tabIndex === 0 && card?.props?.role === 'button' && typeof card?.props?.onClick === 'function', `${String(card?.props?.['data-clickable'])}/${String(card?.props?.tabIndex)}/${String(card?.props?.role)}/${typeof card?.props?.onClick}`)
   }
 }
@@ -2696,32 +2821,47 @@ function byAction(node, action) {
   check('the first conversation has more to show than the box holds', clipOf(begin)?.props?.['data-clipped'] === 'true', String(clipOf(begin)?.props?.['data-clipped']))
   cardOf(begin)?.props?.onMouseEnter?.()
   const hovered = await settle()
-  check('and pointing at it opens it', clipOf(hovered)?.props?.['data-expanded'] === 'true', String(clipOf(hovered)?.props?.['data-expanded']))
+  check('and pointing at it offers the click', cardOf(hovered)?.props?.['data-hint'] === 'true', String(cardOf(hovered)?.props?.['data-hint']))
 
   // The next conversation is also on turn 7, and its summary fits.
   overflow = 300
   await instance.renderer.render(toggle, { sessionId: 'session-b' })
   const switched = await settle()
+  check('a tag from one conversation does not offer a card in the next', cardOf(switched)?.props?.['data-hint'] === 'false', String(cardOf(switched)?.props?.['data-hint']))
   check('a tag from one conversation does not open a card in the next', clipOf(switched)?.props?.['data-expanded'] === 'false', String(clipOf(switched)?.props?.['data-expanded']))
   check('and the new card is measured instead of inheriting the old answer', clipOf(switched)?.props?.['data-clipped'] === 'false', String(clipOf(switched)?.props?.['data-clipped']))
   check('with nothing to reveal, it stops offering a click', cardOf(switched)?.props?.['data-clickable'] === 'false', String(cardOf(switched)?.props?.['data-clickable']))
+
+  // Coming back is the half that a short summary would hide. A fresh conversation
+  // with nothing to show answers "no offer" for a reason that has nothing to do
+  // with the stale tag, so the tag has to be carried back to a card that has
+  // something to offer — same turn number, same long summary, no pointer on it.
+  overflow = 900
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  const returned = await settle()
+  check('a card that has something to offer does not offer it unasked', cardOf(returned)?.props?.['data-hint'] === 'false', String(cardOf(returned)?.props?.['data-hint']))
+  check('and returning does not leave it open', clipOf(returned)?.props?.['data-expanded'] === 'false', String(clipOf(returned)?.props?.['data-expanded']))
 }
 
 // ---------------------------------------------------------------------------
-// The cap is five lines, and only the parts that agree on that
+// The cap is six lines, and only the parts that agree on that
 //
 // The rule is a single declaration, so the guard is a source assertion rather
 // than a rendered one: `.dsse-tiny` sets line-height:1.55 with a font-size of
-// .9em, which makes one line box 1.55em of this element, so five lines is
-// 7.75em. The old 5.2em was 3.35 lines — an odd place to cut, since the last
-// line came out shaved rather than omitted.
+// .86em, which makes one line box 1.55em of this element, so six lines is
+// 9.3em. It was five lines at 7.75em until the summary was asked to show one
+// more line, and three lines at 5.2em (3.35 line boxes — an odd place to cut,
+// since the last line came out shaved rather than omitted) before that. Both
+// older values are asserted absent, because a stale cap left behind in the
+// source would win or lose on rule order rather than on intent.
 // ---------------------------------------------------------------------------
 
 {
   const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
-  check('the summary is capped at five lines', source.includes('.dsse-clip .dsse-text{max-height:7.75em;overflow:hidden}'), 'the cap is not 7.75em')
+  check('the summary is capped at six lines', source.includes('.dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}'), 'the cap is not 9.3em')
+  check('the old five-line cap is gone', source.includes('max-height:7.75em') === false, 'a 7.75em cap survives somewhere')
   check('the old three-line cap is gone', source.includes('max-height:5.2em') === false, 'a 5.2em cap survives somewhere')
-  check('one line box is still 1.55em', /\.dsse-tiny\{[^}]*line-height:1\.55/.test(source), 'the line box changed, so 7.75em is no longer five lines')
+  check('one line box is still 1.55em', /\.dsse-tiny\{[^}]*line-height:1\.55/.test(source), 'the line box changed, so 9.3em is no longer six lines')
   check('the fade is gated on not being expanded', source.includes('.dsse-clip[data-clipped="true"][data-expanded="false"]::after{'), 'the fade ignores the expanded state')
   check('expanding lifts the cap', source.includes('.dsse-clip[data-expanded="true"] .dsse-text{max-height:none}'), 'expanding does not lift the cap')
 }
@@ -2731,16 +2871,22 @@ function byAction(node, action) {
 //
 // Centring the row put the stats' optical centre on the title's box centre, which
 // reads as a few pixels low because the digits sit on a smaller line box. Baseline
-// alignment is what makes them share a line. The stats also stop being pushed to
-// the right edge: they belong to the title as one group, which is what "aligned
-// with the title" means here.
+// alignment is what makes them share a line.
+//
+// The stats are pushed to the far edge on purpose. They were pulled next to the
+// title once, reading "aligned" as "part of the same group", but the header reads
+// better with the title on the left and its numbers on the right — two facts, two
+// ends. The `min-height` went with the 提炼 button it was reserving room for: the
+// row was 42px tall holding one 17px line, which is the gap that showed up under
+// every card title.
 // ---------------------------------------------------------------------------
 
 {
   const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
   check('the card header aligns on the baseline', source.includes('.dsse-card-head{display:flex;align-items:baseline;'), 'the header still centres its row')
   check('the header no longer centres', source.includes('.dsse-card-head{display:flex;align-items:center;') === false, 'a centring header survives')
-  check('the stats sit beside the title rather than at the far edge', source.includes('.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:4px;'), 'the stats are still pushed right')
+  check('the stats sit at the far edge', source.includes('.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;'), 'the stats are not pushed right')
+  check('the header keeps no room for a button that is gone', source.includes('.dsse-card-head{display:flex;align-items:baseline;gap:8px;min-height:') === false, 'the header still reserves a minimum height')
   check('the icon buttons keep their own centring', source.includes('.dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}'), 'the icon buttons lost their vertical placement')
 }
 
@@ -2815,6 +2961,167 @@ function byAction(node, action) {
   const tree = await instance.renderer.deepRender(cards)
   check('a queue with work in it keeps the header visible', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
   check('the queue button reports how much work there is', textOf(firstByClass(tree, 'dsse-queue')).includes('3'), textOf(tree).slice(0, 120))
+}
+
+// ---------------------------------------------------------------------------
+// The launcher page is not a conversation
+//
+// The overlay is registered on a root-level slot, so it is mounted whether or
+// not a conversation is open. It used to find the conversation body and treat
+// that as proof of a conversation — but the host renders that element on every
+// page, including the launcher and the new-session hero. The host does publish
+// which page it is on (`data-content-phase`), so this suite pins the two things
+// that matter: a hero page draws nothing, and a host that says nothing keeps
+// working.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: { turn: 4, calls: 3, failed: 0, summary: { text: 'SESSION FULL' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  // Two hosts, identical except for the page they say they are on. The phase is
+  // read during measurement, and this harness has no live observer to fire a
+  // second one, so the difference has to be in place from the mount.
+  const launch = async (phase) => {
+    const instance = boot({ routes, phase })
+    instance.module.apply(instance.ctx)
+    const cards = instance.seat('cards')
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    return instance.renderer.deepRender(cards)
+  }
+
+  const onConversation = await launch('active')
+  check('a conversation page draws the cards', textOf(onConversation).includes('SESSION FULL'), textOf(onConversation).slice(0, 100))
+
+  const launcher = await launch('hero')
+  check('the launcher page draws no cards at all', byClass(launcher, 'dsse-card').length === 0, textOf(launcher).slice(0, 140))
+  check('and it does not draw a leftover rail either', firstByClass(launcher, 'dsse-rail') === undefined, textOf(launcher).slice(0, 140))
+
+  // A host that never publishes the attribute is not a launcher. Reading a
+  // missing attribute as "not a conversation" would take the panel away from
+  // every older host at once, and the panel cannot tell that from a bug on its
+  // own side.
+  const unknown = await launch(null)
+  check('a host that says nothing still gets its cards', textOf(unknown).includes('SESSION FULL'), textOf(unknown).slice(0, 120))
+
+  // The phase is read during a measurement, and the three phases are not three
+  // documents: the host switches between them in place, when a launcher page
+  // sends its first message or a conversation is left. Nothing resizes at that
+  // moment — the attribute is the whole event — so a size observer cannot see
+  // it. Without a listener on the attribute itself, a session that starts on the
+  // launcher keeps `hero` in `place` and the cards stay hidden for as long as
+  // the page is open.
+  const watched = boot({ routes })
+  watched.module.apply(watched.ctx)
+  firstByClass(await watched.renderer.render(watched.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await watched.renderer.deepRender(watched.seat('cards'))
+  const phaseObserver = watched.mutationObservers.find((observer) =>
+    observer.targets.some((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase')))
+  check('something is listening for the page to change', phaseObserver !== undefined, JSON.stringify(watched.mutationObservers.length))
+  const phaseTarget = phaseObserver?.targets.find((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase'))
+  check('and it watches the document, not the conversation body', phaseTarget?.target === watched.document.documentElement, String(phaseTarget?.target === watched.document.documentElement))
+  // Attributes only. `childList` on the document subtree fires on every streamed
+  // token, which would turn a rare page change into a per-token layout read.
+  check('and it watches attributes alone', phaseTarget?.options?.attributes === true && phaseTarget?.options?.childList !== true, JSON.stringify(phaseTarget?.options))
+  check('and it looks inside the document, not only at its root', phaseTarget?.options?.subtree === true, JSON.stringify(phaseTarget?.options))
+
+  // The callback has to do the work, not just exist: flip the attribute the way
+  // the host does and the cards must appear. The flip alone changes nothing —
+  // the phase reaches `place` through a measurement, which is exactly the step
+  // the observer exists to trigger, so the callback is part of the fixture here
+  // rather than something the test can skip.
+  watched.conversation.setPhase('hero')
+  phaseObserver.callback([{ type: 'attributes', attributeName: 'data-content-phase' }])
+  const hidden = await watched.renderer.deepRender(watched.seat('cards'))
+  check('the cards leave when the page becomes a launcher', byClass(hidden, 'dsse-card').length === 0, textOf(hidden).slice(0, 140))
+  watched.conversation.setPhase('active')
+  phaseObserver.callback([{ type: 'attributes', attributeName: 'data-content-phase' }])
+  const returnedTree = await watched.renderer.deepRender(watched.seat('cards'))
+  check('and come back when it becomes a conversation again', textOf(returnedTree).includes('SESSION FULL'), textOf(returnedTree).slice(0, 140))
+}
+
+// ---------------------------------------------------------------------------
+// The panel learns about changes from a stream, not from a clock
+//
+// The old arrangement asked `/panel` every eight seconds. It was too slow for
+// the counts it draws (they move inside a turn) and too busy for a session that
+// is thinking rather than working. The stream says "something moved" and the
+// panel answers with one fetch, so the timer survives only as the fallback for a
+// host that cannot stream.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(cards)
+
+  const stream = instance.eventSources.at(-1)
+  check('the panel opens one stream for its session', instance.eventSources.length === 1, String(instance.eventSources.length))
+  check('and it names the session it is watching', stream?.url.includes('agent=session-a') === true, String(stream?.url))
+
+  const polling = instance.timers.find((row) => row.ms === 8000)
+  check('the fallback poll starts before the stream is open', polling !== undefined && polling.cleared === false, JSON.stringify(polling === undefined ? null : polling.cleared))
+
+  instance.renderer.deepRender(cards)
+  stream.fire('open')
+  check('an open stream retires the fast poll', polling?.cleared === true, JSON.stringify(polling?.cleared))
+
+  // It retires the fast poll, not polling itself. Two things the stream cannot
+  // see: an `EventSource` that gives up for good (a 404 while the plugin
+  // reloads), and the candidate queue, which any session can add to while the
+  // stream only speaks for this one. A timer is the only thing that notices
+  // either, so clearing it on open would leave the panel stale until the person
+  // changed sessions — the bug this asserts against.
+  const slow = instance.timers.filter((row) => row.ms === 60000)
+  check('and leaves a slow poll behind', slow.length === 1 && slow[0].cleared === false, JSON.stringify(slow.map((row) => row.cleared)))
+  // Guarded like every other interaction here: a mutation that removes the slow
+  // timer must fail a check, not throw past the runner's FAIL-line count.
+  const beforeSlow = instance.calls.length
+  if (slow.length === 1 && typeof slow[0].fn === 'function') slow[0].fn()
+  await settle()
+  check('which still asks the panel for an answer', instance.calls.length > beforeSlow, `${beforeSlow} -> ${instance.calls.length}`)
+  check('and it is far slower than the one it replaced', (slow[0]?.ms ?? 0) > (polling?.ms ?? 0) * 5, `${slow[0]?.ms} vs ${polling?.ms}`)
+
+  const before = instance.calls.length
+  stream.fire('panel')
+  await settle()
+  check('a change on the stream pulls the panel again', instance.calls.length > before, `${before} -> ${instance.calls.length}`)
+}
+
+{
+  // The teardown matters as much as the subscription: a stream left open per
+  // session switch would pile up one connection per conversation the person
+  // visited, each of them waking a component that is no longer mounted.
+  const routes = panelRoutes()
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  const toggle = instance.seat('toggle')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(cards)
+  const first = instance.eventSources.at(-1)
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  await instance.renderer.deepRender(cards)
+  check('switching sessions closes the stream it was watching', first?.closed === true, String(first?.closed))
+}
+
+{
+  // A host whose browser has no `EventSource` (or whose page strips it) must
+  // still get live-ish cards. The fallback is the old timer, and it has to run.
+  const routes = panelRoutes()
+  const instance = boot({ routes, eventSource: false })
+  instance.module.apply(instance.ctx)
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(cards)
+  const polling = instance.timers.find((row) => row.ms === 8000)
+  check('a host without a stream keeps polling', polling !== undefined && polling.cleared === false, JSON.stringify(polling === undefined ? null : polling.cleared))
+  check('and it opens no stream it cannot have', instance.eventSources.length === 0, String(instance.eventSources.length))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

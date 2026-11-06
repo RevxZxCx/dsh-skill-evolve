@@ -35,6 +35,10 @@
 | R-29 | 2026-11-06 | 持久化第十三轮：孤儿判据分叉 | 1 P2 + 1 P3 | 2 / 0 |
 | R-30 | 2026-11-06 | 持久化第十四轮：失败条数与未用变量 | 2 P3 | 2 / 0 |
 | R-31 | 2026-11-06 | 持久化第十五轮：编号与归因 | 3 P3 | 3 / 0 |
+| R-32 | 2026-11-06 | 界面六项需求 + 实时流 第一轮：HEAD 进流、phase 无触发源 | 2 P2 + 5 P3 | 7 / 0 |
+| R-33 | 2026-11-06 | 界面六项需求 + 实时流 第二轮：轮询被永久停掉、HEAD 404 | 1 P2 + 1 P3 | 2 / 0 |
+| R-34 | 2026-11-06 | 界面六项需求 + 实时流 第三轮：守卫空转、注释停在旧上限 | 1 P2 + 1 P3 | 2 / 0 |
+| R-35 | 2026-11-06 | 界面六项需求 + 实时流 第四轮：收敛 | 无待修项 | 0 / 0 |
 
 ---
 
@@ -169,3 +173,89 @@
 '` 变成真换行、`''` 变成退格字节（`od -c` 才看得出），`matchAll` 返回空、断言报「found none」，而同样的表达式在 `node -e` 里是好的。**改代码的脚本本身必须被验证，否则它会把「没匹配上」伪装成「不需要改」。**
 
 **收敛判据**：`node test/run.mjs` **1805 passed / 0 failed**（30 套件）；三个变异套件 11/11、14/14、41/41 全部 killed 且 0 not applied；`scripts/sync-gutter.mjs` 与 `scripts/extract-host-tokens.mjs` 重跑后漂移测试仍绿。
+
+---
+
+## R-32 · 界面六项需求 + 实时流：第一轮（2026-11-06）
+
+**对象**：六项界面需求（统计贴右、实时更新、去掉头部空条、六行/点击才展开、加载提示、只在会话页显示）的全部改动，含新增的 `packages/ui-evolve/lib/live.js` 与 `/live` 路由。
+
+**结论**：7 条，全部成立（2 P2 + 5 P3）。
+
+**整体判断**：主体可靠。req/res 双 close 监听在 Node 24 下不会误断流；首次加载失败不会造成假成功（`client.js` 的加载分支要求 `error === ''`）；`test/live.test.mjs` 里 teardown 之后的断言都在验证 teardown 效果而不是空断言；两个变异脚本的锚点全部唯一命中。
+
+### 采纳（2 P2 + 5 P3）
+
+**P2-1 · HEAD 进 SSE 分支并永不结束。** 路由写的是 `req.method !== 'POST'`，而方法白名单包含 HEAD，于是 HEAD 会写 SSE 头、注册订阅、挂 25 秒心跳且永不 `end()`——每次探测泄漏一个订阅直到 socket 超时。改为 `=== 'GET'`。
+
+**P2-2 · phase 变化没有独立触发源。** `place` 只在 `remeasure` 里更新，而 `remeasure` 的触发点只有 ResizeObserver、window resize、`place.side` 变化和那个「observer 建好就自清」的 1 秒轮询。宿主三条 phase 样式只改子元素，不保证改到被观察元素自身的尺寸。于是同一 sessionId 下从 `hero` 变成 `active`（新会话页发出首条消息）时卡片可能一直不出现。补了一个 `MutationObserver`，`attributeFilter: ["data-content-phase"]` + `subtree: true`。
+
+**为什么只用 attributes 不用 childList**：childList 会在每个流式 token 上触发，是这个 overlay 唯一不能付的代价。
+
+**P3 五条**（审查报的）：`bridge.phase` 是死字段（全文件无读写，真正的 phase 走 `place.phase`）；`'点击收起'` 分支不可达（`turnHinted` 与 `expanded` 的前提互斥）；提示条注释与实际相反（写「不挂载卸载」而实际会挂载）；`.dsse-card[data-hint="true"] .dsse-expand{display:flex}` 是永不适用的规则（节点只在有提示时挂载）；渲染门上叠了两段互相矛盾的旧注释。
+
+**同一轮我自己顺带清掉的两处**（不在审查清单里，但属于同一批改动）：`scripts/mutate-live.mjs` 的 `const equivalents = []` 是从未 push 过的死代码、配着一个永不执行的分支，头部注释还声称「有两条等价变异」——与实跑 26 条全 killed 不符，已删掉声明与分支，头部注释改成「每条变异都应让测试变红；不红就报 SURVIVED 并附 why，让覆盖缺口保持可见而不是悄悄改名叫等价变异」；`test/persistence.test.mjs` 那条多余的流见下。
+
+**测试侧同一轮的另一条**：`test/persistence.test.mjs` 有一行 `await host.stream(detached.id)` 返回值被丢弃——流既不 close 也没有断言，测试结束仍订阅着那个会话。删掉，并把下一行的 `>= 2` 收紧为 `=== 2`。
+
+**收敛判据**：`node test/run.mjs` 2343 passed / 0 failed；`client.test.mjs` 319；五套变异 22/64/14/44/15 全杀；CRLF 0（109 文件）；sync-gutter 连跑三次 `client.js` sha256 恒定。
+
+## R-33 · 界面六项需求 + 实时流：第二轮（2026-11-06）
+
+**对象**：R-32 的修复。第一轮 7 项全部确认修好，两套变异脚本 86 个变异全杀，测试无空断言。留 2 条。
+
+**结论**：2 条，全部成立（1 P2 + 1 P3）。
+
+### 采纳
+
+**P2 · 流打开后永久停掉兜底轮询。** 两层理由，第二层是我自己没想到的：
+
+1. `onOpen: stopPolling` 一旦开流就永久清掉定时器，而 `error` 回调是空的，没有任何恢复路径。`EventSource` 对不可用响应会**永久放弃重连**。
+2. 即使流健康也有洞：服务端只在**本会话**的事件上 publish，而 `/panel` 里的 `pendingCandidates` 读的是**全局**候选队列。别的会话写入候选时这里收不到任何通知——被删掉的轮询正是它唯一的手段。
+
+修法：`open` 时降频到 60 秒（`IDLE_REFRESH_MS`），不删除（D-73）。新增 3 条断言（慢轮询存在且未被清、它仍会去问面板、它比原来慢 5 倍以上），探针（`onOpen: slowDown` → `onOpen: stopPolling`）杀 3 条。
+
+**P3 · HEAD `/live` 落到 404。** 一个确实存在的路由对 HEAD 报告「不存在」，健康检查和 `curl -I` 会据此误判插件未安装。而同文件其它路由都对 HEAD 回 200 空体。新增 4 条断言与 2 条变异。
+
+### 这一轮的教训
+
+**「兜底通道」不能因为主通道上线就删掉，除非主通道覆盖了它的全部输入。** 流覆盖的是「本会话的事件」，轮询覆盖的是「任何来源的任何变化」，后者是前者的超集。判断依据不是「主通道正常工作时的表现」，而是「主通道的输入集合」。
+
+## R-34 · 界面六项需求 + 实时流：第三轮（2026-11-06）
+
+**对象**：R-33 的修复。2 条，全部成立（1 P2 + 1 P3）。
+
+### 采纳
+
+**P2 · `openPairs` 的前提条件在新交互下永不成立，断言已成死代码。** 这是这一轮最值得记的一条。
+
+那段循环的注释声明它保护的不变量是「渲染成展开态的卡片一定有办法关掉」，但前提 `data-expanded === 'true'` 在 hover 不再展开之后恒不成立，而它构造的两棵树（「换一轮」和「指针移上去」）都没点击。实测两行都是 `expanded=false`，那几条 `check` 一次都没执行，套件仍然报 322 passed / 0 failed。把 `client.js` 换回 HEAD 版本后同一条探针输出 `false` / `true`——**说明这条断言在改动前是真在跑的，是我把它改成了空转**。
+
+修法：先 `pressCard()` 点开（并 check 处理器存在），再取两棵树（点击后、指针离开后），每棵树**显式断言** `data-expanded === 'true'`，然后才断言可关闭性四要素。`client.test.mjs` 322 → 327。
+
+**P3 · 行数上限的注释仍按旧的 7.75em 五行描述。** 与紧邻的断言（9.3em / 六行 / `.86em`）相反，读者按注释去核对会得到相反结论。这属于 R-32 已修过的「注释与实际相反」同类问题，只是这次在新位置复发。
+
+**收敛判据**：`node test/run.mjs` 2355 passed / 0 failed；`client.test.mjs` 327；`scripts/mutate-checklist-panel.mjs` 扩到 65 条并全杀。
+
+### 这一轮的教训
+
+**带前提的断言必须让前提失败时也失败。** `continue`、`if (...) { check(...) }`、`?.` 后面跟的断言，全都有这个形状。空转与通过在这套 harness 里长得一模一样，都只是一行 tally——而且它对任何变异都不敏感，只会让所有变异都「存活」。本仓库另一处同类是「测试崩溃不打印 FAIL 行被记成 CRASHED」：两者都是「没有输出」被当成了「没有问题」。
+
+## R-35 · 界面六项需求 + 实时流：第四轮（收敛，2026-11-06）
+
+**对象**：R-34 的修复。
+
+**结论**：**未发现需要修复的问题。**
+
+审查逐项核对了四条：
+
+1. `pressCard` 与后续 `settleInto` 之间没有「前提不成立就静默通过」的路径。`settleInto` 由两次 `deepRender` 组成，每次都会重新 render 并返回新树，所以 `opened`/`leftOpen` 不可能与点击前是同一棵树。`pressCard` 先 check 处理器存在再调用；若 check 失败，后面 `openPairs` 对 `data-expanded` 的显式断言还会再失败一次。
+2. `openPairs` 的新断言不会恒真：它断言的是每棵树自身 `clip.props['data-expanded'] === 'true'`，前提已写成断言而不是跳过条件。
+3. 变异锚点唯一：`onClick: interactive === true ? props.onClick : undefined,` 在 `client.js:1476` 只出现 1 次；其余四处随源码同步的锚点也逐一计数均为 1。
+4. 注释与代码一致：六行 / 9.3em / `.86em` 与断言、样式逐项吻合，算术自洽（9.3 ÷ 1.55 = 6 行，7.75 ÷ 1.55 = 5 行）。
+
+**端到端复验**：`node test/run.mjs` 2355 passed / 0 failed。单独验第 65 条变异：把 `onClick` 那一行替换为 `onClick: undefined,` → 303 passed / 24 failed；从备份还原后 `cmp` 字节一致，`grep -c` 回到 1，重跑 327 passed / 0 failed。
+
+**一个不构成回归的观察**（审查明确说明不作为 finding）：`scripts/mutate-checklist-panel.mjs` 的锚点从来不在 `test/mutations.test.mjs` 的 anchor 校验覆盖范围内（该文件只校验 `mutate-guards.mjs` 与 `mutate-bundle.mjs`）。这是既有状况，锚点实测唯一，脚本自身有 `NOT APPLIED` 兜底。
+
+**四轮收敛，累计采纳 11 条（4 P2 + 7 P3），驳回 0 条。**

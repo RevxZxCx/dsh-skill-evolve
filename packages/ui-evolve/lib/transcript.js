@@ -423,33 +423,44 @@ class TranscriptStore {
    * counting those as turns would make the panel's "last turn" mean "last
    * prompt fragment", which is never what the reader wants.
    *
+   * The return value is the answer to "did this event change what the panel
+   * draws". It exists for the live stream: the host dispatches every event
+   * through here, including the ones no card shows, and waking a client for a
+   * token count would be a notification nobody can see a reason for. The types
+   * named below are the only ones this store reads, so they are the only ones
+   * that can change an answer.
+   *
    * @param {string} agentId - the agent id.
    * @param {any} event - the `session/event` payload.
+   * @returns {boolean} true when the event was used.
    */
   record(agentId, event) {
     const type = event?.type
     const data = event?.data
     if (type === 'user/message') {
-      if (data?.source?.kind !== 'user') return
+      if (data?.source?.kind !== 'user') return false
       this.for(agentId).beginTurn()
-      return
+      return true
     }
     if (type === 'assistant/message') {
       this.for(agentId).noteText(data?.message?.content)
-      return
+      return true
     }
     if (type === 'tool/call') {
       const call = typeof data?.name === 'string' ? { id: typeof data.callId === 'string' ? data.callId : undefined, name: data.name, arguments: data.arguments } : undefined
-      if (call !== undefined) this.for(agentId).noteCall(call)
-      return
+      if (call === undefined) return false
+      this.for(agentId).noteCall(call)
+      return true
     }
     if (type === 'tool/result') {
       this.for(agentId).noteResult(data)
-      return
+      return true
     }
     if (type === 'turn/end') {
       this.for(agentId).endTurn(data)
+      return true
     }
+    return false
   }
 }
 
