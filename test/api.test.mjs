@@ -809,6 +809,75 @@ async function route(overrides, req) {
   check('the models route returns the catalog', bodyOf(res).data.providers[0].provider === 'p', String(res.body))
 }
 
+// ---- the live speed route ----
+//
+// Its own route rather than a field on `/panel`, because the two answer on
+// different clocks: the panel changes when a turn ends, this one changes while a
+// turn is still running. Sharing a poll would either make the panel ask four
+// times a second for numbers that cannot change that often, or make the badge
+// answer up to eight seconds late — which is the whole generation.
+{
+  const asked = []
+  const res = await route(
+    { speedOf: (id) => { asked.push(id); return { tokens: 100, ms: 1000, tps: 100, active: true } } },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-7` }),
+  )
+  check('the speed route answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and hands back the reading', bodyOf(res).data.tps === 100, String(res.body))
+  check('and it asks about the session in the query', asked[0] === 'agent-7', JSON.stringify(asked))
+  check('and it says the reading is active', bodyOf(res).data.active === true, String(res.body))
+}
+
+{
+  // An idle session is a 200 with an inactive reading, not an error: the client
+  // needs to tell "nothing is being written" from "this host cannot say", and
+  // those are the same status code only if the body is read.
+  const res = await route(
+    { speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false }) },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=idle` }),
+  )
+  check('an idle session is not an error', res.statusCode === 200, String(res.statusCode))
+  check('and it reports itself inactive rather than absent', bodyOf(res).ok === true && bodyOf(res).data.active === false, String(res.body))
+}
+
+{
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/speed` }))
+  check('a speed request without a session is a 400', res.statusCode === 400, String(res.statusCode))
+  check('and it says which id is missing', bodyOf(res).code === 'error.agent.missing', String(res.body))
+}
+
+{
+  // `?agent=` parses to the empty string, not to undefined. That one case is the
+  // whole reason the route checks the length as well as the type.
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=` }))
+  check('an empty session id is rejected too', res.statusCode === 400, String(res.statusCode))
+}
+
+{
+  // A host half that predates this route: the panel must still load rather than
+  // fail the whole page because a badge is missing.
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1` }))
+  check('a panel without a meter answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and names the missing capability rather than throwing', bodyOf(res).code === 'error.speed.absent', String(res.body))
+  check('and it is not ok', bodyOf(res).ok === false, String(res.body))
+}
+
+{
+  // HEAD answers without a body, and — like `/panel` — it still runs the reader:
+  // the work is what produces the numbers, and a HEAD that skipped it would answer
+  // 200 for a session the GET path rejects. The assertion below is deliberately
+  // about what comes back rather than about work avoided, because no route here
+  // avoids the work.
+  const asked = []
+  const res = await route(
+    { speedOf: (id) => { asked.push(id); return { tokens: 1, ms: 1, tps: 1, active: true } } },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1`, method: 'HEAD' }),
+  )
+  check('a head request to the speed route answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and it carries no body', res.body === '' || res.body === undefined, String(res.body))
+  check('and it reads the session it was asked about', asked.length === 1 && asked[0] === 'agent-1', JSON.stringify(asked))
+}
+
 {
   const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/unknown` }))
   check('an unknown route is a 404', res.statusCode === 404, String(res.statusCode))

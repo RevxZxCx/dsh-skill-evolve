@@ -53,16 +53,23 @@ function check(label, condition, detail) {
  */
 function parseAnchors(source) {
   const anchors = []
-  // Both quote styles: anchors that contain `'` (a record with `reason:
+  // Three quote styles. Anchors that contain `'` (a record with `reason:
   // 'no-conversation'`) are written with double quotes, so a single-quote-only
-  // pattern silently found 3 of the 4 guard anchors.
-  const pattern = /from:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g
+  // pattern silently found 3 of the 4 guard anchors. Backticks came later, for
+  // anchors that span lines — `scripts/mutate-persistence.mjs` has one, and
+  // while this pattern could not see it the script's 44 mutations looked like 43.
+  //
+  // Template interpolations are not supported: every existing backtick anchor is
+  // a literal, and an anchor built by interpolation could not be checked against
+  // its file without evaluating it. A `${` inside one is treated as text, which
+  // makes the anchor fail to match and say so rather than match quietly.
+  const pattern = /from:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)"|`((?:[^`\\]|\\.)*)`)/g
   // Decoded in a single left-to-right pass. Chained replaces cannot do this
   // correctly in any order: turning `\\` into `\` first manufactures fresh `\n`
   // sequences that the next rule then eats, and running `\n` first eats half of a
   // literal `\\n`. Both orders are wrong, which is why this is a scanner rather
   // than three `.replace` calls. The parser's own edge cases are asserted below.
-  const escapes = { n: '\n', t: '\t', r: '\r', "'": "'", '"': '"', '\\': '\\' }
+  const escapes = { n: '\n', t: '\t', r: '\r', "'": "'", '"': '"', '`': '`', '\\': '\\' }
   const unescape = (text) => {
     let out = ''
     for (let index = 0; index < text.length; index += 1) {
@@ -82,7 +89,7 @@ function parseAnchors(source) {
   }
   let match = pattern.exec(source)
   while (match !== null) {
-    anchors.push({ from: unescape(match[1] ?? match[2] ?? '') })
+    anchors.push({ from: unescape(match[1] ?? match[2] ?? match[3] ?? '') })
     match = pattern.exec(source)
   }
   return anchors
@@ -100,6 +107,13 @@ for (const [label, source, want] of [
   ["an escaped newline becomes a real newline", "from: 'a\\nb'", ["a\nb"]],
   ["a literal backslash survives", "from: 'a\\\\nb'", ["a\\nb"]],
   ["an escaped quote is decoded", "from: 'it\\'s'", ["it's"]],
+  ["backticks carry a real newline", "from: `a\nb`", ["a\nb"]],
+  ["a multi-line backtick anchor keeps its indentation", "from: `  one\n  two\n`", ["  one\n  two\n"]],
+  ["an escaped backtick is decoded", "from: `a\\`b`", ["a`b"]],
+  // Not a claim that interpolation works — a claim that it is left visible. An
+  // anchor built by interpolation cannot be checked against its file without
+  // being evaluated, so it is meant to fail to match and say where.
+  ["an interpolation is left as written", "from: `a${b}c`", ["a${b}c"]],
 ]) {
   const got = parseAnchors(source)
   check(
@@ -172,14 +186,30 @@ for (const [label, source, want] of [
   check('every bundle anchor lands inside the generated region', outside.length === 0, outside.join(' | '))
 }
 
-// ---- the language and output-list mutations ---------------------------------
-{
-  const script = readFileSync(join(repo, 'scripts/mutate-language-and-files.mjs'), 'utf8')
+// ---- every mutation anchor still exists in the file it names ---------------
+//
+// Three scripts, one check. It started as a block for the language script only,
+// and `scripts/mutate-speed.mjs` was written afterwards without one — its
+// forty-nine anchors could rot the same way the panel script's did and the only
+// notice would be a `NOT APPLIED` line in a run nobody started. A list is what
+// keeps the next script from being the fourth one to notice this late.
+//
+// The expected counts are the anchors each script actually has today, not a
+// round number comfortably below it: paired deletions of a `from:` and its
+// `file:` line keep `owners.length === anchors.length` true and the per-anchor
+// checks silent, so a floor that is too low is the one gap a list like this
+// cannot see.
+for (const [name, expected] of [
+  ['mutate-language-and-files.mjs', 21],
+  ['mutate-speed.mjs', 49],
+  ['mutate-persistence.mjs', 44],
+]) {
+  const script = readFileSync(join(repo, 'scripts', name), 'utf8')
   const anchors = parseAnchors(script)
 
-  // This script's mutations do not all point at one file: the language path
-  // spans four modules and the output list spans three. Each mutation names its
-  // target with a module-scope constant (`const summarise = path.join(...)`)
+  // These mutations do not all point at one file: the language path spans four
+  // modules, the speed path four, the persistence path five. Each mutation names
+  // its target with a module-scope constant (`const summarise = path.join(...)`)
   // rather than a path string, so the constant has to be resolved before the
   // anchor can be looked for anywhere. Reading both out of the same text keeps
   // this honest in the direction that matters: an anchor checked against the
@@ -208,16 +238,16 @@ for (const [label, source, want] of [
     }
   }
 
-  check('the language mutation script declares anchors', anchors.length >= 10, `found ${anchors.length}`)
-  const unresolved = owners.filter((name) => !targets.has(name))
+  check(`${name} declares the anchors it is supposed to`, anchors.length >= expected, `found ${anchors.length}, expected at least ${expected}`)
+  const unresolved = owners.filter((owner) => !targets.has(owner))
   check(
-    'every language mutation names a target that resolves to a file',
+    `every ${name} mutation names a target that resolves to a file`,
     owners.length === anchors.length && unresolved.length === 0,
     `${owners.length} owners vs ${anchors.length} anchors; unresolved: ${unresolved.join(',')}`,
   )
 
   // Read each target once. The same file is the target of several mutations, and
-  // re-reading it per anchor turns an 19-anchor check into 19 file reads.
+  // re-reading it per anchor turns a forty-anchor check into forty file reads.
   const contents = new Map()
   const textOf = (file) => {
     if (!contents.has(file)) contents.set(file, readFileSync(file, 'utf8'))
@@ -245,12 +275,12 @@ for (const [label, source, want] of [
       missing += 1
       detail.push(`missing in ${where}: ${anchor.from.split('\\n')[0].slice(0, 50)}`)
     } else if (count > 1) {
-        ambiguous += 1
-        detail.push(`ambiguous in ${where} (${count}): ${anchor.from.split('\\n')[0].slice(0, 50)}`)
-      }
+      ambiguous += 1
+      detail.push(`ambiguous in ${where} (${count}): ${anchor.from.split('\\n')[0].slice(0, 50)}`)
     }
-  check('every language mutation anchor still exists in the file it names', missing === 0, detail.join(' | '))
-  check('no language mutation anchor matches more than once', ambiguous === 0, detail.join(' | '))
+  }
+  check(`every ${name} anchor still exists in the file it names`, missing === 0, detail.join(' | '))
+  check(`no ${name} anchor matches more than once`, ambiguous === 0, detail.join(' | '))
 }
 
 // ---- the mutation scripts must be runnable, not just parseable ---------------

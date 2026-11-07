@@ -382,6 +382,192 @@ try {
     const cleared = await readPanel()
     check('disposal releases the transcript', cleared.data?.calls === 0, JSON.stringify(cleared))
   }
+
+  // --- the speed meter is wired to the event stream, end to end ------------
+  //
+  // `speed.test.mjs` owns the meter's arithmetic and `api.test.mjs` owns the
+  // route's answer shape, but neither can see whether anything is ever fed into
+  // it: a plugin that constructs a meter and never pushes to it passes both
+  // suites, and the badge on screen simply never appears. This block is the only
+  // place where a real stream frame has to become a non-zero reading.
+  //
+  // It emits `agent/assistant-stream`, not `assistant/chunk`. That distinction is
+  // the whole reason this block exists in the shape it does: the earlier version
+  // fed it `assistant/chunk`, an event the agent loop never appends, so the
+  // suite passed against a channel that does not exist in the host and the badge
+  // was dead on every real machine.
+  {
+    const watcher = fakeAgent('session-speed', 'F:/some/project')
+    host.agents.set(watcher.id, watcher)
+    const readSpeed = async () => {
+      const res = {
+        statusCode: undefined,
+        writableEnded: false,
+        once() {
+          return this
+        },
+        writeHead(code) {
+          this.statusCode = code
+          return this
+        },
+        end(body) {
+          this.writableEnded = true
+          this.body = body
+          return this
+        }
+      }
+      await host.routes.get('/api/ui-evolve').handler(
+        { url: `/api/ui-evolve/speed?agent=${watcher.id}`, method: 'GET', headers: { host: '127.0.0.1:19387' } },
+        res
+      )
+      return JSON.parse(res.body)
+    }
+    const frames = (chunk, count = 1) => {
+      for (let index = 0; index < count; index += 1) {
+        host.emit('agent/assistant-stream', { agent: watcher, frame: { type: 'chunk', attemptId: 'attempt-1', revision: index, index, time: Date.now(), chunk } })
+      }
+    }
+
+    const idle = await readSpeed()
+    check('a session that has not streamed reads as inactive', idle.data?.active === false, JSON.stringify(idle))
+    check('and it reports no speed rather than an error', idle.ok === true && idle.data?.tps === 0, JSON.stringify(idle))
+
+    // The frames around a delta are not deltas. A start marker opens the attempt
+    // and an end marker closes it; counting either as text would make the number
+    // jump every time a message begins or finishes. The start comes before its
+    // own deltas here because that is the order the host sends them in.
+    host.emit('agent/assistant-stream', { agent: watcher, frame: { type: 'start', attemptId: 'attempt-1', revision: 0, turn: 1, step: 1 } })
+    host.emit('agent/assistant-stream', { agent: watcher, frame: { type: 'end', attemptId: 'attempt-1', revision: 1, index: 0, outcome: { kind: 'abandoned' } } })
+    const afterMarkers = await readSpeed()
+    check('a frame that opens or closes an attempt is not text', afterMarkers.data?.active === false, JSON.stringify(afterMarkers))
+
+    // Forty characters is ten tokens by the host's own four-characters-per-token
+    // rule, so three deltas have to come back as thirty-odd tokens over some
+    // non-zero span. Asserting a range rather than an exact rate keeps this a
+    // test of the wiring: the arithmetic belongs to `speed.test.mjs`.
+    frames({ type: 'text-delta', index: 0, text: 'x'.repeat(40) }, 3)
+    const streamed = await readSpeed()
+    check('a text delta becomes a live reading', streamed.data?.active === true, JSON.stringify(streamed))
+    check('and the reading counts the deltas', streamed.data?.tokens >= 20, JSON.stringify(streamed))
+    check('and it is a positive speed', streamed.data?.tps > 0, JSON.stringify(streamed))
+
+    // Reasoning deltas are deliberately not counted: thinking streams at its own
+    // rate, and folding it in reports a speed nobody is reading.
+    const beforeReasoning = (await readSpeed()).data?.tokens
+    frames({ type: 'reasoning-delta', index: 1, text: 'y'.repeat(400) })
+    const afterReasoning = (await readSpeed()).data?.tokens
+    check('thinking is not counted as output', afterReasoning === beforeReasoning, `${beforeReasoning} -> ${afterReasoning}`)
+
+    // A frame with no agent, or one whose chunk is not a delta at all, must not
+    // throw out of the event bus — this handler sees every frame of every agent.
+    host.emit('agent/assistant-stream', { agent: undefined, frame: { type: 'chunk', chunk: { type: 'text-delta', text: 'z'.repeat(40) } } })
+    host.emit('agent/assistant-stream', undefined)
+    check('a malformed frame is ignored rather than thrown', (await readSpeed()).data?.tokens === afterReasoning, 'reading moved')
+
+    // The provider's real count arrives with the finished message and rescales
+    // later estimates. A meter that ignored it would report a permanent
+    // four-characters-per-token fiction. The count here is ten times the estimate
+    // on purpose: the scale is clamped (`RATIO_CEILING`), so the reading may only
+    // grow fourfold — an unbounded ratio would let one odd turn redefine every
+    // later number, and `speed.test.mjs` owns the clamp's own assertions.
+    host.emit('session/event', watcher, {
+      type: 'assistant/message',
+      seq: 211,
+      time: Date.now(),
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 5, outputTokens: 300 } }
+    })
+    const settled = await readSpeed()
+    check('a real token count rescales the estimate', settled.data?.tokens === streamed.data?.tokens * 4, `${streamed.data?.tokens} -> ${settled.data?.tokens}`)
+
+    // `outputTokens` counts reasoning too, and this meter counts text only. A
+    // settle that used the whole completion would inflate the scale by however
+    // much the model thought, which on a reasoning-heavy turn is most of it.
+    //
+    // Three more deltas first: `settle` divides by what has arrived since the
+    // last settle, so a second settle with nothing behind it is ignored by design
+    // and would prove nothing here.
+    frames({ type: 'text-delta', index: 0, text: 'x'.repeat(40) }, 3)
+    const beforeSubtract = (await readSpeed()).data?.tokens
+    host.emit('session/event', watcher, {
+      type: 'assistant/message',
+      seq: 212,
+      time: Date.now(),
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [] }, usage: { inputTokens: 5, outputTokens: 400, reasoningTokens: 390 } }
+    })
+    const afterSubtract = (await readSpeed()).data?.tokens
+    // Ten text tokens reported against the thirty estimated ones that arrived
+    // since the previous settle is a scale of a third, so the sixty-token window
+    // now reads as twenty. Settling on the whole 400 instead would clamp the
+    // scale at four and read as 240 — the difference between "the answer is being
+    // written" and "the model is thinking", priced into every later reading.
+    check('reasoning tokens are taken out of the count before it settles', afterSubtract < beforeSubtract, `${beforeSubtract} -> ${afterSubtract}`)
+    check('and the scale it learns is the text-only one', afterSubtract === 20, `${beforeSubtract} -> ${afterSubtract}`)
+
+    // A message that also called a tool is not a pure-text sample: its count
+    // covers the tool's arguments, which never streamed as text. Learning from it
+    // would clamp the scale to the ceiling — one long file write is enough — and
+    // every later reading would be several times too fast. Deltas arrive first
+    // because that is what streaming means; then the message lands carrying both a
+    // text block and a tool-call block.
+    frames({ type: 'text-delta', index: 0, text: 'x'.repeat(40) }, 3)
+    const beforeToolSettle = (await readSpeed()).data?.tokens
+    host.emit('session/event', watcher, {
+      type: 'assistant/message',
+      seq: 213,
+      time: Date.now(),
+      data: {
+        turn: 1,
+        step: 1,
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Let me write that file.' },
+            { type: 'tool-call', id: 'call-1', name: 'write', arguments: '{"path":"a.js","content":"x"}' }
+          ]
+        },
+        usage: { inputTokens: 5, outputTokens: 5000 }
+      }
+    })
+    const afterToolSettle = (await readSpeed()).data?.tokens
+    check('a message that called a tool teaches no scale', afterToolSettle === beforeToolSettle, `${beforeToolSettle} -> ${afterToolSettle}`)
+
+    // A second attempt starts (the retry path, or the next step after a tool
+    // result). Whatever the first one streamed is not part of this message's
+    // token count, so the accumulator behind the learned scale is cleared — but
+    // the window is about the last two seconds of text arriving, and those
+    // deltas really did arrive, so the reading must not blink out.
+    host.emit('agent/assistant-stream', { agent: watcher, frame: { type: 'start', attemptId: 'attempt-2', revision: 0, turn: 1, step: 2 } })
+    const restarted = await readSpeed()
+    const beforeRestart = afterToolSettle
+    check('a new attempt does not erase the last two seconds', restarted.data?.active === true && restarted.data?.tokens === beforeRestart, `${beforeRestart} -> ${restarted.data?.tokens}`)
+
+    // Clearing the window and clearing the accumulator are different things, and
+    // only the second one is right. The reading above proves the window survived;
+    // this proves the *scale* the retry learns comes from the retry alone. The
+    // window at this point reads a third of its estimate (`settle(10)` against
+    // thirty estimated tokens), so the estimate it holds is three times the
+    // reading. Thirty more estimated tokens arrive, and ninety reported against
+    // thirty measured is a scale of three — but only if the abandoned attempt's
+    // thirty estimated tokens were dropped first. Left in place they make the
+    // denominator sixty, the scale one and a half, and every later number half
+    // the truth for the rest of the session.
+    const windowBefore = (restarted.data?.tokens ?? 0) * 3
+    frames({ type: 'text-delta', index: 0, text: 'x'.repeat(40) }, 3)
+    host.emit('session/event', watcher, {
+      type: 'assistant/message',
+      seq: 214,
+      time: Date.now(),
+      data: { turn: 1, step: 2, message: { role: 'assistant', content: [] }, usage: { inputTokens: 5, outputTokens: 90 } }
+    })
+    const afterRestartSettle = (await readSpeed()).data?.tokens
+    const expectedRestart = Math.round((windowBefore + 30) * 3)
+    check('and the retry learns its scale from its own text', afterRestartSettle === expectedRestart, `${afterRestartSettle} vs ${expectedRestart}`)
+
+    // And the entry does not outlive the session it describes.
+    host.emit('agent/disposed', { agent: watcher })
+    const gone = await readSpeed()
+    check('disposal forgets the speed too', gone.data?.active === false && gone.data?.tokens === 0, JSON.stringify(gone))
+  }
   check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))
   check('hint context order is 121', host.contexts.get('skill-evolve:hint')?.order === 121)

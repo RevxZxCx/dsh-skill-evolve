@@ -33,10 +33,11 @@
  */
 
 import { Config } from './config.js'
-import { TranscriptStore } from './transcript.js'
+import { TranscriptStore, readToolCallBlock } from './transcript.js'
 import { Summariser } from './summarise.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
 import { SessionState } from './session-state.js'
+import { SpeedMeter } from './speed.js'
 import { SKILL_GESTURE, readSkillArgument } from '@revxz/dsh-evolve-core'
 
 /** Cordis plugin name. */
@@ -170,6 +171,17 @@ export function apply(ctx, config) {
   const transcripts = new TranscriptStore()
 
   /**
+   * How fast each session is writing right now.
+   *
+   * Separate from `transcripts` because it answers a different question on a
+   * different clock: the transcript wants the turn that finished, this wants the
+   * last two seconds of the turn that is still arriving. Nothing is persisted —
+   * a speed describes a moment, and a moment from a previous process is not a
+   * speed, it is a number with no meaning.
+   */
+  const speeds = new SpeedMeter()
+
+  /**
    * What the panel remembers about each conversation.
    *
    * Three accumulators used to live here as process-wide containers: the MCP
@@ -246,6 +258,78 @@ export function apply(ctx, config) {
     // changes depending on whether the process had restarted.
     sessionState.rememberSkill(agentId, name, via)
   }
+
+  // ------------------------------------------------------------ live speed --
+  //
+  // The one number the host does not already have while a message is arriving.
+  //
+  // Two channels, because the host splits them: text arrives as transient
+  // frames and the token count arrives as a durable event.
+  //
+  // `agent/assistant-stream` is where live text comes from. `assistant/chunk`
+  // looks like the obvious event for this and is not: the agent loop never
+  // appends one (there is no `append("assistant/chunk")` anywhere in the host),
+  // it exists only in the v1→v2 session-format migration, whose retained filter
+  // drops it. An earlier version of this file listened for it and was therefore
+  // silent in production while every test passed, because the tests emitted the
+  // event themselves.
+  //
+  // The provider sends no token count until `message_stop`, so during generation
+  // the count has to come from the text; `usage` on the durable
+  // `assistant/message` corrects the scale afterwards.
+  ctx.on('agent/assistant-stream', safe('speed-stream', (payload) => {
+    const agentId = payload?.agent?.session?.id
+    if (typeof agentId !== 'string' || agentId.length === 0) return
+    const frame = payload?.frame
+    // A new attempt starts every time the provider is asked again: the first
+    // step of a turn, a retry after a failure, the second step after a tool
+    // result. Whatever the previous attempt streamed is not part of this one's
+    // token count, and a settle that divided by both would learn a scale a
+    // quarter of the truth.
+    if (frame?.type === 'start') {
+      speeds.begin(agentId)
+      return
+    }
+    if (frame?.type !== 'chunk') return
+    const chunk = frame.chunk
+    // Only text deltas count. Reasoning deltas stream at their own rate and the
+    // panel is describing how fast the answer is appearing, not how fast the
+    // model is thinking — a reader watching an empty reply does not want to be
+    // told it is going well.
+    if (chunk?.type !== 'text-delta') return
+    speeds.push(agentId, chunk.text)
+  }))
+
+  ctx.on('session/event', safe('speed', (session, event) => {
+    const agentId = session?.id
+    if (typeof agentId !== 'string' || agentId.length === 0) return
+    if (event?.type !== 'assistant/message') return
+    // `usage` rides on the message rather than inside it, and a message the host
+    // assembled without asking a provider (a replay, a resumed turn) carries
+    // none. Settling on a missing number would divide by a total no provider
+    // ever reported.
+    const usage = event?.data?.usage
+    if (usage === undefined || usage === null) return
+    const output = usage.outputTokens
+    if (typeof output !== 'number') return
+    // A message that also asked for a tool is not a pure-text sample. The count
+    // covers everything the step generated — the tool's arguments included — while
+    // the deltas behind it are text only, so one long `str_replace` in the same
+    // message would push the learned scale to the ceiling and leave every later
+    // reading several times too high. Waiting for a text-only message costs
+    // nothing: a turn has one of those eventually.
+    const content = event?.data?.message?.content
+    if (Array.isArray(content) && content.some((block) => readToolCallBlock(block) !== undefined)) return
+    // `outputTokens` counts the reasoning blocks too — the host's own usage
+    // dialog shows them as `（其中推理 N）`, a subset. This meter counts text
+    // only, so settling on the whole completion would inflate the scale by
+    // however much the model thought, and a reasoning-heavy turn would leave
+    // every later reading several times too high. Subtract when the provider
+    // says how much of the total was reasoning.
+    const reasoning = usage.reasoningTokens
+    const text = typeof reasoning === 'number' && Number.isFinite(reasoning) && reasoning > 0 ? output - reasoning : output
+    speeds.settle(agentId, text)
+  }))
 
   // ------------------------------------------------------------ transcript --
   //
@@ -370,6 +454,11 @@ export function apply(ctx, config) {
       .release(agentId)
       .then(() => { transcripts.forget(agentId) }, () => { transcripts.forget(agentId) })
     transcripts.forget(agentId)
+    // A speed has no afterlife: the window is two seconds and the client stops
+    // asking as soon as it reads `active: false`. Dropping the entry here is
+    // about the map, not about the number — a host that runs for a week and
+    // opens a thousand sessions should not hold a thousand empty windows.
+    speeds.forget(agentId)
   }))
 
   // ------------------------------------------------------------- summariser --
@@ -537,6 +626,18 @@ export function apply(ctx, config) {
       transcripts,
       summariser,
       sessionState,
+
+      /**
+       * The live speed reading for one session.
+       *
+       * A function rather than the meter itself so the route cannot reach
+       * `push`/`settle`: the only writer to a speed is the event stream, and a
+       * route that could also write one would be a second author for a number
+       * whose whole meaning is "this is what arrived".
+       */
+      speedOf(agentId) {
+        return speeds.read(agentId)
+      },
 
       /**
        * MCP tool names this session called.

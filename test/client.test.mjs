@@ -464,6 +464,16 @@ function boot(options) {
   const renderer = createRenderer()
   const React = renderer.hooks
 
+  // A clock the fixture can move. `Date` is injected rather than left global for
+  // the same reason the timers are: the speed badge keeps its last number for
+  // four seconds, and with the real clock the only way to observe the number
+  // expiring is to sleep through those four seconds — in every case. A boot with
+  // no `now` keeps the real clock, so nothing that does not ask for time travel
+  // is affected.
+  const clock = { at: settings.now ?? 0, real: settings.now === undefined }
+  if (clock.real === false) clock.at = settings.now
+  const DateStub = { now: () => (clock.real === true ? Date.now() : clock.at) }
+
   const moduleTable = (id) => {
     requested.push(id)
     if (id === 'react') return React
@@ -623,6 +633,7 @@ function boot(options) {
     'setTimeout',
     'clearTimeout',
     'MutationObserver',
+    'Date',
     source,
   )
   // `setTimeout` is injected rather than left global because the hover grace
@@ -662,6 +673,7 @@ function boot(options) {
       ;(settings.clearTimeout ?? clearTimeout)(handle)
     },
     MutationObserverStub,
+    DateStub,
   )
 
   const module = captured.factory(moduleTable)
@@ -680,6 +692,7 @@ function boot(options) {
     hostStyle,
     hostWrites,
     mutationObservers,
+    clock,
     document: documentStub,
     conversation,
     captured,
@@ -3172,6 +3185,344 @@ function byAction(node, action) {
     'a language changed between polls is picked up',
     after.length > 0 && after.every((row) => row.url.includes('lang=ja')),
     JSON.stringify(after.map((row) => row.url)),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The live speed badge: three clocks, one number
+// ---------------------------------------------------------------------------
+//
+// The badge is the only part of the panel that asks faster than the panel does,
+// and it is the only part allowed to. Everything here is about the rate: a badge
+// that asks every quarter second while idle is a cost the host pays forever for
+// a number nobody is watching, and a badge that asks every eight seconds while
+// generating is indistinguishable from one that is not live at all.
+
+/**
+ * A speed route that answers from a script, one payload per call.
+ *
+ * @param {Array<any>} script - payloads, in order; the last one repeats.
+ * @param {object} [sink] - receives each call's index, for asserting the rate.
+ * @returns {Function} the route.
+ */
+function speedScript(script, sink) {
+  let at = 0
+  return () => {
+    const index = Math.min(at, script.length - 1)
+    at += 1
+    sink?.push(index)
+    return script[index]
+  }
+}
+
+/**
+ * Boot, open the panel, and hand back the rendered cards.
+ *
+ * The badge lives in the panel's top row, and the top row does not exist until
+ * the toggle has been clicked. A fixture that renders the toggle alone and looks
+ * for `dsse-speed` finds nothing and every assertion about the badge passes for
+ * the wrong reason.
+ *
+ * @param {object} routes - the route table.
+ * @param {object} [options] - passed through to `boot`; `now` installs a clock
+ *   the fixture can move.
+ * @returns {Promise<{ instance: any, tree: any }>} the instance and the open tree.
+ */
+async function openPanel(routes, options) {
+  const instance = boot({ ...options, routes })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(cards)
+  return { instance, tree }
+}
+
+{
+  const asked = []
+  const { instance, tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': speedScript([{ ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } }], asked),
+  })
+  const top = firstByClass(tree, 'dsse-top-row')
+  const badge = firstByClass(tree, 'dsse-speed')
+  check('a live reading is drawn in the top row', badge !== undefined, textOf(top).slice(0, 120))
+  check('and it carries the number', textOf(badge).includes('100'), textOf(badge))
+  check('and names the unit', textOf(badge).includes('tok/s'), textOf(badge))
+  check('the number is announced with its unit', (badge?.props?.['aria-label'] ?? '').includes('100 tok/s'), String(badge?.props?.['aria-label']))
+  // Not `role="status"`: that implies `aria-live="polite"`, and this number
+  // changes up to four times a second — a screen reader would read it out
+  // continuously for the whole generation. The label is there for whoever lands
+  // on it on purpose; the announcements are not forced on everyone else.
+  check('and it is not announced as it changes', badge?.props?.['aria-live'] === 'off', String(badge?.props?.['aria-live']))
+  check('and it is not a live region in disguise', badge?.props?.role !== 'status', String(badge?.props?.role))
+  check('the badge asked about this session', instance.calls.some((row) => row.url.includes('/speed?agent=session-a')), JSON.stringify(instance.calls.map((row) => row.url)))
+}
+
+{
+  // The row order is the requirement: the number sits between the two controls
+  // and the queue, so it can appear and disappear without moving a target.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 100, ms: 1000, tps: 42, active: true } },
+  })
+  const top = firstByClass(tree, 'dsse-top-row')
+  const children = (top?.props?.children ?? []).filter((node) => node !== null && node !== undefined && node !== false)
+  const at = (name) => children.findIndex((node) => byClass(node, name).length > 0 || node.props?.className === name)
+  const settings = at('dsse-settings-open')
+  const speed = at('dsse-speed')
+  const queue = at('dsse-queue')
+  check('the badge sits after the settings button', settings >= 0 && speed > settings, `${settings} then ${speed}`)
+  check('and before the queue', queue > speed, `${speed} then ${queue}`)
+}
+
+{
+  // Active: ask again in a quarter of a second. This is the whole point of the
+  // feature — a number that updates four times a second reads as a rate, and one
+  // that updates every two seconds reads as a series of unrelated guesses.
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } },
+  })
+  const fast = instance.timers.filter((row) => row.ms === 250 && row.cleared === false)
+  check('a live reading asks again in a quarter second', fast.length >= 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+}
+
+{
+  // Never active at all: straight to the idle clock. The two-second clock is for
+  // a reading that was live a moment ago, not for one that never existed.
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  })
+  const slow = instance.timers.filter((row) => row.ms === 2000 && row.cleared === false)
+  const idle = instance.timers.filter((row) => row.ms === 10000 && row.cleared === false)
+  check('a session that has never streamed goes straight to the idle clock', slow.length === 0 && idle.length >= 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+}
+
+{
+  // A reading that went active and then inactive: the next ask is close, because
+  // the reply may be between paragraphs rather than finished.
+  const asked = []
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': speedScript(
+      [{ ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } }, { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } }],
+      asked,
+    ),
+  })
+  const first = instance.timers.filter((row) => row.ms === 250 && row.cleared === false)
+  check('the live reading scheduled another ask', first.length === 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+  first[0]?.fn?.()
+  await settle()
+  const warm = instance.timers.filter((row) => row.ms === 2000 && row.cleared === false)
+  check('a reply that stopped a moment ago is watched at the slow rate', warm.length === 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+  // The number has to leave on its own. Without a repaint scheduled for the end of
+  // the grace period, the badge keeps whatever it drew until the next ask — which
+  // on the slow clock is two seconds after it should already be gone.
+  const repaint = instance.timers.filter((row) => row.ms === 4000 && row.cleared === false)
+  check('and a repaint is scheduled for when the grace period ends', repaint.length === 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+  check('and it does not fall all the way to the idle rate yet', instance.timers.filter((row) => row.ms === 10000 && row.cleared === false).length === 0, JSON.stringify(instance.timers.map((row) => row.ms)))
+  check('both asks happened', asked.length >= 2, JSON.stringify(asked))
+}
+
+{
+  // The last number survives the window emptying — and then it goes. The second
+  // half is the one that needs a clock: "kept for four seconds" and "kept
+  // forever" look identical at t=0, and only time tells them apart. The fixture
+  // moves `Date.now()` by hand because sleeping through the grace period in every
+  // case would make the suite slower than the feature it is checking.
+  const { instance, tree: live } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/speed': speedScript([
+        { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } },
+        { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+      ]),
+    },
+    { now: 1000 },
+  )
+  check('a live reading is on screen', firstByClass(live, 'dsse-speed') !== undefined, textOf(live).slice(0, 120))
+  instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
+  await settle()
+  const emptied = await instance.renderer.deepRender(instance.seat('cards'))
+  check('the last number survives the window emptying', firstByClass(emptied, 'dsse-speed') !== undefined, textOf(emptied).slice(0, 160))
+  check('and it is still the last real number', textOf(firstByClass(emptied, 'dsse-speed')).includes('100'), textOf(firstByClass(emptied, 'dsse-speed')))
+
+  instance.clock.at = 1000 + 3999
+  const justInside = await instance.renderer.deepRender(instance.seat('cards'))
+  check('a number one millisecond short of the grace period is still shown', firstByClass(justInside, 'dsse-speed') !== undefined, textOf(justInside).slice(0, 160))
+
+  instance.clock.at = 1000 + 4001
+  const expired = await instance.renderer.deepRender(instance.seat('cards'))
+  check('and it is gone once the grace period is over', firstByClass(expired, 'dsse-speed') === undefined, textOf(firstByClass(expired, 'dsse-top-row')).slice(0, 160))
+  check('leaving the space it occupied empty rather than saying zero', textOf(expired).includes('tok/s') === false, textOf(expired).slice(0, 200))
+}
+
+{
+  // A failed ask keeps the number rather than blanking the badge: a panel that
+  // disappears because one request failed is worse than a stale reading, and it
+  // is also what an older host half looks like — no route at all. The reading has
+  // to be earned first, which is why this fixture answers once and then fails:
+  // a badge that never had a number cannot be said to have kept one.
+  let asked = 0
+  const { instance, tree: earned } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': () => {
+      asked += 1
+      if (asked > 1) throw new Error('the speed route answered 500')
+      return { ok: true, data: { tokens: 100, ms: 1000, tps: 123, active: true } }
+    },
+  })
+  check('a reading is on screen before the failure', textOf(firstByClass(earned, 'dsse-speed')).includes('123'), textOf(firstByClass(earned, 'dsse-speed')))
+  instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
+  await settle()
+  const afterFailure = await instance.renderer.deepRender(instance.seat('cards'))
+  check('a failed ask keeps the number it had', textOf(firstByClass(afterFailure, 'dsse-speed')).includes('123'), textOf(afterFailure).slice(0, 160))
+  check('and the badge is still there at all', firstByClass(afterFailure, 'dsse-speed') !== undefined, textOf(afterFailure).slice(0, 160))
+  check('and it went back to asking', instance.timers.some((row) => row.cleared === false && row.ms > 0), JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+}
+
+{
+  // The same shape from the other end: a route that never answers with a reading.
+  const { instance, tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': new Error('the speed route answered 500'),
+  })
+  check('a failed first ask draws no badge', firstByClass(tree, 'dsse-speed') === undefined, textOf(tree).slice(0, 120))
+  check('but it still schedules another try', instance.timers.some((row) => row.cleared === false && row.ms > 0), JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  check('and the panel itself still renders', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
+}
+
+{
+  // An older host half: the route answers, but it cannot measure.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: false, code: 'error.speed.absent', error: 'this panel does not measure output speed' },
+  })
+  check('a host that cannot measure draws no badge', firstByClass(tree, 'dsse-speed') === undefined, textOf(tree).slice(0, 120))
+  check('and says nothing about it in the panel', textOf(tree).includes('does not measure') === false, textOf(tree).slice(0, 200))
+}
+
+{
+  // A zero reading is not worth a widget. A badge that says "0 tok/s" for an idle
+  // conversation is a permanent piece of chrome reporting that nothing is
+  // happening, which the empty space already said.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 500, tps: 0, active: true } },
+  })
+  check('a zero reading draws nothing', firstByClass(tree, 'dsse-speed') === undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
+}
+
+{
+  // Leaving the conversation stops the badge asking. Two sessions' badges left
+  // running is a timer per session for the life of the window.
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } },
+  })
+  instance.renderer.unmount()
+  check('unmounting stops the badge', instance.timers.filter((row) => row.cleared === false).length === 0, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+}
+
+{
+  // Switching conversation reuses this component instance, so the number held
+  // for the old one has to go before the first request for the new one. Held on
+  // across the switch it reads as the new conversation's speed, and it is not.
+  const { instance } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/speed': speedScript([
+        { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } },
+        { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+      ]),
+    },
+    { now: 5000 },
+  )
+  const cards = instance.seat('cards')
+  const toggle = instance.seat('toggle')
+  const first = await instance.renderer.deepRender(cards)
+  check('the old conversation has a number on screen', textOf(firstByClass(first, 'dsse-speed')).includes('100'), textOf(firstByClass(first, 'dsse-speed')))
+  // The new conversation answers "nothing yet", and the clock is still well
+  // inside the old number's grace period — so without the reset the old reading
+  // is still fresh and paints for the new conversation.
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  const switched = await instance.renderer.deepRender(cards)
+  check('switching conversation drops the old number', firstByClass(switched, 'dsse-speed') === undefined, textOf(firstByClass(switched, 'dsse-top-row')).slice(0, 160))
+}
+
+{
+  // The linger repaint is a timer like any other, and a poll that finds the
+  // window warm can schedule one every two seconds. Left unregistered they stack,
+  // and the cleanup that runs on unmount cancels none of them.
+  const { instance } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/speed': speedScript([{ ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } }, { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } }]),
+    },
+    { now: 5000 },
+  )
+  const repaints = () => instance.timers.filter((row) => row.ms === 4000)
+  // First the live reading schedules the fast poll; firing it asks again and the
+  // answer is "empty but warm", which is what schedules the repaint.
+  const fast = instance.timers.filter((row) => row.ms === 250 && row.cleared === false)
+  check('a live reading is being watched closely', fast.length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  if (fast.length === 1 && typeof fast[0].fn === 'function') fast[0].fn()
+  await settle()
+  check('an emptied window schedules the repaint', repaints().length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  // The slow poll fires next and finds the window still warm, scheduling another
+  // repaint. Two live repaint timers would mean the first is never cancelled.
+  const slow = instance.timers.filter((row) => row.ms === 2000 && row.cleared === false)
+  if (slow.length >= 1 && typeof slow[slow.length - 1].fn === 'function') slow[slow.length - 1].fn()
+  await settle()
+  check('a second warm poll replaces the repaint rather than stacking one', repaints().filter((row) => row.cleared === false).length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  instance.renderer.unmount()
+  check('unmounting cancels the repaint too', repaints().every((row) => row.cleared === true), JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+}
+
+{
+  // The number is formatted like the host's own pill: whole numbers above ten so
+  // it does not flicker between 47.3 and 47, one decimal below so a slow reply
+  // is not reported as zero.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 27, ms: 1000, tps: 2.74, active: true } },
+  })
+  const badge = firstByClass(tree, 'dsse-speed')
+  const slow = textOf(badge)
+  check('a slow reading keeps one decimal', slow.startsWith('2.7 '), slow)
+  check('and it is rounded to that decimal, not printed whole', slow.includes('2.74') === false, slow)
+  check('and it does not round to zero', slow.startsWith('0 ') === false, slow)
+}
+
+{
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 473, ms: 1000, tps: 47.35, active: true } },
+  })
+  const fast = textOf(firstByClass(tree, 'dsse-speed'))
+  // Exactly `47`, not `47.3`. The looser assertion this replaced — "the text
+  // contains 47" — is satisfied by `47.3` as well, so it could not tell the
+  // whole-number branch from the one-decimal branch, and a mutation that deleted
+  // the branch survived it.
+  check('a fast reading is a whole number', fast.startsWith('47 '), fast)
+  check('and it carries no decimal point', fast.includes('47.') === false, fast)
+}
+
+{
+  // The badge must not share the panel's 8s beat: two timers on the same delay
+  // are one delay, and nothing that filters recorded timers can tell them apart.
+  const source = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
+  check(
+    'the idle badge clock is its own number',
+    /const SPEED_IDLE_MS = 10000/.test(source),
+    (source.match(/const SPEED_IDLE_MS = \d+/) ?? ['none'])[0],
+  )
+  check(
+    'and the panel keeps its eight seconds',
+    /const REFRESH_MS = 8000/.test(source),
+    (source.match(/const REFRESH_MS = \d+/) ?? ['none'])[0],
   )
 }
 

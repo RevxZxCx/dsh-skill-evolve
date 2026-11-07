@@ -56,8 +56,8 @@ Five keys, all optional. They are the panel's own; the detection settings live i
 ## The routes
 
 The panel talks to the host over a prefix route registered at
-`/api/ui-evolve`: `GET|HEAD /panel`, `GET /models`, `GET|POST /config`,
-`GET|POST /candidates`, and `POST /propose`.
+`/api/ui-evolve`: `GET|HEAD /panel`, `GET|HEAD /speed`, `GET /models`,
+`GET|POST /config`, `GET|POST /candidates`, and `POST /propose`.
 
 Every route answers `HEAD` with a body-less 200.
 
@@ -304,7 +304,7 @@ arrives. The distinction it relies on is `data === undefined` versus a data obje
 with nothing in it: "has not answered" and "answered, and the answer is empty" are
 different states and must not share a rendering.
 
-The header row is ordered **refresh, settings, review**. The review entry is
+The header row is ordered **refresh, settings, speed, review**. The review entry is
 labelled with the word 建议 rather than an icon, and it carries the pending count
 as a badge; it is the only way into the queue from the panel, so a session whose
 cards are all empty but whose queue holds work still draws the header. Its
@@ -312,6 +312,30 @@ accessible name starts with the visible word (`建议 候选审核`), because a 
 replaces the label rather than containing it fails WCAG's label-in-name rule. The
 whole row sits on its own card surface — border, radius, background — instead of
 three bare buttons floating over the conversation.
+
+Between settings and review sits the **output-speed readout**: the two tokens per
+second this reply is producing right now, as opposed to what the host's own
+capsule shows, which is the whole conversation's weighted average (sum of
+`decodeTokens` over sum of `decodeMs`, and by the twentieth turn it mostly
+describes the first nineteen). It reads from `GET /api/ui-evolve/speed`, which is
+a route of its own rather than a field on `/panel`: the panel changes when a turn
+ends, the speed changes while it is running, and one polling period cannot serve
+both. Nothing in the event stream carries a token count during generation — the
+`usage` block arrives once, after `message_stop` — so the number is
+`ceil(characters / 4)` per `text-delta` over a two-second window, rescaled by a
+ratio learned from the provider's real count each time a message settles. The
+ratio is clamped to 0.25..4, because one odd turn should not redefine every number
+after it. Text only: `reasoningTokens` are subtracted and a message that called a
+tool teaches no ratio at all — its `argumentsDelta` counts toward `outputTokens`
+but never flowed as text. The divisor is floored at 500ms, because the first delta
+of a reply arrives with almost no elapsed time and dividing by it would print three
+hundred tokens a second at exactly the moment somebody looks. The badge polls on
+three clocks — 250ms while the window holds text, 2000ms just after it empties,
+10000ms once a session has been idle a while — and keeps the last real reading for
+four seconds past the end of the window, because that is the moment people look. It
+is deliberately not a `role="status"`: a value that changes four times a second
+would be read aloud over the answer itself, so it is `aria-live="off"` with the
+number in `aria-label` for anyone who wants it.
 
 The last-turn card carries its counts in the header, not in a strip below the
 text: calls, commands, and files as labelled numbers, aligned on the title's

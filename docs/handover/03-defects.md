@@ -55,6 +55,11 @@
 | DEF-49 | 2026-11-07 | 路径上限被 `load` 的合并分支绕过，重启间无界增长（200→400→600→800） | 上限只加在一条写入路径上，当成对数据的约束 |
 | DEF-50 | 2026-11-07 | 锚点自检在数量不等时静默空转；语言断言被 `if` 包住 | 检查代码自己也需要被检查：布尔量恒真时断言看起来仍然通过 |
 | DEF-51 | 2026-11-07 | 产出卡头部说「10 个文件」而列表只列 5 行，「全部 10 个」按钮在滚动区外看不见 | 把「显示全部」的入口放在列表末尾，于是截断提示与列表一起被截断 |
+| DEF-52 | 2026-11-08 | 「实时速度」监听宿主从不派发的 `assistant/chunk`，真实通道是 `agent/assistant-stream` | 测试自己派发的事件证明不了宿主会派发它 |
+| DEF-53 | 2026-11-08 | `outputTokens` 含推理 token 与工具参数，学到的比例被顶到上限 | 分子分母的构成必须一句话说清 |
+| DEF-54 | 2026-11-08 | 中断的 attempt 不清累加量，下一次 settle 的分母翻倍 | 累加量与窗口是两个量，不能当做一个 |
+| DEF-55 | 2026-11-08 | `settle` 用 `entryOf` 为从未流式输出的会话建条目，断言被 `||` 放过 | `||` 在断言里几乎总是可疑的 |
+| DEF-56 | 2026-11-08 | 锚点数量下限表写成远低于实况的数字，检查强度被静默削弱 | 下限取「够用就行」，检查强度也是「够用就行」 |
 
 ---
 
@@ -757,3 +762,76 @@ tick，所以被裁条目的 tick 不可能大于 `sequence`，`shift` 计算不
 把入口放在列表末尾，等于让截断提示与列表一起被截断。判断方法是问：**用户只看第一屏时，
 他知不知道还有更多？**
 
+
+## DEF-52 · 「实时速度」监听了一个宿主从不派发的事件
+
+**现象。** 面板头部的速度徽章在真实宿主里永远不出现；读数是空的，也没有任何错误。
+
+**根因（在 `app.asar` 上核实）。** 第一版监听 `assistant/chunk` 并处理 `chunk.type ===
+'text-delta'`。但宿主生产代码里 `append("assistant/chunk"` 出现 **0 次**，那 28 处命中全部
+在 v1→v2 会话格式迁移的 codec 里，而 `RELEASED_V0_EVENT_DISPOSITIONS` 的 `retained` 明确把
+它筛掉。真实通道是 `agent/assistant-stream`（payload `{ agent, frame }`）。
+
+**为什么测试全绿。** 端到端测试自己 `host.emit('assistant/chunk', ...)`，于是它测的是
+「我派发的那个事件会被处理」，不是「宿主会派发这个事件」。
+
+**修法。** 改监听 `agent/assistant-stream`；`frame.type === 'chunk'` 且
+`chunk.type === 'text-delta'` 才 push；`start` 时 `begin()`；`end` 忽略。
+
+**教训。** 一个测试自己派发的事件，永远不能证明宿主会派发它。写监听之前先在宿主打包产物里
+数一遍 `append(` 的次数——那个数字是 0 的通道，就是一个永远不会来的通道。
+
+## DEF-53 · `outputTokens` 含推理 token，比例被放大到上限
+
+**现象。** 一次重推理的回合之后，每条纯文本回复都显示成正常速度的四倍。
+
+**根因。** `outputTokens` 是 `reasoningTokens` 的超集（宿主用量弹窗把它显示为「其中推理
+N」），而分母只有 `text-delta` 累积。重度思考的回合比例被顶到 `RATIO_CEILING = 4`。
+
+**修法。** settle 前减掉 `reasoningTokens`；`message.content` 含 `tool-call` 块时整条消息
+跳过（工具参数同样计入 `outputTokens` 却从未作为文本流过）。
+
+**教训。** 分子分母的构成必须能一句话说清；「同一条消息的 token」不等于「同一条消息的文本」。
+
+## DEF-54 · 中断的 attempt 把污染留给下一次
+
+**现象。** Esc 中断一轮之后，下一条干净消息的速度只有真值的四分之一，而且整场会话都偏小。
+
+**根因。** `entry.message` 只在 `settle` 里清零，而中断走 `interruptedBlocks()` 分支，
+provider 从未发过 `usage`，`settle` 根本不执行。残留的估算把下一次的分母翻倍，比例被压到
+`RATIO_FLOOR = 0.25`。
+
+**修法。** `start` frame 时 `speeds.begin(agentId)` 清累加量（保留窗口）。
+
+**教训。** 「什么时候重置」有两个不同的量（累加量与窗口），当成一个量会让其中一个必然出错。
+
+## DEF-55 · `settle` 为从未流式输出的会话建条目
+
+**现象。** 进程里每个产生过消息的 agent 都会在 meter 里留下一条空记录；`forget` 只清被
+dispose 的会话。长时间运行时这是一张无界增长的表。
+
+**根因。** `settle` 用了 `entryOf(agentId)`（惰性创建），而它需要的只是「有没有东西可除」。
+断言还写了 `meter.sessions.size === 0 || meter.sessions.get('nothing').marks.length === 0`，
+`||` 的后半句让这条断言无论如何都通过。
+
+**修法。** 改用 `sessions.get(agentId)`，与 `begin` 一致；断言改成
+`sessions.has('nothing') === false`，并加一条变异。
+
+**教训。** `||` 在断言里几乎总是可疑的：它把「两种情况都算对」写成了一句，于是没有任何一种
+情况被真正锁住。
+
+## DEF-56 · 锚点数量下限表写成远低于实况的数字
+
+**现象。** `test/mutations.test.mjs` 的 `for (const [name, expected] of ...)` 把
+`mutate-speed.mjs` 写成 30、`mutate-persistence.mjs` 写成 30、
+`mutate-language-and-files.mjs` 写成 10，而实况是 49 / 44 / 21；同一块的注释写「thirty-nine
+anchors」。
+
+**为什么危险。** 判据是 `anchors.length >= expected`，所以永远不会失败。成对删除一条
+`from:` 与它的 `file:` 行时，`owners.length === anchors.length` 仍然成立、逐条 missing 检查
+也无话可说——脚本静默丢掉十九条变异，这道检查照样通过。而它存在的理由正是防这个。
+
+**修法。** 三处改成实况 21/49/44，注释里的「thirty-nine」改「forty-nine」，并写清为什么
+下限不能取个舒服的圆整数。
+
+**教训。** 下限写成「够用就行」的数字，等于把检查的强度也写成了「够用就行」。

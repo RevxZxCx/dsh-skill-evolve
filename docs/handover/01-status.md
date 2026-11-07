@@ -30,6 +30,7 @@
 | 2026-11-06 | 撤回实时流 | 删 `LiveHub`/`/live`/`EventSource`，轮询恢复唯一通道恒定 8 秒；`settling` 照常显示（D-75）；2264 断言全绿，五套变异 68/11/14/44/15 全杀 |
 | 2026-11-07 | 展开按钮改圆标 | 卡片内底边居中圆形图标按钮（D-76，不占布局）；展开后仍显示收起入口且不随指针消失（D-77）；chevron 方向随开合翻转；2277 断言全绿，五套变异 78/11/14/44/15 全杀 |
 | 2026-11-07 | 总结语言 + 产出卡改累计 | 总结语言由宿主 `<html lang>` 指定（D-78）；产出卡改成会话累计（D-79），中断回合也记（D-80），上限三处收口（D-81）；2387 断言全绿，六套变异 81/21/44/15/14/11 全杀 |
+| 2026-11-08 | 实时输出速度 | 新增 `GET|HEAD /speed` 与头部圆角速度徽章（D-86）；走 `agent/assistant-stream` 而非 `assistant/chunk`（D-83）；两秒滑动窗口 + 字符估算 + provider 计数校正（D-82/D-84/D-85）；徽章非 live region（D-87）；2525 断言全绿，七套变异 49/81/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2455,3 +2456,88 @@ sync-gutter 幂等                       client.js sha256 恒定
    `MISSING ANCHOR` / `NOT APPLIED` 发现。改完源码要重跑全部变异脚本。
 6. **加一个上限时问的是「有没有第二条产生超限数据的路径」**，不是「写入的地方裁了没有」。
    `MAX_PATHS` 的漏洞在合并分支（DEF-49）。
+
+## 2026-11-08 · 实时输出速度：给「还在动吗」一个数字
+
+### 需求原话
+
+| # | 用户原话（`m10153`） |
+|---|---|
+| 1 | 「我想要的是实时的速度计算，这样更能表现实际的输出表现」 |
+| 2 | 「实际显示速度的区域在插件界面顶部的设置按钮和建议按钮中间，这一部分刚好是空着的」 |
+
+前一轮问的是「DSH 的 tok/s 是平均还是实时」，答案是**整个会话的加权平均**
+（`decodeTokens / decodeMs`，跨所有上报 usage 的步骤累加），到第二十轮时它主要在描述前十九
+轮。这个需求要的是另一个问题的答案。
+
+### 六条实现要点
+
+1. **采集**（`packages/ui-evolve/lib/speed.js`，新增）：每个 `text-delta` 记
+   `(时间, ceil(len/4))`，读数 = 两秒窗口内 token ÷ 窗口秒数；除数下限 500ms。
+2. **校正**：`usage` 落地时把「provider 计数 ÷ 我们的估算」记成比例，上下限 0.25..4，应用到
+   之后的估算上。分子分母都只算文本——减掉 `reasoningTokens`，带 `tool-call` 块的消息整条
+   不参与（D-84）。
+3. **通道**：监听 `agent/assistant-stream` 的 `chunk` frame，`text-delta` 才 push；
+   `start` frame 清累加量但保留窗口（D-83/D-85）。`assistant/chunk` 是**不存在的通道**——
+   宿主生产代码里 `append("assistant/chunk"` 出现 0 次，那 28 处命中全在 v1→v2 迁移 codec
+   里，且被 `retained` 明确筛掉。
+4. **路由**（`packages/ui-evolve/lib/api.js`）：新增 `GET|HEAD /api/ui-evolve/speed?agent=<id>`
+   → `{ tokens, ms, tps, active }`；缺 agent 400 `error.agent.missing`；主机端无 meter 时
+   200 `error.speed.absent`（旧宿主的一半不该让整页失败）。
+5. **显示**（`packages/ui-evolve/lib/client.js`）：`SpeedBadge` 插在「面板设置」与「建议」
+   之间；三档节拍 250 / 2000 / 10000ms（D-86）；窗口空后最后读数留 4 秒；切换会话立刻清空
+   （React 复用同一实例，不清就会显示上一个会话的速度）；`aria-live="off"`（D-87）。
+6. **格式**：`>= 10` 取整、否则一位小数，与宿主胶囊一致（在 `47.3` 和 `47` 之间闪是噪声）。
+
+### 五轮审查
+
+| 轮次 | runId | P1 | P2 | P3 | 采纳 | 驳回 |
+|---|---|---|---|---|---|---|
+| 第一轮 | `4ee7146b` | 1 | 2 | 3 | 6 | 0 |
+| 第二轮 | `948259b7` | 0 | 2 | 2 | 4 | 0 |
+| 第三轮 | `72dd8f31` | 0 | 0 | 5 | 5 | 0 |
+| 第四轮 | `41069f73` | 0 | 1 | 1 | 2 | 0 |
+| 第五轮 | `cc42adda` | 0 | 1 | 1 | 2 | 0 |
+| **合计** | | **1** | **6** | **12** | **19** | **0** |
+
+第一轮的 P1 是决定性的：代码没有一处写错，错的是「宿主会派发什么」这个前提，而 2531 条
+断言全在我自己搭的世界里运行。后四轮几乎全部是「注释与常量、断言与实现之间的数字对不上」——
+代码有一万条断言和六套变异守着，注释只有下一个读它的人。
+
+### 当前数字
+
+```
+node test/run.mjs                      2525 passed / 0 failed
+node test/speed.test.mjs                 49 passed / 0 failed
+node test/client.test.mjs               384 passed / 0 failed
+node test/api.test.mjs                  201 passed / 0 failed
+node test/index.test.mjs                261 passed / 0 failed
+node test/mutations.test.mjs             36 passed / 0 failed
+scripts/mutate-speed.mjs                 49 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-checklist-panel.mjs       81 killed / 0 survived / 0 not applied
+scripts/mutate-language-and-files.mjs    21 killed / 0 survived / 0 not applied
+scripts/mutate-persistence.mjs           44 killed / 0 survived / 0 not applied
+scripts/mutate-session-store.mjs         15 killed / 0 survived / 0 not applied
+test/mutate-panel.mjs                    14/14 killed
+scripts/mutate-guards.mjs                11/11 killed
+全仓 CRLF                                0（113 个文件，Node 按字节扫）
+sync-gutter                              幂等（client.js sha256 不变）
+```
+
+### 五条踩坑
+
+1. **测试自己派发的事件证明不了宿主会派发它。** 第一版监听 `assistant/chunk`，测试
+   `emit` 它，于是全绿；真实宿主里那个通道的 `append` 次数是 0。写监听之前先在宿主打包产物
+   里数一遍。这是本轮唯一一条 P1，也是最便宜能被机器发现的一条——如果当时问一句
+   「这个事件的派发点在哪」。
+2. **等价变异不要靠加测试消灭，要靠删冗余判据消灭。** `settle` 原有四个守卫，每个都被
+   下游一行遮住，变异测试如实报成「存活」。正确处置是把四个合成一个，而不是给每个补一条
+   自欺的断言。
+3. **锚点自检的下限写成「够用就行」的数字，检查强度也就是「够用就行」。** 新写的
+   `['mutate-speed.mjs', 30]` 实为 49，`>=` 永不失败；成对删掉十九条变异它照样通过。
+4. **注释里的数字要和常量一起改。** 五轮里十二个 P3 有十一个出在注释： 「半秒一次」实为
+   十秒、「十倍」实为四十倍、「四秒陈旧」实为八秒、「每秒五次」实为四次、「Two clocks」
+   实为三档。改常量的那一刻是唯一会想起注释的时刻。
+5. **`||` 在断言里几乎总是可疑的。** `sessions.size === 0 || marks.length === 0` 让一条断言
+   在两种情况下都通过，于是没有一种情况被真正锁住；而它掩盖的正是「`settle` 为每个 agent
+   建了一条空记录」。

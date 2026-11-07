@@ -55,6 +55,55 @@ window.__ModuleLoader__.load({
     const CARD_WIDTH = 288
 
     /**
+     * How often the speed badge asks while the model is writing.
+     *
+     * A quarter of a second: the number moves once per delta, and anything
+     * slower than about four updates a second reads as a stutter rather than as
+     * a rate. It is also cheap — the answer is two integers computed from a
+     * two-second window, not a document.
+     */
+    const SPEED_FAST_MS = 250
+
+    /**
+     * How often it asks when the window is empty.
+     *
+     * The turn is over, so nothing can change until the next one starts — but
+     * "stop asking entirely" would mean never noticing that it started. Two
+     * seconds is the longest gap that still catches a reply before its first
+     * sentence is finished.
+     */
+    const SPEED_SLOW_MS = 2000
+
+    /**
+     * How often it asks once there is nothing left to show.
+     *
+     * A panel sits open for hours. Asking at the live rate, forever, to discover
+     * that a conversation is still idle is a cost the host pays for a number
+     * nobody is looking at — so an idle badge asks forty times less often than a
+     * live one, which is a tenth of a request per second.
+     *
+     * The price is real and is not hidden here: after a long idle stretch the
+     * badge can be up to ten seconds late to notice a reply starting, so its
+     * first reading appears mid-sentence rather than at the first token. That is
+     * the intended trade — an idle panel is not what someone is watching, and the
+     * moment they switch to it the first request goes out immediately.
+     *
+     * Deliberately not `REFRESH_MS`: two timers on the same beat are one timer
+     * you cannot reason about. Anything that later has to tell "the panel
+     * polled" from "the badge polled" — a test filtering recorded timers by
+     * delay, a profile of who is asking — has only the number to go on.
+     */
+    const SPEED_IDLE_MS = 10000
+
+    /**
+     * How long the last real number stays on screen after the window empties.
+     *
+     * The moment a person most wants to read the speed is the moment the reply
+     * stops, and clearing it on the last delta takes it away exactly then.
+     */
+    const SPEED_LINGER_MS = 4000
+
+    /**
      * Resolve a plugin route against the page's own base.
      *
      * The GUI can be mounted under a path prefix, so `/api/...` is not
@@ -138,6 +187,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Format a tokens-per-second reading for the badge.
+     *
+     * Two significant-ish digits under ten, whole numbers above it, matching
+     * what the host's own pill does — a live number that flickers between `47.3`
+     * and `47` is noise, and one that reads `3` instead of `2.7` is a worse
+     * answer to "is it moving".
+     *
+     * @param {number} tps - tokens per second.
+     * @returns {string} e.g. `47`, `2.7`.
+     */
+    function formatSpeed(tps) {
+      const value = Math.max(0, tps)
+      if (value >= 10) return String(Math.round(value))
+      return String(Math.round(value * 10) / 10)
+    }
+
+    /**
      * Format a byte count for a file row.
      *
      * @param {number} bytes - the size.
@@ -179,6 +245,8 @@ window.__ModuleLoader__.load({
 .dsse-rail::-webkit-scrollbar-thumb,.dsse-candidates::-webkit-scrollbar-thumb,.dsse-detail-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,rgba(15,17,21,.16));border-radius:3px}
 .dsse-top-row{flex:0 0 auto;display:flex;align-items:center;gap:6px;min-height:40px;padding:2px 4px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 2px 8px rgba(15,17,21,.04)}
 .dsse-top-row .dsse-queue{width:auto;min-height:32px;margin-left:auto;padding:0 12px}
+.dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:56px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
+.dsse-top-row .dsse-speed-unit{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.68em,9px)}
 .dsse-icon-btn{width:36px;height:36px;display:inline-grid;place-items:center;flex:0 0 auto;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-icon-btn:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
 .dsse-icon{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
@@ -1113,6 +1181,137 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * How fast the answer is arriving, as a live number.
+     *
+     * The host already shows a tok/s pill, but it is the session's average: by
+     * the twentieth turn it is mostly describing the first nineteen. This one
+     * answers the question a person actually asks while watching a reply arrive,
+     * which is "is it still moving".
+     *
+     * Three clocks, one state. While the server says the window has something in
+     * it, this asks four times a second — the number is the point and a number
+     * that updates every two seconds is not a live reading. When the window
+     * empties, it drops to one question every two seconds: the turn may be over,
+     * but the next one starts without warning and a badge that stopped asking
+     * would never notice. After a long quiet spell it drops again, to one question
+     * every ten seconds, because a panel sits open for hours and nobody is reading
+     * an idle number. The price is stated where `SPEED_IDLE_MS` is defined.
+     *
+     * The number lingers for a few seconds after the window empties, because the
+     * moment the reader most wants to read it is the moment the reply finishes.
+     *
+     * @param {object} props - props.
+     * @param {string} props.sessionId - the conversation to measure.
+     * @returns {object} the element, or nothing when there is no speed to show.
+     */
+    function SpeedBadge(props) {
+      const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
+      // The number on screen and the last moment it was real live in refs, not
+      // state, and the difference is not stylistic. `ask` closes over whatever
+      // the effect saw when it was created, and the effect's only dependency is
+      // the session id — so a `seenAt` held in state would be frozen at its mount
+      // value for the life of the conversation. That turned the "warm" branch
+      // into dead code and, worse, made the linger below unreachable: by the time
+      // a reading comes back inactive the number is already gone.
+      const [reading, setReading] = React.useState(null)
+      const held = React.useRef({ tps: 0, at: 0 })
+      const request = React.useRef(0)
+      // Re-render triggers: a timer firing does not paint on its own, and the
+      // linger expiry is a paint-level fact (the number has to disappear four
+      // seconds after the reply stopped, without another poll to notice).
+      const [, setTick] = React.useState(0)
+
+      React.useEffect(() => {
+        if (sessionId === '') return undefined
+        let live = true
+        let timer = null
+        let repaint = null
+        let stopped = false
+        // A different conversation shares this component instance, so anything
+        // held from the previous one has to go before the first request: the
+        // badge would otherwise show the last conversation's number for up to
+        // the linger, which reads as this one's speed and is not.
+        held.current = { tps: 0, at: 0 }
+        setReading(null)
+
+        const schedule = (ms) => {
+          if (stopped) return
+          timer = setTimeout(ask, ms)
+        }
+
+        const ask = async () => {
+          const ticket = ++request.current
+          try {
+            const answer = await call(`/speed?agent=${encodeURIComponent(sessionId)}`)
+            if (live === false || ticket !== request.current) return
+            const next = answer
+            const now = Date.now()
+            if (next?.active === true && typeof next.tps === 'number' && Number.isFinite(next.tps) && next.tps > 0) {
+              held.current = { tps: next.tps, at: now }
+            }
+            setReading(next)
+            if (next?.active === true) {
+              schedule(SPEED_FAST_MS)
+              return
+            }
+            // Recently active, just not this instant: the reply may be between
+            // paragraphs or assembling a tool call, so keep watching closely.
+            // Long idle: drop a long way down and stop paying for it.
+            const warm = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS * 4
+            schedule(warm ? SPEED_SLOW_MS : SPEED_IDLE_MS)
+            // The held number outlives the reading that produced it, so the badge
+            // has to repaint when it expires — nothing else will. One timer, kept
+            // in a variable: two polls in a row while warm would otherwise stack
+            // a timer each, and none of them would be cancelled by the cleanup.
+            if (warm === true && held.current.at !== 0) {
+              if (repaint !== null) clearTimeout(repaint)
+              repaint = setTimeout(() => { repaint = null; setTick((count) => count + 1) }, SPEED_LINGER_MS)
+            }
+          } catch {
+            if (live === false) return
+            // A panel that vanishes because one request failed is worse than a
+            // stale number: keep the last reading and try again on the idle
+            // clock, which is also what happens when the route is simply absent
+            // (an older host half). Retrying on the slow clock instead would knock
+            // on a host that is merely restarting once every two seconds — five
+            // times as often — for as long as the restart takes.
+            schedule(SPEED_IDLE_MS)
+          }
+        }
+
+        ask()
+        return () => {
+          live = false
+          stopped = true
+          request.current += 1
+          if (timer !== null) clearTimeout(timer)
+          if (repaint !== null) clearTimeout(repaint)
+        }
+      }, [sessionId])
+
+      const now = Date.now()
+      const heldFresh = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS
+      const liveReading = reading?.active === true ? reading : null
+      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : 0
+      if (typeof shown !== 'number' || Number.isFinite(shown) === false || shown <= 0) return null
+      return jsxs('span', {
+        className: 'dsse-speed',
+        // Not `role="status"`. That implies `aria-live="polite"`, and this number
+        // changes up to four times a second while a reply arrives — a screen
+        // reader would announce it continuously for the whole generation, which
+        // makes the panel unusable for the people the attribute is meant to help.
+        // The label stays for anyone who lands on it deliberately.
+        'aria-live': 'off',
+        'aria-label': `输出速度 ${formatSpeed(shown)} tok/s`,
+        title: '最近两秒的输出速度',
+        children: [
+          jsx('span', { children: formatSpeed(shown) }),
+          jsx('span', { className: 'dsse-speed-unit', children: 'tok/s' }),
+        ],
+      })
+    }
+
     function Checklist(props) {
       const [open, setOpen] = React.useState(false)
       const [epoch, setEpoch] = React.useState(0)
@@ -1915,6 +2114,11 @@ window.__ModuleLoader__.load({
                 },
                 children: jsx(Icon, { name: 'settings' }),
               }),
+              // Between the two controls and the queue: the empty stretch in this
+              // row is the only place a number can appear and disappear without
+              // moving anything a person aims at, and reading order puts it after
+              // the two buttons that act on the panel rather than before them.
+              jsx(SpeedBadge, { sessionId }),
               jsx(Checklist, {
                 sessionId,
                 onDecided: () => load(true),

@@ -402,6 +402,22 @@ function createPanelApi(deps) {
         return json(res, 200, { ok: true, data: await readPanel(deps, agentId, langOf(url.searchParams.get('lang'))) }, headOnly)
       }
       if (path === `${ROUTE_PREFIX}/models`) return json(res, 200, { ok: true, data: { providers: deps.modelCatalog() } }, headOnly)
+      // A speed is a reading of the last two seconds, not a document. It is a
+      // route rather than a field on `/panel` because the two are polled on
+      // different clocks: the panel changes when a turn ends, this changes while
+      // one is arriving, and folding them together would mean either dragging the
+      // panel down to the badge's quarter-second beat (four requests a second for
+      // numbers that cannot change that often) or leaving the speed up to eight
+      // seconds stale, which is the whole generation.
+      if (path === `${ROUTE_PREFIX}/speed`) {
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          return json(res, 400, { ok: false, code: 'error.agent.missing', error: 'the speed route needs a session id' }, headOnly)
+        }
+        if (typeof deps.speedOf !== 'function') {
+          return json(res, 200, { ok: false, code: 'error.speed.absent', error: 'this panel does not measure output speed' }, headOnly)
+        }
+        return json(res, 200, { ok: true, data: deps.speedOf(agentId) }, headOnly)
+      }
       // `config` is a read on GET/HEAD and a write on POST. The read is checked
       // by method as well as path: matching on the path alone made the write
       // branch below unreachable, so the panel's switches answered "saved" and
