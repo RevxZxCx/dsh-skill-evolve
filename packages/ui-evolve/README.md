@@ -293,19 +293,29 @@ paragraph. Smaller type is what pays for the extra line: the card sits beside th
 conversation and should read as annotation, not as a second column of prose.
 
 The cap lifts for exactly one reason: a click. Hovering does not open the card —
-it reveals a centred line below the summary that says what a click will do
-(`点击展开全文`), and clicking anywhere on the card opens it until it is clicked
-again. The hint is not a button of its own: it is a `div` with
+it reveals a round badge on the card's bottom edge, centred, with a chevron
+pointing down, and clicking anywhere on the card opens it until it is clicked
+again. Once open the badge stays put, whatever the pointer is doing, and points up
+(`点击收起全文`): closing has to remain reachable at the moment the reader is
+looking for it. The hint is not a button of its own: it is a `div` with
 `pointer-events: none`, so a click on the hint is a click on the card beneath it,
 and the whole card is the target. Making it a real button would have meant a
 second thing to focus, a second click handler, and a second accessible name for
 what is really just a line of text explaining the card.
 
-That costs one deliberate trade. The hint is mounted and unmounted as the pointer
-enters and leaves, so the card grows by 26px on hover. The alternatives are worse:
-floating the hint over the text hides the line the person is reading, and lifting
-the cap on hover — which is what this used to do — pushes the text six lines down
-under the pointer. 26px is the cheaper surprise.
+The badge is positioned against the card (`position: absolute` inside a
+`position: relative` card) rather than laid out under the summary, so revealing it
+on hover costs no layout at all — the card does not grow, and the text below it in
+the column does not move. The one case that reserves room is the open card:
+`.dsse-card-body` gets `padding-bottom: 44px`, which clears the 28px badge and its
+8px offset with room to spare. That height was already changing when the card
+opened, so it adds no new class of jitter. Floating the badge over the text without
+reserving anything was the alternative, and it hides the last line of the summary
+the click was for.
+
+There is no `title` on the badge. It has `pointer-events: none`, so it is never a
+hit target and a native tooltip could not appear on it; `aria-label` carries the
+same words for anyone reading the card with a screen reader.
 
 A card with nothing hidden does not offer the interaction at all: no pointer
 cursor, no hint, no tab stop, no `role="button"`.

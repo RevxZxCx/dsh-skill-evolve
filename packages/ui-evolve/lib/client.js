@@ -167,7 +167,7 @@ window.__ModuleLoader__.load({
 .dsse-count{display:inline-block;min-width:22px;padding:1px 7px;border-radius:999px;background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8);font-size:max(.85em,11px);text-align:center}
 .dsse-card[data-clickable="true"]{cursor:pointer}
 .dsse-card[data-clickable="true"]:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
-.dsse-card{flex:0 0 auto;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:11px;box-shadow:0 2px 8px rgba(15,17,21,.04);overflow:hidden}
+.dsse-card{position:relative;flex:0 0 auto;background:var(--dsw-alias-bg-layer-1,#fff);border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:11px;box-shadow:0 2px 8px rgba(15,17,21,.04);overflow:hidden}
 .dsse-card-head{display:flex;align-items:baseline;gap:8px;padding:7px 11px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07))}
 .dsse-card-title{margin:0;font-size:.94em;line-height:1.4;font-weight:600;white-space:nowrap}
 .dsse-card-meta{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:right}
@@ -184,7 +184,9 @@ window.__ModuleLoader__.load({
 .dsse-summary-title{margin:0 0 6px;font-size:1em;line-height:1.45;font-weight:500}
 .dsse-muted{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-tiny{font-size:.86em;line-height:1.55}
-.dsse-expand{display:flex;align-items:center;justify-content:center;gap:5px;min-height:26px;padding:3px 10px;border-top:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07));color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);user-select:none;pointer-events:none}
+.dsse-expand{position:absolute;left:50%;transform:translateX(-50%);bottom:8px;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-secondary,#5b6270);box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}
+.dsse-expand .dsse-icon{width:15px;height:15px}
+.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}
 .dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
 .dsse-row{display:flex;align-items:center;gap:7px;min-width:0;min-height:36px;padding:5px 6px;border-radius:7px}
@@ -998,6 +1000,12 @@ window.__ModuleLoader__.load({
       if (props.name === 'skill') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M4 5.5A2.5 2.5 0 016.5 3H20v15H6.5A2.5 2.5 0 004 20.5v-15z' }), jsx('path', { d: 'M8 3v15' })] })
       if (props.name === 'mcp') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M9 3v5M15 3v5' }), jsx('path', { d: 'M6 8h12v4a6 6 0 01-12 0V8z' }), jsx('path', { d: 'M12 18v3' })] })
       if (props.name === 'collapse') return jsx('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: jsx('path', { d: props.side === 'right' ? 'M9 6l6 6-6 6' : 'M15 6l-6 6 6 6' }) })
+      // The round button in the middle of a card's bottom edge. Drawn as one
+      // chevron rather than a glyph turned by a `transform`: inside a round badge a
+      // rotated shape reads as a spinner caught mid-animation. The direction is the
+      // promise about what the click does — down means there is more below, up means
+      // the card is already open and the click puts it back.
+      if (props.name === 'chevron') return jsx('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: jsx('path', { d: props.up === true ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6' }) })
       return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3z' }), jsx('path', { d: 'M18.5 15l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3z' })] })
     }
 
@@ -1403,13 +1411,13 @@ window.__ModuleLoader__.load({
       return jsxs('section', {
         className: 'dsse-card',
         'data-clickable': interactive === true ? 'true' : 'false',
-        // Whether the expand hint is on screen. The attribute is what the tests
-        // read and what a future style rule could key on; the hint itself is
-        // mounted and unmounted with `expandHint` above. It does change the card's
-        // height — the hint sits under the summary — and that is accepted rather
-        // than avoided: the alternative was opening the summary on hover, which
-        // moved the text under the pointer by six lines instead of twenty-six
-        // pixels. Owner's call: a hint that appears, over a summary that does not.
+        // Whether the expand button is on screen. The attribute is what the tests
+        // read; the button itself is mounted and unmounted with `expandHint` above.
+        // Showing it costs no layout — it is positioned against the card, not placed
+        // under the summary — so the old trade-off this comment used to explain
+        // (twenty-six pixels of growth was tolerable) no longer applies to a hover.
+        // The one case that does reserve space is the open card, and that height is
+        // already changing for reasons of its own.
         'data-hint': props.expandHint === undefined ? 'false' : 'true',
         onMouseEnter: props.onMouseEnter,
         onMouseLeave: props.onMouseLeave,
@@ -1439,15 +1447,29 @@ window.__ModuleLoader__.load({
             ],
           }),
           jsx('div', { className: 'dsse-card-body', children: props.children }),
-          // The hint is not a control of its own. It marks the whole card as one:
-          // a small button under the summary would be a target a few characters
-          // wide, and the card is already focusable and already handles the click,
-          // so the honest affordance is a label on the card rather than a second
-          // thing to hit. `pointer-events` is off for the same reason — a click on
-          // the label is a click on the card.
+          // A round button centred on the card's bottom edge, showing a chevron that
+          // points down when there is more to read and up once the card is open.
+          // It is still not a control of its own: the card already handles the
+          // click, is already focusable and already announces `aria-expanded`, so a
+          // second focus stop a few pixels from the first would only give the
+          // keyboard two ways to do one thing. `pointer-events` is off so a click on
+          // the badge lands on the card, which is also what makes the badge readable
+          // as "the card opens" rather than "this dot does".
           props.expandHint === undefined
             ? null
-            : jsx('div', { className: 'dsse-expand', children: props.expandHint }),
+            : jsxs('div', {
+                className: 'dsse-expand',
+                // Named for a screen reader: the badge is the only visual cue that
+                // something is folded away, and a decorative div announces nothing.
+                // No `title`: `pointer-events` is off, so this element is never hit
+                // and the browser has nothing to hang a native tooltip on. A `title`
+                // here would be a line of code that reads as a feature and does
+                // nothing — the card owns the pointer, so the card would have to
+                // carry it, and `aria-label` already says the same words.
+                role: 'img',
+                'aria-label': props.expandHint,
+                children: jsx(Icon, { name: 'chevron', up: props.expanded === true }),
+              }),
         ],
       })
     }
@@ -1641,8 +1663,12 @@ window.__ModuleLoader__.load({
       // loses nothing: expanding it would not have revealed anything.
       const expanded = turnExpandable === true && turnPinned === true
       // The hint exists only where it would lead somewhere: over a card with
-      // something hidden, while that card is still closed.
-      const turnHinted = turnExpandable === true && turnPinned === false && turnHovered === true
+      // something hidden. An open card keeps its badge regardless of the pointer —
+      // closing has to stay reachable, and the pointer is exactly the thing that
+      // may already have left by the time the reader wants out. A closed one still
+      // waits to be hovered, because an offer to open is not news on every card in
+      // the column.
+      const turnHinted = turnExpandable === true && (turnPinned === true || turnHovered === true)
 
       const data = state.status === "ready" ? state.data : undefined
       const summary = data?.summary
@@ -1890,12 +1916,12 @@ window.__ModuleLoader__.load({
                 onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),
                 expanded,
                 clickable: turnExpandable,
-                // One wording, because there is only one reachable case: `turnHinted`
-                // requires `turnPinned === false` and `expanded` requires it true, so
-                // the two can never hold at once. An open card shows no hint at all —
-                // the owner asked for an offer to open, and a card that closes on the
-                // next click does not need to be told so while the pointer is on it.
-                expandHint: turnHinted === true ? '点击展开全文' : undefined,
+                // Two wordings, and both are reachable now: an open card offers the
+                // click that closes it, and it offers it whether or not the pointer
+                // is still on the card. Making the badge hover-only while open would
+                // hide the one control that leads back out at the moment the pointer
+                // drifts away from the card it just opened.
+                expandHint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,
                 head: jsxs('div', {
                   className: 'dsse-head-stats',
                   children: [

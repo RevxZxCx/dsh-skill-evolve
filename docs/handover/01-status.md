@@ -28,6 +28,7 @@
 | 2026-11-06 | 持久化第十三轮审查修复 | 抽出来的判据，要走过去的人用（`keepsDocument`） |
 | 2026-11-06 | 界面六项需求 + 实时流 | 统计贴右、六行、点击才展开、加载提示、只在会话页显示；`LiveHub` + `/live` SSE，轮询降为 60 秒兜底；2355 断言全绿，五套变异 26/65/14/44/15 全杀 |
 | 2026-11-06 | 撤回实时流 | 删 `LiveHub`/`/live`/`EventSource`，轮询恢复唯一通道恒定 8 秒；`settling` 照常显示（D-75）；2264 断言全绿，五套变异 68/11/14/44/15 全杀 |
+| 2026-11-07 | 展开按钮改圆标 | 卡片内底边居中圆形图标按钮（D-76，不占布局）；展开后仍显示收起入口且不随指针消失（D-77）；chevron 方向随开合翻转；2277 断言全绿，五套变异 78/11/14/44/15 全杀 |
 
 ---
 
@@ -2305,3 +2306,68 @@ sync-gutter 连跑两次                 client.js sha256 不变（幂等）
   （该路由只有 POST 分支，HEAD 落到 404）。这是 `c22ec9a` 就有的错误。
 - 文档里的 `D-xx`/`DEF-xx`/`R-xx` 交叉引用没有测试守着。若要根治，应当在
   `test/` 下加一条「文档中出现的编号必须在对应索引表里存在」。
+
+## 2026-11-07 · 展开按钮改圆标：把「一行字」换成「一个位置」
+
+上一批的收尾是「撤回实时流」，六项界面需求里最后落地的是「点击才展开、hover
+只提示」。提示当时是**卡片下方的一行整宽文字**，并因此在 D-69 里记下一条代价：
+hover 进出会挂载/卸载它，卡片长高 26px。
+
+### 用户的四条要求，逐条对应
+
+| 用户原话 | 落地 |
+|---|---|
+| 「按钮是显示在卡片的内部的底部」 | `position:absolute` 挂在 `.dsse-card{position:relative}` 底边 |
+| 「并且是圆形的」 | `border-radius:999px`，26×26 |
+| 「用图标表示展开的」 | chevron `svg`（`d` 随开合翻转），不是文字 |
+| 「按钮要居中显示」 | `left:50%;transform:translateX(-50%)` |
+| 「展开后还要显示收起按钮」 | `turnHinted` 展开态无条件为真，文案 `点击收起全文` |
+| 「不要挡住文字导致无法看全」 | 展开态 `.dsse-card-body{padding-bottom:44px}` |
+
+### 三条实现的要点
+
+1. **离开文档流，权衡就消失了。** D-69 的 26px 是在「遮住正在读的那行」与「把
+   文字在指针下推走」之间挑一个便宜的。`position:absolute` 让两个都不发生。
+2. **收起是唯一回路，不能挂在 hover 上。** `turnHinted` 从
+   `turnPinned === false && turnHovered` 改成 `turnPinned === true || turnHovered`：
+   折叠态仍要 hover（每张卡常亮一个「展开」是在喊还没发生的事），展开态无条件
+   （读者最想找出口的时候，指针往往已经离开）。
+3. **44px 的算术要能算出来。** 文件里没有 `box-sizing` 声明，默认 content-box，
+   圆钮 26 + 2×1px = 28px，`bottom:8px` 使其顶端距内底边 36px，余 8px。审查
+   独立复算了这一步。
+
+### 两条 P3，都在文档侧
+
+| 轮次 | 问题 | 处置 |
+|---|---|---|
+| R-40 | README 仍写「摘要下方居中一行」+「hover 增高 26px」 | 整段重写为三段（形状位置 / 不占布局 + 算术 / 为何无 `title`） |
+| R-40 | `title: props.expandHint` 因 `pointer-events:none` 永不弹出 | 删掉，注释解释原因（DEF-43） |
+| R-41 | 行为推翻 D-69 两条代价，决策记录没补 | 补 D-76、D-77，索引表 D-69 注明代价被取代（DEF-44） |
+
+第二轮审查明确写「代码侧可以视为收敛」，第三条纯属记录滞后。**这与前一批 12 条
+P3 里 11 条出在文档是同一个模式**：代码有断言和变异守着，文档没有。
+
+### 当前数字（全部本轮实测）
+
+```
+node test/run.mjs                    2277 passed / 0 failed
+node test/client.test.mjs             330 passed / 0 failed
+scripts/mutate-checklist-panel.mjs     78 killed / 0 survived / 0 not applied
+scripts/mutate-guards.mjs              11/11 killed（after restore: 2277 passed）
+scripts/mutate-persistence.mjs         44 killed / 0 survived / 0 not applied
+scripts/mutate-session-store.mjs       15 killed / 0 survived / 0 not applied
+test/mutate-panel.mjs                  14/14 killed
+全仓 CRLF                              0（109 个 git 追踪文件，Node 按字节扫）
+sync-gutter 连跑两次                   client.js sha256 恒为 bc752e36…
+```
+
+### 踩过的坑
+
+1. **旧变异锚点会静默过期。** 把 `right:8px` 改成 `left:50%` 之后，
+   `the expand button pushes the card taller when it appears` 的 `from` 不再命中，
+   幸好脚本有 `NOT APPLIED` 兜底。**改样式的形状时，要同时 grep 变异脚本。**
+2. **同一个视觉结果可以有不同的理由，锚点却只有一个写法。** `the chevron points
+   down even when the card is open` 与 `an open card offers to open itself again`
+   都必须各自唯一命中，改完要先数 `label:` 与 `grep -cF`。
+3. **`git ls-files` 输出格式**（DEF-42）在这套 bash 下会因 `core.quotepath` 把中文
+   路径转义，数文件数必须加 `-c core.quotepath=false`。

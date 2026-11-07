@@ -2172,7 +2172,29 @@ function byAction(node, action) {
   const hovered = await instance.renderer.deepRender(cards)
   check('hovering a clipped summary does not open it', expandedOf(hovered) === 'false', textOf(hovered).slice(0, 120))
   check('hovering offers to open it', turnCard(hovered)?.props?.['data-hint'] === 'true', String(turnCard(hovered)?.props?.['data-hint']))
-  check('and the offer says what the click will do', textOf(hovered).includes('点击展开全文'), textOf(hovered).slice(-80))
+  // The offer is a round badge with a chevron in it, so the words are no longer
+  // text children — they live on `aria-label`, which is what a screen reader reads.
+  // There is deliberately no `title`: the badge has `pointer-events: none`, so it
+  // never becomes a hit target and a native tooltip on it could not appear. The
+  // accessible name is the only thing carrying those words, which is exactly why
+  // this assertion reads the label rather than the rendered text.
+  const offer = firstByClass(hovered, 'dsse-expand')
+  check('and the offer says what the click will do', offer?.props?.['aria-label'] === '点击展开全文', String(offer?.props?.['aria-label']))
+  check('the offer is a button with an icon, not a line of text', (offer?.props?.children?.props?.className ?? '').includes('dsse-icon'), JSON.stringify(offer?.props?.children?.props?.className))
+  // The badge sits centred on the card's bottom edge rather than under the summary,
+  // so revealing it costs no layout. That is the whole reason it was moved out of
+  // the flow: the older strip grew a hovered card by twenty-six pixels and every
+  // pointer that crossed the column nudged the text below it.
+  const expandSheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  check('the offer is pinned to the bottom edge, out of the flow', /\.dsse-expand\{[^}]*position:absolute/.test(expandSheet), (expandSheet.match(/\.dsse-expand\{[^}]*\}/) ?? [''])[0].slice(0, 140))
+  check('and it hangs in the middle of that edge', /\.dsse-expand\{[^}]*left:50%/.test(expandSheet) && /\.dsse-expand\{[^}]*translateX\(-50%\)/.test(expandSheet))
+  check('and the card is the box it is pinned to', /\.dsse-card\{[^}]*position:relative/.test(expandSheet))
+  check('the offer is round', /\.dsse-expand\{[^}]*border-radius:999px/.test(expandSheet))
+  check('the offer takes no clicks of its own', /\.dsse-expand\{[^}]*pointer-events:none/.test(expandSheet))
+  // An open card reserves room for the badge. Without the padding the badge would
+  // sit on top of the last line of the summary it just revealed — the one part of
+  // the card the click was for.
+  check('an open card keeps its last line clear of the badge', /\.dsse-card\[aria-expanded="true"\] \.dsse-card-body\{[^}]*padding-bottom:44px\}/.test(expandSheet), (expandSheet.match(/\.dsse-card\[aria-expanded="true"\][^}]*\}/) ?? [''])[0].slice(0, 120))
   check('a hovered card still reports itself closed', turnCard(hovered)?.props?.['aria-expanded'] === false, String(turnCard(hovered)?.props?.['aria-expanded']))
 
   // Leaving takes the offer away with it, and only the offer: being able to open
@@ -2196,6 +2218,19 @@ function byAction(node, action) {
   check('an open summary keeps its measurement', firstByClass(opened, 'dsse-clip')?.props?.['data-clipped'] === 'true', 'the measurement should survive the expansion')
   check('an open summary draws no fade', firstByClass(opened, 'dsse-clip')?.props?.['data-expanded'] === 'true', 'the fade is gated on data-expanded, so that is what says whether it is drawn')
   check('and it reports itself expanded', turnCard(opened)?.props?.['aria-expanded'] === true, String(turnCard(opened)?.props?.['aria-expanded']))
+  // An open card keeps its badge and says what the next click will do. Hiding the
+  // way out while the card is open is the worst possible moment for it: the pointer
+  // is not a reliable witness — it may have left the card already — and the click
+  // that opened the card is exactly what closed it before.
+  const closing = firstByClass(opened, 'dsse-expand')
+  check('an open card still shows the way out', closing !== undefined, String(closing === undefined))
+  check('and it says the click will close it', closing?.props?.['aria-label'] === '点击收起全文', String(closing?.props?.['aria-label']))
+  // The chevron points up when the card is open and down when it is not, so the
+  // glyph is a promise about the click rather than decoration.
+  const openedPath = firstByClass(opened, 'dsse-expand')?.props?.children?.props?.children?.props?.d
+  const closedPath = firstByClass(hovered, 'dsse-expand')?.props?.children?.props?.children?.props?.d
+  check('the open card points up', openedPath === 'M6 15l6-6 6 6', String(openedPath))
+  check('and the closed card points down', closedPath === 'M6 9l6 6 6-6', String(closedPath))
 
   // The pointer leaving must not close a card that was clicked open: the click is
   // its own reason for being open, and this is the case a single shared boolean
@@ -2210,6 +2245,11 @@ function byAction(node, action) {
   check('and it keeps its keyboard affordances while open', turnCard(stillPinned)?.props?.tabIndex === 0 && turnCard(stillPinned)?.props?.role === 'button', JSON.stringify([turnCard(stillPinned)?.props?.tabIndex, turnCard(stillPinned)?.props?.role]))
   check('and it still reports itself expanded', turnCard(stillPinned)?.props?.['aria-expanded'] === true, String(turnCard(stillPinned)?.props?.['aria-expanded']))
   check('an open summary keeps its clipped reading', firstByClass(stillPinned, 'dsse-clip')?.props?.['data-clipped'] === 'true', String(firstByClass(stillPinned, 'dsse-clip')?.props?.['data-clipped']))
+  // The point of the rule above: the way out does not depend on the pointer. This
+  // is the frame where a hover-gated badge would be missing, and the card would be
+  // open with nothing on it saying how to close it.
+  check('the way out survives the pointer leaving', turnCard(stillPinned)?.props?.['data-hint'] === 'true', String(turnCard(stillPinned)?.props?.['data-hint']))
+  check('and it still says the click will close it', firstByClass(stillPinned, 'dsse-expand')?.props?.['aria-label'] === '点击收起全文', String(firstByClass(stillPinned, 'dsse-expand')?.props?.['aria-label']))
 
   // A second click releases the pin, and with no pointer on the card it closes.
   press(stillPinned)

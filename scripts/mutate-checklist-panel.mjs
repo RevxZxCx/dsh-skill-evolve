@@ -371,6 +371,91 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The badge is the only visual cue that a summary is folded away. Its words
+    // moved onto `aria-label` when it became an icon, so a build that dropped that
+    // label would still look right and would announce nothing.
+    label: 'the expand button carries no words for a screen reader',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                'aria-label': props.expandHint,`,
+    to: `                'aria-label': '',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the expand button is a line of text again',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                children: jsx(Icon, { name: 'chevron', up: props.expanded === true }),`,
+    to: `                children: props.expandHint,`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Positioned against the card, so showing it costs no layout. Putting it back
+    // in the flow is the change that used to grow a hovered card by twenty-six
+    // pixels and nudge the text below it.
+    label: 'the expand button pushes the card taller when it appears',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-expand{position:absolute;left:50%;`,
+    to: `.dsse-expand{position:static;`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the expand button is pushed back to the corner',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-expand{position:absolute;left:50%;transform:translateX(-50%);`,
+    to: `.dsse-expand{position:absolute;right:8px;`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the expand button is a square',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;`,
+    to: `display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:4px;`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // `pointer-events:none` is what makes a click on the badge a click on the card.
+    // Without it the badge is a dead patch inside the one target the card offers.
+    label: 'a click on the expand button lands on nothing',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}`,
+    to: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none}`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The badge hangs on the bottom edge of the card, which is exactly where the
+    // last line of a summarised paragraph ends. The open card reserves room for it;
+    // without the reservation the badge sits on top of the line it just revealed.
+    label: 'an open card lets the badge cover its last line',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}`,
+    to: ``,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Closing has to stay reachable. Gating the badge on the pointer while the card
+    // is open hides the way out at the moment the reader is looking for it.
+    label: 'an open card hides the way out while the pointer is elsewhere',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `      const turnHinted = turnExpandable === true && (turnPinned === true || turnHovered === true)`,
+    to: `      const turnHinted = turnExpandable === true && turnHovered === true`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an open card offers to open itself again',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `expandHint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,`,
+    to: `expandHint: turnHinted === true ? '点击展开全文' : undefined,`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A chevron that points the same way in both states is decoration; the direction
+    // is the only thing saying whether the next click opens or closes.
+    label: 'the chevron points down even when the card is open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `children: jsx('path', { d: props.up === true ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6' })`,
+    to: `children: jsx('path', { d: 'M6 9l6 6 6-6' })`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
     label: 'the summary is capped at three lines again',
     file: 'packages/ui-evolve/lib/client.js',
     from: '.dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}',
