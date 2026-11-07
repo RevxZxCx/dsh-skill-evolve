@@ -1035,6 +1035,221 @@ for (const reason of ['gone', 'archived']) {
 }
 
 // ---------------------------------------------------------------------------
+// The output card lists the session's work, so its files outlive the turn
+// ---------------------------------------------------------------------------
+
+// These paths used to live in the transcript and described one turn: a turn
+// that edited nothing emptied the card, and a turn that touched one file hid
+// the rest. The list below is per session, ordered by recency, and has to
+// survive both the turn boundary and a restart.
+{
+  const { state, root } = await fixture()
+  state.rememberPaths('files', ['a.js', 'b.js'])
+  check('a file is remembered', state.pathsSeen('files').includes('a.js'), JSON.stringify(state.pathsSeen('files')))
+  check('the newest file comes first', state.pathsSeen('files')[0] === 'b.js', JSON.stringify(state.pathsSeen('files')))
+
+  // The whole point: a later turn that touches something else does not retire
+  // what the earlier turns did.
+  state.rememberPaths('files', ['c.js'])
+  check('a later turn keeps the earlier files', state.pathsSeen('files').length === 3, JSON.stringify(state.pathsSeen('files')))
+  check('and the newest is still first', state.pathsSeen('files')[0] === 'c.js', JSON.stringify(state.pathsSeen('files')))
+
+  // Editing something again moves it forward instead of duplicating it. The
+  // delete-before-set is what makes this true: a Map that never deletes keeps
+  // the file in its original slot and the list stops being a recency order.
+  state.rememberPaths('files', ['a.js'])
+  const reordered = state.pathsSeen('files')
+  check('editing a file again moves it to the front', reordered[0] === 'a.js', JSON.stringify(reordered))
+  check('and does not list it twice', reordered.filter((file) => file === 'a.js').length === 1, JSON.stringify(reordered))
+  check('and the others keep their order', reordered[1] === 'c.js' && reordered[2] === 'b.js', JSON.stringify(reordered))
+  await done(root)
+}
+
+{
+  // Nothing to record is not a record with a hole in it: values that are not
+  // paths are skipped rather than turned into filenames that would be stat'ed
+  // later against the working directory.
+  const { state, root } = await fixture()
+  state.rememberPaths('junk', [null, 42, '', 'kept.js', undefined, {}])
+  const seen = state.pathsSeen('junk')
+  check('only strings count as paths', seen.length === 1 && seen[0] === 'kept.js', JSON.stringify(seen))
+  state.rememberPaths('junk', [])
+  check('an empty list changes nothing', state.pathsSeen('junk').length === 1, JSON.stringify(state.pathsSeen('junk')))
+  state.rememberPaths('junk', undefined)
+  check('a missing list changes nothing', state.pathsSeen('junk').length === 1, JSON.stringify(state.pathsSeen('junk')))
+  check('an unknown session has no files', state.pathsSeen('nobody').length === 0, JSON.stringify(state.pathsSeen('nobody')))
+  await done(root)
+}
+
+{
+  // A session whose only contribution is a written file still has a card to
+  // draw. Without paths in `keepsDocument`, the document that holds the very
+  // list the reader is looking at would be refused as empty.
+  const { state, store, root } = await fixture()
+  state.rememberPaths('writes-only', ['out.txt'])
+  await state.flush('writes-only')
+  const stored = await store.read('writes-only')
+  check('a session that only wrote files gets a file', stored !== undefined, String(stored))
+  check('and the file it wrote is in it', stored?.paths?.['out.txt'] !== undefined, JSON.stringify(stored?.paths))
+  await done(root)
+}
+
+{
+  // The list has to come back after a restart, in the same order, or the card
+  // resets every time the host reloads.
+  //
+  // The seed's ticks are deliberately not in insertion order: the insertion
+  // order of the map is `one, two, three` and the ticks are 9, 2, 5. A merge
+  // that hands every remembered file a fresh tick in the order it reads them
+  // reproduces the insertion order and nothing else, and with consecutive
+  // numbers it would even land on the right values by accident — which is
+  // exactly what an earlier version of this fixture did, so the mutation that
+  // breaks the shift passed here for a whole run.
+  const { state, store, root } = await fixture()
+  await store.write('restart', {
+    state: STATE_VERSION,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 9,
+    paths: { 'one.js': 9, 'two.js': 2, 'three.js': 5 }
+  })
+  // The merge only runs when memory already holds a fact: a brand-new record
+  // adopts the file wholesale, and an assertion made after that adoption passes
+  // for a merge that never happened. So the restart is driven the way the host
+  // drives it — an event first, the read second.
+  state.rememberPaths('restart', ['later.js'])
+  await state.load('restart')
+  const seen = state.pathsSeen('restart')
+  check('files survive a restart', seen.length === 4, JSON.stringify(seen))
+  check(
+    'and they keep their order',
+    seen[0] === 'later.js' && seen[1] === 'one.js' && seen[2] === 'three.js' && seen[3] === 'two.js',
+    JSON.stringify(seen)
+  )
+  // The merge shifts what memory knew above what the file knew, and adds the
+  // file's entries at the ticks they were written with. Handing a remembered
+  // file a fresh tick instead would claim this process watched an edit it never
+  // saw, and the next real edit would have to outbid that claim.
+  const merged = state.document('restart')
+  check(
+    'and they come back on the ticks they were written with',
+    merged?.paths?.['one.js'] === 9 && merged?.paths?.['two.js'] === 2 && merged?.paths?.['three.js'] === 5,
+    JSON.stringify(merged?.paths)
+  )
+  check(
+    'and the file written before the load is lifted above all of them',
+    merged?.paths?.['later.js'] === 10,
+    JSON.stringify(merged?.paths)
+  )
+  check(
+    'and the sequence ends one past the file it read',
+    state.bySession.get('restart')?.sequence === 10,
+    String(state.bySession.get('restart')?.sequence)
+  )
+  await done(root)
+}
+
+{
+  // The list had no cap, so it grew for the life of the session — which is one
+  // `fs.stat` per entry on every panel read, eight seconds apart, plus a JSON
+  // object in the state file that never stops growing. Nothing on screen can use
+  // more than a screenful, so the oldest edits are dropped and the newest kept.
+  const { state, root } = await fixture()
+  const many = []
+  for (let index = 0; index < 260; index += 1) many.push(`file-${index}.js`)
+  state.rememberPaths('capped', many)
+  const kept = state.pathsSeen('capped')
+  check('a long session does not remember every file it ever touched', kept.length < many.length, String(kept.length))
+  check('and it keeps a screenful worth', kept.length >= 100, String(kept.length))
+  check('and the newest edit is the one it keeps first', kept[0] === 'file-259.js', kept[0])
+  check('and the oldest is the one that goes', kept.includes('file-0.js') === false, kept[kept.length - 1])
+  await done(root)
+}
+
+{
+  // The cap used to live only in `rememberPaths`, so a process that recorded
+  // paths before its first `load` — the ordinary "event first, poll later" order
+  // — held the file's list plus its own and nothing brought the sum back down.
+  // The shutdown write is the merged document, so each restart started from a
+  // larger file: three of them measured 400, 600, then 800 paths against a cap of
+  // 200, and every panel read was one `fs.stat` per entry.
+  const { root } = await fixture()
+  const store = new SessionStore({ root, log: () => {} })
+  const files = {}
+  for (let index = 0; index < 200; index += 1) files[`disk-${index}.js`] = index + 1
+  await store.write('merged-cap', { state: STATE_VERSION, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 300, paths: files })
+  const state = new SessionState({
+    store,
+    log: () => {},
+    snapshotOf: () => undefined,
+    restore: () => {},
+    delayMs: 0,
+  })
+  const mine = []
+  for (let index = 0; index < 200; index += 1) mine.push(`memory-${index}.js`)
+  state.rememberPaths('merged-cap', mine)
+  await state.load('merged-cap')
+  const merged = state.pathsSeen('merged-cap')
+  check('a merge does not carry two full lists at once', merged.length <= 200, String(merged.length))
+  check('and the memory entries are the ones that survive it', merged.includes('memory-199.js'), merged[0])
+  const written = state.document('merged-cap')
+  check(
+    'and the document written back is capped too',
+    Object.keys(written?.paths ?? {}).length <= 200,
+    String(Object.keys(written?.paths ?? {}).length)
+  )
+  await done(root)
+}
+
+{
+  // A file written by a build without the cap — or by the merge path above before
+  // it trimmed — must shrink on the way in. Reading it whole would keep it whole:
+  // every poll would stat all of its entries and the next write would preserve
+  // the excess.
+  const { root } = await fixture()
+  const store = new SessionStore({ root, log: () => {} })
+  const huge = {}
+  for (let index = 0; index < 600; index += 1) huge[`stale-${index}.js`] = index + 1
+  await store.write('huge-file', { state: STATE_VERSION, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 700, paths: huge })
+  const state = new SessionState({
+    store,
+    log: () => {},
+    snapshotOf: () => undefined,
+    restore: () => {},
+    delayMs: 0,
+  })
+  await state.load('huge-file')
+  const read = state.pathsSeen('huge-file')
+  check('an oversized file is read down to the cap', read.length <= 200, String(read.length))
+  check('and the newest entries are the ones kept', read[0] === 'stale-599.js', read[0])
+  check('and the oldest are the ones dropped', read.includes('stale-0.js') === false, read[read.length - 1])
+  await done(root)
+}
+
+{
+  // A file from an older build was written before this field existed. It is
+  // readable, not corrupt: everything it does carry has to load.
+  const { root } = await fixture()
+  const store = new SessionStore({ root, log: () => {} })
+  await store.write('old-build', { state: STATE_VERSION, turns: 3, previous: null, skills: {}, tools: [], servers: {}, sequence: 2 })
+  const restored = []
+  const state = new SessionState({
+    store,
+    log: () => {},
+    snapshotOf: () => undefined,
+    restore: (sessionId, snapshot) => restored.push({ sessionId, snapshot }),
+    delayMs: 0,
+  })
+  await state.load('old-build')
+  check('a file without paths still loads its turn count', restored[0]?.snapshot?.turns === 3, JSON.stringify(restored))
+  check('and it simply has no files', state.pathsSeen('old-build').length === 0, JSON.stringify(state.pathsSeen('old-build')))
+  await done(root)
+}
+
+// ---------------------------------------------------------------------------
 // A record is empty when there is nothing to write, not when nothing was counted
 // ---------------------------------------------------------------------------
 
@@ -1204,6 +1419,38 @@ for (const reason of ['gone', 'archived']) {
   check('a count is not an orphan', after.includes('counted.json') === true, JSON.stringify(after))
   const kept = await storeB.read('counted')
   check('and the count survived the other process leaving', kept?.turns === 4, JSON.stringify(kept?.turns))
+
+  await done(root)
+}
+
+{
+  // The same shape as the count above, for the newest field: a document whose
+  // only fact is the files the session edited. That is a whole class of real
+  // session — edits code, loads no skill, calls no MCP tool, has the summary
+  // turned off — and it is the file that holds the output card the person is
+  // reading. `dropIfOrphan` asks `keepsDocument`, and `keepsDocument` only
+  // answers for the fields it is handed: leaving `paths` out of that call made
+  // this file deletable by the other process releasing a session it never wrote.
+  const root = join(tmpdir(), `dsse-session-state-only-paths-${randomUUID()}`)
+  await mkdirp(root)
+  const storeA = new SessionStore({ root })
+  const storeB = new SessionStore({ root })
+  const stateA = new SessionState({ store: storeA, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  const stateB = new SessionState({ store: storeB, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+
+  const loaded = await stateA.load('edited')
+  check('the first process reads an empty disk for the edited session', loaded === false, String(loaded))
+
+  stateB.rememberPaths('edited', ['src/a.js'])
+  await stateB.flush('edited')
+  const written = await storeB.read('edited')
+  check('the second process writes only files down', written?.paths?.['src/a.js'] === 1, JSON.stringify(written?.paths))
+
+  await stateA.release('edited')
+  const after = await filesIn(root)
+  check('a file list is not an orphan', after.includes('edited.json') === true, JSON.stringify(after))
+  const kept = await storeB.read('edited')
+  check('and the file list survived the other process leaving', kept?.paths?.['src/a.js'] === 1, JSON.stringify(kept?.paths))
 
   await done(root)
 }

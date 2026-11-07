@@ -267,13 +267,25 @@ export function apply(ctx, config) {
     const agentId = session?.id
     if (typeof agentId !== 'string' || agentId.length === 0) return
 
+    // The output card lists the session's work, not this turn's, so the paths a
+    // turn touched have to outlive it. Read *before* `record` folds the turn:
+    // `endTurn` either moves the paths into `previous` or — for a turn the host
+    // abandoned — clears them outright, so reading afterwards names the turn
+    // before this one in both cases. That read the wrong turn twice: it re-issued
+    // a fresh tick for files an interrupted turn never touched, pushing stale
+    // work to the top of the list, and it dropped the edits that turn did make.
+    const ended = event?.type === 'turn/end' ? transcripts.view(agentId)?.current?.paths : undefined
+
     transcripts.record(agentId, event)
 
     // A finished turn is the moment the panel has something worth writing down.
     // Mid-turn events are not: the panel describes the turn that *ended*, and
     // rewriting the file once per tool call would be a write per file read for a
     // document that had not changed.
-    if (event?.type === 'turn/end') sessionState.rememberTurn(agentId)
+    if (event?.type === 'turn/end') {
+      sessionState.rememberTurn(agentId)
+      if (ended !== undefined) sessionState.rememberPaths(agentId, ended)
+    }
 
     // Remember MCP tool names as they are dispatched. Presence is proved by
     // traffic: a configured server that never connected contributes no calls, and
@@ -557,6 +569,20 @@ export function apply(ctx, config) {
        */
       skillsUsed(agentId) {
         return sessionState.skillsUsed(agentId)
+      },
+
+      /**
+       * Files this session edited, newest first.
+       *
+       * Per session and cumulative, because the output card describes the
+       * conversation's work rather than the last turn's. The list is paths
+       * only: whether a file still exists, how big it is and when it was last
+       * written are answered by the route that reads it, which stats each path
+       * at read time instead of trusting a size remembered from a turn that has
+       * long since ended.
+       */
+      filesSeen(agentId) {
+        return sessionState.pathsSeen(agentId)
       },
 
       routeFor,

@@ -398,7 +398,9 @@ function createPanelApi(deps) {
     const agentId = url.searchParams.get('agent') ?? undefined
 
     try {
-      if (path === `${ROUTE_PREFIX}/panel`) return json(res, 200, { ok: true, data: await readPanel(deps, agentId) }, headOnly)
+      if (path === `${ROUTE_PREFIX}/panel`) {
+        return json(res, 200, { ok: true, data: await readPanel(deps, agentId, langOf(url.searchParams.get('lang'))) }, headOnly)
+      }
       if (path === `${ROUTE_PREFIX}/models`) return json(res, 200, { ok: true, data: { providers: deps.modelCatalog() } }, headOnly)
       // `config` is a read on GET/HEAD and a write on POST. The read is checked
       // by method as well as path: matching on the path alone made the write
@@ -598,6 +600,25 @@ async function viewOf(deps, agentId) {
 }
 
 /**
+ * A BCP 47 tag from a query string, or `undefined` for anything else.
+ *
+ * The panel puts the browser's `document.documentElement.lang` here so the
+ * summary can be written in the language the reader is already reading. The
+ * value ends up inside a prompt, so it is validated here rather than trusted:
+ * the shape is checked in `summarise.js` too, but a request carrying
+ * `?lang=../..` should not reach a module that then has to be careful with it.
+ *
+ * @param {string | null} raw - the raw query value.
+ * @returns {string | undefined} the tag, if it looked like one.
+ */
+function langOf(raw) {
+  if (typeof raw !== 'string') return undefined
+  const trimmed = raw.trim()
+  if (trimmed.length === 0 || trimmed.length > 35) return undefined
+  return /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(trimmed) ? trimmed : undefined
+}
+
+/**
  * Assemble everything the panel draws.
  *
  * One request rather than three: the three modules share a turn number, and
@@ -606,9 +627,10 @@ async function viewOf(deps, agentId) {
  *
  * @param {object} deps - the API dependencies.
  * @param {string | undefined} agentId - which agent to describe.
+ * @param {string} [lang] - a BCP 47 tag for the language the reader sees.
  * @returns {Promise<object>} the payload.
  */
-async function readPanel(deps, agentId) {
+async function readPanel(deps, agentId, lang) {
   const config = valueOf(deps.config)
   const id = agentId ?? ''
   const view = id.length > 0 ? await viewOf(deps, id) : undefined
@@ -620,7 +642,7 @@ async function readPanel(deps, agentId) {
     // is proven reachable and authorised against this account, whereas the
     // catalogue only proves that an adapter advertised it.
     const sessionRoute = typeof deps.routeFor === 'function' ? deps.routeFor(id) : undefined
-    summary = await deps.summariser.summarise({ agentId: id, snapshot: previous, sessionRoute })
+    summary = await deps.summariser.summarise({ agentId: id, snapshot: previous, sessionRoute, language: lang })
   } else if (config.panelSummary !== true) {
     summary = { enabled: false, reason: 'turned off in settings' }
   }
@@ -633,7 +655,15 @@ async function readPanel(deps, agentId) {
     used: typeof deps.skillsUsed === 'function' ? deps.skillsUsed(id) : undefined,
     recency,
   })
-  const files = previous === undefined ? [] : await statTouchedFiles({ paths: previous.paths ?? [], cwd: deps.cwdFor(id) })
+  // The output card lists the session's work in recency order, not the turn that
+  // just ended. `previous.paths` was the old source and it described one turn:
+  // a turn that touched nothing emptied the card, and a turn that re-edited one
+  // file hid the other nineteen. The cumulative list lives in session state and
+  // survives both the turn ending and a restart; the transcript stays the source
+  // of truth for the turn itself, which is what the previous-turn card shows.
+  const remembered = typeof deps.filesSeen === 'function' ? deps.filesSeen(id) : []
+  const fallback = previous === undefined ? [] : (previous.paths ?? [])
+  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd: deps.cwdFor(id) })
 
   return {
     agent: id,
@@ -642,6 +672,11 @@ async function readPanel(deps, agentId) {
     skills,
     mcp: describeMcp(typeof deps.mcpTools === 'function' ? deps.mcpTools(id) : new Set(), recency),
     files,
+    // The count beside 调用 and 命令 on the previous-turn card. Those two come
+    // from `previous` and describe the turn that just ended; the file count has
+    // to describe the same turn or the three numbers read as one set while one
+    // of them is about the whole session. The cumulative list is `files`.
+    turnFiles: Array.isArray(previous?.paths) ? previous.paths.length : 0,
     commands: previous?.commands ?? [],
     tools: previous?.tools ?? [],
     calls: previous?.calls ?? 0,

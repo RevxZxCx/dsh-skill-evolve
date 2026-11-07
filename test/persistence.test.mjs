@@ -185,7 +185,7 @@ function fakeSession(id, cwd = 'F:/some/project') {
  * the turn carries a `completed` reason because an abandoned turn deliberately
  * does not write `previous` — the panel describes turns that finished.
  */
-function work(host, session, { skill, tool, said, turn = 1 }) {
+function work(host, session, { skill, tool, said, edit, turn = 1 }) {
   host.emit('session/event', session.session, {
     type: 'user/message',
     seq: turn * 10,
@@ -214,6 +214,19 @@ function work(host, session, { skill, tool, said, turn = 1 }) {
       seq: turn * 10 + 3,
       time: Date.now(),
       data: { message: { role: 'assistant', content: [{ type: 'text', text: said }] } }
+    })
+  }
+  // A file edit. The panel's output card reads the session's list of written
+  // paths, and the only thing that feeds it is the transcript's snapshot of a
+  // turn that ended — so a turn that edits nothing is the case that shows
+  // whether the list survives, and a turn that edits something is the case
+  // that shows whether it is fed at all.
+  if (edit !== undefined) {
+    host.emit('session/event', session.session, {
+      type: 'tool/call',
+      seq: turn * 10 + 5,
+      time: Date.now(),
+      data: { turn, step: 1, callId: `c-edit-${turn}`, name: 'edit', arguments: JSON.stringify({ path: edit }) }
     })
   }
   host.emit('session/event', session.session, {
@@ -305,6 +318,143 @@ console.log('persistence — the panel describes a conversation, not a process')
   // not happen twice.
   const again = await second.panel(session.id)
   check('a second poll agrees with the first', again.data?.turn === reloaded.data?.turn, JSON.stringify(again.data?.turn))
+}
+
+// ---------------------------------------------------------------------------
+// The output card lists the session's work, not the turn's
+// ---------------------------------------------------------------------------
+
+{
+  // The card used to describe the turn that had just ended: a turn that edited
+  // nothing emptied it, and a turn that re-edited one file hid the other
+  // nineteen. What feeds it now is the session state's own list of paths, and
+  // the only thing that fills that list is the transcript's snapshot at
+  // `turn/end` — so this walks a real conversation through the real handler and
+  // reads the real route.
+  const home = await makeTempRoot('dsse-persist-files-')
+  process.env.DSH_HOME = home
+
+  const host = fakeHost()
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  const session = fakeSession('session-files', home)
+  host.agents.set(session.id, session)
+
+  // Two files written for real, because the route stats them: a path that does
+  // not exist is dropped, and the assertions below would then be about the
+  // stat call rather than about the list.
+  const first = join(home, 'first.js')
+  const second = join(home, 'second.js')
+  await writeFile(first, 'one\n', 'utf8')
+  await writeFile(second, 'two\n', 'utf8')
+
+  work(host, session, { said: 'wrote the first one', edit: first, turn: 1 })
+  const afterFirst = await host.panel(session.id)
+  check(
+    'a turn that wrote a file puts it on the card',
+    (afterFirst.data?.files ?? []).some((row) => row.path === first),
+    JSON.stringify(afterFirst.data?.files)
+  )
+
+  work(host, session, { said: 'wrote the other one', edit: second, turn: 2 })
+  const afterSecond = await host.panel(session.id)
+  check(
+    'the file from the turn before is still there',
+    (afterSecond.data?.files ?? []).some((row) => row.path === first),
+    JSON.stringify(afterSecond.data?.files)
+  )
+  check(
+    'and so is the one this turn wrote',
+    (afterSecond.data?.files ?? []).some((row) => row.path === second),
+    JSON.stringify(afterSecond.data?.files)
+  )
+
+  // A turn that touched no file. This is the case the old card failed: `previous`
+  // describes a turn with an empty `paths`, and a card built from it went blank.
+  work(host, session, { said: 'just talked this time', turn: 3 })
+  const afterQuiet = await host.panel(session.id)
+  check(
+    'a turn that touched nothing does not empty the card',
+    (afterQuiet.data?.files ?? []).length === 2,
+    JSON.stringify(afterQuiet.data?.files)
+  )
+
+  // Re-editing an early file moves it to the front rather than adding a second
+  // row: the card is a list of files, not of edits.
+  await writeFile(first, 'three\n', 'utf8')
+  work(host, session, { said: 'changed the first one again', edit: first, turn: 4 })
+  const afterReedit = await host.panel(session.id)
+  check(
+    're-editing a file does not list it twice',
+    (afterReedit.data?.files ?? []).filter((row) => row.path === first).length === 1,
+    JSON.stringify(afterReedit.data?.files)
+  )
+
+  // And the list survives a restart, because it lives on disk rather than in
+  // the transcript of a turn that no longer exists. The write is coalesced, so
+  // the second host is only a restart once the file is actually there.
+  const stored = await waitForFile(join(stateDir(home), `${session.id}.json`))
+  check('the session was written down', stored, join(stateDir(home), `${session.id}.json`))
+  const restarted = fakeHost()
+  applyPanel(restarted.ctx, PanelConfig({ panelSummary: false }))
+  const reloaded = await restarted.panel(session.id)
+  check(
+    'the list survives a restart',
+    (reloaded.data?.files ?? []).length === 2,
+    JSON.stringify(reloaded.data?.files)
+  )
+}
+
+{
+  // A turn the host abandoned is still a turn that touched files. The handler
+  // used to read `previous.paths` *after* `record` had folded the turn, and
+  // `endTurn` does not fold an interrupted turn — it clears the paths and leaves
+  // `previous` describing the turn before it. That read the wrong turn twice: it
+  // re-issued a fresh tick for files nobody had touched (pushing stale work to
+  // the top of the list) and dropped every edit the interrupted turn did make.
+  const home = await makeTempRoot('dsse-persist-interrupted-')
+  process.env.DSH_HOME = home
+
+  const host = fakeHost()
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  const session = fakeSession('session-interrupted', home)
+  host.agents.set(session.id, session)
+
+  const old = join(home, 'old.js')
+  const interrupted = join(home, 'interrupted.js')
+  await writeFile(old, 'one\n', 'utf8')
+  await writeFile(interrupted, 'two\n', 'utf8')
+
+  work(host, session, { said: 'wrote the old one', edit: old, turn: 1 })
+
+  // A second turn that edits a different file and is then abandoned. Written out
+  // by hand rather than through `work`, which always ends the turn as completed.
+  host.emit('session/event', session.session, {
+    type: 'user/message',
+    seq: 20,
+    time: Date.now(),
+    data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }
+  })
+  host.emit('session/event', session.session, {
+    type: 'tool/call',
+    seq: 25,
+    time: Date.now(),
+    data: { turn: 2, step: 1, callId: 'c-edit-2', name: 'edit', arguments: JSON.stringify({ path: interrupted }) }
+  })
+  host.emit('session/event', session.session, {
+    type: 'turn/end',
+    seq: 24,
+    time: Date.now(),
+    data: { turn: 2, reason: { kind: 'interrupted' } }
+  })
+
+  const after = await host.panel(session.id)
+  const paths = (after.data?.files ?? []).map((row) => row.path)
+  check('an interrupted turn does not empty the card', paths.length === 2, JSON.stringify(paths))
+  check('the file it did edit is on the card', paths.includes(interrupted), JSON.stringify(paths))
+  check('and the file it never touched is still there', paths.includes(old), JSON.stringify(paths))
+  // Order is the point: the interrupted turn's edit is the newest thing that
+  // happened, so it leads. Reading the wrong turn put `old.js` back on top.
+  check('the newest edit leads even though the turn was abandoned', paths[0] === interrupted, JSON.stringify(paths))
 }
 
 // ---------------------------------------------------------------------------

@@ -447,6 +447,17 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The row beside the title describes the turn that just ended, so its file
+    // count has to come from `turnFiles`. Reading the cumulative list instead is
+    // what shipped the first time, and it made the three numbers beside the title
+    // look like one set while one of them was about the whole session.
+    label: "the turn header counts the whole session's files",
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `const turnFiles = Number.isFinite(data?.turnFiles) ? data.turnFiles : 0`,
+    to: `const turnFiles = Array.isArray(data?.files) ? data.files.length : 0`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
     // A chevron that points the same way in both states is decoration; the direction
     // is the only thing saying whether the next click opens or closes.
     label: 'the chevron points down even when the card is open',
@@ -622,6 +633,26 @@ const mutations = [
         setPinnedTurn("")
         setClippedTurn("")`,
     to: '',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The timer is the panel's only source of news. Shortening the delay turns a
+    // glanceable column into a request every tenth of a second, and nothing else
+    // in the suite can tell the difference between 8000 and 100.
+    label: 'the panel asks again ten times a second',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const REFRESH_MS = 8000',
+    to: 'const REFRESH_MS = 100',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A timer that nobody clears keeps polling the session the reader left.
+    label: 'the timer outlives the panel that started it',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        const timer = setInterval(() => load(true), REFRESH_MS)
+        return () => clearInterval(timer)`,
+    to: `        const timer = setInterval(() => load(true), REFRESH_MS)
+        return () => {}`,
     suites: ['test/client.test.mjs'],
   },
 ]

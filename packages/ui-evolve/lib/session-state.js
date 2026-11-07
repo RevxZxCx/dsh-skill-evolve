@@ -60,6 +60,15 @@ const WRITE_DELAY_MS = 1000
 const STATE_VERSION = 1
 
 /**
+ * How many edited files a session remembers.
+ *
+ * Enough for the "all files" view of a long session without turning every panel
+ * read into a directory walk. The transcript's own cap is 40 per turn; this one
+ * is per session, so it is larger.
+ */
+const MAX_PATHS = 200
+
+/**
  * @param {any} value - anything.
  * @returns {boolean} true for a plain object, false for arrays and null.
  */
@@ -105,7 +114,28 @@ function readState(stored) {
     }
   }
   const sequence = typeof stored.sequence === 'number' && Number.isFinite(stored.sequence) && stored.sequence > 0 ? stored.sequence : 0
-  return { skills, tools, servers, sequence }
+  // Absent in every file written before the output card became cumulative, and
+  // that is a readable state, not a broken one: an older session simply has no
+  // remembered paths and starts accumulating from its next turn.
+  const paths = new Map()
+  if (isRecord(stored.paths)) {
+    for (const [file, at] of Object.entries(stored.paths)) {
+      if (typeof at !== 'number' || !Number.isFinite(at)) continue
+      paths.set(file, at)
+    }
+  }
+  // A file written by an older build that had no cap, or by the merge path
+  // before it trimmed, can hold more than this version would ever write. Keeping
+  // it whole would carry the excess through every read: `pathsSeen` is what the
+  // panel asks for, and each entry is one `fs.stat` on every poll. Trim to the
+  // newest `MAX_PATHS` on the way in, so the file shrinks on the next write
+  // instead of staying large forever.
+  if (paths.size > MAX_PATHS) {
+    const newest = [...paths.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_PATHS)
+    paths.clear()
+    for (const [file, at] of newest) paths.set(file, at)
+  }
+  return { skills, tools, servers, paths, sequence }
 }
 
 /**
@@ -128,6 +158,17 @@ function blankRecord() {
     skills: new Map(),
     tools: new Set(),
     servers: new Map(),
+    /**
+     * Files this session edited, each with the tick of its last edit.
+     *
+     * The output card used to describe the turn that just ended, which meant a
+     * turn that changed nothing emptied the card and a turn that re-edited one
+     * file left the others looking untouched. The card is now a list of the
+     * session's work in recency order, so the fact to keep is per file and
+     * survives the turn ending. Same clock as `skills` and `servers`: the map
+     * holds a position, `sequence` hands out the next one.
+     */
+    paths: new Map(),
     sequence: 0,
     snapshot: undefined,
     timer: undefined,
@@ -168,6 +209,12 @@ function blankRecord() {
  */
 function keepsDocument(facts) {
   if (facts.skills.size > 0 || facts.tools.size > 0) return true
+  // A session whose only output is files it wrote is a session with something to
+  // show, and it is exactly the shape a conversation leaves behind when all it
+  // did was edit code: no skill loaded, no MCP tool called, the summary turned
+  // off in settings. Leaving paths out of this answer would make `document()`
+  // refuse the file that holds the one card the person is reading.
+  if (facts.paths instanceof Map && facts.paths.size > 0) return true
   if (facts.previous !== undefined && facts.previous !== null) return true
   // A count on its own is still something the panel prints, and the one field
   // that cannot be rebuilt from live events after a restart. Leaving it out of
@@ -194,6 +241,7 @@ function hasFacts(entry) {
   return keepsDocument({
     skills: entry.skills,
     tools: entry.tools,
+    paths: entry.paths,
     previous: entry.snapshot?.previous,
     turns: entry.snapshot?.turns,
   })
@@ -434,6 +482,7 @@ class SessionState {
       const shift = state.sequence
       for (const [name, skill] of current.skills) current.skills.set(name, { ...skill, at: skill.at + shift })
       for (const [server, at] of current.servers) current.servers.set(server, at + shift)
+      for (const [file, at] of current.paths) current.paths.set(file, at + shift)
       // A skill both sides know keeps `tool` if either of them saw it. The two
       // routes are not equal evidence: `tool` means the model chose to load the
       // skill, `gesture` means a person typed its name. Letting memory's
@@ -450,6 +499,23 @@ class SessionState {
       }
       for (const tool of state.tools) current.tools.add(tool)
       for (const [server, at] of state.servers) if (current.servers.has(server) === false) current.servers.set(server, at)
+      // A file both sides know keeps the newer position, which after the shift
+      // above is always memory's: memory is what happened since the file was
+      // written. The one thing not to do is add the file's entry under a fresh
+      // tick, because that would claim this process saw an edit it did not.
+      for (const [file, at] of state.paths) if (current.paths.has(file) === false) current.paths.set(file, at)
+      // The cap has to be enforced here as well, not only in `rememberPaths`. A
+      // process that records paths before its first `load` — the ordinary "event
+      // arrives first, poll comes later" order — would otherwise hold the file's
+      // list plus its own, and nothing downstream would bring the sum back down:
+      // the document written on shutdown is the merged one, so the next restart
+      // starts from a larger file. Three restarts of that shape measured 400,
+      // 600, then 800 remembered paths against a cap of 200.
+      //
+      // Trimming is correct here because the shift above has already put every
+      // file entry below every memory entry: ascending order deletes the file's
+      // oldest first, which is exactly the order to lose them in.
+      this.trimPaths(current)
       current.sequence = shift + current.sequence
       // A snapshot already in memory is left alone here. It came from the
       // transcript, and the transcript is the only thing that may add a stored
@@ -523,6 +589,78 @@ class SessionState {
     const server = cut === -1 ? toolName.slice('mcp__'.length) : toolName.slice('mcp__'.length, cut)
     if (server.length > 0) entry.servers.set(server, ++entry.sequence)
     this.schedule(sessionId)
+  }
+
+  /**
+   * Files a turn edited, folded into the session's running list.
+   *
+   * Called when a turn ends, because that is the only moment the transcript's
+   * own path list is complete. Each file gets a fresh position: re-editing a
+   * file already in the list moves it to the front rather than leaving it where
+   * it was on first touch, which is what "the work I just did" means to someone
+   * reading the card.
+   *
+   * @param {string} sessionId - the session.
+   * @param {string[]} paths - the paths the finished turn wrote.
+   * @returns {void}
+   */
+  rememberPaths(sessionId, paths) {
+    if (!Array.isArray(paths) || paths.length === 0) return
+    const entry = this.entry(sessionId)
+    if (entry === undefined) return
+    let touched = false
+    for (const file of paths) {
+      if (typeof file !== 'string' || file.length === 0) continue
+      // Delete before set, the same way `rememberSkill` does: a Map keeps
+      // insertion order and a re-set keeps the old slot, and this list's whole
+      // order is "most recently edited first".
+      entry.paths.delete(file)
+      entry.paths.set(file, ++entry.sequence)
+      touched = true
+    }
+    if (touched === true) {
+      this.trimPaths(entry)
+      this.schedule(sessionId)
+    }
+  }
+
+  /**
+   * Keep the path list down to the size the card can use.
+   *
+   * The transcript caps its own per-turn list at 40 and the client draws five;
+   * this list had no cap at all, so it grew for the life of the session. That is
+   * not a display problem — it is one `fs.stat` per entry on every panel read,
+   * eight seconds apart, and a JSON object in the state file that never stops
+   * growing. Dropping the oldest edits costs nothing visible: the card shows the
+   * newest five, and "all" is a scroll through a session's work rather than an
+   * archive of it.
+   *
+   * @param {object} entry - the record to trim in place.
+   * @returns {void}
+   */
+  trimPaths(entry) {
+    if (entry.paths.size <= MAX_PATHS) return
+    const ordered = [...entry.paths.entries()].sort((a, b) => a[1] - b[1])
+    const excess = entry.paths.size - MAX_PATHS
+    for (let index = 0; index < excess; index += 1) {
+      const oldest = ordered[index]
+      if (oldest !== undefined) entry.paths.delete(oldest[0])
+    }
+  }
+
+  /**
+   * The files this session edited, newest first.
+   *
+   * The order is the record's own positions, descending — the panel sorts by
+   * mtime when it can and falls back to this, so the two agree.
+   *
+   * @param {string} sessionId - the session.
+   * @returns {string[]} the paths, or an empty list.
+   */
+  pathsSeen(sessionId) {
+    const entry = this.bySession.get(sessionId)
+    if (entry === undefined || entry.paths.size === 0) return []
+    return [...entry.paths.entries()].sort((a, b) => b[1] - a[1]).map(([file]) => file)
   }
 
   /**
@@ -619,6 +757,8 @@ class SessionState {
     for (const [name, skill] of entry.skills) skills[name] = { via: skill.via, at: skill.at }
     const servers = {}
     for (const [server, at] of entry.servers) servers[server] = at
+    const paths = {}
+    for (const [file, at] of entry.paths) paths[file] = at
     return {
       state: STATE_VERSION,
       turns: snapshot?.turns,
@@ -626,6 +766,7 @@ class SessionState {
       skills,
       tools: [...entry.tools],
       servers,
+      paths,
       sequence: entry.sequence,
     }
   }
@@ -813,6 +954,7 @@ class SessionState {
     const keep = keepsDocument({
       skills: stored.skills,
       tools: stored.tools,
+      paths: stored.paths,
       previous: found.value.previous,
       turns: found.value.turns,
     })

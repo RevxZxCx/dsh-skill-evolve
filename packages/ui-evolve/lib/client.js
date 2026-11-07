@@ -117,6 +117,27 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The language the host is currently rendering in, as a query value.
+     *
+     * The host has no locale service a plugin can ask, but its locale plugin
+     * writes the answer onto `<html lang>` — including when the person never
+     * chose one and the browser decided. That attribute is therefore the only
+     * place the panel can learn what language its reader is reading, and the
+     * summary is written in it.
+     *
+     * Returns `""` rather than a guess when the attribute is missing: a wrong
+     * language is worse than none, because none falls back to the model's own
+     * reading of the transcript, while a wrong one is an instruction it obeys.
+     *
+     * @returns {string} e.g. `zh-CN`, or `""`.
+     */
+    function hostLanguage() {
+      if (typeof document === "undefined" || document?.documentElement === undefined) return ""
+      const lang = document.documentElement.lang
+      return typeof lang === "string" ? lang.trim() : ""
+    }
+
+    /**
      * Format a byte count for a file row.
      *
      * @param {number} bytes - the size.
@@ -1548,7 +1569,9 @@ window.__ModuleLoader__.load({
           // the open settings dialog went with it.
           if (quiet !== true) setState((prior) => (prior.status === "ready" ? prior : { ...prior, status: "loading" }))
           try {
-            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`)
+            const lang = hostLanguage()
+            const query = lang === "" ? "" : `&lang=${encodeURIComponent(lang)}`
+            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}${query}`)
             if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
             setState({ status: "ready", data })
             setError("")
@@ -1677,6 +1700,10 @@ window.__ModuleLoader__.load({
       const files = Array.isArray(data?.files) ? data.files : []
       const ordered = files.slice().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
       const shown = filesOpen ? ordered : ordered.slice(0, 5)
+      // How many files the turn that just ended wrote. `files` is the whole
+      // session's work now, so it cannot answer that question, and the two other
+      // numbers on the same row are turn-scoped.
+      const turnFiles = Number.isFinite(data?.turnFiles) ? data.turnFiles : 0
 
       const summaryText = state.status === 'loading'
         ? '正在读取本轮数据…'
@@ -1813,7 +1840,7 @@ window.__ModuleLoader__.load({
       // when the answer arrives, and a session that produced nothing shows nothing.
       const turnHasContent =
         data !== undefined &&
-        ((summary?.text !== undefined && String(summary.text).length > 0) || (data.calls ?? 0) > 0 || (data.failed ?? 0) > 0 || ordered.length > 0)
+        ((summary?.text !== undefined && String(summary.text).length > 0) || (data.calls ?? 0) > 0 || (data.failed ?? 0) > 0 || turnFiles > 0)
       const showTurn = turnHasContent
       const showActivity = activity.length > 0
       const showFiles = ordered.length > 0
@@ -1927,7 +1954,7 @@ window.__ModuleLoader__.load({
                   children: [
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(commands) }), jsx('span', { children: '命令' })] }),
-                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(ordered.length) }), jsx('span', { children: '文件' })] }),
+                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(turnFiles) }), jsx('span', { children: '文件' })] }),
                   ],
                 }),
                 children: jsx(Clip, {

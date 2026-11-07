@@ -29,6 +29,7 @@
 | 2026-11-06 | 界面六项需求 + 实时流 | 统计贴右、六行、点击才展开、加载提示、只在会话页显示；`LiveHub` + `/live` SSE，轮询降为 60 秒兜底；2355 断言全绿，五套变异 26/65/14/44/15 全杀 |
 | 2026-11-06 | 撤回实时流 | 删 `LiveHub`/`/live`/`EventSource`，轮询恢复唯一通道恒定 8 秒；`settling` 照常显示（D-75）；2264 断言全绿，五套变异 68/11/14/44/15 全杀 |
 | 2026-11-07 | 展开按钮改圆标 | 卡片内底边居中圆形图标按钮（D-76，不占布局）；展开后仍显示收起入口且不随指针消失（D-77）；chevron 方向随开合翻转；2277 断言全绿，五套变异 78/11/14/44/15 全杀 |
+| 2026-11-07 | 总结语言 + 产出卡改累计 | 总结语言由宿主 `<html lang>` 指定（D-78）；产出卡改成会话累计（D-79），中断回合也记（D-80），上限三处收口（D-81）；2387 断言全绿，六套变异 81/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2371,3 +2372,86 @@ sync-gutter 连跑两次                   client.js sha256 恒为 bc752e36…
    都必须各自唯一命中，改完要先数 `label:` 与 `grep -cF`。
 3. **`git ls-files` 输出格式**（DEF-42）在这套 bash 下会因 `core.quotepath` 把中文
    路径转义，数文件数必须加 `-c core.quotepath=false`。
+
+## 2026-11-07 · 总结语言与产出卡：把「猜」换成「被告知」，把「这一轮」换成「这个会话」
+
+这一轮两条需求，一句话各自概括：
+
+| 需求 | 用户原话 | 一句话 |
+|---|---|---|
+| 1 | 「总结有的时候会变成英文，你需要设置一个自动获取当前宿主语言，并且让总结为对应语言」 | 界面语言由宿主发布，别让模型从对话里猜 |
+| 2a | 「技能和mcp显示的增量列表吗？…相当于会话的信息展示」 | 技能/MCP 卡**本来就是**会话累计，无需改动 |
+| 2b | 「产出栏也不应该做成每一轮的产出显示，而是增量列表…修改已经在列表中的，就将顺序提前」 | 产出卡从「这一轮」改成「这个会话」，按最近修改排序 |
+
+需求 2 的范围被用户在两轮之间澄清过（`m08413`）：「我只是做一个比喻，而不是现在要
+更改上一轮卡片展示的逻辑，此需求不涉及上一轮卡片的内容修改，只修改技能和mcp卡片和
+产出卡片」。所以这一轮**没有**改上一轮卡片的展示逻辑——只给它换了一个数字来源（见下）。
+
+### 六条实现的要点
+
+1. **语言只是被要求，不高明。** `document.documentElement.lang` → `?lang=` →
+   `languageLine()` → 提示词。模型不再被要求「推断用户读什么语言」。
+2. **中文分字形。** `zh-CN`/`zh-SG`/`zh` 简，`zh-TW`/`zh-HK`/`zh-MO`/`zh-Hant` 繁。
+   只说 `Chinese` 会让模型任选，对只读一种字形的读者等于半个总结。
+3. **表内 11 种，表外有别。** 封闭表而非透传：多写一句「用 ru 写」而读者读英文，等于
+   把猜测还回去。表外但形态合法 → 通用兜底句，**不退化成沉默**（DEF-46）。
+4. **缓存键用渲染后的句子，不用语言名。** 表外标签的 `languageName` 是 `undefined`，
+   用它做键会让 `lang=nl` 与无 `lang` 共用缓存，而两者提示词不同（DEF-48）。
+5. **产出卡的 `paths` 与 `skills`/`servers` 共用 `sequence` 时钟。** 三种事实都是
+   「最近用过的排前面」，各自维护计数器只会让「最近」在两处含义不同。
+6. **上一轮卡片的文件数改成单轮的 `turnFiles`。** 累计化之后，同格里 `calls`/`commands`
+   仍是单轮数，文件数若跟着变成累计，三个数字看起来是一组而其中一个换了口径（R-42 第 3 条）。
+
+### 四轮审查
+
+| 轮次 | runId | findings | 采纳 / 驳回 |
+|---|---|---|---|
+| 第一轮 | `5bb8e058` | 3 P2 + 2 P3 | 5 / 0 |
+| 第二轮 | `e76a5eb5` | 3 P2 + 3 P3 | 6 / 0 |
+| 第三轮 | `b0074f63` | 1 P2 | 1 / 0 |
+| 第四轮 | `b9bdb395` | 0 | 0 / 0 |
+
+累计 **12 条，驳回 0**。第三轮的 P2 是这批里最值得记的一条：`MAX_PATHS` 的实现完全
+正确，但只加在 `rememberPaths` 一条路径上，`load` 的合并分支能绕过它，重启间
+200→400→600→800 无界增长（DEF-49、D-81）。
+
+**这一批 12 条 finding 的分布与上一批相反。** 上一批（撤回实时流）11/12 出在文档；
+这一批 6 条出在**新写的测试自己空转或测不出区别**，4 条出在**新字段与既有代码的接缝**，
+2 条出在文档。代码主线从头到尾是对的，错的是它和周围东西的接口。
+
+### 当前数字
+
+```
+node test/run.mjs                    2387 passed / 0 failed
+node test/summarise.test.mjs          144 passed
+node test/session-state.test.mjs      235 passed
+node test/api.test.mjs                186 passed
+node test/persistence.test.mjs         71 passed
+node test/client.test.mjs             338 passed
+scripts/mutate-checklist-panel.mjs     81 killed / 0 survived / 0 not applied
+scripts/mutate-language-and-files.mjs  21 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-persistence.mjs         44 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-session-store.mjs       15 killed / 0 survived / 0 not applied / 0 crashed
+test/mutate-panel.mjs                  14/14 killed
+scripts/mutate-guards.mjs              11/11 killed（after restore: 2387 passed）
+全仓 CRLF                              0（109 个 git 追踪文件）
+sync-gutter 幂等                       client.js sha256 恒定
+```
+
+### 踩坑清单
+
+1. **python 写含 `\n` 的 JS 字符串会把 `\n` 变成真实换行**（本轮踩了三次），
+   写源码里的多行锚点必须用 `edit` 工具。`s.count(old) == 0` 通常就是转义问题。
+2. **python 读写含中文的源码必须显式 `encoding='utf-8'`**，默认 GBK 会抛
+   `UnicodeDecodeError`，而如果这个异常发生在变异脚本的写文件阶段，测试照常全绿、
+   变异静默未应用——最危险的一种失败。
+3. **探针必须改行为不改结构。** 把 `const spoken = languageLine(language)` 整体换成
+   `languageName(language)` 会让 `.length` 在 `undefined` 上抛错、测试崩溃无 tally，
+   等于什么也没证明。
+4. **断言移出 `if` 之后要用 `?.` 调用。** 裸 `poll.fn()` 会把「fixture 变了」变成崩溃，
+   变异脚本拿到无 tally 记成 SURVIVED——一条真实覆盖缺口被伪装成存活。
+5. **改函数签名或把单行改成块，会让别的文件里的变异锚点静默过期。** 本轮
+   `test/mutate-panel.mjs` 与 `mutate-persistence.mjs` 各有一条因此失效，靠
+   `MISSING ANCHOR` / `NOT APPLIED` 发现。改完源码要重跑全部变异脚本。
+6. **加一个上限时问的是「有没有第二条产生超限数据的路径」**，不是「写入的地方裁了没有」。
+   `MAX_PATHS` 的漏洞在合并分支（DEF-49）。

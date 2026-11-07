@@ -41,8 +41,8 @@ const cases = [
   {
     label: 'summarise run reverted to this.llm()',
     file: 'packages/ui-evolve/lib/summarise.js',
-    from: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = valueOf(this.llm)',
-    to: '  async run({ key, body, signal, sessionRoute }) {\n    const llm = this.llm()',
+    from: '  async run({ key, body, signal, sessionRoute, language }) {\n    const llm = valueOf(this.llm)',
+    to: '  async run({ key, body, signal, sessionRoute, language }) {\n    const llm = this.llm()',
     test: 'test/panel-wiring.test.mjs',
   },
   {

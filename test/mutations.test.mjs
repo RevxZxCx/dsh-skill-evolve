@@ -172,6 +172,87 @@ for (const [label, source, want] of [
   check('every bundle anchor lands inside the generated region', outside.length === 0, outside.join(' | '))
 }
 
+// ---- the language and output-list mutations ---------------------------------
+{
+  const script = readFileSync(join(repo, 'scripts/mutate-language-and-files.mjs'), 'utf8')
+  const anchors = parseAnchors(script)
+
+  // This script's mutations do not all point at one file: the language path
+  // spans four modules and the output list spans three. Each mutation names its
+  // target with a module-scope constant (`const summarise = path.join(...)`)
+  // rather than a path string, so the constant has to be resolved before the
+  // anchor can be looked for anywhere. Reading both out of the same text keeps
+  // this honest in the direction that matters: an anchor checked against the
+  // wrong file would report a false MISSING, and a renamed constant would report
+  // nothing at all if it were skipped instead of counted.
+  const targets = new Map()
+  {
+    const declaration = /^\s*const (\w+) = path\.join\(repo,\s*([^)]*)\)/gm
+    let found = declaration.exec(script)
+    while (found !== null) {
+      const segments = found[2].split(',').map((part) => part.trim().replace(/^'|'$/g, ''))
+      targets.set(found[1], join(repo, ...segments))
+      found = declaration.exec(script)
+    }
+  }
+  // `parseAnchors` returns the `from:` literals in source order and the `file:`
+  // lines sit one per mutation, so the two lists line up. Their lengths agreeing
+  // is the check that the pairing is real rather than an accident of this text.
+  const owners = []
+  {
+    const owner = /^\s{4}file: (\w+),$/gm
+    let found = owner.exec(script)
+    while (found !== null) {
+      owners.push(found[1])
+      found = owner.exec(script)
+    }
+  }
+
+  check('the language mutation script declares anchors', anchors.length >= 10, `found ${anchors.length}`)
+  const unresolved = owners.filter((name) => !targets.has(name))
+  check(
+    'every language mutation names a target that resolves to a file',
+    owners.length === anchors.length && unresolved.length === 0,
+    `${owners.length} owners vs ${anchors.length} anchors; unresolved: ${unresolved.join(',')}`,
+  )
+
+  // Read each target once. The same file is the target of several mutations, and
+  // re-reading it per anchor turns an 19-anchor check into 19 file reads.
+  const contents = new Map()
+  const textOf = (file) => {
+    if (!contents.has(file)) contents.set(file, readFileSync(file, 'utf8'))
+    return contents.get(file)
+  }
+
+  let missing = 0
+  let ambiguous = 0
+  const detail = []
+  // A count mismatch is itself a failure of this check, not a reason to skip it.
+  // Guarding the loop on the lengths agreeing made both assertions below vacuous
+  // in exactly the case they exist for — a mutation gained or lost without its
+  // anchor being re-checked — and left the only evidence in the other check's
+  // message.
+  if (owners.length !== anchors.length) {
+    missing += 1
+    detail.push(`${owners.length} owners vs ${anchors.length} anchors: the pairing cannot be checked`)
+  }
+  for (const [position, anchor] of anchors.entries()) {
+    const file = targets.get(owners[position])
+    if (file === undefined || anchor.from === '') continue
+    const count = textOf(file).split(anchor.from).length - 1
+    const where = basename(file)
+    if (count === 0) {
+      missing += 1
+      detail.push(`missing in ${where}: ${anchor.from.split('\\n')[0].slice(0, 50)}`)
+    } else if (count > 1) {
+        ambiguous += 1
+        detail.push(`ambiguous in ${where} (${count}): ${anchor.from.split('\\n')[0].slice(0, 50)}`)
+      }
+    }
+  check('every language mutation anchor still exists in the file it names', missing === 0, detail.join(' | '))
+  check('no language mutation anchor matches more than once', ambiguous === 0, detail.join(' | '))
+}
+
 // ---- the mutation scripts must be runnable, not just parseable ---------------
 {
   const script = readFileSync(join(repo, 'scripts/mutate-guards.mjs'), 'utf8')

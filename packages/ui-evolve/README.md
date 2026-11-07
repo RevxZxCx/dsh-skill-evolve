@@ -198,6 +198,28 @@ Three modules, top to bottom:
    otherwise end the block early and let the rest of it read as instructions.
    The scrub is case-insensitive and tolerates whitespace inside the tag, because
    `</TRANSCRIPT >` closes a block just as well as `</transcript>`.
+
+   **The language is told, not guessed.** The prompt used to ask the model for
+   "the language the user wrote in", and a reader whose interface is Chinese may
+   well type English — the interface is what they read. So the panel reads
+   `document.documentElement.lang`, passes it as `?lang=`, and the summary
+   instruction names the language outright (`Write it in Simplified Chinese,
+   whatever language the transcript below is in`). `zh` is split by script:
+   `zh-CN`/`zh-SG`/bare `zh` are simplified, `zh-TW`/`zh-HK`/`zh-MO`/`zh-Hant`
+   are traditional, because "Chinese" alone leaves the model free to pick a
+   script half the readers cannot read.
+
+   The name comes from a closed table of eleven languages rather than from the
+   tag itself: echoing `用 ru 写` to a reader who turns out to read English hands
+   the guess back with a straight face. A well-formed tag outside the table is
+   **not** silently dropped — it gets the old generic sentence, so a change that
+   only helps eleven languages does not quietly take it away from the rest. A
+   tag missing from `<html lang>` produces no sentence at all, which is the one
+   honest answer: no instruction beats a wrong one.
+
+   The summary cache is keyed on the rendered sentence, not on the language
+   name. A tag outside the table has no name, so keying on the name would make
+   `lang=nl` and no `lang` share one entry while their prompts differ.
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question
@@ -210,9 +232,30 @@ Three modules, top to bottom:
    with the steps, and it was removed along with the header's propose button —
    drafting the next turn is not what a person is doing while reading the card.
    The route it called (`POST /propose`) remains part of the service contract.
-3. **Produced files.** Files this conversation wrote, newest first, with the
-   added and removed line counts. Sourced from the same turn transcript the
-   other two modules read, so all three agree on which turn they describe.
+3. **Produced files.** The work of the **whole session**, newest first, with the
+   added and removed line counts. This is the one of the three that used to
+   describe a single turn: the list came from the turn that had just ended, so a
+   quiet turn emptied the card and re-editing one file hid the other nineteen.
+   The list now lives in the stored session state (`paths`, a `Map` from file to
+   the same `sequence` tick the skills and MCP rows use), survives restarts, and
+   is capped at 200 entries — the transcript caps a turn at 40, this is per
+   session, so it is larger, but it is still capped because every panel read is
+   one `fs.stat` per entry, every eight seconds.
+
+   The cap has to hold on three paths, not one: `rememberPaths`, the merge in
+   `load` (a process that records a path before its first read would otherwise
+   keep the file's list *and* its own, and the next shutdown would write the sum
+   back), and `readState` (a file written by a build without the cap must shrink
+   on the way in). An interrupted turn counts too, and its paths are read
+   **before** `transcripts.record()` folds the turn — reading `previous` after
+   the record returns the turn before it, because an abandoned turn is not
+   folded into `previous` at all.
+
+   The row beside the "Last turn" title still describes **one** turn, so its
+   file count comes from `turnFiles`, not from the length of this list. Three
+   numbers sitting together read as one set; one of them describing the whole
+   session while the other two describe the last turn is a thing the reader has
+   no way to notice.
 
 Reading the panel may touch the disk: `GET /panel` falls back to the stored
 session state when this process holds nothing for that conversation yet, so the
@@ -221,7 +264,10 @@ transcript. The read is per conversation and happens once — the loaded documen
 is installed into the in-memory store, so a polled panel does not re-read.
 
 The panel can write, but only through the routes that already had a gate behind
-them. It calls `GET /api/ui-evolve/panel` to read the three modules,
+them. It calls `GET /api/ui-evolve/panel?agent=<id>&lang=<tag>` to read the
+three modules — the tag is the interface language, and everything outside
+`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$` is dropped rather than escaped, because
+the value ends up inside a prompt —
 `GET /api/ui-evolve/candidates` to read the queue, `POST /config` for its own
 switches, and `POST /candidates` to approve or discard one candidate. The panel
 itself no longer calls `POST /propose` — the button that did is gone, because a

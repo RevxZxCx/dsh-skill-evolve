@@ -496,6 +496,7 @@ function boot(options) {
     head: { appendChild: (node) => styles.push(node) },
     body: { attributes: new Map() },
     documentElement: {
+      lang: settings.lang ?? '',
       style: {
         getPropertyValue: (name) => hostStyle.get(name) ?? '',
         setProperty: (name, value) => { hostWrites.push([name, String(value)]); hostStyle.set(name, String(value)) },
@@ -702,6 +703,11 @@ function panelRoutes() {
         turn: 7,
         calls: 12,
         failed: 1,
+        // Deliberately different from `files.length` below. The row of three
+        // numbers beside the title describes the turn that ended, and `files` is
+        // the whole session's work since the output card became cumulative; a
+        // fixture where the two agree cannot tell the two apart.
+        turnFiles: 1,
         summary: { text: 'Read three files and edited one.', model: 'p/m' },
         pendingCandidates: 2,
         skills: {
@@ -712,7 +718,16 @@ function panelRoutes() {
           ],
         },
         mcp: [{ server: 'github', tools: 3 }],
-        files: [{ path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 }],
+        // Two files, one turn-file. The row beside the title describes the turn
+        // that ended, so its file count must come from `turnFiles`; the output
+        // card below lists the whole session's work. A fixture where the two
+        // numbers agree cannot tell an implementation that reads the cumulative
+        // length apart from one that reads the turn's, which is the exact
+        // substitution that shipped once already.
+        files: [
+          { path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 },
+          { path: '/tmp/out/older.md', bytes: 1024, mtimeMs: 10 },
+        ],
       },
     },
     '/api/ui-evolve/config': {
@@ -928,7 +943,7 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  const instance = boot({ routes: panelRoutes() })
+  const instance = boot({ routes: panelRoutes(), lang: 'zh-CN' })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
@@ -967,9 +982,11 @@ check(
     check('the old stat strip is gone', firstByClass(tree, 'dsse-facts') === undefined, textOf(tree).slice(0, 160))
     check('the header carries no action button', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') === undefined && firstByClass(firstHead, 'dsse-head-btn') === undefined, textOf(tree).slice(0, 160))
     // Cards without a `head` still get their metadata from `meta`. Both paths have
-    // to be pinned: removing the fallback would silently empty two headers.
+    // to be pinned: removing the fallback would silently empty two headers. The
+    // count here is the cumulative one, not `turnFiles` — this card lists the
+    // session's work, and the fixture deliberately makes the two numbers differ.
     const metas = byClass(tree, 'dsse-card-meta').map((node) => textOf(node))
-    check('a card without a custom head still shows its meta', metas.includes('2 技能 · 1 服务') && metas.includes('1 个文件'), JSON.stringify(metas))
+    check('a card without a custom head still shows its meta', metas.includes('2 技能 · 1 服务') && metas.includes('2 个文件'), JSON.stringify(metas))
   }
   check('the candidate badge is shown', textOf(firstByClass(tree, 'dsse-queue')).includes('2'), textOf(firstByClass(tree, 'dsse-queue')).slice(0, 80))
   check('skills are listed', textOf(tree).includes('pdf-tools'), textOf(tree).slice(0, 200))
@@ -987,6 +1004,44 @@ check(
     'the model catalogue was fetched',
     instance.calls.some((row) => row.url.endsWith('/models')),
     JSON.stringify(instance.calls.map((row) => row.url)),
+  )
+  // The reader's language is the host's, and the host writes it to `<html lang>`.
+  // Without it the model picks a language from the transcript, which is how a
+  // Chinese reader kept getting English summaries. The attribute is read at ask
+  // time rather than captured once, so the fixture sets it before boot.
+  check(
+    'the panel is told which language the reader uses',
+    instance.calls.some((row) => row.url.includes('lang=zh-CN')),
+    JSON.stringify(instance.calls.map((row) => row.url)),
+  )
+  // The timer is the panel's only way of learning anything. It cannot be told
+  // that a turn ended or that a file on disk was touched, so the delay is part of
+  // the contract rather than an implementation detail: a constant nobody asserts
+  // is a constant anybody can shorten to 100ms, and the comment beside it would
+  // still say "every few seconds". The fixture keeps the handle for exactly this.
+  const polls = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  check(
+    'the panel asks again on a timer',
+    polls.length === 1,
+    JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])),
+  )
+  if (polls.length === 1 && typeof polls[0].fn === 'function') {
+    const before = instance.calls.length
+    polls[0].fn()
+    await settle()
+    check(
+      'and firing it asks the panel again',
+      instance.calls.length > before,
+      `${before} -> ${instance.calls.length}`,
+    )
+  }
+  // A timer that outlives its component keeps a switched-away session's panel
+  // polling forever, and each one adds up for the life of the window.
+  instance.renderer.unmount()
+  check(
+    'unmounting stops the timer',
+    instance.timers.every((row) => row.ms !== 8000 || row.cleared === true),
+    JSON.stringify(instance.timers.filter((row) => row.ms === 8000).map((row) => row.cleared)),
   )
 }
 
@@ -3061,6 +3116,63 @@ function byAction(node, action) {
   phaseObserver.callback([{ type: 'attributes', attributeName: 'data-content-phase' }])
   const returnedTree = await watched.renderer.deepRender(watched.seat('cards'))
   check('and come back when it becomes a conversation again', textOf(returnedTree).includes('SESSION FULL'), textOf(returnedTree).slice(0, 140))
+}
+
+// ---------------------------------------------------------------------------
+// The language is read from the host, and read again every time
+// ---------------------------------------------------------------------------
+
+// `<html lang>` is the only place the bundle can find out what language the
+// reader uses: the host's locale preference lives in settings, which the client
+// does not get, and an unset preference is resolved by the browser. The host
+// writes the result of that resolution to the attribute, so the attribute is the
+// answer whether the reader chose a language or left it to the browser.
+{
+  // No attribute is not a reason to guess. A wrong language is obeyed, while a
+  // missing one lets the model read the transcript and decide for itself, which
+  // is the behaviour that predates this path.
+  const instance = boot({ routes: panelRoutes(), lang: '' })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check(
+    'a host that names no language asks without one',
+    instance.calls.some((row) => row.url.includes('/panel?')) && instance.calls.every((row) => row.url.includes('lang=') === false),
+    JSON.stringify(instance.calls.map((row) => row.url)),
+  )
+}
+
+{
+  // The attribute is read when the panel asks, not when the bundle loads: a
+  // reader who changes the interface language gets the new one on the next poll
+  // rather than after a restart.
+  const instance = boot({ routes: panelRoutes(), lang: 'en-GB' })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check(
+    'the first ask carries the language the host set',
+    instance.calls.some((row) => row.url.includes('lang=en-GB')),
+    JSON.stringify(instance.calls.map((row) => row.url)),
+  )
+  instance.document.documentElement.lang = 'ja'
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  check('the panel is still polling', poll !== undefined, JSON.stringify(instance.timers.map((row) => row.ms)))
+  // Called through `?.` rather than inside an `if`: the assertion below is the
+  // only thing that reads the language of a later poll. Guarding it on `poll`
+  // turns a fixture change into no assertion at all while the suite stays green,
+  // and calling it bare turns the same change into a crash the mutation scripts
+  // score as "survived". A missing poll must fail the assertion, not skip it and
+  // not take the tally line with it.
+  const before = instance.calls.length
+  poll?.fn?.()
+  await settle()
+  const after = instance.calls.slice(before)
+  check(
+    'a language changed between polls is picked up',
+    after.length > 0 && after.every((row) => row.url.includes('lang=ja')),
+    JSON.stringify(after.map((row) => row.url)),
+  )
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
