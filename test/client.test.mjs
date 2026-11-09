@@ -446,6 +446,10 @@ function boot(options) {
   const registrations = []
   const effects = []
   const injectedNames = []
+  // Which optional service groups `apply` asked for. Recorded even when the
+  // service is missing, so "the plugin asks and copes" can be told apart from
+  // "the plugin never asked".
+  const injectedServices = []
   const styles = []
   const requested = []
   const calls = []
@@ -519,10 +523,37 @@ function boot(options) {
     querySelector: (selector) => (selector === '[data-conversation-content]' ? conversation : null),
   }
 
+  const openedResources = []
+  const sidebarStub = settings.sidebar === false
+    ? undefined
+    : {
+        openResource: (address) => {
+          if (settings.sidebarThrows === true) throw new Error('sidebarRight: nothing is on screen')
+          openedResources.push(address)
+        },
+      }
+
   const ctx = {
     effect(register, label) {
       effects.push(label)
       return register()
+    },
+    // Optional services only. A child context exists when the service does, and
+    // its absence is what a Host without a right sidebar looks like — the plugin
+    // has to load either way, which is the whole reason this is not in `inject`.
+    inject(names, register) {
+      injectedServices.push(names.slice())
+      if (names.includes('sidebarRight') === false) return () => {}
+      if (sidebarStub === undefined) return () => {}
+      const child = {
+        sidebarRight: sidebarStub,
+        effect(inner, label) {
+          effects.push(label)
+          return inner()
+        },
+      }
+      const dispose = register(child)
+      return typeof dispose === 'function' ? dispose : () => {}
     },
     slots: {
       inject(name, register) {
@@ -694,6 +725,8 @@ function boot(options) {
     registrations,
     effects,
     injectedNames,
+    injectedServices,
+    openedResources,
     requested,
     calls,
     styles,
@@ -797,7 +830,19 @@ check(
 )
 check('the cards go into the shell overlay', booted.injectedNames.includes('shell.overlay'), JSON.stringify(booted.injectedNames))
 check('both seats registered', booted.registrations.length === 2, String(booted.registrations.length))
-check('three effects are declared', booted.effects.length === 3, String(booted.effects.length))
+// Named rather than counted: the count alone passed while a new effect could be
+// added anywhere, and what matters is that each one is registered under its own
+// label so its dispose shows up as its own line in the plugin's lifetime.
+check(
+  'four effects are declared, each named',
+  JSON.stringify(booted.effects) === JSON.stringify([
+    'skill-evolve: panel toggle',
+    'skill-evolve: card overlay',
+    'skill-evolve: panel teardown',
+    'skill-evolve: sidebar preview',
+  ]),
+  JSON.stringify(booted.effects),
+)
 
 for (const { spec } of booted.registrations) {
   const expected = spec.id.endsWith(':toggle') ? 'conversation.session.header.actions' : 'shell.overlay'
@@ -1393,26 +1438,102 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  const instance = boot({ routes: panelRoutes() })
+  // A route whose files carry the preview address, because a row only becomes a
+  // button when the Host handed it one. `panelRoutes()` predates addresses, so
+  // clicking anything in it would prove nothing about the channel.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'].data.files = [
+    { path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20, address: 'dsh-resource://file/session/session-a/tmp/out/report.md' },
+    { path: '/tmp/out/older.md', bytes: 1024, mtimeMs: 10, address: 'dsh-resource://file/session/session-a/tmp/out/older.md' },
+  ]
+  const instance = boot({ routes })
+  // Labelled, because the two owners of the preview channel have to be tried
+  // separately: releasing both and checking the log afterwards cannot say which
+  // one released it.
   const disposers = []
-  const ctx = {
-    effect(register) {
+  const sidebarOpened = []
+  // Built as a factory so the plugin can be loaded a second time later: the
+  // channel is rebound by running `apply` again, not by hand, because a hand-made
+  // rebind would test this file's idea of the contract instead of the plugin's.
+  const makeCtx = () => ({
+    effect(register, label) {
       const dispose = register()
-      if (typeof dispose === 'function') disposers.push(dispose)
+      if (typeof dispose === 'function') disposers.push({ label, dispose })
       return () => {}
+    },
+    // The sidebar's own effect is registered through `child.effect`, so its
+    // dispose has to land in the same list as the rest — otherwise this test
+    // would report a clean teardown while leaving the preview channel bound.
+    inject: (names, register) => {
+      if (names.includes('sidebarRight') === false) return () => {}
+      const child = {
+        sidebarRight: { openResource: (address) => sidebarOpened.push(address) },
+        effect(inner, label) {
+          const dispose = inner()
+          if (typeof dispose === 'function') disposers.push({ label, dispose })
+          return () => {}
+        },
+      }
+      const dispose = register(child)
+      return typeof dispose === 'function' ? dispose : () => {}
     },
     slots: { inject: (name, register) => register(), register: (spec, Component) => {
       instance.registrations.push({ spec, Component })
       return () => {}
     } },
-  }
-  instance.module.apply(ctx)
+  })
+  instance.module.apply(makeCtx())
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   check('open before teardown', (await instance.renderer.deepRender(cards)) !== null)
-  for (const dispose of disposers) dispose()
+  // Click a row while the channel is still bound. Without this the assertion
+  // below cannot tell "the preview channel was released" from "nothing was ever
+  // opened" — an empty log is what both look like, which is why deleting both
+  // resets used to keep this suite green.
+  const beforeTeardown = await instance.renderer.deepRender(cards)
+  const rowBefore = firstByClass(beforeTeardown, 'dsse-row-open')
+  check('a row offers a preview before teardown', rowBefore !== undefined && typeof rowBefore.props?.onClick === 'function')
+  rowBefore?.props?.onClick?.()
+  check('the preview channel was bound before teardown', sidebarOpened.length === 1, JSON.stringify(sidebarOpened))
+  // The two resets are exercised one at a time. Releasing both and then looking at
+  // the log cannot say which one released the channel, and that is exactly how
+  // both of them stayed untested while the suite was green.
+  //
+  // First the sidebar's own effect: a Host can take the service away while the
+  // plugin is still loaded, and every row has to stop pretending it can open a
+  // preview.
+  const sidebarEffect = disposers.find((row) => row.label === 'skill-evolve: sidebar preview')
+  check('the sidebar channel is registered as its own effect', sidebarEffect !== undefined, JSON.stringify(disposers.map((row) => row.label)))
+  sidebarEffect?.dispose()
+  const afterDrop = await instance.renderer.deepRender(cards)
+  const rowAfterDrop = firstByClass(afterDrop, 'dsse-row-open')
+  check('a row stops being a button when the sidebar goes away', rowAfterDrop === undefined, JSON.stringify(byClass(afterDrop, 'dsse-row').length))
+  firstByClass(afterDrop, 'dsse-row')?.props?.onClick?.()
+  check('and it cannot reach the service it no longer has', sidebarOpened.length === 1, JSON.stringify(sidebarOpened))
+  // The service coming back has to restore the channel, not leave the panel
+  // permanently degraded. Loading the plugin again is what a Host does when the
+  // sidebar reappears, and it is the only path that can rebind `openResource`.
+  instance.module.apply(makeCtx())
+  const rebound = await instance.renderer.deepRender(cards)
+  const rowRebound = firstByClass(rebound, 'dsse-row-open')
+  check('and the rows come back when the sidebar does', rowRebound !== undefined, JSON.stringify(byClass(rebound, 'dsse-row').length))
+  rowRebound?.props?.onClick?.()
+  check('a rebound row reaches the sidebar again', sidebarOpened.length === 2, JSON.stringify(sidebarOpened))
+  // Now the plugin's own teardown, with the channel bound again.
+  const panelTeardown = disposers.find((row) => row.label === 'skill-evolve: panel teardown')
+  check('the plugin registers its own teardown', panelTeardown !== undefined, JSON.stringify(disposers.map((row) => row.label)))
+  panelTeardown?.dispose()
   check('teardown closes the cards', (await instance.renderer.deepRender(cards)) === null)
+  // Re-open the panel after the teardown and click the same row again. The
+  // plugin is gone, so nothing may reach the sidebar a second time; a channel
+  // left bound by an incomplete teardown would answer here.
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const afterTeardown = await instance.renderer.deepRender(cards)
+  const rowAfter = firstByClass(afterTeardown, 'dsse-row-open')
+  rowAfter?.props?.onClick?.()
+  check('a torn-down panel cannot open a preview', sidebarOpened.length === 2, JSON.stringify(sidebarOpened))
+  for (const row of disposers) row.dispose()
   const phaseObservers = instance.mutationObservers.filter((observer) =>
     observer.targets.some((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase')))
   const typographyObservers = instance.mutationObservers.filter((observer) => phaseObservers.includes(observer) === false)
@@ -3687,6 +3808,197 @@ async function openPanel(routes, options) {
     /const REFRESH_MS = 8000/.test(source),
     (source.match(/const REFRESH_MS = \d+/) ?? ['none'])[0],
   )
+}
+
+// ---------------------------------------------------------------------------
+// The output card: four rows, the way out visible, and every row a preview
+// ---------------------------------------------------------------------------
+
+{
+  // Seven files, and the modification times run the *other* way: `f1.md` was
+  // edited first in the conversation and is also the *oldest* on disk. Array
+  // order is the order they were edited in, newest first — that is what the card
+  // claims to show, so the times must disagree with it. A fixture whose times
+  // agree cannot tell a sort by `mtimeMs` from no sort at all, and an earlier
+  // draft of this block made exactly that mistake: both orders came out the same
+  // and the probe survived.
+  const rows = Array.from({ length: 7 }, (_, index) => ({
+    path: `/work/f${index + 1}.md`,
+    bytes: 100 * (index + 1),
+    mtimeMs: index * 1000,
+    address: `dsh-resource://file/session/session-a/${encodeURIComponent(`work/f${index + 1}.md`)}`,
+  }))
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 3, calls: 4, failed: 0, turnFiles: 7,
+      summary: { text: 'edited seven files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: rows,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const list = firstByClass(card, 'dsse-files')
+  const names = () => byClass(card, 'dsse-name').map((node) => textOf(node))
+
+  check('the output card lists four rows before anybody opens it', names().length === 4, JSON.stringify(names()))
+  // The four shown are the first four edited, not the four newest on disk.
+  check('the rows are the ones edited last, in that order', JSON.stringify(names()) === JSON.stringify(['f1.md', 'f2.md', 'f3.md', 'f4.md']), JSON.stringify(names()))
+  check('the header says how many there are', textOf(firstByClass(card, 'dsse-card-meta')).includes('7 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
+  // The attribute is what switches the scroll box on, so a folded card has to say
+  // so. Asserting only the open state let a list that always claimed to be open
+  // pass — and that would give a four-row card a scrollbar it does not need.
+  check('a folded list does not claim to be open', list?.props?.['data-open'] === 'false', String(list?.props?.['data-open']))
+  // The way out must not live inside the list it reveals, or it is clipped with
+  // it — which is exactly how "5 of 10" shipped as "only 5".
+  const foot = firstByClass(card, 'dsse-foot')
+  // The count is what makes the fold honest: four rows out of seven is a promise
+  // that three more exist, and the only thing that says so is this control. A
+  // mutation that deletes the footer outright used to take the suite down with a
+  // TypeError at the click below, which the mutation runner records as a crash
+  // rather than a kill — so the count is asserted, not just the label.
+  check('the control that reveals the rest is on the card, not in the list', foot !== undefined, JSON.stringify(Object.keys(card ?? {})))
+  check('and it is not inside the list it reveals', firstByClass(list, 'dsse-foot') === undefined && firstByClass(list, 'dsse-more') === undefined)
+  check('it says how many more there are', textOf(foot).includes('展开全部 7 个'), textOf(foot))
+  // Order, not presence. `textOf(card)` walks every descendant, so any check that
+  // the label appears somewhere in the card passes whether the control is above
+  // the list, below it, or floating over it. The body's children array is the only
+  // place the order is visible: `Card` renders `[head, body, expand]` and the list
+  // and the control are siblings inside `body`.
+  check('and it sits below the list', (() => {
+    const body = (Array.isArray(card?.props?.children) ? card.props.children : [])
+      .find((node) => node?.props?.className === 'dsse-card-body')
+    const children = Array.isArray(body?.props?.children) ? body.props.children : []
+    const listAt = children.findIndex((node) => String(node?.props?.className ?? '').startsWith('dsse-list dsse-files'))
+    const footAt = children.findIndex((node) => node?.props?.className === 'dsse-foot')
+    return listAt >= 0 && footAt > listAt
+  })(), JSON.stringify((card?.props?.children ?? []).map((node) => node?.props?.className ?? node?.type ?? '')))
+  // Exactly one way out. Two of them would be two answers to "how do I see the
+  // rest", and the one in the list is the one that gets clipped.
+  check('the card offers exactly one way out', byClass(card, 'dsse-more').length === 1, String(byClass(card, 'dsse-more').length))
+
+  // Every row is a button, because clicking one opens a preview.
+  const openRow = firstByClass(list, 'dsse-row-open')
+  check('a row is a button, not a div with a handler', openRow?.type === 'button', String(openRow?.type))
+  check('and it says what clicking does', String(openRow?.props?.title ?? '').includes('侧栏预览'), String(openRow?.props?.title))
+  check('a click opens that file and no other', (() => {
+    // The third row on purpose. A click on the first row cannot tell "opens the
+    // row it belongs to" from "opens the first file" — both land on the same
+    // address, and the mutation that swapped them survived for exactly that
+    // reason until this used a row that is not first.
+    const row = byClass(list, 'dsse-row-open')[2]
+    const handler = row?.props?.onClick
+    check('the row answers a click', typeof handler === 'function', String(typeof handler))
+    handler?.()
+    return instance.openedResources.length === 1 && instance.openedResources[0] === rows[2].address
+  })(), JSON.stringify(instance.openedResources))
+
+  // Opening the card scrolls instead of growing without bound.
+  check('the list scrolls once it is open, and only then', (() => {
+    const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+    const closed = /\.dsse-files\{/.test(sheet)
+    const open = /\.dsse-files\[data-open="true"\]\{[^}]*max-height:\d+px/.test(sheet) && /\.dsse-files\[data-open="true"\]\{[^}]*overflow-y:auto/.test(sheet)
+    return closed && open
+  })())
+  check('the rows look clickable', /\.dsse-row-open\{[^}]*cursor:pointer/.test(instance.styles.map((node) => String(node.textContent)).join('\n')))
+
+  // The control is pressed through a guard rather than dereferenced: with the
+  // footer gone, `byClass(...)[0].props` throws, and a suite that throws prints no
+  // tally — the mutation runner records that as a crash instead of a kill, which
+  // reads as "this mutation was not testable" rather than "the card lost its only
+  // way out".
+  const press = (tree) => {
+    const control = byClass(tree, 'dsse-more')[0]
+    check('the card offers a control to press', control !== undefined && typeof control.props?.onClick === 'function')
+    control?.props?.onClick?.()
+  }
+  press(card)
+  const opened = await instance.renderer.deepRender(instance.seat('cards'))
+  const openCard = byClass(opened, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const openNames = byClass(openCard, 'dsse-name').map((node) => textOf(node))
+  check('opening the card shows every file', openNames.length === 7, JSON.stringify(openNames))
+  check('and the order did not change', JSON.stringify(openNames) === JSON.stringify(rows.map((_, index) => `f${index + 1}.md`)), JSON.stringify(openNames))
+  check('the list says it is open', firstByClass(openCard, 'dsse-files')?.props?.['data-open'] === 'true', String(firstByClass(openCard, 'dsse-files')?.props?.['data-open']))
+  check('and the control now offers the way back', textOf(firstByClass(openCard, 'dsse-foot')) === '收起', textOf(firstByClass(openCard, 'dsse-foot')))
+  check('the header stops repeating the total it is showing', textOf(firstByClass(openCard, 'dsse-card-meta')).includes('全部 7 个'), textOf(firstByClass(openCard, 'dsse-card-meta')))
+
+  press(openCard)
+  const closed = await instance.renderer.deepRender(instance.seat('cards'))
+  const closedCard = byClass(closed, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  check('closing the card puts the fold back', byClass(closedCard, 'dsse-name').length === 4, String(byClass(closedCard, 'dsse-name').length))
+}
+
+{
+  // A Host without a right sidebar must still get a readable list. The row is a
+  // plain div in that case: a button that does nothing when pressed is worse
+  // than text, because it promises something the Host cannot deliver.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'edited one file' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [{ path: '/work/only.md', bytes: 12, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/only.md' }],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes, sidebar: false })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const row = byClass(tree, 'dsse-row')[0]
+  check('the file is still listed without a sidebar', row !== undefined && textOf(row).includes('only.md'), textOf(tree).slice(0, 160))
+  check('but it is not dressed up as a button', row?.type !== 'button' && row?.props?.onClick === undefined, String(row?.type))
+  check('and the plugin still asked for the service it could not get', JSON.stringify(instance.injectedServices).includes('sidebarRight'), JSON.stringify(instance.injectedServices))
+  check('the missing sidebar is not a load failure', instance.registrations.length === 2, String(instance.registrations.length))
+  // A card that already fits gets no control at all. Rendering one whenever the
+  // list is non-empty would put a button labelled "展开全部 1 个" under a single
+  // row — a control that cannot reveal anything.
+  check('a card that already fits offers nothing to expand', firstByClass(tree, 'dsse-foot') === undefined && firstByClass(tree, 'dsse-more') === undefined, textOf(tree).slice(0, 160))
+}
+
+{
+  // The Host throws when no session is mounted, which is an ordinary moment: the
+  // panel outlives a session switch. A preview that cannot be opened must not
+  // take the whole column of cards down with it.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'a summary worth keeping' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [{ path: '/work/x.md', bytes: 5, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/x.md' }],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes, sidebarThrows: true })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const openRow = firstByClass(tree, 'dsse-row-open')
+  check('the row still offers a preview', openRow !== undefined, JSON.stringify(byClass(tree, 'dsse-row').length))
+  let threw = false
+  try {
+    openRow?.props?.onClick?.()
+  } catch {
+    threw = true
+  }
+  check('a preview that cannot open does not throw into the cards', threw === false)
+  check('and the cards are still on screen afterwards', textOf(tree).includes('a summary worth keeping'), textOf(tree).slice(0, 160))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

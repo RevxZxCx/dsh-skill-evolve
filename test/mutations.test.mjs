@@ -283,6 +283,60 @@ for (const [name, expected] of [
   check(`no ${name} anchor matches more than once`, ambiguous === 0, detail.join(' | '))
 }
 
+// ---- the panel script names its targets as paths, not as constants ----------
+//
+// `scripts/mutate-checklist-panel.mjs` writes `file: 'packages/ui-evolve/lib/x.js'`
+// rather than the `file: summarise` style the loop above resolves through the
+// `const summarise = path.join(repo, ...)` declarations. That is why it was left
+// out of the table for so long: dropping it in would have made every owner
+// "unresolved" and the check would have failed for the wrong reason. It gets its
+// own block, reading the literal path.
+{
+  const name = 'mutate-checklist-panel.mjs'
+  const script = readFileSync(join(repo, 'scripts', name), 'utf8')
+  const anchors = parseAnchors(script)
+  const owners = []
+  {
+    const owner = /^\s{4}file: ([^\n]+),$/gm
+    let found = owner.exec(script)
+    while (found !== null) {
+      owners.push(found[1].trim().replace(/^'|'$/g, ''))
+      found = owner.exec(script)
+    }
+  }
+  // One number, spelled once. The floor and the sentence that reports it drift
+  // apart the moment the mutation table grows, and a failure message naming a
+  // lower floor than the assertion uses sends the next reader after the wrong gap.
+  const minimum = 99
+  check(`${name} declares the anchors it is supposed to`, anchors.length >= minimum, `found ${anchors.length}, expected at least ${minimum}`)
+  const contents = new Map()
+  const text = (file) => {
+    if (!contents.has(file)) contents.set(file, readFileSync(join(repo, file), 'utf8'))
+    return contents.get(file)
+  }
+  let missing = 0
+  let ambiguous = 0
+  const detail = []
+  if (owners.length !== anchors.length) {
+    missing += 1
+    detail.push(`${owners.length} owners vs ${anchors.length} anchors: the pairing cannot be checked`)
+  }
+  for (const [position, anchor] of anchors.entries()) {
+    const file = owners[position]
+    if (file === undefined || anchor.from === '') continue
+    const count = text(file).split(anchor.from).length - 1
+    if (count === 0) {
+      missing += 1
+      detail.push(`missing in ${file}: ${anchor.from.split('\n')[0].slice(0, 50)}`)
+    } else if (count > 1) {
+      ambiguous += 1
+      detail.push(`ambiguous in ${file} (${count}): ${anchor.from.split('\n')[0].slice(0, 50)}`)
+    }
+  }
+  check(`every ${name} anchor still exists in the file it names`, missing === 0, detail.join(' | '))
+  check(`no ${name} anchor matches more than once`, ambiguous === 0, detail.join(' | '))
+}
+
 // ---- the mutation scripts must be runnable, not just parseable ---------------
 {
   const script = readFileSync(join(repo, 'scripts/mutate-guards.mjs'), 'utf8')

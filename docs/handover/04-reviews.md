@@ -64,6 +64,10 @@
 | R-58 | 2026-11-09 | 第五轮：「全文唯一」表述过宽（实为 R-50 之后唯一） | 1 P3 | 1 / 0 |
 | R-59 | 2026-11-09 | 上一轮速度 第一轮：长轮询不比较 `after`（P1）、自增桩掩盖它（P2）、文档仍记 average（P2）、变异 why 不实、切会话不 abort（P3） | 1 P1 + 2 P2 + 2 P3 | 5 / 0 |
 | R-60 | 2026-11-09 | 上一轮速度 第二轮：长轮询到期后再空等 27 秒（P1）、live 读数不装过期重绘（P2） | 1 P1 + 1 P2 | 2 / 0 |
+| R-61 | 2026-11-10 | 产出卡 第一轮：`FILE_LIST_MAX_PX` 未被引用、`canPreview` 传了但 `Card` 不读、工作区外地址断言可截断、`and it sits below the list` 恒真 | 4 P3 | 4 / 0 |
+| R-62 | 2026-11-10 | 第二轮：teardown 断言全程没点过一次（恒真）、`statTouchedFiles` 的 JSDoc 被并进邻函数 | 2 P2 | 2 / 0 |
+| R-63 | 2026-11-10 | 第三轮：判定可合入；变异数下限 99 而失败文案仍写 97 | 1 P3 | 1 / 0 |
+| R-64 | 2026-11-10 | 第四轮：无新增问题，判定可合入；提示两套历史变异脚本 ENOENT（非本补丁） | 0 | 0 / 0 |
 
 ---
 
@@ -937,4 +941,119 @@ live 读数现在先装一个、warm 回答取消它再装一个，日志里两�
 **共同特征。** 两条都出在「延迟在什么时刻被解读」上：P1 是把等待**之后**的时间当成了等待**本身**的余量，
 P2 是把「何时过期」绑在了「是不是实时」这个无关分支上。两者都通过，是因为此前没有任何断言观察
 「两个请求之间隔了多久」与「一条读数在多久之后应当变样」。
+## R-61 · 产出卡（折叠 + 预览）第一轮
 
+- **runId**：`829afb31-9a31-4d34-885b-80711d5df2c4`
+- **判定**：patch is correct，0 P1 / 0 P2 / 4 P3，全部采纳。
+
+**审查确认成立的部分（逐条比对过宿主实现）。** `resourceAddress()` 与宿主 `fileAddressFor()` 的五条分支
+等价（工作区根 → `relative = ''`、工作区内 → 相对、工作区外 → 保留规范化绝对路径、反斜杠归一、
+盘符 `%3A` 还原），UNC 归一后与宿主同码同结果；`newestFirstOf(paths, false)` 只反转一次；
+`canPreview` 在渲染期读模块级 `let`，没有 stale closure；缺 `sidebarRight` 时行退化为 `div` 的降级路径正确；
+`catch {}` 与仓库既有的「不写 `console.*`」约定一致。
+
+**四条 P3。**
+1. `FILE_LIST_MAX_PX` 定义了却从不被引用（`client.js:78` 是 309，`:326` 硬编码 `max-height:309px`）→ CSS 改成插值。
+   探针（改回转义字面量）→ 445 / 1。
+2. `canPreview` 与 `onOpenFile` 传给 `Card` 但它不读（`Card` 只读
+   `onClick/clickable/expanded/expandHint/head/meta/title/children` 与两个鼠标事件，无 rest 透传）→
+   从 `Card` props 里删掉这两个键，行仍用 `Cards` 闭包里的 `canPreview` / `openable` / `onClick`。
+3. 工作区外地址断言只比对前缀与后缀，截断后的地址仍能通过 → 改成拼出完整期望值做全等。
+   探针：把 `else if (normalized.startsWith(\`${root}/\`))` 改成 `else if (true)` → 225 / 1。
+4. `and it sits below the list` 恒真（`card.props.children` 是数组，没有 `.props`；`textOf(card)` 遍历全部
+   后代，必然命中字符串里的「全部 7 个」）→ 改成先在 `card.props.children` 里找 `dsse-card-body`，再在其
+   `children` 数组比较 `dsse-list dsse-files` 与 `dsse-foot` 的下标。探针：把 footer 块整体移到列表之前 →
+   445 / 1，失败信息 `["dsse-card-head","dsse-card-body",""]`。
+
+**共同特征。** 四条里三条是「断言看起来测了一件事，实际测了另一件」：可截断的全等、恒真的后代搜索、
+传下去但没人读的 prop。它们都通过，是因为这些断言的**失败条件**从来没有被真正构造过一次。
+
+---
+
+## R-62 · 产出卡 第二轮
+
+- **runId**：`30d977cd-9e5d-4c41-826e-456a3bce8925`
+- **判定**：patch is incorrect，2 P2，全部采纳。
+
+**[P2] teardown 断言恒真。** `check('teardown leaves no preview channel it cannot take back',
+sidebarOpened.length === 0)` 之前**一次点击都没有**发生过，于是删掉两处 `openResource` 复位仍然 446 全绿。
+修法（这是本轮最关键的重构）：把 `disposers` 从函数数组改成 `{label, dispose}`，`ctx` 改成 `makeCtx()` 工厂，
+让两处复位**分别**由各自的 owner 证伪——先点一行（期望 1），只 dispose `skill-evolve: sidebar preview`
+断言行不再是按钮且旧行点击不新增，再 `instance.module.apply(makeCtx())` 真正重跑 `apply` 断言行回来且能再
+打开（期望 2），最后只 dispose `skill-evolve: panel teardown` 断言为 2 而不是 3。
+第一版「重新绑定」是假动作：手写 `ctx.inject(['sidebarRight'], …)` 根本没把 `openResource` 绑回去。
+
+**[P2] `statTouchedFiles` 的 JSDoc 被拆散。** `Pick the files a turn touched…` 那段被并进了 `newestFirstOf`
+的注释块，`statTouchedFiles` 只剩裸 `@param {object} input`。修法：整段移回 `statTouchedFiles`。
+
+**测试侧的新坑。** 两处复位互为冗余时，任何一条变异都只删得掉一处，剩下那处照样释放，于是变异全部存活；
+按 owner 分开执行后各删一处均 453 / 1。另一处：teardown 块的 fixture 没有 `address`，行永远是 `div`，
+445 / 3。
+
+---
+
+## R-63 · 产出卡 第三轮
+
+- **runId**：`2961ce2a-1f27-4cbb-ab04-28b402b8c81f`
+- **判定**：patch is correct（「此补丁可以合入」），1 P3，已采纳。
+
+**三项疑问全部核实。**
+- **teardown 断言是真可证伪的。** 仅删 panel 的 `openResource = undefined` → 453 / 1（唯一失败
+  `a torn-down panel cannot open a preview`，日志 3 次 vs 期望 2 次）；仅把 sidebar effect 的 dispose 换成
+  空函数 → 453 / 1（唯一失败 `a row stops being a button when the sidebar goes away`，残留 5 行）；
+  两处同删 → 452 / 2。与实施方的探针数字逐字一致。
+- **二次 `apply` 不污染全局。** teardown 块自建 `const instance = boot({ routes })`，作用域限于该块；
+  `instance.seat(name)` 用 `registrations.find(...)` 取首条，两次 apply 注册的是同一个 `Component` 引用；
+  读 `registrations.length` 的三处都在独立 boot 实例里且只 apply 一次。
+- **同构期望值不掩盖编码缺陷。** 删掉实现里的 `replace(/%3A/gi, ':')` → `test/api.test.mjs` 225 / 1，
+  唯一失败正是工作区外那条（`C%3A:...` vs `C:/...`）；同文件另有两条硬编码字面量分别覆盖分段编码与
+  session id 编码，已足够。
+
+**[P3] 变异数下限 99，失败文案仍写 97**（`test/mutations.test.mjs:307`）→ 改成共享常量 `const minimum = 99`，
+断言与文案都用它。注释记下理由：下限与报告它的那句话会在表一变大时立刻分叉，而报出一个比断言更低的数字，
+会让下一个读者去找错的那个缺口。
+
+---
+
+## R-64 · 产出卡 第四轮
+
+- **runId**：`046d5f56-347c-43e5-9008-7a592cdeab79`
+- **判定**：**此补丁可以合入**，无新增 P1–P3。
+
+**修复确认。** 审查方把 `minimum` 临时改成 100 实跑，得到
+`FAIL mutate-checklist-panel.mjs declares the anchors it is supposed to — found 99, expected at least 100`，
+确认这条断言真的会生效（不是永远为真的摆设），随后还原、39 passed。
+
+**同类问题复核。** `test/mutations.test.mjs:202-205` 的 `[name, expected]` 表只求值一次，与第 241 行文案共用
+`expected`，没有重复字面量；其余脚本的总计都用 `results.length` / `mutations.length` 动态算。另用同逻辑
+解析器独立统计四个脚本的真实锚点数 **21 / 69 / 44 / 99**，与表中 21 / 69 / 44 及 `minimum = 99` 完全一致，
+owners 数量逐一相等，无空 `from`。
+
+**数字独立复跑一致。** 2654 / 454 / 226 / 39；七套变异 99 / 69 / 21 / 44 / 15 / 14 / 11 全杀；CRLF 0
+（113 个 git 追踪文件，逐字节检测）；`sync-gutter` 连跑两次同 sha256。审查方补充：`grep -lI $'\r'` 在本机
+PowerShell / MSYS 环境会对全部文件误报（`core.autocrlf=true` 让工作区带 CRLF 而仓库内仍是 LF），
+逐字节检测才是对的。
+
+**额外提示（非本补丁、不阻塞）。** `scripts/mutate-outcome.mjs` 与 `scripts/mutate-result-shape.mjs` 跑起来
+ENOENT 崩溃：它们指向不存在的 `lib/outcome.js`、`lib/evidence.js`，实际位置是 `packages/core/lib/outcome.js`、
+`packages/core/lib/evidence.js`，由历史重构提交 `e347991`（把插件拆成四包工作区）搬迁目录后未同步修改所致，
+`git diff HEAD` 对这两个文件为空。审查建议单开一条待办，否则「七套变异」这个说法会掩盖「其中两套早已失效」
+的事实。已核实：`packages/core/lib/` 确有这两个文件，`test/` 有 `evidence.test.mjs` / `outcome-wiring.test.mjs` /
+`outcome.test.mjs`，`scripts/mutate-outcome.mjs:18-19` 是 `const LIB = 'lib/outcome.js'` 与
+`const WIRING = 'lib/index.js'`，`scripts/mutate-result-shape.mjs` 的 `file: 'lib/evidence.js'` 出现在
+`:18`、`:25`、`:36`。**本轮未修**（非本补丁范围），已记入待办。
+
+---
+
+## 产出卡（折叠 + 预览）· 四轮累计
+
+| 轮次 | runId | P1 | P2 | P3 | 采纳 / 驳回 |
+|---|---|---|---|---|---|
+| 第一轮 | `829afb31` | 0 | 0 | 4 | 4 / 0 |
+| 第二轮 | `30d977cd` | 0 | 2 | 0 | 2 / 0 |
+| 第三轮 | `2961ce2a` | 0 | 0 | 1 | 1 / 0 |
+| 第四轮 | `046d5f56` | 0 | 0 | 0 | 0 / 0 |
+| **合计** | — | **0** | **2** | **5** | **7 / 0** |
+
+**收尾判据。** 四轮里真正的行为缺陷只有两条（R-62 的两条 P2），且都在同一处：清理与证伪的归属。
+其余五条 P3 全是「断言看起来测了一件事，实际测了另一件」与文档对不上。第四轮无新增问题，收敛。

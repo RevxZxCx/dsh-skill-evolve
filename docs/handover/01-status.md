@@ -34,6 +34,7 @@
 | 2026-11-09 | 徽章改常驻 | 徽章答过一次就常驻，空闲显示破折号而非 0（D-88）；`known` 跨会话保留、读数随会话清空（D-89）；2530 断言全绿，七套变异 50/81/21/44/15/14/11 全杀 |
 | 2026-11-09 | 速度显示最近几次平均 | 停下来后显示最近五条消息的加权平均（D-90），与实时读数按 实时>linger>平均>破折号 的优先级共存；`averageOf` 删掉不可达守卫（DEF-61）；补「有窗口无平均」用例（DEF-62）；2566 断言全绿，七套变异 58/81/21/44/15/14/11 全杀 |
 | 2026-11-09 | 速度改显「上一轮这一条」 | 生成中显示最近两秒，停下后显示刚结束那一轮的整轮速率并常驻（D-91，取代 D-90 的最近五条平均）；`/speed` 支持 `after=<revision>` 长轮询，比较基准是调用方自己的数（DEF-63）；下一次延迟由上一请求的实际挂起时长决定（DEF-64）；每一条读数都装过期重绘（DEF-65）；切会话中止在途请求；2607 断言全绿，七套变异 69/81/21/44/15/14/11 全杀 |
+| 2026-11-10 | 产出卡折叠 + 侧栏预览 | 顺序改由数据源给（被编辑的先后，最新在前，D-92）；折叠 4 行、出口钉在卡片底部、展开后列表自己滚（D-93，关闭 DEF-51）；行点击在右栏预览，走可选 `ctx.inject(["sidebarRight"])`，没有侧栏时退化为纯文本（D-94）；2654 断言全绿，七套变异 99/69/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2728,3 +2729,65 @@ finding 都只关于台账，而修一条台账问题又会产出一条新的台
 
 **下一步。** 长轮询把每个空闲会话的一条连接挂 25 秒；宿主若在前端代理层限制并发连接数，
 需要确认 6 个以上会话同时开面板时的表现。
+
+---
+
+## 2026-11-10 · 产出卡：折叠 4 行 + 点击预览
+
+**用户三件事（m13374）。** ①待办里 DEF-51 给出解决方案；②产出栏的显示逻辑需要调研，是显示最近修改的
+文件还是别的，要给具体方案；③产出栏的文件要能点击，点击后在侧栏自动打开预览。
+
+**调研的边界要先说清。** `web_search` 在本会话不可用（`Error: DeepSeek search has no API key for
+"DEEPSEEK_API_KEY"`），所以「看一下开源项目的实现」这一条**无法联网核对**。能做的是两件：用宿主自己的
+成熟实现做对照（`app.asar` 里 ui-deliverables 的 changed-files 卡），以及把宿主侧栏的文件预览能力逐条
+读出来。前者给出两件事——折叠数是 4（`COLLAPSED_ROWS`，注释写着「the design's summary height for a
+closing message」）、排序按记录顺序而不是 mtime；后者给出 `dsh-resource://file/session/<id>/<path>` 这套
+地址与 `sidebarRight.openResource` 这个入口。
+
+**两个取舍由用户拍板。** 顺序 = 按对话里被编辑的先后、最新在前（不是 mtime）；折叠 = 4 行，超过 4 行时
+显示展开按钮，点击后出现滚动条与「收起」（用户原话）。
+
+**三处改动。**
+1. **顺序**（D-92）。撤掉客户端的 `mtimeMs` 重排，顺序直接来自数据源；回落源 `previous.paths` 是按调用
+   顺序追加的（最旧在前），新增 `newestFirstOf(paths, false)` 显式反转，让两个数据源同义（DEF-67 修）。
+2. **折叠**（D-93）。`FOLDED_FILES = 4`；出口移出列表，住在 `.dsse-foot` 这个**兄弟**节点里；展开时才给
+   列表 `max-height:${FILE_LIST_MAX_PX}px; overflow-y:auto`。DEF-51 关闭。
+3. **预览**（D-94）。服务端 `statTouchedFiles` 多返回 `address`（`resourceAddress()` 与宿主
+   `fileAddressFor()` 五条分支等价）；客户端用 `ctx.inject(["sidebarRight"], ...)` 拿到侧栏并发布到模块级
+   `openResource`，行在 `canPreview === true` 时是 `<button>`，否则是 `<div>`；点击包 `try/catch`。
+
+**当前数字（全部实跑）。**
+```
+node test/run.mjs                    2654 passed / 0 failed
+test/client.test.mjs                  454；test/api.test.mjs 226；test/mutations.test.mjs 39
+scripts/mutate-checklist-panel.mjs     99 killed / 0 survived / 0 not applied
+scripts/mutate-speed.mjs 69；mutate-language-and-files.mjs 21；mutate-persistence.mjs 44；
+mutate-session-store.mjs 15；test/mutate-panel.mjs 14/14；scripts/mutate-guards.mjs 11/11
+全仓 CRLF                              0（113 个 git 追踪文件，逐字节检测）
+sync-gutter 连跑两次                   client.js sha256 恒为 314f2256706e04a981a2d9f405652a955bccff19bd834e3a6f0236df9e9fc54d
+test/gutter-drift.test.mjs             20 passed
+```
+
+**四轮审查（R-61…R-64，7 条全部采纳、0 驳回）。** 最后一轮明确判定「此补丁可以合入」。真正的行为缺陷只有
+两条，都在同一处：清理与证伪的归属（`disposables` 要按 owner 分开，否则两处复位互为冗余，任何一条变异都
+存活）。其余五条是「断言看起来测了一件事，实际测了另一件」。
+
+**四条踩坑。**
+- **JSX 子树里的 `props` 属于构造它的那个组件。** 行是在 `Cards` 里构造好当 `children` 传下去的，
+  `typeof props.onOpenFile === 'function'` 因此恒为 `false`，每一行在每个宿主上都退化成纯文本（DEF-66）。
+- **递增的 fixture 往往恰好是错的那一边。** `mtimeMs: 7000 - index * 1000` 让「不排序」与「按 mtime 降序」
+  给出同一个列表，顺序断言什么也没证明；改成 `index * 1000` 后同一条探针立刻杀 3 条（DEF-67）。
+- **手写的白名单必须有一条断言去问「这份名单完整吗」。** `mutate-checklist-panel.mjs` 因为写路径字面量
+  而没被锚点下限表收录，坏了 9 个锚点仍然全绿（DEF-68）。另：该脚本的 `from` 若写成数组 `.join` 形式，
+  解析器会静默漏数并让其后所有锚点错位配对。
+- **`and it sits below the list` 恒真。** `card.props.children` 是数组没有 `.props`，而 `textOf` 遍历全部
+  后代必然命中——必须下探到 `dsse-card-body` 再比较两个子节点的下标。
+
+**下一步。**
+- `scripts/mutate-outcome.mjs` 与 `scripts/mutate-result-shape.mjs` 指向已不存在的 `lib/outcome.js`、
+  `lib/evidence.js`（实际在 `packages/core/lib/`），跑起来 ENOENT。这是四包重构提交 `e347991` 的遗留，
+  非本补丁范围，**未修**。在修好之前，「七套变异全杀」这句话实际覆盖的只有五套。
+- 每行只带 `title`（完整路径 + 「点击在侧栏预览」），没有行号跳转；宿主 `openResource` 支持
+  `{ params: { line } }`，若将来能从工具调用里记下编辑行号，可以直接跳过去。
+- 侧栏预览走的是会话工作区解析（`remote.workspaceFiles.stat`），工作区外的文件地址是绝对路径形式；
+  目前没有断言覆盖「侧栏真的能读工作区外的文件」，只覆盖了地址拼法。

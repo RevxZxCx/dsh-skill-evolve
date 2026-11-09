@@ -175,22 +175,35 @@ const mutations = [
   {
     label: 'an older panel response overwrites the newer session',
     file: 'packages/ui-evolve/lib/client.js',
-    from: 'if (request !== panelRequest.current || sessionId !== bridge.sessionId) return',
-    to: 'if (false) return',
+    // This guard stands at both ends of the same loader — the try arm keeps a
+    // stale reply from landing, the catch arm keeps a stale failure from landing.
+    // The anchor carries the line below it so that it names the try arm alone; a
+    // bare guard line matches twice and `split/join` would disable both while
+    // claiming to test one.
+    from: `if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
+            setState({ status: "ready", data })`,
+    to: `if (false) return
+            setState({ status: "ready", data })`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'an older candidate response replaces the latest queue',
     file: 'packages/ui-evolve/lib/client.js',
-    from: 'if (request !== loadRequest.current) return',
-    to: 'if (false) return',
+    // Matched twice for the same reason as the panel loader above.
+    from: `if (request !== loadRequest.current) return
+          if (payload?.available === false) {`,
+    to: `if (false) return
+          if (payload?.available === false) {`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'an older config response rolls back the latest choice',
     file: 'packages/ui-evolve/lib/client.js',
-    from: 'if (request !== configRequest.current) return',
-    to: 'if (false) return',
+    // Matched twice for the same reason as the panel loader above.
+    from: `if (request !== configRequest.current) return
+          if (saved?.ok === false) throw new Error(String(saved.reason ?? saved.error ?? 'the setting was refused'))`,
+    to: `if (false) return
+          if (saved?.ok === false) throw new Error(String(saved.reason ?? saved.error ?? 'the setting was refused'))`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -264,17 +277,13 @@ const mutations = [
     // dropping the id lookup makes a discard aimed at a stale row hit its twin.
     label: 'the decision resolves by name and ignores the id',
     file: 'packages/skill-evolve/lib/index.js',
-    from: [
-      '    return queue.find((entry) => entry.id === id)',
-      '  }',
-      '  return findByName(queue, name)',
-    ].join('\n'),
-    to: [
-      '    const exact = queue.find((entry) => entry.id === id)',
-      '    if (exact !== undefined) return exact',
-      '  }',
-      '  return findByName(queue, name)',
-    ].join('\n'),
+    from: `    return queue.find((entry) => entry.id === id)
+  }
+  return findByName(queue, name)`,
+    to: `    const exact = queue.find((entry) => entry.id === id)
+    if (exact !== undefined) return exact
+  }
+  return findByName(queue, name)`,
     suites: ['test/review-fixes.test.mjs'],
   },
   // P1 from the review: a manual refresh must not drop the payload it already has.
@@ -345,6 +354,159 @@ const mutations = [
     file: 'packages/ui-evolve/lib/api.js',
     from: '    if (outcome === undefined) return { ok: false, reason: THE_SKILL_HALF_IS_ABSENT }',
     to: '    if (false) return { ok: false, reason: THE_SKILL_HALF_IS_ABSENT }',
+    suites: ['test/api.test.mjs'],
+  },
+  // Round: the output card became the session's list of edited files, folded at
+  // four rows with the way out on the card, and every row opens a preview.
+  {
+    label: 'the output card folds at five rows again',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)',
+    to: '      const shown = filesOpen ? ordered : ordered.slice(0, 5)',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the output card is folded even once it is open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)',
+    to: '      const shown = ordered.slice(0, FOLDED_FILES)',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the rows are re-sorted by modification time',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      const ordered = files\n',
+    to: '      const ordered = files.slice().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))\n',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The list keeps claiming to be open, so a folded card gets a scroll box it
+    // does not need and the CSS rule stops matching the state it describes.
+    label: 'a folded list claims to be open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                    className: 'dsse-list dsse-files',
+                    'data-open': filesOpen === true ? 'true' : 'false',`,
+    to: `                    className: 'dsse-list dsse-files',
+                    'data-open': 'true',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The control disappears. This is the shape DEF-51 described: the header still
+    // says how many there are, the list shows four, and nothing says the rest exist.
+    label: 'the way out is never drawn at all',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                  ordered.length > FOLDED_FILES || filesOpen`,
+    to: `                  false`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a card that already fits still offers to expand',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '                  ordered.length > FOLDED_FILES || filesOpen',
+    to: '                  ordered.length > 0 || filesOpen',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A button that does nothing when pressed promises what the Host cannot do.
+    label: 'every row is a button, whether or not it can open anything',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '                      const openable = canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
+    to: '                      const openable = typeof file.address === \'string\' && file.address.length > 0',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the rows are never clickable at all',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '                      const openable = canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
+    to: '                      const openable = false',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a row opens the first file instead of its own',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '                        onClick: openable === true ? () => openFile(file.address) : undefined,',
+    to: '                        onClick: openable === true ? () => openFile(ordered[0].address) : undefined,',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The sidebar throws whenever no conversation is adopted, which happens on
+    // every session switch. Without the guard the throw escapes into the render.
+    label: 'a preview that fails takes the cards with it',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        try {
+          openResource(address)
+        } catch {}`,
+    to: `        openResource(address)`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the rows advertise a preview they cannot open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      const canPreview = typeof openResource === \'function\'',
+    to: '      const canPreview = true',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the panel never asks whether this host has a sidebar',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      ctx.inject(["sidebarRight"], (child) => {',
+    to: '      ctx.inject(["nothingAtAll"], (child) => {',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Two resets, one channel. `apply` clears it on the plugin's own teardown and
+    // the injected effect clears it on the sidebar's; losing either one leaves the
+    // channel bound to a service the Host has already taken away, so a later click
+    // reaches an interface that is no longer there. Neither was covered before:
+    // the old assertion counted an empty log, which is the same shape as "nothing
+    // was ever opened".
+    label: 'a torn-down panel keeps its preview channel',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          bridge.open = false
+          bridge.listeners.clear()
+          openResource = undefined`,
+    to: `          bridge.open = false
+          bridge.listeners.clear()`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the sidebar effect gives back nothing on teardown',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          () => () => {
+            if (openResource !== undefined) openResource = undefined
+          },`,
+    to: `          () => () => {},`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an orphaned file is listed with no address',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: 'address: resourceAddress(sessionId ?? \'\', cwd, absolute) }',
+    to: 'address: \'\' }',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'a path outside the workspace keeps its absolute form with the separators intact',
+    file: 'packages/ui-evolve/lib/api.js',
+    // Double-quoted on purpose: the anchor has to contain two literal
+    // backslashes, and in a single-quoted literal each pair would already have
+    // collapsed to one by the time the anchor is built.
+    from: "  const normalized = path.replace(/\\\\/g, '/')",
+    to: '  const normalized = path',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'the session id goes into the address unencoded',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: '  return `dsh-resource://file/session/${encodeSegment(sessionId)}/${encoded}`',
+    to: '  return `dsh-resource://file/session/${sessionId}/${encoded}`',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'the turn fallback is listed oldest first',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: '  const fallback = newestFirstOf(previous === undefined ? [] : (previous.paths ?? []), false)',
+    to: '  const fallback = newestFirstOf(previous === undefined ? [] : (previous.paths ?? []), true)',
     suites: ['test/api.test.mjs'],
   },
   // Round three: the 上一轮 card grew two reasons to open, the header lost its

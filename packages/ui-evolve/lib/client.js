@@ -55,6 +55,29 @@ window.__ModuleLoader__.load({
     const CARD_WIDTH = 288
 
     /**
+     * How many output files the card lists before the fold.
+     *
+     * Four, the same number the Host's own changed-files card uses for the
+     * summary above a closing message. The card sits in a narrow column beside
+     * the conversation and has to leave the other two cards in view, so the
+     * folded state is the state it will be read in most of the time.
+     */
+    const FOLDED_FILES = 4
+
+    /**
+     * The tallest the expanded file list may get before it scrolls.
+     *
+     * Only applies once the reader has opened the card: at that point the list
+     * is the thing being read, and a session with forty files should not push
+     * the other cards off the column. Eight rows is two folded states' worth,
+     * which is enough that opening a five-file list never scrolls.
+     *
+     * Written as rows rather than pixels so it stays tied to the row height the
+     * stylesheet sets: eight rows of 36px with a 3px gap is 8 × 36 + 7 × 3.
+     */
+    const FILE_LIST_MAX_PX = 8 * 36 + 7 * 3
+
+    /**
      * How often the speed badge asks while the model is writing.
      *
      * A quarter of a second: the number moves once per delta, and anything
@@ -299,6 +322,12 @@ window.__ModuleLoader__.load({
 .dsse-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsse-font-mono,var(--dsse-font-family,inherit));font-size:max(.9em,12px)}
 .dsse-where{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-size{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
+.dsse-files{display:grid;gap:3px}
+.dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
+.dsse-row-open{width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.dsse-row-open:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
+.dsse-foot{display:flex;justify-content:center;padding-top:6px;border-top:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07));margin-top:6px}
+.dsse-foot[data-open="true"]{border-top-color:transparent;margin-top:0}
 .dsse-badge{display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f4f8);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-badge-own{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
 .dsse-btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 11px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color 160ms ease,opacity 160ms ease}
@@ -306,7 +335,8 @@ window.__ModuleLoader__.load({
 .dsse-btn-primary{border-color:var(--dsw-alias-brand-text,#2f4bd8);background:var(--dsw-alias-brand-primary,#2f4bd8);color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsse-btn-primary:hover{background:var(--dsw-alias-brand-primary,#2f4bd8);opacity:.9}
 .dsse-btn:disabled{opacity:.5;cursor:default}
-.dsse-more{border:0;background:transparent;color:var(--dsw-alias-brand-text,#2f4bd8);font:inherit;font-size:max(.85em,11px);cursor:pointer;padding:6px 0}
+.dsse-more{border:0;background:transparent;color:var(--dsw-alias-brand-text,#2f4bd8);font:inherit;font-size:max(.85em,11px);cursor:pointer;padding:6px 0;width:100%}
+.dsse-more:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:2px;border-radius:6px}
 .dsse-note{margin:7px 0 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:center}
 .dsse-empty{margin:0;padding:12px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:.9em;text-align:center}
 .dsse-err{flex:0 0 auto;margin:0;padding:9px 10px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115);overflow-wrap:anywhere;font-size:.9em}
@@ -448,6 +478,18 @@ window.__ModuleLoader__.load({
      * response.
      */
     const bridge = { sessionId: "", open: false, side: "left", collapsed: false, listeners: new Set() }
+
+    /**
+     * Where output-file rows ask for a preview.
+     *
+     * The overlay runs in root scope and cannot reach a session-scoped service,
+     * so `apply` publishes the sidebar here once (and only if the Host has one).
+     * It stays `undefined` on a Host without `sidebarRight`, which is what makes
+     * the rows plain text instead of buttons that do nothing.
+     *
+     * @type {((address: string) => void) | undefined}
+     */
+    let openResource = undefined
 
     /**
      * Publish a change to everything drawing the cards.
@@ -1999,12 +2041,33 @@ window.__ModuleLoader__.load({
       const skills = Array.isArray(data?.skills?.skills) ? data.skills.skills : []
       const mcp = Array.isArray(data?.mcp) ? data.mcp : []
       const files = Array.isArray(data?.files) ? data.files : []
-      const ordered = files.slice().sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0))
-      const shown = filesOpen ? ordered : ordered.slice(0, 5)
+      // The order is the one the conversation wrote them in, newest first, and it
+      // arrives that way — `pathsSeen` walks session state's path map backwards.
+      // Sorting by mtime here was a second answer to the same question and a
+      // different one: a build step touching an old file would jump it to the top
+      // of a list about editing.
+      const ordered = files
+      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)
       // How many files the turn that just ended wrote. `files` is the whole
       // session's work now, so it cannot answer that question, and the two other
       // numbers on the same row are turn-scoped.
       const turnFiles = Number.isFinite(data?.turnFiles) ? data.turnFiles : 0
+
+      // Opening a preview is a side effect on someone else's surface, so a throw
+      // from the sidebar must not take the whole card column down with it. The
+      // Host's own `openResource` throws when no conversation is adopted yet —
+      // which is a normal state for a panel that outlives a session switch.
+      const openFile = (address) => {
+        if (typeof openResource !== 'function') return
+        try {
+          openResource(address)
+        } catch {}
+      }
+      // Whether this Host can preview at all. It is read here, in the closure that
+      // owns the channel, rather than in the `Card` body: `Card` never receives the
+      // opener as a prop, so a row that tested its own props for one would answer
+      // "no" on every Host and quietly render plain text everywhere.
+      const canPreview = typeof openResource === 'function'
 
       const summaryText = state.status === 'loading'
         ? '正在读取本轮数据…'
@@ -2300,19 +2363,38 @@ window.__ModuleLoader__.load({
             ? null
             : jsxs(Card, {
                 title: '产出文件',
-                meta: `${ordered.length} 个文件`,
+                // The folded count has to be visible without opening anything, and
+                // the open state has to say what is on screen rather than repeat the
+                // total. Both numbers sit in the header, where they cannot be scrolled
+                // out of view — that was the whole of DEF-51.
+                meta: filesOpen ? `全部 ${ordered.length} 个` : `${ordered.length} 个文件`,
                 children: [
                   jsx('div', {
-                    className: 'dsse-list',
+                    className: 'dsse-list dsse-files',
+                    'data-open': filesOpen === true ? 'true' : 'false',
                     children: shown.map((file) => {
                       const parts = splitPath(file.path)
-                      return jsxs('div', {
-                        className: 'dsse-row',
+                      // A row is a button, not a div with a handler: it has to be
+                      // reachable by keyboard and announced as something that does
+                      // something. `canPreview` is false when this Host has no right
+                      // sidebar, in which case the row is not interactive at all
+                      // rather than looking clickable and doing nothing.
+                      //
+                      // These children are built in `Cards` and passed down, so `props`
+                      // in this closure is `Cards`' own — not `Card`'s. Reading the
+                      // opener off props here is how the first draft made every row
+                      // inert on every Host.
+                      const openable = canPreview === true && typeof file.address === 'string' && file.address.length > 0
+                      return jsxs(openable === true ? 'button' : 'div', {
+                        className: openable === true ? 'dsse-row dsse-row-open' : 'dsse-row',
+                        type: openable === true ? 'button' : undefined,
+                        title: `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}`,
+                        onClick: openable === true ? () => openFile(file.address) : undefined,
                         children: [
-                          jsxs('span', {
+                          jsx('span', {
                             className: 'dsse-row-main',
                             children: [
-                              jsx('span', { className: 'dsse-name', title: String(file.path), children: parts.name }),
+                              jsx('span', { className: 'dsse-name', children: parts.name }),
                               parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
                             ],
                           }),
@@ -2321,12 +2403,19 @@ window.__ModuleLoader__.load({
                       }, `file:${file.path}`)
                     }),
                   }),
-                  ordered.length > shown.length || filesOpen
-                    ? jsx('button', {
-                        className: 'dsse-more',
-                        type: 'button',
-                        onClick: () => setFilesOpen((open) => open === false),
-                        children: filesOpen ? '收起' : `全部 ${ordered.length} 个`,
+                  // Outside the scrolling list on purpose. A control that reveals
+                  // the rest of a clipped list cannot live inside that list: it ends
+                  // up clipped with it, which is how "5 of 10" became "only 5".
+                  ordered.length > FOLDED_FILES || filesOpen
+                    ? jsx('div', {
+                        className: 'dsse-foot',
+                        'data-open': filesOpen === true ? 'true' : 'false',
+                        children: jsx('button', {
+                          className: 'dsse-more',
+                          type: 'button',
+                          onClick: () => setFilesOpen((open) => open === false),
+                          children: filesOpen ? '收起' : `展开全部 ${ordered.length} 个`,
+                        }),
                       })
                     : null,
                 ],
@@ -2620,6 +2709,7 @@ window.__ModuleLoader__.load({
         () => () => {
           bridge.open = false
           bridge.listeners.clear()
+          openResource = undefined
           stopHostTypography()
           if (typeof document !== "undefined") {
             document.getElementById(`${NS}:style`)?.remove()
@@ -2627,6 +2717,21 @@ window.__ModuleLoader__.load({
         },
         "skill-evolve: panel teardown",
       )
+
+      // Optional on purpose. `sidebarRight` is absent on a Host that ships no
+      // sidebar, and putting it in `inject` would make that Host refuse this
+      // plugin entirely — a panel that loses one affordance must still load.
+      ctx.inject(["sidebarRight"], (child) => {
+        const sidebar = child.sidebarRight
+        if (sidebar === undefined || typeof sidebar.openResource !== "function") return
+        openResource = (address) => sidebar.openResource(address)
+        child.effect(
+          () => () => {
+            if (openResource !== undefined) openResource = undefined
+          },
+          "skill-evolve: sidebar preview",
+        )
+      })
     }
 
     module.exports.apply = apply

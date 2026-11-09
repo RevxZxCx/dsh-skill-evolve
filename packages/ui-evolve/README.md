@@ -232,8 +232,9 @@ Three modules, top to bottom:
    with the steps, and it was removed along with the header's propose button —
    drafting the next turn is not what a person is doing while reading the card.
    The route it called (`POST /propose`) remains part of the service contract.
-3. **Produced files.** The work of the **whole session**, newest first, with the
-   added and removed line counts. This is the one of the three that used to
+3. **Produced files.** The work of the **whole session**, in the order the
+   conversation edited it, most recent first, with each file's size on the right.
+   This is the one of the three that used to
    describe a single turn: the list came from the turn that had just ended, so a
    quiet turn emptied the card and re-editing one file hid the other nineteen.
    The list now lives in the stored session state (`paths`, a `Map` from file to
@@ -250,6 +251,39 @@ Three modules, top to bottom:
    **before** `transcripts.record()` folds the turn — reading `previous` after
    the record returns the turn before it, because an abandoned turn is not
    folded into `previous` at all.
+
+   **Order comes from the source, not from the filesystem.** The card is titled
+   after what this conversation produced, so its order is "most recently edited
+   by this session first" — the session state's tick, reversed. `fs.stat`'s
+   `mtimeMs` still travels with each row but decides nothing: a build step, a
+   `touch`, or another tool rewriting a file would hoist it to the top of a list
+   that is supposed to describe the conversation. The fallback source needs one
+   adjustment: `filesSeen` walks the path map backwards and is already newest
+   first, while `previous.paths` is appended in call order (oldest first), so
+   `newestFirstOf(paths, false)` reverses exactly that one.
+
+   **Four rows, and the way out is not inside the list.** `FOLDED_FILES = 4`,
+   matching the Host's own changed-files card. The expand/collapse control lives
+   in a `.dsse-foot` sibling *outside* the list: a control that reveals the rest
+   of a clipped list cannot live inside that list, or it gets clipped with it —
+   which is how "5 of 10" became "only 5" (`DEF-51`). Opening the card gives the
+   list `max-height: FILE_LIST_MAX_PX` and `overflow-y: auto`, so expanding it
+   never pushes the other two cards out of view. The header stops repeating the
+   total once the list is showing it.
+
+   **A row opens the file in the right sidebar.** The panel asks for
+   `sidebarRight` through `ctx.inject(["sidebarRight"], ...)` — an *optional*
+   injection, not an entry in `module.exports.inject`, because a declared-but-
+   missing service makes the whole plugin refuse to load on a Host without a
+   right sidebar. When it is there, `openResource` is published to a module-level
+   `openResource` and each row becomes a `<button>`; when it is not, the row is a
+   plain `<div>` with no handler at all rather than a control that does nothing.
+   The address is built on the Host side (`resourceAddress`) from the session's
+   `cwd` and the absolute path, in the form `dsh-resource://file/session/<id>/
+   <relative path>` — the same five branches as the Host's own `fileAddressFor`.
+   A click is wrapped in `try/catch`: `openResource` throws while no session is
+   adopted, which is normal in the instant between sessions, and a failed preview
+   must not take the whole rail down with it.
 
    The row beside the "Last turn" title still describes **one** turn, so its
    file count comes from `turnFiles`, not from the length of this list. Three

@@ -476,6 +476,59 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
 }
 
 // ---------------------------------------------------------------------------
+// The address that previews a file in the host's right sidebar
+// ---------------------------------------------------------------------------
+
+// `dsh-resource://file/session/<id>/<relative path>`, with the encoding the host's
+// own address builder applies: segments percent-encoded, a drive colon kept.
+{
+  const dir = tempDir('skill-evolve-address-')
+  mkdirSync(join(dir, 'src'))
+  writeFileSync(join(dir, 'src', 'a.js'), 'x')
+  const [file] = await statTouchedFiles({ paths: [join(dir, 'src', 'a.js')], cwd: dir, sessionId: 'session-a' })
+  check(
+    'a file carries the address that previews it',
+    file?.address === 'dsh-resource://file/session/session-a/src/a.js',
+    String(file?.address),
+  )
+}
+
+{
+  // A path outside the workspace cannot be made relative, so it is carried whole.
+  // Dropping it would leave the row un-clickable with no explanation.
+  const dir = tempDir('skill-evolve-address-out-')
+  const other = tempDir('skill-evolve-address-other-')
+  writeFileSync(join(other, 'outside.js'), 'y')
+  const [file] = await statTouchedFiles({ paths: [join(other, 'outside.js')], cwd: dir, sessionId: 'session-a' })
+  // Spelled out in full rather than checked by prefix and suffix. Both of those
+  // survive a truncation that slices the workspace root off anyway: the result
+  // still starts with the session prefix and still ends with the file name, and
+  // the branch that keeps an outside path whole is exactly the branch such a
+  // slice would break.
+  const expected = `dsh-resource://file/session/session-a/${join(other, 'outside.js')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':'))
+    .join('/')}`
+  check(
+    'a file outside the workspace keeps its own coordinates',
+    file?.address === expected,
+    `${String(file?.address)} vs ${expected}`,
+  )
+}
+
+{
+  const dir = tempDir('skill-evolve-address-space-')
+  writeFileSync(join(dir, 'two words.js'), 'z')
+  const [file] = await statTouchedFiles({ paths: [join(dir, 'two words.js')], cwd: dir, sessionId: 'a b' })
+  check(
+    'spaces are encoded so the address stays one token',
+    file?.address === 'dsh-resource://file/session/a%20b/two%20words.js',
+    String(file?.address),
+  )
+}
+
+// ---------------------------------------------------------------------------
 // readPanel
 // ---------------------------------------------------------------------------
 
@@ -557,6 +610,35 @@ function deps(overrides = {}) {
     'agent-1',
   )
   check('an empty remembered list falls back to the turn', payload.files.length === 1 && payload.files[0].path === fromTurn, JSON.stringify(payload.files))
+}
+
+{
+  // The fallback source has to mean the same thing as the primary one. The turn's
+  // `paths` are appended in call order — oldest first — while the session's
+  // remembered list is read newest first. Passing the turn's list through
+  // unchanged would make the card's order depend on which source answered, and
+  // the whole point of the ordering is that the file just edited is on top.
+  const dir = tempDir('skill-evolve-files-fallback-order-')
+  const first = join(dir, 'first.js')
+  const second = join(dir, 'second.js')
+  const third = join(dir, 'third.js')
+  for (const file of [first, second, third]) writeFileSync(file, 'e')
+  const payload = await readPanel(
+    deps({
+      transcripts: {
+        view: () => ({
+          turns: 1,
+          previous: { turn: 1, calls: 3, failed: 0, paths: [first, second, third], commands: [], said: 'wrote three', tools: [] },
+        }),
+      },
+    }),
+    'agent-1',
+  )
+  check(
+    'the fallback is listed newest first, like the remembered list',
+    JSON.stringify(payload.files.map((file) => file.path)) === JSON.stringify([third, second, first]),
+    JSON.stringify(payload.files.map((file) => file.path)),
+  )
 }
 
 {

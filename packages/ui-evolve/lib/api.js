@@ -245,6 +245,53 @@ async function readJsonBody(req) {
 }
 
 /**
+ * Turn the panel's own file list into the order the card draws.
+ *
+ * The two sources disagree about direction. `deps.filesSeen` walks session
+ * state's path map backwards, so it already hands back "most recently edited
+ * first"; `previous.paths` is the transcript's per-turn list, appended in call
+ * order, so it reads oldest-first. Reversing here is what makes the fallback
+ * mean the same thing as the primary source — without it a turn that touched
+ * four files would list them backwards the one time the session list is empty.
+ *
+ * @param {string[]} paths - paths in the order they were written.
+ * @param {boolean} newestFirst - whether `paths` is already newest-first.
+ * @returns {string[]} the list in newest-first order.
+ */
+function newestFirstOf(paths, newestFirst) {
+  return newestFirst === true ? paths : paths.slice().reverse()
+}
+
+/**
+ * The address that opens this file in the Host's right sidebar.
+ *
+ * Mirrors the Host's own `fileAddressFor`: a path inside the session's working
+ * directory becomes `dsh-resource://file/session/<id>/<relative>`, and anything
+ * else is sent as a normalised absolute path. The panel already holds absolute
+ * paths, so this is the one place that knows `cwd` and can decide.
+ *
+ * Encoding follows the Host too — `encodeURIComponent` per segment with the
+ * drive colon put back, so `F:/work/a b.md` survives the round trip.
+ *
+ * @param {string} sessionId - the session the preview belongs to.
+ * @param {string} cwd - the session's working directory, if known.
+ * @param {string} path - an absolute path.
+ * @returns {string} the resource address.
+ */
+function resourceAddress(sessionId, cwd, path) {
+  const encodeSegment = (segment) => encodeURIComponent(segment).replace(/%3A/gi, ':')
+  const normalized = path.replace(/\\/g, '/')
+  const root = typeof cwd === 'string' && cwd.length > 0 ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+  let relative = normalized
+  if (root.length > 0) {
+    if (normalized === root) relative = ''
+    else if (normalized.startsWith(`${root}/`)) relative = normalized.slice(root.length + 1)
+  }
+  const encoded = relative.split('/').map(encodeSegment).join('/')
+  return `dsh-resource://file/session/${encodeSegment(sessionId)}/${encoded}`
+}
+
+/**
  * Pick the files a turn touched that actually exist and are worth listing.
  *
  * A path recorded from a tool call is a claim, not a fact: an `edit` may have
@@ -256,9 +303,10 @@ async function readJsonBody(req) {
  * @param {object} input - the request.
  * @param {string[]} input.paths - the candidate paths.
  * @param {string} [input.cwd] - the directory relative paths resolve against.
- * @returns {Promise<Array<{ path: string, bytes: number, mtimeMs: number }>>} the existing files.
+ * @param {string} [input.sessionId] - the session the addresses belong to.
+ * @returns {Promise<Array<{ path: string, bytes: number, mtimeMs: number, address: string }>>} the existing files.
  */
-async function statTouchedFiles({ paths, cwd }) {
+async function statTouchedFiles({ paths, cwd, sessionId }) {
   const seen = new Set()
   const out = []
   for (const raw of paths) {
@@ -270,7 +318,7 @@ async function statTouchedFiles({ paths, cwd }) {
       const { stat } = await import('node:fs/promises')
       const info = await stat(absolute)
       if (!info.isFile()) continue
-      out.push({ path: absolute, bytes: info.size, mtimeMs: info.mtimeMs })
+      out.push({ path: absolute, bytes: info.size, mtimeMs: info.mtimeMs, address: resourceAddress(sessionId ?? '', cwd, absolute) })
     } catch {
       // Not there, or not readable. The panel says "edited", not "exists", so a
       // missing file is a legitimate answer and needs no warning.
@@ -744,15 +792,23 @@ async function readPanel(deps, agentId, lang) {
     used: typeof deps.skillsUsed === 'function' ? deps.skillsUsed(id) : undefined,
     recency,
   })
-  // The output card lists the session's work in recency order, not the turn that
-  // just ended. `previous.paths` was the old source and it described one turn:
-  // a turn that touched nothing emptied the card, and a turn that re-edited one
-  // file hid the other nineteen. The cumulative list lives in session state and
-  // survives both the turn ending and a restart; the transcript stays the source
-  // of truth for the turn itself, which is what the previous-turn card shows.
+  // The output card lists the session's work in newest-first order, not the turn
+  // that just ended. `previous.paths` was the old source and it described one
+  // turn: a turn that touched nothing emptied the card, and a turn that re-edited
+  // one file hid the other nineteen. The cumulative list lives in session state
+  // and survives both the turn ending and a restart; the transcript stays the
+  // source of truth for the turn itself, which is what the previous-turn card
+  // shows.
+  //
+  // The order comes from the sources, not from the filesystem. `filesSeen` is
+  // already newest-first (it walks the path map backwards), which is the order
+  // the conversation wrote them in; `mtime` would be a second answer to the same
+  // question and a different one — a build step touching an old file would jump
+  // it to the top of a list about editing.
   const remembered = typeof deps.filesSeen === 'function' ? deps.filesSeen(id) : []
-  const fallback = previous === undefined ? [] : (previous.paths ?? [])
-  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd: deps.cwdFor(id) })
+  const fallback = newestFirstOf(previous === undefined ? [] : (previous.paths ?? []), false)
+  const cwd = deps.cwdFor(id)
+  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd, sessionId: id })
 
   return {
     agent: id,
