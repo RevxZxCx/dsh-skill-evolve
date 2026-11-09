@@ -247,6 +247,7 @@ window.__ModuleLoader__.load({
 .dsse-top-row .dsse-queue{width:auto;min-height:32px;margin-left:auto;padding:0 12px}
 .dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:44px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
 .dsse-top-row .dsse-speed-idle{color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:.7}
+.dsse-top-row .dsse-speed-average{opacity:.85}
 .dsse-top-row .dsse-speed-unit{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.68em,9px)}
 .dsse-icon-btn{width:36px;height:36px;display:inline-grid;place-items:center;flex:0 0 auto;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-icon-btn:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
@@ -1306,30 +1307,53 @@ window.__ModuleLoader__.load({
       }, [sessionId])
 
       const now = Date.now()
-      // Three states, and the difference between them is the whole point:
-      //   live    — a window with text in it right now
-      //   recent  — the last real number, still within the linger
-      //   idle    — nothing measured for a while (or ever, this session)
-      // All three draw the widget once the host has answered at all. An idle
-      // badge shows a dash rather than the last number it saw, because a number
-      // that looks live while nothing is arriving is worse than no number: it is
-      // read as a fact about right now.
+      // Four states, and which number they show is the whole point:
+      //   live    — text is arriving; the last two seconds, which is "now"
+      //   recent  — the window just closed and the linger has not run out yet;
+      //             the last real number, whether or not this session has
+      //             settled anything before
+      //   average — the linger is over but messages have settled; the last few
+      //             of them, which is "how fast this is going"
+      //   idle    — nothing has ever settled and there is no recent reading
+      // The order of `recent` and `average` below is not the order they are
+      // listed in: a reading that stopped four seconds ago is still fresher
+      // than a mean over the last five messages, so it wins.
+      // The average is the state a reader actually spends their time in: they
+      // look up after the reply finishes, and at that moment a two-second window
+      // says nothing. That number stays for the rest of the session, which is
+      // what makes the widget findable at all.
       const liveReading = reading?.active === true ? reading : null
+      const average = reading?.average !== null && typeof reading?.average?.tps === 'number' && Number.isFinite(reading.average.tps) && reading.average.tps > 0 ? reading.average : null
       const heldFresh = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS
-      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : 0
-      const measured = typeof shown === 'number' && Number.isFinite(shown) === true && shown > 0
       if (known === false) return null
+      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : average !== null ? average.tps : 0
+      const measured = typeof shown === 'number' && Number.isFinite(shown) === true && shown > 0
       const idle = measured === false
+      // `average !== null && liveReading === null`: a standing average, not a
+      // reading that happened to come from the mean. It is dimmer than a live
+      // number because it describes the recent past, and `aria-label` says so —
+      // a reader who lands on it should not think the reply is still going.
+      const standing = liveReading === null && average !== null && heldFresh === false
+      const label = idle === true
+        ? '输出速度：当前没有输出'
+        : standing === true
+          ? `最近 ${average.samples} 次的平均输出速度 ${formatSpeed(shown)} tok/s`
+          : `输出速度 ${formatSpeed(shown)} tok/s`
+      const hint = idle === true
+        ? '当前没有输出'
+        : standing === true
+          ? `最近 ${average.samples} 次输出的平均速度`
+          : '最近两秒的输出速度'
       return jsxs('span', {
-        className: idle === true ? 'dsse-speed dsse-speed-idle' : 'dsse-speed',
+        className: idle === true ? 'dsse-speed dsse-speed-idle' : standing === true ? 'dsse-speed dsse-speed-average' : 'dsse-speed',
         // Not `role="status"`. That implies `aria-live="polite"`, and this number
         // changes up to four times a second while a reply arrives — a screen
         // reader would announce it continuously for the whole generation, which
         // makes the panel unusable for the people the attribute is meant to help.
         // The label stays for anyone who lands on it deliberately.
         'aria-live': 'off',
-        'aria-label': idle === true ? '输出速度：当前没有输出' : `输出速度 ${formatSpeed(shown)} tok/s`,
-        title: idle === true ? '当前没有输出' : '最近两秒的输出速度',
+        'aria-label': label,
+        title: hint,
         children: [
           jsx('span', { children: idle === true ? '—' : formatSpeed(shown) }),
           idle === true ? null : jsx('span', { className: 'dsse-speed-unit', children: 'tok/s' }),

@@ -313,11 +313,17 @@ replaces the label rather than containing it fails WCAG's label-in-name rule. Th
 whole row sits on its own card surface — border, radius, background — instead of
 three bare buttons floating over the conversation.
 
-Between settings and review sits the **output-speed readout**: the two tokens per
-second this reply is producing right now, as opposed to what the host's own
-capsule shows, which is the whole conversation's weighted average (sum of
-`decodeTokens` over sum of `decodeMs`, and by the twentieth turn it mostly
-describes the first nineteen). It reads from `GET /api/ui-evolve/speed`, which is
+Between settings and review sits the **output-speed readout**. It shows two
+different numbers, because a reader asks two different questions. While text is
+arriving it shows the last two seconds — "how fast is this going right now". Once
+a reply ends it shows the standing average of the last five finished messages —
+"how fast is this provider going". Both are needed: the two-second window says
+nothing the instant a reply stops, and that is exactly when somebody raises their
+head to ask how it went. The average is weighted (summed tokens over summed
+duration, not the mean of the per-message rates), so one short answer that
+happened to arrive quickly cannot outvote a long one. It also differs from the
+host's own capsule, which averages the whole conversation: by the twentieth turn
+that mostly describes the first nineteen. It reads from the `speed` route, which is
 a route of its own rather than a field on `/panel`: the panel changes when a turn
 ends, the speed changes while it is running, and one polling period cannot serve
 both. Nothing in the event stream carries a token count during generation — the
@@ -331,17 +337,20 @@ but never flowed as text. The divisor is floored at 500ms, because the first del
 of a reply arrives with almost no elapsed time and dividing by it would print three
 hundred tokens a second at exactly the moment somebody looks. The badge polls on
 three clocks — 250ms while the window holds text, 2000ms just after it empties,
-10000ms once a session has been idle a while — and keeps the last real reading for
+10000ms once a session has been idle a while — and keeps the last window reading for
 four seconds past the end of the window, because that is the moment people look.
-After that it shows a dash rather than `0 tok/s`: a zero is a measurement, and the
-honest statement about an idle conversation is that there is no number. The badge
-itself stays in the header for the life of the session — a readout that only exists
-while a reply is arriving is one nobody can find, which is what the first version of
-this did. Only a host that has never once answered draws nothing: no `/speed` route
-at all, a first request that failed, or a `200` carrying `ok: false` because that
-host cannot measure. It is deliberately not a `role="status"`: a value that changes
-four times a second would be read aloud over the answer itself, so it is
-`aria-live="off"` with the number in `aria-label` for anyone who wants it.
+After those four seconds the standing average takes over, marked with a slightly
+quieter style so it reads as a description of the recent past rather than of this
+instant. A dash appears only when no message has ever settled: a zero is a
+measurement, and the honest statement about a session that has produced nothing yet
+is that there is no number. The badge itself stays in the header for the life of the
+session — a readout that only exists while a reply is arriving is one nobody can
+find, which is what the first version of this did. Only a host that has never once
+answered draws nothing: no `/speed` route at all, a first request that failed, or a
+`200` carrying `ok: false` because that host cannot measure. It is deliberately
+not a `role="status"`: a value that changes four times a second would be read
+aloud over the answer itself, so it is `aria-live="off"` with the number in
+`aria-label` for anyone who wants it.
 
 The last-turn card carries its counts in the header, not in a strip below the
 text: calls, commands, and files as labelled numbers, aligned on the title's

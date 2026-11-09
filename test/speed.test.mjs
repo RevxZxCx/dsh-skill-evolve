@@ -325,6 +325,169 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
   fresh.meter.begin('never-seen')
   check('a begin for an unknown session allocates nothing', fresh.meter.sessions.has('never-seen') === false, JSON.stringify([...fresh.meter.sessions.keys()]))
 }
+
+{
+  const { meter, advance, at } = clocked()
+  // The start time belongs to the attempt, not to the session. An abandoned
+  // attempt leaves both halves of the accumulator behind, and carrying its start
+  // time into the retry would time the retry from a delta that belongs to the
+  // message before it — a span nobody waited for, reported as this message's speed.
+  at(1_000)
+  meter.push('restart', 'x'.repeat(40))
+  advance(3_000)
+  meter.begin('restart')
+  meter.push('restart', 'x'.repeat(40))
+  advance(600)
+  meter.settle('restart', 40)
+  const reading = meter.read('restart')
+  const sample = reading.average
+  check('a retry is timed from its own first delta', sample !== null && sample.ms === 600, JSON.stringify(sample))
+  check('and its speed is the one it actually produced', sample !== null && Math.round(sample.tps) === 67, JSON.stringify(sample))
+}
+
+// ---- the standing average ----
+
+// The average exists because of when a reader looks: a two-second window says
+// nothing the moment a reply ends, and that is exactly when someone raises their
+// head to ask how fast it went. So the service keeps the last few settled
+// messages and reports them as one number.
+
+{
+  const { meter, advance } = clocked()
+  // A cold meter has no average at all — null, not zero. Zero would claim the
+  // provider produced nothing at a rate of nothing.
+  const cold = meter.read('avg')
+  check('a session with no settled message has no average', cold.average === null, JSON.stringify(cold))
+  check('and it still says it is inactive', cold.active === false, JSON.stringify(cold))
+}
+
+{
+  const { meter, advance } = clocked()
+  // Streaming has started but nothing has settled yet: there is a live window and
+  // no average. The cold case above never reaches `averageOf` at all (no entry),
+  // so this is the one state that can tell the empty-samples guard apart from no
+  // guard: the badges that would follow are a live reading plus a standing number
+  // for a message that has not finished.
+  advance(100)
+  meter.push('mid', 'x'.repeat(40))
+  const midway = meter.read('mid')
+  check('a message still streaming has no average yet', midway.average === null, JSON.stringify(midway))
+  check('but its window is live', midway.active === true && midway.tokens > 0, JSON.stringify(midway))
+}
+
+{
+  const { meter, advance } = clocked()
+  // One message: 100 real tokens over ten 100ms deltas.
+  for (let index = 0; index < 10; index += 1) {
+    advance(100)
+    meter.push('avg', 'x'.repeat(40))
+  }
+  meter.settle('avg', 100)
+  const one = meter.read('avg')
+  check('one settled message is one sample', one.average?.samples === 1, JSON.stringify(one.average))
+  check('and it reports the provider own token count', one.average?.tokens === 100, JSON.stringify(one.average))
+  check('over the time the message took', one.average?.ms === 900, JSON.stringify(one.average))
+
+  // A second message, twice as long and twice as big, so the weighted and the
+  // unweighted answers differ. Arithmetic mean of the two rates would be ~111;
+  // the weighted one is 300 tokens over 2800ms.
+  meter.begin('avg')
+  for (let index = 0; index < 20; index += 1) {
+    advance(100)
+    meter.push('avg', 'x'.repeat(40))
+  }
+  meter.settle('avg', 200)
+  const two = meter.read('avg')
+  check('a second message joins the average', two.average?.samples === 2, JSON.stringify(two.average))
+  check('and the tokens are summed', two.average?.tokens === 300, JSON.stringify(two.average))
+  check('and so are the milliseconds', two.average?.ms === 2800, JSON.stringify(two.average))
+  // Summing the rates instead would give (100/0.9 + 200/2.0) / 2 = 105.6, which
+  // is not what "300 tokens in 2.8 seconds" means.
+  check('and the rate is tokens over time, not the mean of rates', Math.round(two.average?.tps) === 107, JSON.stringify(two.average))
+}
+
+{
+  const { meter, advance } = clocked()
+  // A message that arrives almost at once: four deltas inside twenty
+  // milliseconds, then the provider's count. Dividing by 20ms would report
+  // 5000 tok/s and make this the fastest message the session ever had, so the
+  // span is floored at the same place the live window floors it.
+  meter.begin('burst')
+  for (let index = 0; index < 4; index += 1) {
+    advance(5)
+    meter.push('burst', 'x'.repeat(40))
+  }
+  meter.settle('burst', 100)
+  const burst = meter.read('burst').average
+  check('a message that arrived at once is not the fastest ever', burst?.ms === 500, JSON.stringify(burst))
+  check('and its rate is capped by that floor', Math.round(burst?.tps) === 200, JSON.stringify(burst))
+}
+
+{
+  const { meter, advance } = clocked()
+  // The span starts at the first delta of a message, not at the last one: three
+  // deltas 400ms apart mean the message took 800ms, not 0.
+  meter.begin('span')
+  advance(0)
+  meter.push('span', 'x'.repeat(40))
+  advance(400)
+  meter.push('span', 'x'.repeat(40))
+  advance(400)
+  meter.push('span', 'x'.repeat(40))
+  meter.settle('span', 100)
+  const span = meter.read('span').average
+  check('a message is timed from its first delta', span?.ms === 800, JSON.stringify(span))
+}
+
+{
+  const { meter, advance } = clocked()
+  // Seven messages of 100 tokens over 900ms each. Only the last five survive, so
+  // an hour-old session reports what the provider is doing now rather than what
+  // it averaged over lunch.
+  for (let message = 0; message < 7; message += 1) {
+    meter.begin('cap')
+    for (let index = 0; index < 10; index += 1) {
+      advance(100)
+      meter.push('cap', 'x'.repeat(40))
+    }
+    meter.settle('cap', 100)
+  }
+  const capped = meter.read('cap')
+  check('the average keeps the last few messages, not all of them', capped.average?.samples === 5, JSON.stringify(capped.average))
+  check('and the tokens show it is five messages, not seven', capped.average?.tokens === 500, JSON.stringify(capped.average))
+}
+
+{
+  const { meter, advance } = clocked()
+  // A settle that never saw a delta teaches no scale and records no sample: the
+  // provider reported tokens for text this meter never counted.
+  for (let index = 0; index < 10; index += 1) {
+    advance(100)
+    meter.push('empty', 'x'.repeat(40))
+  }
+  meter.settle('empty', 100)
+  const before = meter.read('empty').average
+  meter.settle('empty', 500)
+  const after = meter.read('empty').average
+  check('a settle with no text behind it adds no sample', after?.samples === before?.samples, JSON.stringify([before, after]))
+  check('and it does not move the average either', after?.tokens === before?.tokens, JSON.stringify([before, after]))
+}
+
+{
+  const { meter, advance } = clocked()
+  // The average outlives the window: ten seconds after the reply ended the
+  // instantaneous reading is gone but the standing number is not.
+  for (let index = 0; index < 10; index += 1) {
+    advance(100)
+    meter.push('stand', 'x'.repeat(40))
+  }
+  meter.settle('stand', 100)
+  advance(30_000)
+  const later = meter.read('stand')
+  check('the window has emptied by then', later.active === false, JSON.stringify(later))
+  check('but the average is still there', later.average !== null, JSON.stringify(later))
+  check('and it still says how many messages it covers', later.average?.samples === 1, JSON.stringify(later.average))
+}
 const summary = `${passed} passed, ${failed} failed`
 
 if (failed > 0) {

@@ -221,16 +221,16 @@ const mutations = [
     file: speed,
     suites: meter,
     label: 'an idle session still reads as active',
-    from: '    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: false }',
-    to: '    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: true }',
+    from: '    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: false, average }',
+    to: '    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: true, average }',
     why: '`active: true` is the client\'s instruction to keep asking four times a second; an idle session that claims it is live is a poll a quarter second for the life of the window',
   },
   {
     file: speed,
     suites: meter,
     label: 'a session that never streamed allocates an entry to say so',
-    from: '    const entry = this.sessions.get(agentId)\n    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false }',
-    to: '    const entry = this.entryOf(agentId)\n    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false }',
+    from: '    const entry = this.sessions.get(agentId)\n    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false, average: null }',
+    to: '    const entry = this.entryOf(agentId)\n    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false, average: null }',
     why: 'reading is the most frequent thing that happens to a meter — four times a second per open panel — and a read that writes makes the map grow with every conversation the user merely looked at',
   },
 
@@ -290,7 +290,7 @@ const mutations = [
     suites: meter,
     label: 'starting again throws away the last two seconds',
     from: '    const entry = this.sessions.get(agentId)\n    if (entry === undefined) return\n    entry.message = 0',
-    to: '    this.sessions.delete(agentId)',
+    to: '    this.sessions.delete(agentId)\n    return',
     why: 'the window holds text that really did arrive; clearing it makes the badge blink out on every retry and every second step, which is exactly when someone is watching',
   },
   {
@@ -448,6 +448,82 @@ const mutations = [
     from: "      if (known === false) return null",
     to: "      if (false) return null",
     why: 'an older host half has the panel but not the route, and a permanent dash in its header is a widget that will never say anything — the one case where drawing nothing is the honest answer',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'the average keeps every message the session ever had',
+    from: '    if (entry.samples.length > AVERAGE_SAMPLES) entry.samples.splice(0, entry.samples.length - AVERAGE_SAMPLES)',
+    to: '    if (false) entry.samples.splice(0, entry.samples.length - AVERAGE_SAMPLES)',
+    why: 'a session left open all afternoon would report its lunchtime speed forever: the standing number is meant to say how the provider is doing now, and an unbounded list never forgets',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'a message is timed from its last delta instead of its first',
+    from: '    if (entry.message === 0) entry.messageAt = at',
+    to: '    entry.messageAt = at',
+    why: 'every delta would move the start forward, so a message is timed from the moment it finished arriving — the span collapses toward zero and the standing average reports a speed the provider never reached',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'a message that arrived at once is the fastest ever',
+    from: '    const span = Math.max(MIN_SPAN_MS, this.now() - startedAt)',
+    to: '    const span = Math.max(1, this.now() - startedAt)',
+    why: 'a four-delta message can arrive inside twenty milliseconds, and dividing by that reports five thousand tokens a second — one such message makes the standing average claim a speed the provider never reached, which is the same floor the live window already applies',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'a settle with no text behind it records a sample anyway',
+    from: `    const ratio = outputTokens / measured
+    if (!Number.isFinite(ratio) || ratio <= 0) return`,
+    to: `    const ratio = outputTokens / measured
+    if (!Number.isFinite(ratio) || ratio <= 0) {
+      entry.samples.push({ tokens: outputTokens, ms: span })
+      return
+    }`,
+    why: 'this line is unreachable for the reason the mutation tests: measured is zero only when no delta arrived, and the ratio guard already returned. It is here to document that the sample is recorded after the guard, not before',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'the average survives the session being forgotten',
+    from: `    this.sessions.delete(agentId)
+    this.ratios.delete(agentId)`,
+    to: `    this.sessions.delete(agentId)`,
+    why: 'the ratios map is keyed by session too, so one leaked entry per conversation ever opened; the standing average lives in the entry and goes with it, which is what makes it per-session rather than per-process',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'the average means the per-message rates',
+    from: `    for (const sample of entry.samples) {
+      tokens += sample.tokens
+      ms += sample.ms
+    }`,
+    to: `    for (const sample of entry.samples) {
+      tokens += sample.ms / 1000
+      ms += 1
+    }`,
+    why: 'an arithmetic mean of rates gives a four-token message the same weight as a thousand-token one, so one short answer that happened to arrive fast pulls the standing number up for the next four messages — the reading the weighted sum exists to prevent',
+  },
+  {
+    file: speed,
+    suites: meter,
+    label: 'a session with nothing settled still reports an average',
+    from: '    if (entry.samples.length === 0) return null',
+    to: '    if (false) return null',
+    why: 'the average is what a reader sees the instant a reply ends; reporting one before anything has settled means dividing zero by zero and drawing a badge that claims a speed nobody measured',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the average outranks the reading that just stopped',
+    from: '      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : average !== null ? average.tps : 0',
+    to: '      const shown = liveReading !== null ? liveReading.tps : average !== null ? average.tps : heldFresh === true ? held.current.tps : 0',
+    why: 'the freshest statement about a reply that just ended is that reply own window, not the mean of five; putting the average first makes a fast answer look slower the moment it finishes',
   },
   {
     file: client,

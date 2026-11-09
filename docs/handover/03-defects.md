@@ -64,6 +64,8 @@
 | DEF-58 | 2026-11-09 | 删 linger 代码时连带删掉 `setTick` 的 `useState`，4 秒定时器仍在调它 | 删一段逻辑时，它调用的状态声明也是这段逻辑的一部分 |
 | DEF-59 | 2026-11-09 | 变异 `why` 描述的是另一条变异的行为 | `why` 是后续读者判断这条变异为何存在的唯一线索 |
 | DEF-60 | 2026-11-09 | README 把「不画徽章」的宿主范围说窄了（漏掉 `ok:false`） | 判据写成「没有那条路由」时，实际判据往往是「一次都没成功答过」 |
+| DEF-61 | 2026-11-09 | `averageOf` 的 `ms <= 0` 守卫不可达，与同一次改动删掉被遮蔽守卫的原则冲突 | 「不可达」要证明，不能凭直觉留一行当保险 |
+| DEF-62 | 2026-11-09 | 「流式进行中但尚无 settle」这一状态没有任何断言，空样本守卫删掉也不报警 | 冷启动用例走的是另一条分支，覆盖不到「有窗口、无平均」 |
 
 ---
 
@@ -883,3 +885,30 @@ anchors」。
 **修法。** 改成「Only a host that has never once answered draws nothing: no `/speed` route at all, a first request that failed, or a `200` carrying `ok: false` because that host cannot measure.」
 
 **教训。** 判据写成「没有那条路由」时，实际判据往往是「一次都没成功答过」——路由存在不代表能干活。
+
+## DEF-61 · `averageOf` 里留了一个不可达的守卫
+
+**现象。** `averageOf` 在累加完样本后写 `if (ms <= 0) return null`。但每条样本的 `ms` 都是
+`Math.max(MIN_SPAN_MS, ...)` 的结果，恒 ≥ 500，只要 `samples` 非空，累加必然大于 0。
+
+**为什么是缺陷而不只是冗余。** 同一次改动在 `settle` 里删掉了四个被遮蔽的守卫，注释写的是「They are
+gone rather than kept as decoration that reads like protection」。留下这一行，等于同一个文件里对同一件
+事给出两种做法。
+
+**检测手段的缺口。** 当时 `scripts/mutate-speed.mjs` 对 `averageOf` 没有任何锚点，所以「58/58 全杀」
+并不覆盖这两条分支——删除第 299 行不会有任何测试变红。
+
+**教训。** 判断一行可不可达要给出论证（这里是「`ms` 恒 ≥ `MIN_SPAN_MS`」），而不是凭「保险起见留着」。
+留着的代价不是几个字节，是让下一个读代码的人以为这条路径真的会发生。
+
+## DEF-62 · 「流式进行中但尚无 settle」没有断言
+
+**现象。** `averageOf` 的 `samples.length === 0` 守卫被改成 `if (false)` 之后，整套测试仍然全绿。
+
+**真因。** 冷启动那条用例走的是 `entry === undefined` 分支，根本没进 `averageOf`；而「有窗口、无平均」
+这个状态——第一条消息正在流式输出、还没 settle——没有任何用例。
+
+**修法。** `test/speed.test.mjs` 新增一块：`advance(100)` + `push` 之后断言
+`midway.average === null` 且 `midway.active === true && midway.tokens > 0`。
+
+**教训。** 「没有平均」有两个成因（没有条目 / 有窗口但没样本），只测其中一个，另一个的守卫就无法证伪。

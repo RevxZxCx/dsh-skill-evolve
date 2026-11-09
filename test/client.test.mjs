@@ -3426,6 +3426,72 @@ async function openPanel(routes, options) {
 }
 
 {
+  // A settled session: nothing arriving, but five messages have reported their
+  // own token counts. This is the state a reader is in almost all the time —
+  // they look up after the reply ends — so the widget has to carry the standing
+  // number, not a dash and not a stale window.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': {
+      ok: true,
+      data: { tokens: 0, ms: 0, tps: 0, active: false, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } },
+    },
+  })
+  const badge = firstByClass(tree, 'dsse-speed')
+  check('a settled session shows the standing average', badge !== undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
+  check('and the number is the average, not a dash', textOf(badge).includes('50'), textOf(badge))
+  check('and it still carries the unit', textOf(badge).includes('tok/s'), textOf(badge))
+  check('and it is drawn as the standing kind', (badge?.props?.className ?? '').includes('dsse-speed-average'), String(badge?.props?.className))
+  // Which number this is has to reach someone who cannot see the colour: the
+  // same digits mean different things live and settled.
+  check('and the label says how many messages it covers', (badge?.props?.['aria-label'] ?? '').includes('最近 5 次'), String(badge?.props?.['aria-label']))
+  check('and the tooltip says it is an average', (badge?.props?.title ?? '').includes('平均'), String(badge?.props?.title))
+}
+
+{
+  // While text is arriving the live window wins: it is the sharper statement
+  // about right now, and the average is still there underneath.
+  const { tree } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': {
+      ok: true,
+      data: { tokens: 30, ms: 1000, tps: 30, active: true, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } },
+    },
+  })
+  const badge = firstByClass(tree, 'dsse-speed')
+  check('a live reading beats the standing average', textOf(badge).includes('30'), textOf(badge))
+  check('and it is not drawn as the standing kind', (badge?.props?.className ?? '').includes('dsse-speed-average') === false, String(badge?.props?.className))
+  check('and the label does not claim an average', (badge?.props?.['aria-label'] ?? '').includes('平均') === false, String(badge?.props?.['aria-label']))
+}
+
+{
+  // Just after a reply ends the freshest statement is the window that closed,
+  // not the mean over five messages. Held wins inside the linger; the average
+  // takes over only once that reading is stale.
+  const { instance } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/speed': speedScript([
+        { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true, average: null } },
+        { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } } },
+      ]),
+    },
+    { now: 1000 },
+  )
+  instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
+  await settle()
+  const during = await instance.renderer.deepRender(instance.seat('cards'))
+  check('the window that just closed outranks the average', textOf(firstByClass(during, 'dsse-speed')).includes('100'), textOf(firstByClass(during, 'dsse-speed')))
+  check('and it is not labelled as an average yet', (firstByClass(during, 'dsse-speed')?.props?.['aria-label'] ?? '').includes('平均') === false, String(firstByClass(during, 'dsse-speed')?.props?.['aria-label']))
+
+  instance.clock.at = 1000 + 4001
+  const after = await instance.renderer.deepRender(instance.seat('cards'))
+  const standing = firstByClass(after, 'dsse-speed')
+  check('once that reading is stale the average takes over', textOf(standing).includes('50'), textOf(standing))
+  check('and it says so', (standing?.props?.className ?? '').includes('dsse-speed-average'), String(standing?.props?.className))
+}
+
+{
   // Leaving the conversation stops the badge asking. Two sessions' badges left
   // running is a timer per session for the life of the window.
   const { instance } = await openPanel({
