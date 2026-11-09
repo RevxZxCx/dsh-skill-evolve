@@ -436,10 +436,18 @@ const mutations = [
   {
     file: client,
     suites: view,
-    label: 'a zero reading draws a badge saying zero',
-    from: '      if (typeof shown !== \'number\' || Number.isFinite(shown) === false || shown <= 0) return null',
-    to: '      if (typeof shown !== \'number\' || Number.isFinite(shown) === false) return null',
-    why: 'a permanent "0 tok/s" is a piece of chrome announcing that nothing is happening, which the empty space already said, and it never goes away',
+    label: 'a zero reading is shown as a number',
+    from: "      const idle = measured === false",
+    to: "      const idle = false",
+    why: 'a dash and a zero are different statements: the first says nothing is arriving, the second says something arrived at a rate of nothing. Here the number is zero, so the last real reading is replaced by a claim that output is happening at zero speed — a stale number kept on screen is a different mutation, and a different failure',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'a host that has no speed route gets a permanent dash',
+    from: "      if (known === false) return null",
+    to: "      if (false) return null",
+    why: 'an older host half has the panel but not the route, and a permanent dash in its header is a widget that will never say anything — the one case where drawing nothing is the honest answer',
   },
   {
     file: client,

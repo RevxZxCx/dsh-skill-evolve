@@ -53,6 +53,10 @@
 | R-47 | 2026-11-08 | 第二轮：2 P2 + 2 P3（工具参数与中断污染比例） | 4 | 4 / 0 |
 | R-48 | 2026-11-08 | 第三轮：0 P2 + 5 P3，结论 patch is correct | 5 | 5 / 0 |
 | R-49 | 2026-11-08 | 第四轮：1 P2 + 1 P3（锚点下限表与 README 路由清单） | 2 | 2 / 0 |
+| R-50 | 2026-11-09 | 徽章改常驻 第一轮：锚点下限仍写 49、变异 `why` 描述错 | 1 P2 + 1 P3 | 2 / 0 |
+| R-51 | 2026-11-09 | 第二轮：README 与 `@returns` 停在「四秒后消失」 | 1 P3 | 1 / 0 |
+| R-52 | 2026-11-09 | 第三轮：README 把「不画徽章」的宿主范围说窄 | 1 P3 | 1 / 0 |
+| R-53 | 2026-11-09 | 第四轮：收敛，无 finding | 0 | 0 / 0 |
 
 ---
 
@@ -670,3 +674,77 @@ R-45（0）= **12 条，全部采纳，驳回 0**。
 
 **共同特征。** 第一轮抓的是「前提错了」（事件通道），后四轮几乎全部是「注释与常量、断言与
 实现之间的数字对不上」。代码有一万条断言和六套变异守着；注释只有下一个读它的人。
+
+## R-50 · 徽章改常驻 第一轮
+
+runId `abfe568f-9a3d-44c1-ab74-3546a1e6cd46`。审查确认补丁整体正确：`known` 只在 `ask()`
+成功返回后置真，无 `/speed` 路由与 `ok:false` 都会经 `unwrap()` 抛错走 catch，因此不会产生
+「永远不更新却一直在」的死破折号；`setTick` 重绘仍有必要（linger 到期到下一次轮询之间最长
+两秒空档）；idle 的 `aria-label`、`title` 与可见的 `—` 语义一致。报两条：
+
+**P2。** 锚点增至 50 条，但 `test/mutations.test.mjs` 的下限表仍写 49，注释仍写
+「forty-nine anchors」。判据是 `>=`，所以成对删掉一条 `from:` 与其 `file:` 行时检查仍然通过。
+
+**P3。** 新变异 `a zero reading is shown as a number` 的 `why` 声称「最后一个真实数字留在
+屏幕上」，但实际施加后渲染的是 `0 tok/s`——真实数字被替换，并没有留下。保留旧数字是
+`the last number never expires` 那条变异的职责。
+
+**采纳。** 2 条全部采纳。下限改 50、注释改 fifty；`why` 重写为如实描述并点名职责归属。
+
+## R-51 · 第二轮
+
+runId `96f8babf-0790-4050-a9f4-b828c48e5339`。两条确认落实：50 条 `file:/from:/label:/to:/why:/suites:`
+严格配对，无空锚点；`mutations.test.mjs:204` 已是 50。报一条：
+
+**P3。** `packages/ui-evolve/README.md` 的速度徽章说明仍停在「三档节拍 + 最后一个真实读数保留
+四秒」，没写四秒后变破折号、徽章常驻；`client.js` 的 `@returns … or nothing when there is no
+speed to show` 与紧邻的新注释「All three draw the widget once the host has answered at all」
+直接矛盾。
+
+**采纳。** 1 条采纳。README 补三段（dash 而非 0、徽章常驻、只有从未答过的宿主不画）；JSDoc
+改写并修正 `@returns`。审查同时明确说明 `docs/handover/01-status.md` 里 2525 / 49 / 384 那几个
+数**不需要**同步——那是 2026-11-08 的落盘快照，应另起一节。
+
+## R-52 · 第三轮
+
+runId `449f535d-1b43-4266-87fa-c2f4f7b7f104`。JSDoc 与实测均通过。报一条：
+
+**P3。** README 新句「only a host with no `/speed` route at all … draws nothing」把范围说窄了：
+`known` 的真实判据是「`ask()` 一次都没成功返回过」，宿主有该路由但返回 `200 {ok:false,
+code:'error.speed.absent'}` 时同样不画（`api.js` 在缺 `speedOf` 依赖时正是这么答的），首次请求
+500 或返回非 JSON 也落在同一分支。审查同时指出插入新段后有一行只有 47 字符，没重排折行。
+
+**采纳。** 1 条采纳。措辞改成「Only a host that has never once answered draws nothing: no
+`/speed` route at all, a first request that failed, or a `200` carrying `ok: false` because that
+host cannot measure.」；该段重排到 72–85 列。
+
+## R-53 · 第四轮
+
+runId `75985db9-c71f-481d-b867-d8b051acf271`。**收敛，无 finding。**
+
+审查逐条核实：`setKnown(true)` 在 hook 内唯一出现且紧跟成功返回，「only a host that has never
+once answered」是精确判据；`a failed ask keeps the number it had` 证明答过之后失败仍保留徽章，
+与措辞不冲突；三档时钟、四秒 linger、`aria-live="off"` 与常量及渲染逻辑逐条一致；新段落九行
+长度 82/81/85/84/83/81/83/72/74，无过短或过长行；全文 grep `draws nothing|disappear|vanish|four
+seconds|gone|0 tok/s|no speed to show` 无旧语义残留。
+
+实测：`node test/run.mjs` 2530 passed；`scripts/mutate-speed.mjs` 50 killed / 0 survived /
+0 not applied / 0 crashed（新增两条分别杀 5 与 2 条断言）；`test/mutations.test.mjs` 36 passed；
+`git status --short` 恰为五处改动。
+
+一条**不作为 finding** 的观察：`known` 切会话时刻意保留，所以 README 的「for the life of the
+session」严格说是低估——徽章实际存活于宿主面板的整个生命周期。审查判断当前表述不会误导读者。
+
+## 四轮累计
+
+| 轮次 | runId | P1 | P2 | P3 | 采纳 | 驳回 |
+|---|---|---|---|---|---|---|
+| 第一轮 | `abfe568f` | 0 | 1 | 1 | 2 | 0 |
+| 第二轮 | `96f8babf` | 0 | 0 | 1 | 1 | 0 |
+| 第三轮 | `449f535d` | 0 | 0 | 1 | 1 | 0 |
+| 第四轮 | `75985db9` | 0 | 0 | 0 | 0 | 0 |
+| **合计** | | **0** | **1** | **3** | **4** | **0** |
+
+**共同特征。** 前三轮的四条全部落在文档与变异元数据上，没有一条是代码缺陷——但第一轮那条 P2
+（锚点下限表）如果放过，`mutate-speed.mjs` 可以在少一条变异的情况下报全绿。代码有断言和变异
+守着，而**守卫自己的数字、以及描述守卫的注释，没有任何东西守着**。

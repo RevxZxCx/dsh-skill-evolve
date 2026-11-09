@@ -31,6 +31,7 @@
 | 2026-11-07 | 展开按钮改圆标 | 卡片内底边居中圆形图标按钮（D-76，不占布局）；展开后仍显示收起入口且不随指针消失（D-77）；chevron 方向随开合翻转；2277 断言全绿，五套变异 78/11/14/44/15 全杀 |
 | 2026-11-07 | 总结语言 + 产出卡改累计 | 总结语言由宿主 `<html lang>` 指定（D-78）；产出卡改成会话累计（D-79），中断回合也记（D-80），上限三处收口（D-81）；2387 断言全绿，六套变异 81/21/44/15/14/11 全杀 |
 | 2026-11-08 | 实时输出速度 | 新增 `GET|HEAD /speed` 与头部圆角速度徽章（D-86）；走 `agent/assistant-stream` 而非 `assistant/chunk`（D-83）；两秒滑动窗口 + 字符估算 + provider 计数校正（D-82/D-84/D-85）；徽章非 live region（D-87）；2525 断言全绿，七套变异 49/81/21/44/15/14/11 全杀 |
+| 2026-11-09 | 徽章改常驻 | 徽章答过一次就常驻，空闲显示破折号而非 0（D-88）；`known` 跨会话保留、读数随会话清空（D-89）；2530 断言全绿，七套变异 50/81/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2541,3 +2542,84 @@ sync-gutter                              幂等（client.js sha256 不变）
 5. **`||` 在断言里几乎总是可疑的。** `sessions.size === 0 || marks.length === 0` 让一条断言
    在两种情况下都通过，于是没有一种情况被真正锁住；而它掩盖的正是「`settle` 为每个 agent
    建了一条空记录」。
+
+## 2026-11-09 · 徽章改常驻：把「只在发生时存在」换成「一直在，说清此刻」
+
+用户两次报告「界面中没有看到对应的速度显示」，附截图：顶行只有刷新、齿轮、建议。上一节
+（2026-11-08）交付的徽章，在服务端、路由、断言、变异、五轮审查全部通过的情况下，**对用户
+来说不存在**。
+
+### 四条要求
+
+| 用户原话 | 落点 |
+|---|---|
+| 「目前在界面中没有看到对应的速度按钮」 | 徽章改为常驻：`known` 记住宿主管答过一次，之后一直画 |
+| 「目前在界面中没有看到对应的速度显示」 | 空闲时画淡化破折号 `—`，不画 `0 tok/s`，也不留旧数字 |
+| （上一节的）「实时的速度计算」 | 三档节拍与两秒窗口不变（D-82/D-86） |
+| （回归保护）旧宿主不显示 | 一次都没答过 `/speed` 的宿主仍什么都不画 |
+
+### 六条实现要点
+
+- **`known` 状态**（`client.js:1224`）：`ask()` 成功返回后 `setKnown(true)`；渲染门从
+  「值必须 > 0」改成 `if (known === false) return null`。判据是「这台宿主能不能测速」，
+  而不是「此刻有没有数字」。
+- **三态渲染**：live（窗口里有字）/ recent（linger 内，最后一个真实读数）/ idle（测过但当前
+  无输出）。三者都画，差别只在数字还是破折号（D-88）。
+- **idle 显示 `—` 而不是 0**：`0 tok/s` 是一次测量，声称正在以零速率输出；空闲时真相是
+  「没有输出」，没有速率可说（D-88）。
+- **`known` 跨会话保留、`held`/`reading` 切会话清空**（D-89）：两个状态描述的是不同的东西
+  ——「这台宿主」与「这个会话」。
+- **补回 `setTick`**：删旧 linger 代码时把它的 `useState` 声明一并删了，而 4 秒重绘定时器仍在
+  调用它（DEF-58）。
+- **`dsse-speed-idle` 样式**：`min-width` 56 → 44px，`opacity:.7`，`color` 走 tertiary。
+
+### 四轮审查
+
+| 轮次 | runId | findings | 采纳 |
+|---|---|---|---|
+| 第一轮 | `abfe568f` | 1 P2 + 1 P3（锚点下限仍 49、变异 `why` 描述错） | 2 |
+| 第二轮 | `96f8babf` | 1 P3（README 与 `@returns` 停在「四秒后消失」） | 1 |
+| 第三轮 | `449f535d` | 1 P3（README 把「不画徽章」的宿主范围说窄） | 1 |
+| 第四轮 | `75985db9` | 无 finding，收敛 | 0 |
+
+合计 4 条全部采纳、0 驳回。**四条全部出在文档与变异元数据，没有一条是代码缺陷**——但第一轮
+那条 P2 如果放过，`mutate-speed.mjs` 可以在少一条变异的情况下报全绿。
+
+### 当前数字
+
+```
+node test/run.mjs                        2530 passed / 0 failed
+node test/client.test.mjs                 389 passed / 0 failed
+node test/mutations.test.mjs               36 passed / 0 failed
+scripts/mutate-speed.mjs                   50 killed / 0 survived / 0 not applied / 0 crashed
+scripts/mutate-checklist-panel.mjs         81 killed / 0 survived / 0 not applied
+scripts/mutate-language-and-files.mjs      21 killed / 0 survived / 0 not applied
+scripts/mutate-persistence.mjs             44 killed / 0 survived / 0 not applied
+scripts/mutate-session-store.mjs           15 killed / 0 survived / 0 not applied
+test/mutate-panel.mjs                      14/14 killed
+scripts/mutate-guards.mjs                  11/11 killed
+全仓 CRLF                                  0（113 个文件，Node 按字节扫）
+sync-gutter                                幂等（client.js sha256 44497e1c…）
+```
+
+### 四条踩坑
+
+1. **断言写在「功能已经可见」的前提下，检测不到「功能在真实的第一秒里不存在」。** 29 条
+   徽章断言全部通过，因为它们都在徽章已经渲染出来的世界里断言；而「用户在一个空闲会话上
+   打开面板会看到什么」没被问过，当时甚至有一条反过来的断言
+   （`a zero reading draws nothing`）。这是本轮唯一的真缺陷，也是最贵的一条。
+2. **删一段逻辑时，它调用的状态声明也是这段逻辑的一部分。** 删 linger 相关代码时把
+   `setTick` 的 `useState` 一起删了，而 4 秒重绘定时器仍在调用它；测试用注入时钟直接跳读，
+   从未真的让定时器回调执行，所以全绿（DEF-58）。
+3. **`why` 是后续读者判断这条变异为何存在的唯一线索。** 写成另一条变异的行为，会让两个
+   不同的防护看起来重叠，而重叠的防护会被合并或删除（DEF-59）。
+4. **判据写成「没有那条路由」时，实际判据往往是「一次都没成功答过」。** 路由存在不代表
+   能干活：`200 {ok:false}` 同样走 catch（DEF-60）。
+
+### 两条下一步（不属于本轮）
+
+- **DEF-51 仍待办**：产出卡头部说「10 个文件」而列表只列 5 行，「全部 10 个」按钮在侧栏
+  滚动区外看不见。用户 2026-11-07 决定与产出卡后续需求一并处理。
+- **`scripts/mutate-speed.mjs` 的两条 `NOT MUTATED`**：`estimateTokens` 的非字符串分支
+  （唯一调用方传宿主已校验的 `chunk.text`）、徽标的 `title` 属性（装饰，`aria-label` 才是
+  被断言的）。两者都写在脚本的 `known` 数组里。

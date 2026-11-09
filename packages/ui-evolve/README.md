@@ -332,10 +332,16 @@ of a reply arrives with almost no elapsed time and dividing by it would print th
 hundred tokens a second at exactly the moment somebody looks. The badge polls on
 three clocks — 250ms while the window holds text, 2000ms just after it empties,
 10000ms once a session has been idle a while — and keeps the last real reading for
-four seconds past the end of the window, because that is the moment people look. It
-is deliberately not a `role="status"`: a value that changes four times a second
-would be read aloud over the answer itself, so it is `aria-live="off"` with the
-number in `aria-label` for anyone who wants it.
+four seconds past the end of the window, because that is the moment people look.
+After that it shows a dash rather than `0 tok/s`: a zero is a measurement, and the
+honest statement about an idle conversation is that there is no number. The badge
+itself stays in the header for the life of the session — a readout that only exists
+while a reply is arriving is one nobody can find, which is what the first version of
+this did. Only a host that has never once answered draws nothing: no `/speed` route
+at all, a first request that failed, or a `200` carrying `ok: false` because that
+host cannot measure. It is deliberately not a `role="status"`: a value that changes
+four times a second would be read aloud over the answer itself, so it is
+`aria-live="off"` with the number in `aria-label` for anyone who wants it.
 
 The last-turn card carries its counts in the header, not in a strip below the
 text: calls, commands, and files as labelled numbers, aligned on the title's

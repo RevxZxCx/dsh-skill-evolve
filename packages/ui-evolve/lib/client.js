@@ -245,7 +245,8 @@ window.__ModuleLoader__.load({
 .dsse-rail::-webkit-scrollbar-thumb,.dsse-candidates::-webkit-scrollbar-thumb,.dsse-detail-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,rgba(15,17,21,.16));border-radius:3px}
 .dsse-top-row{flex:0 0 auto;display:flex;align-items:center;gap:6px;min-height:40px;padding:2px 4px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 2px 8px rgba(15,17,21,.04)}
 .dsse-top-row .dsse-queue{width:auto;min-height:32px;margin-left:auto;padding:0 12px}
-.dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:56px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
+.dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:44px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
+.dsse-top-row .dsse-speed-idle{color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:.7}
 .dsse-top-row .dsse-speed-unit{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.68em,9px)}
 .dsse-icon-btn{width:36px;height:36px;display:inline-grid;place-items:center;flex:0 0 auto;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-icon-btn:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
@@ -1200,10 +1201,13 @@ window.__ModuleLoader__.load({
      *
      * The number lingers for a few seconds after the window empties, because the
      * moment the reader most wants to read it is the moment the reply finishes.
+     * Past that it draws a dash, and it keeps drawing it: the widget is permanent
+     * once the host has answered, and only a host that has never answered at all
+     * — no `/speed` route, an older half of the plugin — draws nothing.
      *
      * @param {object} props - props.
      * @param {string} props.sessionId - the conversation to measure.
-     * @returns {object} the element, or nothing when there is no speed to show.
+     * @returns {object} the element, or nothing on a host that cannot measure.
      */
     function SpeedBadge(props) {
       const sessionId = typeof props.sessionId === 'string' ? props.sessionId : ''
@@ -1215,12 +1219,20 @@ window.__ModuleLoader__.load({
       // into dead code and, worse, made the linger below unreachable: by the time
       // a reading comes back inactive the number is already gone.
       const [reading, setReading] = React.useState(null)
+      // Whether this host has ever answered. The distinction matters: a host
+      // without the route must not get a permanent dash in its header, but a
+      // host that answered once — even with "idle" — keeps the widget on
+      // screen. A readout that only appears while a reply is arriving is a
+      // readout nobody can find.
+      const [known, setKnown] = React.useState(false)
+      // A repaint ticket, and it is load-bearing. The held number outlives the
+      // reading that produced it, so when the linger runs out something has to
+      // re-render the badge to turn that number into a dash — and nothing else
+      // fires at that moment: the next poll is up to ten seconds away, by which
+      // time a badge still claiming a speed has been wrong for six of them.
+      const [, setTick] = React.useState(0)
       const held = React.useRef({ tps: 0, at: 0 })
       const request = React.useRef(0)
-      // Re-render triggers: a timer firing does not paint on its own, and the
-      // linger expiry is a paint-level fact (the number has to disappear four
-      // seconds after the reply stopped, without another poll to notice).
-      const [, setTick] = React.useState(0)
 
       React.useEffect(() => {
         if (sessionId === '') return undefined
@@ -1234,6 +1246,8 @@ window.__ModuleLoader__.load({
         // the linger, which reads as this one's speed and is not.
         held.current = { tps: 0, at: 0 }
         setReading(null)
+        // `known` deliberately survives the reset: the question it answers is
+        // about the host, not the conversation.
 
         const schedule = (ms) => {
           if (stopped) return
@@ -1251,6 +1265,7 @@ window.__ModuleLoader__.load({
               held.current = { tps: next.tps, at: now }
             }
             setReading(next)
+            setKnown(true)
             if (next?.active === true) {
               schedule(SPEED_FAST_MS)
               return
@@ -1291,23 +1306,33 @@ window.__ModuleLoader__.load({
       }, [sessionId])
 
       const now = Date.now()
-      const heldFresh = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS
+      // Three states, and the difference between them is the whole point:
+      //   live    — a window with text in it right now
+      //   recent  — the last real number, still within the linger
+      //   idle    — nothing measured for a while (or ever, this session)
+      // All three draw the widget once the host has answered at all. An idle
+      // badge shows a dash rather than the last number it saw, because a number
+      // that looks live while nothing is arriving is worse than no number: it is
+      // read as a fact about right now.
       const liveReading = reading?.active === true ? reading : null
+      const heldFresh = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS
       const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : 0
-      if (typeof shown !== 'number' || Number.isFinite(shown) === false || shown <= 0) return null
+      const measured = typeof shown === 'number' && Number.isFinite(shown) === true && shown > 0
+      if (known === false) return null
+      const idle = measured === false
       return jsxs('span', {
-        className: 'dsse-speed',
+        className: idle === true ? 'dsse-speed dsse-speed-idle' : 'dsse-speed',
         // Not `role="status"`. That implies `aria-live="polite"`, and this number
         // changes up to four times a second while a reply arrives — a screen
         // reader would announce it continuously for the whole generation, which
         // makes the panel unusable for the people the attribute is meant to help.
         // The label stays for anyone who lands on it deliberately.
         'aria-live': 'off',
-        'aria-label': `输出速度 ${formatSpeed(shown)} tok/s`,
-        title: '最近两秒的输出速度',
+        'aria-label': idle === true ? '输出速度：当前没有输出' : `输出速度 ${formatSpeed(shown)} tok/s`,
+        title: idle === true ? '当前没有输出' : '最近两秒的输出速度',
         children: [
-          jsx('span', { children: formatSpeed(shown) }),
-          jsx('span', { className: 'dsse-speed-unit', children: 'tok/s' }),
+          jsx('span', { children: idle === true ? '—' : formatSpeed(shown) }),
+          idle === true ? null : jsx('span', { className: 'dsse-speed-unit', children: 'tok/s' }),
         ],
       })
     }

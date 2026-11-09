@@ -3355,8 +3355,13 @@ async function openPanel(routes, options) {
 
   instance.clock.at = 1000 + 4001
   const expired = await instance.renderer.deepRender(instance.seat('cards'))
-  check('and it is gone once the grace period is over', firstByClass(expired, 'dsse-speed') === undefined, textOf(firstByClass(expired, 'dsse-top-row')).slice(0, 160))
-  check('leaving the space it occupied empty rather than saying zero', textOf(expired).includes('tok/s') === false, textOf(expired).slice(0, 200))
+  // The widget stays; the number does not. A readout that vanishes when nothing
+  // is happening is a readout nobody can find — and the dash is a different
+  // statement from a stale number, which would be read as a fact about now.
+  check('the badge is still there once the grace period is over', firstByClass(expired, 'dsse-speed') !== undefined, textOf(firstByClass(expired, 'dsse-top-row')).slice(0, 160))
+  check('and it stops claiming a speed', textOf(firstByClass(expired, 'dsse-speed')).includes('100') === false, textOf(firstByClass(expired, 'dsse-speed')))
+  check('and it says it is idle instead', textOf(firstByClass(expired, 'dsse-speed')).includes('—'), textOf(firstByClass(expired, 'dsse-speed')))
+  check('and it is drawn as the quiet kind', (firstByClass(expired, 'dsse-speed')?.props?.className ?? '').includes('dsse-speed-idle'), String(firstByClass(expired, 'dsse-speed')?.props?.className))
 }
 
 {
@@ -3405,14 +3410,19 @@ async function openPanel(routes, options) {
 }
 
 {
-  // A zero reading is not worth a widget. A badge that says "0 tok/s" for an idle
-  // conversation is a permanent piece of chrome reporting that nothing is
-  // happening, which the empty space already said.
+  // The route answered, and the answer was "nothing has streamed". The widget
+  // still has to be there: a readout that only exists during a reply is one
+  // nobody can locate, and the whole reason it was asked for is the second
+  // before the number appears. `known` is what separates this from an older
+  // host that has no route at all — that one must not get a permanent dash.
   const { tree } = await openPanel({
     ...panelRoutes(),
     '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 500, tps: 0, active: true } },
   })
-  check('a zero reading draws nothing', firstByClass(tree, 'dsse-speed') === undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
+  const badge = firstByClass(tree, 'dsse-speed')
+  check('a measured-but-idle session still draws the badge', badge !== undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
+  check('and it does not invent a number', textOf(badge).includes('0 tok/s') === false, textOf(badge))
+  check('and it draws the idle form', (badge?.props?.className ?? '').includes('dsse-speed-idle'), String(badge?.props?.className))
 }
 
 {
@@ -3449,7 +3459,8 @@ async function openPanel(routes, options) {
   // is still fresh and paints for the new conversation.
   await instance.renderer.render(toggle, { sessionId: 'session-b' })
   const switched = await instance.renderer.deepRender(cards)
-  check('switching conversation drops the old number', firstByClass(switched, 'dsse-speed') === undefined, textOf(firstByClass(switched, 'dsse-top-row')).slice(0, 160))
+  check('and it does not carry the old number into the new conversation', textOf(firstByClass(switched, 'dsse-speed')).includes('100') === false, textOf(firstByClass(switched, 'dsse-top-row')).slice(0, 160))
+  check('so the new conversation reads as idle', textOf(firstByClass(switched, 'dsse-speed')).includes('—'), textOf(firstByClass(switched, 'dsse-speed')))
 }
 
 {

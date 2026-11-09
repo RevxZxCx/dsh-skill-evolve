@@ -190,7 +190,7 @@ for (const [label, source, want] of [
 //
 // Three scripts, one check. It started as a block for the language script only,
 // and `scripts/mutate-speed.mjs` was written afterwards without one — its
-// forty-nine anchors could rot the same way the panel script's did and the only
+// fifty anchors could rot the same way the panel script's did and the only
 // notice would be a `NOT APPLIED` line in a run nobody started. A list is what
 // keeps the next script from being the fourth one to notice this late.
 //
@@ -201,7 +201,7 @@ for (const [label, source, want] of [
 // cannot see.
 for (const [name, expected] of [
   ['mutate-language-and-files.mjs', 21],
-  ['mutate-speed.mjs', 49],
+  ['mutate-speed.mjs', 50],
   ['mutate-persistence.mjs', 44],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')
