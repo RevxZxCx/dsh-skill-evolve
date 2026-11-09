@@ -313,44 +313,76 @@ replaces the label rather than containing it fails WCAG's label-in-name rule. Th
 whole row sits on its own card surface — border, radius, background — instead of
 three bare buttons floating over the conversation.
 
-Between settings and review sits the **output-speed readout**. It shows two
-different numbers, because a reader asks two different questions. While text is
-arriving it shows the last two seconds — "how fast is this going right now". Once
-a reply ends it shows the standing average of the last five finished messages —
-"how fast is this provider going". Both are needed: the two-second window says
-nothing the instant a reply stops, and that is exactly when somebody raises their
-head to ask how it went. The average is weighted (summed tokens over summed
-duration, not the mean of the per-message rates), so one short answer that
-happened to arrive quickly cannot outvote a long one. It also differs from the
-host's own capsule, which averages the whole conversation: by the twentieth turn
-that mostly describes the first nineteen. It reads from the `speed` route, which is
-a route of its own rather than a field on `/panel`: the panel changes when a turn
-ends, the speed changes while it is running, and one polling period cannot serve
-both. Nothing in the event stream carries a token count during generation — the
-`usage` block arrives once, after `message_stop` — so the number is
-`ceil(characters / 4)` per `text-delta` over a two-second window, rescaled by a
-ratio learned from the provider's real count each time a message settles. The
-ratio is clamped to 0.25..4, because one odd turn should not redefine every number
-after it. Text only: `reasoningTokens` are subtracted and a message that called a
-tool teaches no ratio at all — its `argumentsDelta` counts toward `outputTokens`
-but never flowed as text. The divisor is floored at 500ms, because the first delta
-of a reply arrives with almost no elapsed time and dividing by it would print three
-hundred tokens a second at exactly the moment somebody looks. The badge polls on
-three clocks — 250ms while the window holds text, 2000ms just after it empties,
-10000ms once a session has been idle a while — and keeps the last window reading for
-four seconds past the end of the window, because that is the moment people look.
-After those four seconds the standing average takes over, marked with a slightly
-quieter style so it reads as a description of the recent past rather than of this
-instant. A dash appears only when no message has ever settled: a zero is a
-measurement, and the honest statement about a session that has produced nothing yet
-is that there is no number. The badge itself stays in the header for the life of the
-session — a readout that only exists while a reply is arriving is one nobody can
-find, which is what the first version of this did. Only a host that has never once
+Between settings and review sits the **output-speed readout**. It answers one
+question at a time and always answers it about something the reader just watched.
+While text is arriving it shows the last two seconds — "how fast is this going
+right now". Once the reply stops, the same badge becomes **the rate of the whole
+reply that just finished**, labelled 上一轮, and stays there until the next turn
+starts. Nothing is averaged across earlier messages: a reader who just watched one
+answer wants that answer's number, and a mean over five replies describes a
+history they did not read. It also differs from the host's own capsule, which
+averages the whole conversation: by the twentieth turn that mostly describes the
+first nineteen.
+
+It reads from the `speed` route, which is a route of its own rather than a field on
+`/panel`: the panel changes when a turn ends, the speed changes while it is
+running, and one polling period cannot serve both. Nothing in the event stream
+carries a token count during generation — the `usage` block arrives once, after
+`message_stop` — so the live number is `ceil(characters / 4)` per `text-delta` over
+a two-second window, rescaled by a ratio learned from the provider's real count
+each time a message settles. The ratio is clamped to 0.25..4, because one odd turn
+should not redefine every number after it. Text only: `reasoningTokens` are
+subtracted and a message that called a tool teaches no ratio at all — its
+`argumentsDelta` counts toward `outputTokens` but never flowed as text. The divisor
+is floored at 500ms, because the first delta of a reply arrives with almost no
+elapsed time and dividing by it would print three hundred tokens a second at
+exactly the moment somebody looks.
+
+**How the badge learns that something happened.** Polling on a fixed clock was the
+first version, and it failed for a reason worth writing down: a reply takes three to
+eight seconds, an idle timer fires every ten, so the badge was usually asked after
+the thing it measures had already ended. A readout that only exists while a reply is
+arriving is one nobody can find. The route therefore takes an `after=<revision>`
+parameter and **holds the request open** until the meter moves or twenty-five
+seconds pass — one request instead of thirty, and the answer arrives when the fact
+does, not up to a period later. The revision moves on the first `text-delta` and
+again when the message settles, so the wait ends at both ends of a reply. The
+client's first request carries no `after` and comes back immediately, so the badge
+draws on the first frame; every later one carries the revision it last saw. While
+the window still holds text the client polls at 250ms instead, because there the
+answer is changing faster than any hold could report it.
+
+**What decides the next delay is the last answer's duration, not a constant.** Every
+scheduling call happens after the response has arrived, so a number chosen there is
+not a margin around the server's deadline — it is dead time in which nothing is
+listening. A reply that lands in that gap is one the badge never sees, which is the
+original symptom. So the client times each request: one that took about the full
+window really was held, meaning this host honours `after`, and the next request goes
+out at once so the next change is caught the instant it happens. One that came back
+instantly was answered without waiting, and asking again at once would spin — that
+host gets the idle spacing. A failed request retries after ten seconds: a missing
+route or a restarting host is worth knocking on again, but not at either of the other
+two rates.
+
+The number is held for four seconds past the end of the window before the reply's
+own rate replaces it, because the moment a person most wants to read the speed is
+the moment the text stops. That repaint is armed for every reading, live ones
+included: a reply goes quiet between paragraphs and while a tool call is being
+assembled, and with a held request the next answer can be half a minute away, so
+without it the last live number would sit there in the live style long after it
+stopped being true. That rate is drawn in a slightly quieter style, so it
+reads as a description of the reply rather than of this instant. A dash appears only
+when no message has ever settled: a zero is a measurement, and the honest statement
+about a session that has produced nothing yet is that there is no number. The badge
+stays in the header for the life of the session. Only a host that has never once
 answered draws nothing: no `/speed` route at all, a first request that failed, or a
-`200` carrying `ok: false` because that host cannot measure. It is deliberately
-not a `role="status"`: a value that changes four times a second would be read
-aloud over the answer itself, so it is `aria-live="off"` with the number in
-`aria-label` for anyone who wants it.
+`200` carrying `ok: false` because that host cannot measure. Switching conversations
+keeps the badge — whether a host can measure is a fact about the host — but clears
+the number, and aborts the request still in flight so an abandoned conversation
+does not keep a connection open until the hold expires. It is deliberately not a
+`role="status"`: a value that changes four times a second would be read aloud over
+the answer itself, so it is `aria-live="off"` with the number in `aria-label` for
+anyone who wants it.
 
 The last-turn card carries its counts in the header, not in a strip below the
 text: calls, commands, and files as labelled numbers, aligned on the title's

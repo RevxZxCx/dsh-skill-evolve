@@ -201,7 +201,7 @@ for (const [label, source, want] of [
 // cannot see.
 for (const [name, expected] of [
   ['mutate-language-and-files.mjs', 21],
-  ['mutate-speed.mjs', 58],
+  ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 44],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')

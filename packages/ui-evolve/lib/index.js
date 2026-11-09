@@ -640,6 +640,19 @@ export function apply(ctx, config) {
       },
 
       /**
+       * The counter a waiting speed request compares against.
+       *
+       * A number, not the reading: the long poll only has to notice that
+       * something happened, and building two rounded numbers per waiting client
+       * per second to throw them away is the work this avoids. It also keeps the
+       * route from being able to write a speed, which `speedOf` alone already
+       * guarantees for the same reason — the event stream is the only author.
+       */
+      speedRevision(agentId) {
+        return speeds.revisionOf(agentId)
+      },
+
+      /**
        * MCP tool names this session called.
        *
        * Per session, not per process: two conversations in one host have

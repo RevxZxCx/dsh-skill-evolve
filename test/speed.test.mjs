@@ -340,39 +340,46 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
   advance(600)
   meter.settle('restart', 40)
   const reading = meter.read('restart')
-  const sample = reading.average
+  const sample = reading.last
   check('a retry is timed from its own first delta', sample !== null && sample.ms === 600, JSON.stringify(sample))
   check('and its speed is the one it actually produced', sample !== null && Math.round(sample.tps) === 67, JSON.stringify(sample))
 }
 
-// ---- the standing average ----
+// ---- the last reply ----
 
-// The average exists because of when a reader looks: a two-second window says
-// nothing the moment a reply ends, and that is exactly when someone raises their
-// head to ask how fast it went. So the service keeps the last few settled
-// messages and reports them as one number.
+// `last` exists because of when a reader looks: a two-second window says nothing
+// the moment a reply ends, and that is exactly when someone raises their head to
+// ask how fast that reply went. The badge shows it until the next reply starts.
+//
+// Only the last one is kept. A mean over several replies answers a question the
+// reader did not ask, about replies they were not watching: the number beside the
+// conversation has to describe the conversation's most recent turn, or it is a
+// statistic rather than a reading.
 
 {
-  const { meter, advance } = clocked()
-  // A cold meter has no average at all — null, not zero. Zero would claim the
+  const { meter } = clocked()
+  // A cold meter has no last reply at all — null, not zero. Zero would claim the
   // provider produced nothing at a rate of nothing.
-  const cold = meter.read('avg')
-  check('a session with no settled message has no average', cold.average === null, JSON.stringify(cold))
+  const cold = meter.read('cold')
+  check('a session with no settled message has no last reading', cold.last === null, JSON.stringify(cold))
   check('and it still says it is inactive', cold.active === false, JSON.stringify(cold))
+  check('and it has no revision to wait past', cold.revision === 0, JSON.stringify(cold))
 }
 
 {
   const { meter, advance } = clocked()
-  // Streaming has started but nothing has settled yet: there is a live window and
-  // no average. The cold case above never reaches `averageOf` at all (no entry),
-  // so this is the one state that can tell the empty-samples guard apart from no
-  // guard: the badges that would follow are a live reading plus a standing number
-  // for a message that has not finished.
+  // Streaming has started but nothing has settled: there is a live window and no
+  // last reading. The cold case above never reaches `lastOf` at all (no entry), so
+  // this is the state that tells "no reply yet" apart from "no session".
   advance(100)
   meter.push('mid', 'x'.repeat(40))
   const midway = meter.read('mid')
-  check('a message still streaming has no average yet', midway.average === null, JSON.stringify(midway))
+  check('a message still streaming has no last reading yet', midway.last === null, JSON.stringify(midway))
   check('but its window is live', midway.active === true && midway.tokens > 0, JSON.stringify(midway))
+  // The revision moves on the first delta, not only on a settle: a long poll that
+  // waited through an idle stretch has to be woken by the reply starting, or the
+  // first number it can report arrives after the reply has finished.
+  check('and the first delta alone moved the revision', midway.revision === 1, String(midway.revision))
 }
 
 {
@@ -380,30 +387,39 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
   // One message: 100 real tokens over ten 100ms deltas.
   for (let index = 0; index < 10; index += 1) {
     advance(100)
-    meter.push('avg', 'x'.repeat(40))
+    meter.push('one', 'x'.repeat(40))
   }
-  meter.settle('avg', 100)
-  const one = meter.read('avg')
-  check('one settled message is one sample', one.average?.samples === 1, JSON.stringify(one.average))
-  check('and it reports the provider own token count', one.average?.tokens === 100, JSON.stringify(one.average))
-  check('over the time the message took', one.average?.ms === 900, JSON.stringify(one.average))
+  meter.settle('one', 100)
+  const one = meter.read('one')
+  check('a settled message leaves a last reading', one.last !== null, JSON.stringify(one))
+  check('and it reports the provider own token count', one.last?.tokens === 100, JSON.stringify(one.last))
+  check('over the time the message took', one.last?.ms === 900, JSON.stringify(one.last))
+  check('at the rate it actually produced', Math.round(one.last?.tps) === 111, JSON.stringify(one.last))
+  // Ten deltas and one settle: the counter is a change signal, not a sample count.
+  check('and settling moved the revision too', one.revision === 11, String(one.revision))
+}
 
-  // A second message, twice as long and twice as big, so the weighted and the
-  // unweighted answers differ. Arithmetic mean of the two rates would be ~111;
-  // the weighted one is 300 tokens over 2800ms.
-  meter.begin('avg')
+{
+  const { meter, advance } = clocked()
+  // Two messages with very different shapes. The second replaces the first rather
+  // than joining it: 200 tokens over its own 1900ms is what "that reply" means,
+  // and summing to 300 over 2800ms would be a claim about two replies that the
+  // badge is not making.
+  for (let index = 0; index < 10; index += 1) {
+    advance(100)
+    meter.push('two', 'x'.repeat(40))
+  }
+  meter.settle('two', 100)
+  meter.begin('two')
   for (let index = 0; index < 20; index += 1) {
     advance(100)
-    meter.push('avg', 'x'.repeat(40))
+    meter.push('two', 'x'.repeat(40))
   }
-  meter.settle('avg', 200)
-  const two = meter.read('avg')
-  check('a second message joins the average', two.average?.samples === 2, JSON.stringify(two.average))
-  check('and the tokens are summed', two.average?.tokens === 300, JSON.stringify(two.average))
-  check('and so are the milliseconds', two.average?.ms === 2800, JSON.stringify(two.average))
-  // Summing the rates instead would give (100/0.9 + 200/2.0) / 2 = 105.6, which
-  // is not what "300 tokens in 2.8 seconds" means.
-  check('and the rate is tokens over time, not the mean of rates', Math.round(two.average?.tps) === 107, JSON.stringify(two.average))
+  meter.settle('two', 200)
+  const two = meter.read('two')
+  check('a second message replaces the first', two.last?.tokens === 200, JSON.stringify(two.last))
+  check('and it brings its own duration', two.last?.ms === 1900, JSON.stringify(two.last))
+  check('so the rate is that message alone', Math.round(two.last?.tps) === 105, JSON.stringify(two.last))
 }
 
 {
@@ -418,7 +434,7 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
     meter.push('burst', 'x'.repeat(40))
   }
   meter.settle('burst', 100)
-  const burst = meter.read('burst').average
+  const burst = meter.read('burst').last
   check('a message that arrived at once is not the fastest ever', burst?.ms === 500, JSON.stringify(burst))
   check('and its rate is capped by that floor', Math.round(burst?.tps) === 200, JSON.stringify(burst))
 }
@@ -435,48 +451,33 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
   advance(400)
   meter.push('span', 'x'.repeat(40))
   meter.settle('span', 100)
-  const span = meter.read('span').average
+  const span = meter.read('span').last
   check('a message is timed from its first delta', span?.ms === 800, JSON.stringify(span))
 }
 
 {
   const { meter, advance } = clocked()
-  // Seven messages of 100 tokens over 900ms each. Only the last five survive, so
-  // an hour-old session reports what the provider is doing now rather than what
-  // it averaged over lunch.
-  for (let message = 0; message < 7; message += 1) {
-    meter.begin('cap')
-    for (let index = 0; index < 10; index += 1) {
-      advance(100)
-      meter.push('cap', 'x'.repeat(40))
-    }
-    meter.settle('cap', 100)
-  }
-  const capped = meter.read('cap')
-  check('the average keeps the last few messages, not all of them', capped.average?.samples === 5, JSON.stringify(capped.average))
-  check('and the tokens show it is five messages, not seven', capped.average?.tokens === 500, JSON.stringify(capped.average))
-}
-
-{
-  const { meter, advance } = clocked()
-  // A settle that never saw a delta teaches no scale and records no sample: the
-  // provider reported tokens for text this meter never counted.
+  // A settle that never saw a delta teaches no scale and reports nothing: the
+  // provider reported tokens for text this meter never counted. It must not
+  // overwrite the last reading either — an empty half of an interrupted turn
+  // would otherwise replace a real number with a made-up one.
   for (let index = 0; index < 10; index += 1) {
     advance(100)
     meter.push('empty', 'x'.repeat(40))
   }
   meter.settle('empty', 100)
-  const before = meter.read('empty').average
+  const before = meter.read('empty')
   meter.settle('empty', 500)
-  const after = meter.read('empty').average
-  check('a settle with no text behind it adds no sample', after?.samples === before?.samples, JSON.stringify([before, after]))
-  check('and it does not move the average either', after?.tokens === before?.tokens, JSON.stringify([before, after]))
+  const after = meter.read('empty')
+  check('a settle with no text behind it reports nothing', after.last?.tokens === before.last?.tokens, JSON.stringify([before.last, after.last]))
+  check('and it does not move the revision either', after.revision === before.revision, JSON.stringify([before.revision, after.revision]))
 }
 
 {
   const { meter, advance } = clocked()
-  // The average outlives the window: ten seconds after the reply ended the
-  // instantaneous reading is gone but the standing number is not.
+  // The last reading outlives the window: thirty seconds after the reply ended the
+  // instantaneous number is gone but the settled one is not, which is the whole
+  // reason the badge is findable.
   for (let index = 0; index < 10; index += 1) {
     advance(100)
     meter.push('stand', 'x'.repeat(40))
@@ -485,8 +486,8 @@ check('and neither is a missing delta', estimateTokens(undefined) === 0, String(
   advance(30_000)
   const later = meter.read('stand')
   check('the window has emptied by then', later.active === false, JSON.stringify(later))
-  check('but the average is still there', later.average !== null, JSON.stringify(later))
-  check('and it still says how many messages it covers', later.average?.samples === 1, JSON.stringify(later.average))
+  check('but the last reading is still there', later.last !== null, JSON.stringify(later))
+  check('and it still describes the reply that ended', later.last?.tokens === 100, JSON.stringify(later.last))
 }
 const summary = `${passed} passed, ${failed} failed`
 

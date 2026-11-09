@@ -878,6 +878,267 @@ async function route(overrides, req) {
   check('and it reads the session it was asked about', asked.length === 1 && asked[0] === 'agent-1', JSON.stringify(asked))
 }
 
+// ---- the long poll on the speed route ----
+//
+// The badge used to discover a reply by asking on a timer, and the timer had to
+// be slow enough not to be traffic — which made it slower than most replies. The
+// wait inverts that: the request stays open and is answered the moment the meter
+// moves. What has to be true of it is checked here, because a wait that never
+// ends is a hung panel and a wait that ends too early is the old polling again.
+//
+// These cases go through `routeHeld` rather than `route`. The wait's own interval
+// is `unref`'d so a plugin cannot pin a headless host open, which in a test means
+// a pending wait is the only handle left and node resolves the whole run instead
+// of the promise — the "unsettled top-level await" warning, and no tally line at
+// all. Holding the loop for the duration also gives every case a deadline, so a
+// wait that never ends fails an assertion instead of hanging CI.
+async function routeHeld(deps, req, limitMs = 5000) {
+  const keepAlive = setInterval(() => {}, 1000)
+  let deadline = null
+  try {
+    return await Promise.race([
+      route(deps, req),
+      new Promise((resolve) => {
+        deadline = setTimeout(() => resolve({ statusCode: 0, body: '', timedOut: true }), limitMs)
+      }),
+    ])
+  } finally {
+    clearInterval(keepAlive)
+    if (deadline !== null) clearTimeout(deadline)
+  }
+}
+
+/**
+ * The body of a response that may never have been written.
+ *
+ * A case that goes through `routeHeld` can come back with `timedOut` and no
+ * body at all, and reading it has to fail an assertion rather than throw: a
+ * mutation that makes the wait hang is a broken wait, and it should be counted
+ * as one. Parsing an empty string takes the whole suite down with it instead,
+ * which reports nothing about the line that actually broke.
+ */
+function heldBodyOf(res) {
+  return res.body === undefined || res.body === '' ? {} : JSON.parse(res.body)
+}
+
+{
+  // No `after`: a plain read, answered at once. This is the request the panel
+  // makes when it opens, and delaying it would delay the first paint.
+  const started = Date.now()
+  const res = await routeHeld(
+    { speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 3 }), speedRevision: () => 0 },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1` }),
+  )
+  check('a request with no revision is answered at once', res.timedOut !== true && Date.now() - started < 1000, String(Date.now() - started))
+  check('and it still carries the reading', heldBodyOf(res).data?.revision === 3, String(res.body))
+}
+
+{
+  // The caller is behind: it last saw revision 3 and the meter is already at 9.
+  // There is something new to say, so the wait ends on the first look rather
+  // than sitting out the whole deadline.
+  //
+  // The counter is constant on purpose. A stub that increments on every call
+  // makes the first tick see a change whatever the request asked for, which
+  // passes against a server that never reads `after` at all — the exact defect
+  // this case exists to catch. The number has to be the thing compared.
+  const started = Date.now()
+  const res = await routeHeld(
+    {
+      speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 9 }),
+      speedRevision: () => 9,
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=3` }),
+  )
+  check('a revision that moved ends the wait early', res.timedOut !== true && Date.now() - started < 2000, String(Date.now() - started))
+  check('and the answer is the new reading', heldBodyOf(res).data?.revision === 9, String(res.body))
+}
+
+{
+  // The other half of the same comparison: the caller is up to date. Nothing has
+  // happened since revision 9, so there is nothing to say and the wait has to sit
+  // there. A server that answered anyway would be the old fast polling with an
+  // open connection bolted onto it — and the panel would ask again immediately,
+  // in a loop.
+  const held = await routeHeld(
+    {
+      speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 9 }),
+      speedRevision: () => 9,
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=9` }),
+    800,
+  )
+  check('a revision that has not moved keeps the request open', held.timedOut === true, String(held.timedOut))
+  check('and nothing is written while it waits', held.body === '', String(held.body))
+}
+
+{
+  // The client goes away — a panel closed, a conversation switched. The wait has
+  // to end with it: an interval left ticking per abandoned request is a leak that
+  // only shows up after an afternoon of use. The request here carries its own
+  // `once`, because the shared fixture has no event plumbing and this is the one
+  // case that needs it.
+  const base = fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=1` })
+  const listeners = new Map()
+  const req = {
+    ...base,
+    once(name, handler) {
+      const list = listeners.get(name) ?? []
+      list.push(handler)
+      listeners.set(name, list)
+      return req
+    },
+    fire(name) {
+      for (const handler of listeners.get(name) ?? []) handler()
+    },
+  }
+  let answered = false
+  const pending = routeHeld(
+    { speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 1 }), speedRevision: () => 1 },
+    req,
+  ).then((res) => { answered = true; return res })
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  check('a wait with nothing to report is still waiting', answered === false, String(answered))
+  req.fire('close')
+  const res = await pending
+  check('and closing the request ends it', answered === true, String(answered))
+  check('with the reading it had', heldBodyOf(res).data?.revision === 1, String(res.body))
+}
+
+{
+  // HEAD never waits. A health check or a `curl -I` holds no socket open for
+  // twenty-five seconds, and there is no body to be fresher for. `routeHeld` is
+  // what turns a broken version of this into a failed assertion: a HEAD that
+  // waited would sit on the deadline, and awaiting it directly would take the
+  // whole run down with it instead of saying which line broke.
+  const started = Date.now()
+  const res = await routeHeld(
+    { speedOf: () => ({ tokens: 1, ms: 1, tps: 1, active: true, last: null, revision: 1 }), speedRevision: () => 1 },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=1`, method: 'HEAD' }),
+  )
+  check('a head request does not wait', res.timedOut !== true && Date.now() - started < 1000, String(Date.now() - started))
+  check('and it answers 200', res.statusCode === 200, String(res.statusCode))
+}
+
+{
+  // A host half with no counter cannot support the wait. It must answer rather
+  // than throw or hang: the badge has to keep working against an older server,
+  // and the only thing it loses is the low latency.
+  const started = Date.now()
+  const res = await routeHeld(
+    { speedOf: () => ({ tokens: 1, ms: 1, tps: 1, active: true, last: null, revision: 1 }) },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=1` }),
+  )
+  check('a host with no revision answers the wait at once', res.timedOut !== true && Date.now() - started < 1000, String(Date.now() - started))
+  check('and it still reports the reading', heldBodyOf(res).data?.tps === 1, String(res.body))
+}
+
+{
+  // A garbage `after` is a plain read, not a 400: the value is an optimisation,
+  // and a client that sends something unexpected should lose the optimisation
+  // rather than the badge.
+  const started = Date.now()
+  const res = await routeHeld(
+    { speedOf: () => ({ tokens: 1, ms: 1, tps: 1, active: true, last: null, revision: 1 }), speedRevision: () => 1 },
+    fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=later` }),
+  )
+  check('a nonsense revision answers the wait at once', res.timedOut !== true && Date.now() - started < 1000, String(Date.now() - started))
+  check('and it does not become an error', res.statusCode === 200, String(res.statusCode))
+}
+
+{
+  // The deadline is the whole difference between "a long poll" and "a hung
+  // request": a conversation that never produces another token would otherwise
+  // hold the connection open forever, and a panel that went quiet would never
+  // find out that the reply it is waiting for was abandoned an hour ago. Waiting
+  // the real `SPEED_WAIT_MS` out is twenty-five seconds of test run, so the clock
+  // is moved instead — `setInterval` is what the wait actually calls, and a stub
+  // that runs the callback while reporting a time past the deadline is the same
+  // situation the real timer reaches on its own.
+  const realNow = Date.now
+  const realSet = globalThis.setInterval
+  const realClear = globalThis.clearInterval
+  let ticks = 0
+  let offset = 0
+  try {
+    Date.now = () => realNow() + offset
+    globalThis.setInterval = (fn, ms) => {
+      ticks += 1
+      // Step past the deadline on the first tick. The wait computes `deadline`
+      // from the same clock it later compares against, so a clock that merely
+      // stands still can never reach it, and a stub that never ticks would make
+      // this block hang rather than fail.
+      offset += 60000
+      // Deferred, not immediate: `speedWait` assigns the handle *after* calling
+      // `setInterval`, so a tick that ran synchronously would reach `finish`
+      // while `timer` is still in its temporal dead zone and throw instead of
+      // testing the deadline.
+      Promise.resolve().then(fn)
+      return { stub: true, ms }
+    }
+    globalThis.clearInterval = () => {}
+    const started = realNow()
+    const res = await routeHeld(
+      { speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 4 }), speedRevision: () => 4 },
+      fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=4` }),
+      2000,
+    )
+    const parsed = res.body === '' ? {} : JSON.parse(res.body)
+    check('a wait with nothing to report ends at its deadline', res.timedOut !== true, String(res.timedOut))
+    check('and the deadline is the only thing that ended it', ticks > 0 && realNow() - started < 2000, String(ticks))
+    check('and it answers with the reading rather than nothing', parsed.data?.revision === 4, String(res.body))
+  } finally {
+    Date.now = realNow
+    globalThis.setInterval = realSet
+    globalThis.clearInterval = realClear
+  }
+}
+
+{
+  // The interval is cleared on the way out, on every path out. In a running host
+  // the timer is not `unref`'d — that is for a headless process — so one left
+  // armed per request ticks a hundred times a second for the life of the plugin,
+  // and a closed panel produces one of these per open.
+  //
+  // The counter moves between the read that opens the wait (`started`) and the
+  // first tick, which is exactly what a token arriving does. The stub runs the
+  // tick straight away, so the answer comes back without waiting out a step.
+  const realSet = globalThis.setInterval
+  const realClear = globalThis.clearInterval
+  const scheduled = []
+  const cleared = []
+  let reads = 0
+  try {
+    globalThis.setInterval = (fn, ms) => {
+      const handle = { fn, ms, stub: true }
+      scheduled.push(handle)
+      // Same reason as the deadline block: the handle exists before the callback
+      // may run, so the tick has to wait a microtask.
+      Promise.resolve().then(fn)
+      return handle
+    }
+    globalThis.clearInterval = (handle) => { cleared.push(handle) }
+    const res = await routeHeld(
+      {
+        speedOf: () => ({ tokens: 1, ms: 1, tps: 1, active: true, last: null, revision: 2 }),
+        speedRevision: () => {
+          reads += 1
+          return reads === 1 ? 2 : 3
+        },
+      },
+      fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-1&after=2` }),
+      2000,
+    )
+    check('a wait that is answered schedules one timer', scheduled.filter((row) => row.ms === 100).length === 1, String(scheduled.length))
+    const waited = scheduled.filter((row) => row.ms === 100)
+    check('and it takes that timer away again', cleared.length >= 1 && cleared.includes(waited[0]), `${scheduled.length} vs ${cleared.length}`)
+    check('and the answer still arrives', heldBodyOf(res).data?.revision === 2, String(res.body))
+  } finally {
+    globalThis.setInterval = realSet
+    globalThis.clearInterval = realClear
+  }
+}
+
 {
   const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/unknown` }))
   check('an unknown route is a 404', res.statusCode === 404, String(res.statusCode))

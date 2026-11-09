@@ -71,20 +71,6 @@ const RATIO_FLOOR = 0.25
 const RATIO_CEILING = 4
 
 /**
- * How many finished messages the standing average is taken over.
- *
- * "The last few" rather than "all of them": a session that has been open for an
- * hour should report how this provider is doing now, not what it averaged at
- * lunch. Five is roughly a screenful of turns, and long enough that a single
- * slow reply does not define the number.
- *
- * The average exists because a two-second window answers "how fast is it going"
- * and nothing at all answers "how fast did that go" once the reply is over. The
- * second question is the one people ask when they look up after it finishes.
- */
-const AVERAGE_SAMPLES = 5
-
-/**
  * Estimate the tokens in a piece of text.
  *
  * @param {string} text - the delta as it arrived.
@@ -111,7 +97,15 @@ export class SpeedMeter {
    */
   constructor(options = {}) {
     this.now = typeof options.now === 'function' ? options.now : () => Date.now()
-    /** @type {Map<string, { marks: Array<{ at: number, tokens: number }>, message: number, messageAt: number, samples: Array<{ tokens: number, ms: number }> }>} */
+    /**
+     * @type {Map<string, {
+     *   marks: Array<{ at: number, tokens: number }>,
+     *   message: number,
+     *   messageAt: number,
+     *   last: { tokens: number, ms: number } | null,
+     *   revision: number,
+     * }>}
+     */
     this.sessions = new Map()
     /** @type {Map<string, number>} */
     this.ratios = new Map()
@@ -121,13 +115,13 @@ export class SpeedMeter {
    * One entry per session, created on first use.
    *
    * @param {string} agentId - the session.
-   * @returns {{ marks: Array<{ at: number, tokens: number }>, message: number, messageAt: number, samples: Array<{ tokens: number, ms: number }> } | undefined} the entry.
+   * @returns {{ marks: Array<{ at: number, tokens: number }>, message: number, messageAt: number, last: { tokens: number, ms: number } | null, revision: number } | undefined} the entry.
    */
   entryOf(agentId) {
     if (typeof agentId !== 'string' || agentId.length === 0) return undefined
     const existing = this.sessions.get(agentId)
     if (existing !== undefined) return existing
-    const created = { marks: [], message: 0, messageAt: 0, samples: [] }
+    const created = { marks: [], message: 0, messageAt: 0, last: null, revision: 0 }
     this.sessions.set(agentId, created)
     return created
   }
@@ -157,6 +151,11 @@ export class SpeedMeter {
     entry.marks.push({ at, tokens })
     entry.message += tokens
     this.prune(entry, at)
+    // The long poll watches this: a request that was waiting for a reply to
+    // start has nothing else to look at. Bumping it here rather than leaving the
+    // waiter to spot `marks` means the wait ends at the first delta of the reply
+    // instead of at the first delta the waiter happens to ask after.
+    entry.revision += 1
   }
 
   /**
@@ -226,11 +225,14 @@ export class SpeedMeter {
     const ratio = outputTokens / measured
     if (!Number.isFinite(ratio) || ratio <= 0) return
     this.ratios.set(agentId, Math.min(RATIO_CEILING, Math.max(RATIO_FLOOR, ratio)))
-    // A sample is what this message actually did, in the provider's own tokens:
-    // its count over its own duration. Recorded after the scale is learned, so
-    // the numbers the average is built from never depend on the estimate.
-    entry.samples.push({ tokens: outputTokens, ms: span })
-    if (entry.samples.length > AVERAGE_SAMPLES) entry.samples.splice(0, entry.samples.length - AVERAGE_SAMPLES)
+    // What this message actually did, in the provider's own tokens: its count
+    // over its own duration. Recorded after the scale is learned, so the number
+    // the badge shows between replies never depends on the estimate. Only the
+    // last one is kept — the question it answers is "how fast was that reply",
+    // and a mean over older replies answers a question the reader did not ask
+    // about a reply they were not watching.
+    entry.last = { tokens: outputTokens, ms: span }
+    entry.revision += 1
   }
 
   /**
@@ -238,25 +240,30 @@ export class SpeedMeter {
    *
    * Two numbers come back, and they answer different questions. `tps` is the
    * last two seconds — "how fast is it going right now", present only while
-   * something is arriving. `average` is the last few finished messages —
-   * "how fast is this provider going", present from the first settled message
-   * until the session ends. The badge needs both: the first is what a reader
-   * wants while watching, the second is what they want when they look up after
-   * it finished, which is most of the time.
+   * something is arriving. `last` is the reply that finished before it —
+   * "how fast did that go", present from the first settled message until the
+   * session ends. The badge needs both: one while watching, the other for the
+   * rest of the time, which is most of it.
+   *
+   * `revision` changes whenever the reading could say something new — the first
+   * delta of a reply, or a message settling — and exists for the long poll: an
+   * idle client has no reason to ask four times a second, and a plain timer is
+   * what made the badge miss the first seconds of a reply altogether.
    *
    * @param {string} agentId - the session.
-   * @returns {{ tokens: number, ms: number, tps: number, active: boolean, average: { tokens: number, ms: number, tps: number, samples: number } | null }} the
+   * @returns {{ tokens: number, ms: number, tps: number, active: boolean, last: { tokens: number, ms: number, tps: number } | null, revision: number }} the
    *   reading. `active` is false when the window is empty, which is the client's
    *   signal to slow down — a finished turn decays to zero over one window
    *   rather than snapping to empty on the last delta.
    */
   read(agentId) {
     const entry = this.sessions.get(agentId)
-    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false, average: null }
-    const average = this.averageOf(entry)
+    if (entry === undefined) return { tokens: 0, ms: 0, tps: 0, active: false, last: null, revision: 0 }
+    const last = this.lastOf(entry)
+    const revision = entry.revision
     const at = this.now()
     this.prune(entry, at)
-    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: false, average }
+    if (entry.marks.length === 0) return { tokens: 0, ms: 0, tps: 0, active: false, last, revision }
 
     let estimated = 0
     let oldest = at
@@ -271,41 +278,42 @@ export class SpeedMeter {
       ms: Math.round(ms),
       tps: scaled / (ms / 1000),
       active: true,
-      average,
+      last,
+      revision,
     }
   }
 
   /**
-   * The standing average over the last few finished messages.
+   * The number the badge shows between replies.
    *
-   * Summed tokens over summed duration, not the mean of per-message rates: a
-   * four-token message that took half a second is not as informative as a
-   * thousand-token message that took twenty, and averaging the rates would give
-   * them equal weight. Weighting by duration is what "how fast did these go"
-   * means.
-   *
-   * @param {{ samples: Array<{ tokens: number, ms: number }> }} entry - one session's entry.
-   * @returns {{ tokens: number, ms: number, tps: number, samples: number } | null} the
-   *   average, or null before anything has settled.
+   * @param {{ last: { tokens: number, ms: number } | null }} entry - one session's entry.
+   * @returns {{ tokens: number, ms: number, tps: number } | null} the last finished
+   *   reply, or null before anything has settled.
    */
-  averageOf(entry) {
-    // The empty case is the only one worth naming: every sample's `ms` is floored
-    // at `MIN_SPAN_MS` by `settle`, so a non-empty list can never sum to zero. A
-    // guard for that would be a line no test could reach — the same reason the
-    // four shadowed guards came out of `settle`.
-    if (entry.samples.length === 0) return null
-    let tokens = 0
-    let ms = 0
-    for (const sample of entry.samples) {
-      tokens += sample.tokens
-      ms += sample.ms
-    }
+  lastOf(entry) {
+    if (entry.last === null) return null
+    // `ms` is floored at `MIN_SPAN_MS` by `settle`, so this cannot be a division
+    // by zero: a guard here would be a line no test could reach, which is the
+    // same reason the four shadowed guards came out of `settle`.
     return {
-      tokens: Math.round(tokens),
-      ms: Math.round(ms),
-      tps: tokens / (ms / 1000),
-      samples: entry.samples.length,
+      tokens: Math.round(entry.last.tokens),
+      ms: Math.round(entry.last.ms),
+      tps: entry.last.tokens / (entry.last.ms / 1000),
     }
+  }
+
+  /**
+   * The revision a long poll can wait past.
+   *
+   * Reads the counter without building a reading: a waiting request only needs
+   * to know whether something changed, and computing numbers per second per
+   * waiting client to throw them away is the work this avoids.
+   *
+   * @param {string} agentId - the session.
+   * @returns {number} the current revision, 0 for a session that never settled.
+   */
+  revisionOf(agentId) {
+    return this.sessions.get(agentId)?.revision ?? 0
   }
 
   /**

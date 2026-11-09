@@ -431,6 +431,8 @@ try {
     const idle = await readSpeed()
     check('a session that has not streamed reads as inactive', idle.data?.active === false, JSON.stringify(idle))
     check('and it reports no speed rather than an error', idle.ok === true && idle.data?.tps === 0, JSON.stringify(idle))
+    check('and it has nothing from a previous message', idle.data?.last === null, JSON.stringify(idle.data?.last))
+    check('and its revision starts at nothing', idle.data?.revision === 0, String(idle.data?.revision))
 
     // The frames around a delta are not deltas. A start marker opens the attempt
     // and an end marker closes it; counting either as text would make the number
@@ -450,6 +452,11 @@ try {
     check('a text delta becomes a live reading', streamed.data?.active === true, JSON.stringify(streamed))
     check('and the reading counts the deltas', streamed.data?.tokens >= 20, JSON.stringify(streamed))
     check('and it is a positive speed', streamed.data?.tps > 0, JSON.stringify(streamed))
+    // The revision is what the long poll watches. A request sitting open with
+    // `after=<n>` returns the moment this number changes, so the first delta of a
+    // reply is the event that wakes the badge — not the end of the reply, which is
+    // all the two-second window would have to say by then.
+    check('and each delta moved the revision', streamed.data?.revision === 3, String(streamed.data?.revision))
 
     // Reasoning deltas are deliberately not counted: thinking streams at its own
     // rate, and folding it in reports a speed nobody is reading.
@@ -478,6 +485,12 @@ try {
     })
     const settled = await readSpeed()
     check('a real token count rescales the estimate', settled.data?.tokens === streamed.data?.tokens * 4, `${streamed.data?.tokens} -> ${settled.data?.tokens}`)
+    // Settling also moves the revision: the number the badge shows changes from a
+    // live reading to "the last message", and a poll waiting on the old revision
+    // has to be told. It carries the provider's own count, not the estimate.
+    check('and settling moved the revision too', settled.data?.revision === 4, String(settled.data?.revision))
+    check('and it left the finished message behind', settled.data?.last?.tokens === 300, JSON.stringify(settled.data?.last))
+    check('and the last message knows how long it took', settled.data?.last?.ms > 0, JSON.stringify(settled.data?.last))
 
     // `outputTokens` counts reasoning too, and this meter counts text only. A
     // settle that used the whole completion would inflate the scale by however
@@ -567,6 +580,7 @@ try {
     host.emit('agent/disposed', { agent: watcher })
     const gone = await readSpeed()
     check('disposal forgets the speed too', gone.data?.active === false && gone.data?.tokens === 0, JSON.stringify(gone))
+    check('and it forgets the last message with it', gone.data?.last === null, JSON.stringify(gone.data?.last))
   }
   check('five commands registered', host.commands.size === 5, [...host.commands.keys()].join(','))
   check('hint context registered', host.contexts.has('skill-evolve:hint'))

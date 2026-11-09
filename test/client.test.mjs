@@ -576,6 +576,15 @@ function boot(options) {
       if (path.startsWith(prefix) === false) continue
       if (answer instanceof Error) throw answer
       const payload = typeof answer === 'function' ? answer(init, target) : answer
+      // A held request takes time, and the client measures that time with the
+      // injected clock — `schedule()` runs after the answer arrives, so "how
+      // long was the request held" is the whole input to the next delay. Making
+      // the fixture advance the clock is how a test can say "this host held it
+      // for the full window" without real waiting; a suite that slept 25
+      // seconds per case would be neither fast nor deterministic.
+      if (settings.latency !== undefined) {
+        clock.at += typeof settings.latency === 'function' ? settings.latency(path) : settings.latency
+      }
       return { ok: true, status: 200, json: async () => payload }
     }
     throw new Error(`no route for ${path}`)
@@ -3289,15 +3298,89 @@ async function openPanel(routes, options) {
 }
 
 {
-  // Never active at all: straight to the idle clock. The two-second clock is for
-  // a reading that was live a moment ago, not for one that never existed.
+  // The long poll is the whole fix for "the badge only flashed". The first
+  // request has no revision to name, so it is answered at once and the panel
+  // paints; every request after that carries the last revision the server
+  // reported, which is what makes the server hold it open until the meter moves.
+  // Without the `after`, the server has nothing to compare against and answers
+  // immediately every time — which is the polling this replaced.
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': speedScript([
+      { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true, revision: 7 } },
+      { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true, revision: 8 } },
+    ]),
+  })
+  const urls = () => instance.calls.filter((row) => row.url.includes('/speed')).map((row) => row.url)
+  check('the first request names no revision', urls()[0]?.includes('after=') === false, JSON.stringify(urls()))
+  instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
+  await settle()
+  check('and the next one waits past the revision it was given', urls()[1]?.includes('after=7'), JSON.stringify(urls()))
+  instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
+  await settle()
+  check('which moves on with the answer', urls()[2]?.includes('after=8'), JSON.stringify(urls()))
+  // And it can be taken back. A long poll is unanswered for up to twenty-five
+  // seconds by design, so a conversation the reader has left would otherwise
+  // keep its connection — and the server's hundred-millisecond interval — alive
+  // until the deadline. Switching a few times in a row would leave the new
+  // conversation's first request queued behind the abandoned ones.
+  const flight = instance.calls.filter((row) => row.url.includes('/speed')).at(-1)?.init?.signal
+  check('every request is made with a way to cancel it', flight !== undefined, String(flight))
+  const signal = flight
+  check('and that signal is not already aborted', signal?.aborted === false, String(signal?.aborted))
+  instance.renderer.unmount()
+  check('unmounting cancels the request in flight', signal?.aborted === true, String(signal?.aborted))
+}
+{
+  // Never active at all, and this host answered instantly. An instant answer is
+  // the only evidence the client has that `after` was ignored — the request was
+  // not held — so asking again at once would spin. The slow clock is wrong too:
+  // there is nothing warm to watch. What is left is the idle spacing.
   const { instance } = await openPanel({
     ...panelRoutes(),
     '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
   })
-  const slow = instance.timers.filter((row) => row.ms === 2000 && row.cleared === false)
-  const idle = instance.timers.filter((row) => row.ms === 10000 && row.cleared === false)
-  check('a session that has never streamed goes straight to the idle clock', slow.length === 0 && idle.length >= 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+  const ms = instance.timers.map((row) => row.ms)
+  check('a session that has never streamed does not use the slow clock', instance.timers.filter((row) => row.ms === 2000 && row.cleared === false).length === 0, JSON.stringify(ms))
+  check('and an answer that came back at once is not repeated at once', instance.timers.filter((row) => row.ms === 0).length === 0, JSON.stringify(ms))
+  check('so it settles on the idle spacing until something changes', instance.timers.filter((row) => row.ms === 10000 && row.cleared === false).length === 1, JSON.stringify(ms))
+}
+
+{
+  // The host held the request for the whole window, which is the only evidence
+  // the client has that `after` is honoured. The next ask has to go out at once:
+  // `schedule()` runs after the await, so any constant delay here is not a margin
+  // around the server's deadline, it is a second quiet period as long as the
+  // first — and a reply that lands inside it is one the badge never sees at all.
+  // The held window is simulated by advancing the fixture clock by the latency
+  // the route took, which is exactly the quantity the client measures.
+  const asked = []
+  const { instance } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/speed': speedScript([{ ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } }], asked),
+    },
+    { now: 0, latency: 25000 },
+  )
+  const ms = instance.timers.map((row) => row.ms)
+  check('a request that was held for the whole window is repeated at once', instance.timers.filter((row) => row.ms === 0 && row.cleared === false).length === 1, JSON.stringify(ms))
+  check('and nothing waits out a deadline that has already passed', instance.timers.filter((row) => row.ms === 27000).length === 0, JSON.stringify(ms))
+}
+
+{
+  // A live reading arms the repaint too. A reply goes quiet for longer than the
+  // grace period between paragraphs and while a tool call is being assembled,
+  // and with a held request the next answer can be a long way off. Without the
+  // repaint the badge would keep the last live number, drawn in the live style,
+  // for the whole pause — which is the number telling the reader something that
+  // stopped being true.
+  const { instance } = await openPanel({
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true } },
+  })
+  const ms = instance.timers.map((row) => row.ms)
+  check('a live reading still schedules the ask that keeps it moving', instance.timers.filter((row) => row.ms === 250 && row.cleared === false).length === 1, JSON.stringify(ms))
+  check('and a live reading arms a repaint as well', instance.timers.filter((row) => row.ms === 4000 && row.cleared === false).length === 1, JSON.stringify(ms))
 }
 
 {
@@ -3426,54 +3509,55 @@ async function openPanel(routes, options) {
 }
 
 {
-  // A settled session: nothing arriving, but five messages have reported their
-  // own token counts. This is the state a reader is in almost all the time —
-  // they look up after the reply ends — so the widget has to carry the standing
-  // number, not a dash and not a stale window.
+  // A settled session: nothing arriving, but the last reply reported its own token
+  // count. This is the state a reader is in almost all the time — they look up
+  // after the reply ends — so the widget has to carry that reply's number, not a
+  // dash and not a stale window.
   const { tree } = await openPanel({
     ...panelRoutes(),
     '/api/ui-evolve/speed': {
       ok: true,
-      data: { tokens: 0, ms: 0, tps: 0, active: false, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } },
+      data: { tokens: 0, ms: 0, tps: 0, active: false, last: { tokens: 1500, ms: 30_000, tps: 50 }, revision: 3 },
     },
   })
   const badge = firstByClass(tree, 'dsse-speed')
-  check('a settled session shows the standing average', badge !== undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
-  check('and the number is the average, not a dash', textOf(badge).includes('50'), textOf(badge))
+  check('a settled session shows the last reply', badge !== undefined, textOf(firstByClass(tree, 'dsse-top-row')).slice(0, 120))
+  check('and the number is that reply, not a dash', textOf(badge).includes('50'), textOf(badge))
   check('and it still carries the unit', textOf(badge).includes('tok/s'), textOf(badge))
-  check('and it is drawn as the standing kind', (badge?.props?.className ?? '').includes('dsse-speed-average'), String(badge?.props?.className))
-  // Which number this is has to reach someone who cannot see the colour: the
-  // same digits mean different things live and settled.
-  check('and the label says how many messages it covers', (badge?.props?.['aria-label'] ?? '').includes('最近 5 次'), String(badge?.props?.['aria-label']))
-  check('and the tooltip says it is an average', (badge?.props?.title ?? '').includes('平均'), String(badge?.props?.title))
+  check('and it is drawn as the settled kind', (badge?.props?.className ?? '').includes('dsse-speed-previous'), String(badge?.props?.className))
+  // Which number this is has to reach someone who cannot see the colour: the same
+  // digits mean different things live and settled, and "50 tok/s" with no subject
+  // is the sentence this whole state exists to avoid.
+  check('and the label says it describes the previous reply', (badge?.props?.['aria-label'] ?? '').includes('上一轮'), String(badge?.props?.['aria-label']))
+  check('and the tooltip says the same', (badge?.props?.title ?? '').includes('上一轮'), String(badge?.props?.title))
 }
 
 {
-  // While text is arriving the live window wins: it is the sharper statement
-  // about right now, and the average is still there underneath.
+  // While text is arriving the live window wins: it is the sharper statement about
+  // right now, and the settled number is still there underneath.
   const { tree } = await openPanel({
     ...panelRoutes(),
     '/api/ui-evolve/speed': {
       ok: true,
-      data: { tokens: 30, ms: 1000, tps: 30, active: true, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } },
+      data: { tokens: 30, ms: 1000, tps: 30, active: true, last: { tokens: 1500, ms: 30_000, tps: 50 }, revision: 4 },
     },
   })
   const badge = firstByClass(tree, 'dsse-speed')
-  check('a live reading beats the standing average', textOf(badge).includes('30'), textOf(badge))
-  check('and it is not drawn as the standing kind', (badge?.props?.className ?? '').includes('dsse-speed-average') === false, String(badge?.props?.className))
-  check('and the label does not claim an average', (badge?.props?.['aria-label'] ?? '').includes('平均') === false, String(badge?.props?.['aria-label']))
+  check('a live reading beats the last one', textOf(badge).includes('30'), textOf(badge))
+  check('and it is not drawn as the settled kind', (badge?.props?.className ?? '').includes('dsse-speed-previous') === false, String(badge?.props?.className))
+  check('and the label does not claim a previous reply', (badge?.props?.['aria-label'] ?? '').includes('上一轮') === false, String(badge?.props?.['aria-label']))
 }
 
 {
-  // Just after a reply ends the freshest statement is the window that closed,
-  // not the mean over five messages. Held wins inside the linger; the average
-  // takes over only once that reading is stale.
+  // Just after a reply ends the freshest statement is the window that closed, not
+  // the settled whole-message number. Held wins inside the linger; the settled
+  // number takes over only once that reading is stale.
   const { instance } = await openPanel(
     {
       ...panelRoutes(),
       '/api/ui-evolve/speed': speedScript([
-        { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true, average: null } },
-        { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false, average: { tokens: 1500, ms: 30_000, tps: 50, samples: 5 } } },
+        { ok: true, data: { tokens: 100, ms: 1000, tps: 100, active: true, last: null, revision: 1 } },
+        { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false, last: { tokens: 1500, ms: 30_000, tps: 50 }, revision: 2 } },
       ]),
     },
     { now: 1000 },
@@ -3481,14 +3565,14 @@ async function openPanel(routes, options) {
   instance.timers.filter((row) => row.ms === 250 && row.cleared === false)[0]?.fn?.()
   await settle()
   const during = await instance.renderer.deepRender(instance.seat('cards'))
-  check('the window that just closed outranks the average', textOf(firstByClass(during, 'dsse-speed')).includes('100'), textOf(firstByClass(during, 'dsse-speed')))
-  check('and it is not labelled as an average yet', (firstByClass(during, 'dsse-speed')?.props?.['aria-label'] ?? '').includes('平均') === false, String(firstByClass(during, 'dsse-speed')?.props?.['aria-label']))
+  check('the window that just closed outranks the last reply', textOf(firstByClass(during, 'dsse-speed')).includes('100'), textOf(firstByClass(during, 'dsse-speed')))
+  check('and it is not labelled as a previous reply yet', (firstByClass(during, 'dsse-speed')?.props?.['aria-label'] ?? '').includes('上一轮') === false, String(firstByClass(during, 'dsse-speed')?.props?.['aria-label']))
 
   instance.clock.at = 1000 + 4001
   const after = await instance.renderer.deepRender(instance.seat('cards'))
-  const standing = firstByClass(after, 'dsse-speed')
-  check('once that reading is stale the average takes over', textOf(standing).includes('50'), textOf(standing))
-  check('and it says so', (standing?.props?.className ?? '').includes('dsse-speed-average'), String(standing?.props?.className))
+  const settled = firstByClass(after, 'dsse-speed')
+  check('once that reading is stale the last reply takes over', textOf(settled).includes('50'), textOf(settled))
+  check('and it says so', (settled?.props?.className ?? '').includes('dsse-speed-previous'), String(settled?.props?.className))
 }
 
 {
@@ -3541,13 +3625,15 @@ async function openPanel(routes, options) {
     { now: 5000 },
   )
   const repaints = () => instance.timers.filter((row) => row.ms === 4000)
-  // First the live reading schedules the fast poll; firing it asks again and the
-  // answer is "empty but warm", which is what schedules the repaint.
+  // First the live reading arms a repaint and schedules the fast poll; firing it
+  // asks again and the answer is "empty but warm", which cancels that repaint and
+  // arms a fresh one. Two entries in the log is the expected shape — what matters
+  // is that only one of them is still live.
   const fast = instance.timers.filter((row) => row.ms === 250 && row.cleared === false)
   check('a live reading is being watched closely', fast.length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
   if (fast.length === 1 && typeof fast[0].fn === 'function') fast[0].fn()
   await settle()
-  check('an emptied window schedules the repaint', repaints().length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  check('an emptied window schedules the repaint', repaints().filter((row) => row.cleared === false).length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
   // The slow poll fires next and finds the window still warm, scheduling another
   // repaint. Two live repaint timers would mean the first is never cancelled.
   const slow = instance.timers.filter((row) => row.ms === 2000 && row.cleared === false)

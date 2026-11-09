@@ -71,6 +71,72 @@ const ROUTE_PREFIX = '/api/ui-evolve'
 const THE_SKILL_HALF_IS_ABSENT = 'the skill half is not installed, so the candidate queue is not available here'
 
 /**
+ * How long a long poll stays open, and how often it looks.
+ *
+ * The wait has to outlast the gap between two replies — a person reads one
+ * answer, thinks, then types — without being an indefinitely open socket a
+ * proxy will cut. Twenty-five seconds is under every common idle timeout and
+ * long enough that an idle badge is a handful of requests per minute rather than
+ * one every ten seconds that is always too late to be the first to know.
+ *
+ * The check interval is not a poll of a remote service: it reads one integer out
+ * of a `Map` this process owns, so it costs less than the response it is
+ * deciding not to send.
+ */
+const SPEED_WAIT_MS = 25 * 1000
+const SPEED_WAIT_STEP_MS = 100
+
+/**
+ * Hold a speed request open until the reading could say something new.
+ *
+ * A timer on the client discovers a reply up to one interval late, and that
+ * interval has to be long enough not to be traffic. This is the other way round:
+ * the request waits, and answers the moment the meter's revision moves. What it
+ * must never do is wait past the client's patience or into a socket that has
+ * already gone — hence the deadline, and the `close` listener that ends the wait
+ * the moment the browser navigates away. Without that listener the interval
+ * outlives the request it belongs to, once per abandoned panel.
+ *
+ * @param {object} deps - the api dependencies.
+ * @param {import('node:http').IncomingMessage} req - the request, for its close.
+ * @param {string} agentId - the session being watched.
+ * @param {URLSearchParams} params - the request's query.
+ * @returns {Promise<void>} resolves when it is time to answer, however that happened.
+ */
+function speedWait(deps, req, agentId, params) {
+  const after = Number.parseInt(params.get('after') ?? '', 10)
+  // No `after`, or a nonsense one: the caller asked for a plain read and gets
+  // one. Answering at once is also right for a client that has just opened the
+  // panel — it has nothing yet, and waiting would delay the first paint.
+  if (Number.isFinite(after) === false) return Promise.resolve()
+  if (typeof deps.speedRevision !== 'function') return Promise.resolve()
+
+  // `after` is the caller's own reading, not a flag saying "I would like a
+  // wait". Comparing against the revision at the moment the request happens to
+  // arrive would treat a change that landed between two polls as no change at
+  // all, and a reply that settles in that gap is the common case rather than the
+  // corner one: the caller would then sit out the whole deadline for a number
+  // that was already final when it asked.
+  const moved = () => deps.speedRevision(agentId) !== after
+  if (moved() === true) return Promise.resolve()
+
+  const deadline = Date.now() + SPEED_WAIT_MS
+  return new Promise((resolve) => {
+    const finish = () => {
+      clearInterval(timer)
+      resolve()
+    }
+    const timer = setInterval(() => {
+      if (moved() === true || Date.now() >= deadline) finish()
+    }, SPEED_WAIT_STEP_MS)
+    // The interval must not be the reason this process stays alive: a plugin that
+    // pinned the event loop open would keep a headless host running.
+    if (typeof timer.unref === 'function') timer.unref()
+    if (typeof req?.once === 'function') req.once('close', finish)
+  })
+}
+
+/**
  * Write one JSON response.
  *
  * `headOnly` exists because the client sends `HEAD` to probe a route without
@@ -416,6 +482,13 @@ function createPanelApi(deps) {
         if (typeof deps.speedOf !== 'function') {
           return json(res, 200, { ok: false, code: 'error.speed.absent', error: 'this panel does not measure output speed' }, headOnly)
         }
+        // The long poll. A badge that asks on a timer discovers a reply up to one
+        // interval late, and the interval has to be long enough not to be traffic
+        // — which was ten seconds, longer than most replies. `wait` turns the
+        // question around: the request stays open until the reading could say
+        // something new, then answers. It never waits on HEAD (a probe has no
+        // body to fill) and never waits when the client did not ask.
+        if (headOnly !== true) await speedWait(deps, req, agentId, url.searchParams)
         return json(res, 200, { ok: true, data: deps.speedOf(agentId) }, headOnly)
       }
       // `config` is a read on GET/HEAD and a write on POST. The read is checked

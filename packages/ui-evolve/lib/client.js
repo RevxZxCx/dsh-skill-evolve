@@ -65,28 +65,41 @@ window.__ModuleLoader__.load({
     const SPEED_FAST_MS = 250
 
     /**
-     * How often it asks when the window is empty.
+     * How often it asks back while a reply is arriving but no text is.
      *
-     * The turn is over, so nothing can change until the next one starts — but
-     * "stop asking entirely" would mean never noticing that it started. Two
-     * seconds is the longest gap that still catches a reply before its first
-     * sentence is finished.
+     * A reply pauses between paragraphs and while a tool call is assembled, so
+     * the window empties for a second or two in the middle of a turn. Asking
+     * again after two seconds is quick enough to catch the next paragraph and
+     * slow enough not to be the reason a quiet second is expensive.
      */
     const SPEED_SLOW_MS = 2000
 
     /**
-     * How often it asks once there is nothing left to show.
+     * How long the server is willing to hold a speed request open.
      *
-     * A panel sits open for hours. Asking at the live rate, forever, to discover
-     * that a conversation is still idle is a cost the host pays for a number
-     * nobody is looking at — so an idle badge asks forty times less often than a
-     * live one, which is a tenth of a request per second.
+     * The client has to agree with the server on this, or one of them gives up
+     * on a request the other is still deliberately not answering. Matching the
+     * server's `SPEED_WAIT_MS` is the whole of the contract, and it is also the
+     * signal read back off a response: an answer that took about this long
+     * means the request really was held, so the host honours `after` and the
+     * next one can be sent at once. An answer that came back immediately means
+     * this host answered without waiting, and asking again at once would spin.
      *
-     * The price is real and is not hidden here: after a long idle stretch the
-     * badge can be up to ten seconds late to notice a reply starting, so its
-     * first reading appears mid-sentence rather than at the first token. That is
-     * the intended trade — an idle panel is not what someone is watching, and the
-     * moment they switch to it the first request goes out immediately.
+     * It is not a poll interval. An idle badge holds one request open rather
+     * than making thirty small ones, which is what makes it free to be late
+     * never rather than late by up to a poll interval: the server answers the
+     * moment the meter moves.
+     */
+    const SPEED_WAIT_MS = 25000
+
+    /**
+     * How often it asks after a failure.
+     *
+     * A failed request means the route is missing (an older host half) or the
+     * host is restarting. Knocking on either at the live rate is a waste, and
+     * knocking at the idle rate would still be a request every ten seconds
+     * forever for an answer that is never coming — but stopping is worse,
+     * because a restart is temporary and the badge has to come back on its own.
      *
      * Deliberately not `REFRESH_MS`: two timers on the same beat are one timer
      * you cannot reason about. Anything that later has to tell "the panel
@@ -247,7 +260,7 @@ window.__ModuleLoader__.load({
 .dsse-top-row .dsse-queue{width:auto;min-height:32px;margin-left:auto;padding:0 12px}
 .dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:44px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
 .dsse-top-row .dsse-speed-idle{color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:.7}
-.dsse-top-row .dsse-speed-average{opacity:.85}
+.dsse-top-row .dsse-speed-previous{opacity:.85}
 .dsse-top-row .dsse-speed-unit{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.68em,9px)}
 .dsse-icon-btn{width:36px;height:36px;display:inline-grid;place-items:center;flex:0 0 auto;padding:0;border:0;border-radius:8px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-icon-btn:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
@@ -1184,27 +1197,31 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * How fast the answer is arriving, as a live number.
+     * How fast the answer is arriving, and how fast it went, in one place.
      *
      * The host already shows a tok/s pill, but it is the session's average: by
      * the twentieth turn it is mostly describing the first nineteen. This one
-     * answers the question a person actually asks while watching a reply arrive,
-     * which is "is it still moving".
+     * answers the question a person actually asks, which changes with the
+     * moment: while a reply arrives it is "is this moving and how fast", and
+     * after it ends it is "how fast was that one".
      *
-     * Three clocks, one state. While the server says the window has something in
-     * it, this asks four times a second — the number is the point and a number
-     * that updates every two seconds is not a live reading. When the window
-     * empties, it drops to one question every two seconds: the turn may be over,
-     * but the next one starts without warning and a badge that stopped asking
-     * would never notice. After a long quiet spell it drops again, to one question
-     * every ten seconds, because a panel sits open for hours and nobody is reading
-     * an idle number. The price is stated where `SPEED_IDLE_MS` is defined.
+     * Three states, two numbers:
+     *   live     — text is arriving right now; the last two seconds
+     *   previous — the reply is over; the speed of that whole message, which
+     *              stays until the next one starts
+     *   idle     — nothing has been measured yet in this conversation
+     * The middle state is why this widget is findable. A readout that only
+     * exists while a reply is arriving is a readout nobody sees: the moment a
+     * reader looks up is the moment it stops.
      *
-     * The number lingers for a few seconds after the window empties, because the
-     * moment the reader most wants to read it is the moment the reply finishes.
-     * Past that it draws a dash, and it keeps drawing it: the widget is permanent
-     * once the host has answered, and only a host that has never answered at all
-     * — no `/speed` route, an older half of the plugin — draws nothing.
+     * Asking, not polling, and the difference is the whole reason it works. An
+     * idle badge holds the request open (`&after=<revision>`) and the server
+     * answers the instant the meter changes, so the first number of a reply
+     * appears within a fraction of a second rather than up to one poll interval
+     * later — which, for the ten-second interval this used to have, was usually
+     * after the reply had already finished. While text is arriving it asks four
+     * times a second instead, because a number that updates once every two
+     * seconds is not a live reading.
      *
      * @param {object} props - props.
      * @param {string} props.sessionId - the conversation to measure.
@@ -1228,12 +1245,17 @@ window.__ModuleLoader__.load({
       const [known, setKnown] = React.useState(false)
       // A repaint ticket, and it is load-bearing. The held number outlives the
       // reading that produced it, so when the linger runs out something has to
-      // re-render the badge to turn that number into a dash — and nothing else
-      // fires at that moment: the next poll is up to ten seconds away, by which
-      // time a badge still claiming a speed has been wrong for six of them.
+      // re-render the badge to fall back from it — and nothing else fires at
+      // that moment: the pending long poll is waiting on the meter, and an idle
+      // meter does not move.
       const [, setTick] = React.useState(0)
       const held = React.useRef({ tps: 0, at: 0 })
       const request = React.useRef(0)
+      // The revision the server last reported. Sent back as `after`, this is what
+      // turns the next request into a long poll: the server holds it until the
+      // meter moves, so the badge learns about a reply starting without having to
+      // ask again and again to find out.
+      const revision = React.useRef(null)
 
       React.useEffect(() => {
         if (sessionId === '') return undefined
@@ -1241,11 +1263,20 @@ window.__ModuleLoader__.load({
         let timer = null
         let repaint = null
         let stopped = false
+        // The request in flight, so the cleanup can take it back. A long poll is
+        // deliberately unanswered for up to twenty-five seconds; without this the
+        // server keeps one connection and one hundred-millisecond interval alive
+        // per conversation the reader has already left, and switching a few times
+        // in a row leaves the new conversation's first request queued behind
+        // them.
+        let pending = null
         // A different conversation shares this component instance, so anything
         // held from the previous one has to go before the first request: the
         // badge would otherwise show the last conversation's number for up to
-        // the linger, which reads as this one's speed and is not.
+        // the linger, which reads as this one's speed and is not. The revision
+        // goes with it — it names a position in another conversation's meter.
         held.current = { tps: 0, at: 0 }
+        revision.current = null
         setReading(null)
         // `known` deliberately survives the reset: the question it answers is
         // about the host, not the conversation.
@@ -1258,32 +1289,57 @@ window.__ModuleLoader__.load({
         const ask = async () => {
           const ticket = ++request.current
           try {
-            const answer = await call(`/speed?agent=${encodeURIComponent(sessionId)}`)
+            // The first request has no revision to name, so it is answered at
+            // once — the panel must paint. Every later one waits for a change.
+            const after = revision.current
+            const query = after === null ? '' : `&after=${after}`
+            const flight = new AbortController()
+            pending = flight
+            const askedAt = Date.now()
+            const answer = await call(`/speed?agent=${encodeURIComponent(sessionId)}${query}`, { signal: flight.signal })
             if (live === false || ticket !== request.current) return
             const next = answer
+            const heldFor = Date.now() - askedAt
+            if (typeof next?.revision === 'number' && Number.isFinite(next.revision)) revision.current = next.revision
             const now = Date.now()
             if (next?.active === true && typeof next.tps === 'number' && Number.isFinite(next.tps) && next.tps > 0) {
               held.current = { tps: next.tps, at: now }
             }
             setReading(next)
             setKnown(true)
-            if (next?.active === true) {
-              schedule(SPEED_FAST_MS)
-              return
-            }
-            // Recently active, just not this instant: the reply may be between
-            // paragraphs or assembling a tool call, so keep watching closely.
-            // Long idle: drop a long way down and stop paying for it.
-            const warm = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS * 4
-            schedule(warm ? SPEED_SLOW_MS : SPEED_IDLE_MS)
             // The held number outlives the reading that produced it, so the badge
             // has to repaint when it expires — nothing else will. One timer, kept
             // in a variable: two polls in a row while warm would otherwise stack
             // a timer each, and none of them would be cancelled by the cleanup.
-            if (warm === true && held.current.at !== 0) {
+            // It is armed for every reading, including a live one: a reply can go
+            // quiet for longer than the grace period between paragraphs or while a
+            // tool call is assembled, and without this the last live number would
+            // stay on screen in the live style until the next answer arrives —
+            // which, with a held request, can be most of a minute.
+            if (held.current.at !== 0) {
               if (repaint !== null) clearTimeout(repaint)
               repaint = setTimeout(() => { repaint = null; setTick((count) => count + 1) }, SPEED_LINGER_MS)
             }
+            if (next?.active === true) {
+              schedule(SPEED_FAST_MS)
+              return
+            }
+            const warm = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS * 4
+            // How the next request is scheduled depends on what the last one did,
+            // not on a constant. `schedule()` runs after the await, so any delay
+            // chosen here is dead time *after* an answer has already arrived.
+            // A reply that took about the server's whole window was held on
+            // purpose: the meter had not moved, and the right move is to ask
+            // again now, so the next change is caught the instant it happens.
+            // Anything else — a near-instant answer — means this host ignored
+            // `after` and is a plain read; then a slow clock is the only thing
+            // between the badge and a spin loop.
+            const wasHeld = heldFor >= SPEED_WAIT_MS / 2
+            if (wasHeld === true) {
+              schedule(0)
+              return
+            }
+            schedule(warm === true ? SPEED_SLOW_MS : SPEED_IDLE_MS)
           } catch {
             if (live === false) return
             // A panel that vanishes because one request failed is worse than a
@@ -1303,49 +1359,46 @@ window.__ModuleLoader__.load({
           request.current += 1
           if (timer !== null) clearTimeout(timer)
           if (repaint !== null) clearTimeout(repaint)
+          // Aborting wakes the server's `close` listener, which is the one path
+          // out of the wait that does not cost the deadline.
+          if (pending !== null) pending.abort()
         }
       }, [sessionId])
 
       const now = Date.now()
-      // Four states, and which number they show is the whole point:
-      //   live    — text is arriving; the last two seconds, which is "now"
-      //   recent  — the window just closed and the linger has not run out yet;
-      //             the last real number, whether or not this session has
-      //             settled anything before
-      //   average — the linger is over but messages have settled; the last few
-      //             of them, which is "how fast this is going"
-      //   idle    — nothing has ever settled and there is no recent reading
-      // The order of `recent` and `average` below is not the order they are
-      // listed in: a reading that stopped four seconds ago is still fresher
-      // than a mean over the last five messages, so it wins.
-      // The average is the state a reader actually spends their time in: they
-      // look up after the reply finishes, and at that moment a two-second window
-      // says nothing. That number stays for the rest of the session, which is
-      // what makes the widget findable at all.
+      // Three states, and which number they show is the whole point:
+      //   live     — text is arriving; the last two seconds, which is "now"
+      //   previous — the last message has settled; its whole speed, which is
+      //              "how fast that one went" and stays until the next starts
+      //   idle     — nothing has settled in this conversation yet
+      // There is a fourth shape on screen but not a fourth state: for a few
+      // seconds after a reply ends the held live number is still fresher than
+      // the settled one, so it wins. That is the linger, and it is shorter than
+      // the gap between two replies by design.
       const liveReading = reading?.active === true ? reading : null
-      const average = reading?.average !== null && typeof reading?.average?.tps === 'number' && Number.isFinite(reading.average.tps) && reading.average.tps > 0 ? reading.average : null
+      const last = reading?.last !== null && typeof reading?.last?.tps === 'number' && Number.isFinite(reading.last.tps) && reading.last.tps > 0 ? reading.last : null
       const heldFresh = held.current.at !== 0 && now - held.current.at < SPEED_LINGER_MS
       if (known === false) return null
-      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : average !== null ? average.tps : 0
+      const shown = liveReading !== null ? liveReading.tps : heldFresh === true ? held.current.tps : last !== null ? last.tps : 0
       const measured = typeof shown === 'number' && Number.isFinite(shown) === true && shown > 0
       const idle = measured === false
-      // `average !== null && liveReading === null`: a standing average, not a
-      // reading that happened to come from the mean. It is dimmer than a live
-      // number because it describes the recent past, and `aria-label` says so —
-      // a reader who lands on it should not think the reply is still going.
-      const standing = liveReading === null && average !== null && heldFresh === false
+      // `last !== null && liveReading === null`: a settled number, not one that
+      // happened to come from the same reading. It is dimmer than a live number
+      // because it describes a finished reply, and `aria-label` says so — a
+      // reader who lands on it should not think the reply is still going.
+      const previous = liveReading === null && last !== null && heldFresh === false
       const label = idle === true
         ? '输出速度：当前没有输出'
-        : standing === true
-          ? `最近 ${average.samples} 次的平均输出速度 ${formatSpeed(shown)} tok/s`
+        : previous === true
+          ? `上一轮输出速度 ${formatSpeed(shown)} tok/s`
           : `输出速度 ${formatSpeed(shown)} tok/s`
       const hint = idle === true
         ? '当前没有输出'
-        : standing === true
-          ? `最近 ${average.samples} 次输出的平均速度`
+        : previous === true
+          ? '上一轮这条回复的平均速度'
           : '最近两秒的输出速度'
       return jsxs('span', {
-        className: idle === true ? 'dsse-speed dsse-speed-idle' : standing === true ? 'dsse-speed dsse-speed-average' : 'dsse-speed',
+        className: idle === true ? 'dsse-speed dsse-speed-idle' : previous === true ? 'dsse-speed dsse-speed-previous' : 'dsse-speed',
         // Not `role="status"`. That implies `aria-live="polite"`, and this number
         // changes up to four times a second while a reply arrives — a screen
         // reader would announce it continuously for the whole generation, which
