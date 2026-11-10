@@ -311,9 +311,13 @@ window.__ModuleLoader__.load({
 .dsse-summary-title{margin:0 0 6px;font-size:1em;line-height:1.45;font-weight:500}
 .dsse-muted{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-tiny{font-size:.86em;line-height:1.55}
-.dsse-expand{position:absolute;left:50%;transform:translateX(-50%);bottom:8px;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-secondary,#5b6270);box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}
+.dsse-expand{box-sizing:border-box;position:absolute;left:50%;transform:translateX(-50%);bottom:8px;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-secondary,#5b6270);box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}
 .dsse-expand .dsse-icon{width:15px;height:15px}
 .dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}
+.dsse-expand-action{pointer-events:auto;cursor:pointer;padding:0;font:inherit}
+.dsse-expand-action:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
+.dsse-expand-action:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:2px}
+.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}
 .dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
 .dsse-row{display:flex;align-items:center;gap:7px;min-width:0;min-height:36px;padding:5px 6px;border-radius:7px}
@@ -326,8 +330,6 @@ window.__ModuleLoader__.load({
 .dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
 .dsse-row-open{width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .dsse-row-open:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
-.dsse-foot{display:flex;justify-content:center;padding-top:6px;border-top:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.07));margin-top:6px}
-.dsse-foot[data-open="true"]{border-top-color:transparent;margin-top:0}
 .dsse-badge{display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f4f8);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-badge-own{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
 .dsse-btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 11px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color 160ms ease,opacity 160ms ease}
@@ -335,8 +337,6 @@ window.__ModuleLoader__.load({
 .dsse-btn-primary{border-color:var(--dsw-alias-brand-text,#2f4bd8);background:var(--dsw-alias-brand-primary,#2f4bd8);color:var(--dsw-alias-label-primary-foreground,#fff)}
 .dsse-btn-primary:hover{background:var(--dsw-alias-brand-primary,#2f4bd8);opacity:.9}
 .dsse-btn:disabled{opacity:.5;cursor:default}
-.dsse-more{border:0;background:transparent;color:var(--dsw-alias-brand-text,#2f4bd8);font:inherit;font-size:max(.85em,11px);cursor:pointer;padding:6px 0;width:100%}
-.dsse-more:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:2px;border-radius:6px}
 .dsse-note{margin:7px 0 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:center}
 .dsse-empty{margin:0;padding:12px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:.9em;text-align:center}
 .dsse-err{flex:0 0 auto;margin:0;padding:9px 10px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:9px;background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115);overflow-wrap:anywhere;font-size:.9em}
@@ -1783,6 +1783,9 @@ window.__ModuleLoader__.load({
         // The one case that does reserve space is the open card, and that height is
         // already changing for reasons of its own.
         'data-hint': props.expandHint === undefined ? 'false' : 'true',
+        // The reserved strip at the bottom belongs to the badge, so it is on only
+        // while a badge is drawn. A card that fits needs none of it.
+        'data-badge': props.badgeAction === undefined ? 'false' : 'true',
         onMouseEnter: props.onMouseEnter,
         onMouseLeave: props.onMouseLeave,
         onClick: interactive === true ? props.onClick : undefined,
@@ -1813,26 +1816,44 @@ window.__ModuleLoader__.load({
           jsx('div', { className: 'dsse-card-body', children: props.children }),
           // A round button centred on the card's bottom edge, showing a chevron that
           // points down when there is more to read and up once the card is open.
-          // It is still not a control of its own: the card already handles the
-          // click, is already focusable and already announces `aria-expanded`, so a
-          // second focus stop a few pixels from the first would only give the
-          // keyboard two ways to do one thing. `pointer-events` is off so a click on
-          // the badge lands on the card, which is also what makes the badge readable
-          // as "the card opens" rather than "this dot does".
-          props.expandHint === undefined
-            ? null
-            : jsxs('div', {
-                className: 'dsse-expand',
-                // Named for a screen reader: the badge is the only visual cue that
-                // something is folded away, and a decorative div announces nothing.
-                // No `title`: `pointer-events` is off, so this element is never hit
-                // and the browser has nothing to hang a native tooltip on. A `title`
-                // here would be a line of code that reads as a feature and does
-                // nothing — the card owns the pointer, so the card would have to
-                // carry it, and `aria-label` already says the same words.
-                role: 'img',
-                'aria-label': props.expandHint,
-                children: jsx(Icon, { name: 'chevron', up: props.expanded === true }),
+          //
+          // Two shapes, because two cards need two different things. The 上一轮 card
+          // lets the whole card take the click, so its badge is decoration:
+          // `pointer-events` off, no tab stop, `role="img"`. The 产出文件 card cannot
+          // do that — every row in it is already a button, and a card that also
+          // answered clicks would swallow the row presses. So that card passes
+          // `badgeAction` and the badge becomes the control itself: a real
+          // `<button>` with its own focus ring and its own `aria-expanded`.
+          //
+          // Either way it is one badge in the same place with the same geometry,
+          // which is the point: the two cards should read as the same object.
+          props.badgeAction === undefined
+            ? (props.expandHint === undefined
+              ? null
+              : jsxs('div', {
+                  className: 'dsse-expand',
+                  // Named for a screen reader: the badge is the only visual cue that
+                  // something is folded away, and a decorative div announces nothing.
+                  // No `title`: `pointer-events` is off, so this element is never hit
+                  // and the browser has nothing to hang a native tooltip on. A `title`
+                  // here would be a line of code that reads as a feature and does
+                  // nothing — the card owns the pointer, so the card would have to
+                  // carry it, and `aria-label` already says the same words.
+                  role: 'img',
+                  'aria-label': props.expandHint,
+                  children: jsx(Icon, { name: 'chevron', up: props.expanded === true }),
+                }))
+            : jsx('button', {
+                className: 'dsse-expand dsse-expand-action',
+                type: 'button',
+                // A live hit target, so the tooltip works here and is worth having:
+                // the chevron alone says "there is a direction", not how many rows
+                // are behind it.
+                title: props.badgeAction.label,
+                'aria-label': props.badgeAction.label,
+                'aria-expanded': props.badgeAction.open === true,
+                onClick: props.badgeAction.onClick,
+                children: jsx(Icon, { name: 'chevron', up: props.badgeAction.open === true }),
               }),
         ],
       })
@@ -2368,6 +2389,18 @@ window.__ModuleLoader__.load({
                 // total. Both numbers sit in the header, where they cannot be scrolled
                 // out of view — that was the whole of DEF-51.
                 meta: filesOpen ? `全部 ${ordered.length} 个` : `${ordered.length} 个文件`,
+                // The fold's control is the same round badge the 上一轮 card uses,
+                // in the same place and the same size — two cards in one column
+                // should not teach the reader two shapes for one gesture. It has to
+                // be a real button here rather than card decoration: the rows are
+                // buttons too, and a card that swallowed clicks would eat them.
+                badgeAction: ordered.length > FOLDED_FILES || filesOpen
+                  ? {
+                      label: filesOpen ? '收起' : `展开全部 ${ordered.length} 个`,
+                      open: filesOpen === true,
+                      onClick: () => setFilesOpen((open) => open === false),
+                    }
+                  : undefined,
                 children: [
                   jsx('div', {
                     className: 'dsse-list dsse-files',
@@ -2403,21 +2436,6 @@ window.__ModuleLoader__.load({
                       }, `file:${file.path}`)
                     }),
                   }),
-                  // Outside the scrolling list on purpose. A control that reveals
-                  // the rest of a clipped list cannot live inside that list: it ends
-                  // up clipped with it, which is how "5 of 10" became "only 5".
-                  ordered.length > FOLDED_FILES || filesOpen
-                    ? jsx('div', {
-                        className: 'dsse-foot',
-                        'data-open': filesOpen === true ? 'true' : 'false',
-                        children: jsx('button', {
-                          className: 'dsse-more',
-                          type: 'button',
-                          onClick: () => setFilesOpen((open) => open === false),
-                          children: filesOpen ? '收起' : `展开全部 ${ordered.length} 个`,
-                        }),
-                      })
-                    : null,
                 ],
               }),
           settings,

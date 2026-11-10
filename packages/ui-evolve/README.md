@@ -263,13 +263,27 @@ Three modules, top to bottom:
    `newestFirstOf(paths, false)` reverses exactly that one.
 
    **Four rows, and the way out is not inside the list.** `FOLDED_FILES = 4`,
-   matching the Host's own changed-files card. The expand/collapse control lives
-   in a `.dsse-foot` sibling *outside* the list: a control that reveals the rest
-   of a clipped list cannot live inside that list, or it gets clipped with it —
-   which is how "5 of 10" became "only 5" (`DEF-51`). Opening the card gives the
-   list `max-height: FILE_LIST_MAX_PX` and `overflow-y: auto`, so expanding it
-   never pushes the other two cards out of view. The header stops repeating the
-   total once the list is showing it.
+   matching the Host's own changed-files card. The control that reveals the rest
+   is the *same round badge* the 上一轮 card already draws, in the same place and
+   the same size — two cards in one column should not teach the reader two shapes
+   for one gesture. It is nonetheless a real `<button>` here, while the 上一轮
+   card's badge is decoration: that card lets the whole card take the click, so
+   its badge is a `role="img"` div with `pointer-events: none`; this card cannot
+   copy that, because every row in it is already a button and a card that
+   answered clicks too would swallow the row presses. So `Card` takes an optional
+   `badgeAction` and the badge becomes the control itself, with its own focus
+   ring, its own `aria-expanded` and a chevron that turns over when it opens.
+   Both shapes are still `.dsse-expand`, so the geometry stays in one rule —
+   including `box-sizing: border-box`, without which a `div` and a `button`
+   render the same declaration two pixels apart.
+
+   Because the badge is pinned to the card rather than laid out in the list, it
+   cannot be clipped with the list it reveals — which is how "5 of 10" became
+   "only 5" (`DEF-51`). Opening the card gives the list
+   `max-height: FILE_LIST_MAX_PX` and `overflow-y: auto`, so expanding it never
+   pushes the other two cards out of view. Only a card that actually draws a badge
+   reserves the strip for it (`data-badge`), so a card that fits keeps its own
+   padding. The header stops repeating the total once the list is showing it.
 
    **A row opens the file in the right sidebar.** The panel asks for
    `sidebarRight` through `ctx.inject(["sidebarRight"], ...)` — an *optional*
@@ -458,8 +472,8 @@ The badge is positioned against the card (`position: absolute` inside a
 `position: relative` card) rather than laid out under the summary, so revealing it
 on hover costs no layout at all — the card does not grow, and the text below it in
 the column does not move. The one case that reserves room is the open card:
-`.dsse-card-body` gets `padding-bottom: 44px`, which clears the 28px badge and its
-8px offset with room to spare. That height was already changing when the card
+`.dsse-card-body` gets `padding-bottom: 44px`, which clears the 26px badge and its
+8px offset with 10px to spare. That height was already changing when the card
 opened, so it adds no new class of jitter. Floating the badge over the text without
 reserving anything was the alternative, and it hides the last line of the summary
 the click was for.

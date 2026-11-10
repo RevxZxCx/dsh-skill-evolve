@@ -3858,32 +3858,84 @@ async function openPanel(routes, options) {
   // pass — and that would give a four-row card a scrollbar it does not need.
   check('a folded list does not claim to be open', list?.props?.['data-open'] === 'false', String(list?.props?.['data-open']))
   // The way out must not live inside the list it reveals, or it is clipped with
-  // it — which is exactly how "5 of 10" shipped as "only 5".
-  const foot = firstByClass(card, 'dsse-foot')
+  // it — which is exactly how "5 of 10" shipped as "only 5". It is now the same
+  // round badge the 上一轮 card uses, in the same corner: one column, one gesture,
+  // one shape.
+  const sheetOf = () => instance.styles.map((node) => String(node.textContent)).join(' ')
+  const ruleOf = (selector) => {
+    const sheet = sheetOf()
+    const at = sheet.indexOf(`${selector}{`)
+    if (at < 0) return ''
+    const end = sheet.indexOf('}', at)
+    return end < 0 ? '' : sheet.slice(at, end + 1)
+  }
+  // Which way the chevron points. `Icon` is a component, so the rendered tree may
+  // hand back the element (carrying `up`) or the `<svg>` it became (carrying the
+  // path); read whichever is there rather than pinning the harness's expansion.
+  const pointsUp = (tree) => {
+    const icon = firstByClass(tree, 'dsse-expand')?.props?.children
+    if (icon?.props?.up !== undefined) return icon.props.up === true
+    const path = icon?.props?.children
+    const d = typeof path?.props?.d === 'string' ? path.props.d : ''
+    if (d === '') return undefined
+    return d.startsWith('M6 15')
+  }
+  const badge = firstByClass(card, 'dsse-expand-action')
   // The count is what makes the fold honest: four rows out of seven is a promise
   // that three more exist, and the only thing that says so is this control. A
-  // mutation that deletes the footer outright used to take the suite down with a
+  // mutation that deletes it outright used to take the suite down with a
   // TypeError at the click below, which the mutation runner records as a crash
   // rather than a kill — so the count is asserted, not just the label.
-  check('the control that reveals the rest is on the card, not in the list', foot !== undefined, JSON.stringify(Object.keys(card ?? {})))
-  check('and it is not inside the list it reveals', firstByClass(list, 'dsse-foot') === undefined && firstByClass(list, 'dsse-more') === undefined)
-  check('it says how many more there are', textOf(foot).includes('展开全部 7 个'), textOf(foot))
+  check('the control that reveals the rest is a badge on the card', badge !== undefined, JSON.stringify(Object.keys(card ?? {})))
+  check('and it is not inside the list it reveals', firstByClass(list, 'dsse-expand') === undefined && firstByClass(list, 'dsse-expand-action') === undefined)
+  check('it says how many more there are', String(badge?.props?.['aria-label'] ?? '') === '展开全部 7 个', String(badge?.props?.['aria-label']))
+  // The badge is the control here, not a picture of one. In the 上一轮 card the
+  // whole card takes the click, so its badge is a `role="img"` div with the
+  // pointer switched off. This card cannot copy that — every row in it is already
+  // a button, and a card that answered clicks too would swallow the row presses —
+  // so the badge has to carry the click itself.
+  check('the badge is the control, not a picture of one', badge?.type === 'button', String(badge?.type))
+  check('and it carries its own state', badge?.props?.['aria-expanded'] === false, String(badge?.props?.['aria-expanded']))
+  check('and its chevron points down while the card is closed', pointsUp(card) === false, String(pointsUp(card)))
+  check('a badge is what reserves the strip at the bottom', card?.props?.['data-badge'] === 'true', String(card?.props?.['data-badge']))
   // Order, not presence. `textOf(card)` walks every descendant, so any check that
   // the label appears somewhere in the card passes whether the control is above
-  // the list, below it, or floating over it. The body's children array is the only
-  // place the order is visible: `Card` renders `[head, body, expand]` and the list
-  // and the control are siblings inside `body`.
-  check('and it sits below the list', (() => {
-    const body = (Array.isArray(card?.props?.children) ? card.props.children : [])
-      .find((node) => node?.props?.className === 'dsse-card-body')
-    const children = Array.isArray(body?.props?.children) ? body.props.children : []
-    const listAt = children.findIndex((node) => String(node?.props?.className ?? '').startsWith('dsse-list dsse-files'))
-    const footAt = children.findIndex((node) => node?.props?.className === 'dsse-foot')
-    return listAt >= 0 && footAt > listAt
+  // the list, below it, or floating over it. `Card` renders `[head, body, badge]`,
+  // so the badge's index is the one honest answer.
+  check('and it comes after the body it belongs to', (() => {
+    const children = Array.isArray(card?.props?.children) ? card.props.children : []
+    const bodyAt = children.findIndex((node) => node?.props?.className === 'dsse-card-body')
+    const badgeAt = children.findIndex((node) => String(node?.props?.className ?? '').startsWith('dsse-expand'))
+    return bodyAt >= 0 && badgeAt > bodyAt
   })(), JSON.stringify((card?.props?.children ?? []).map((node) => node?.props?.className ?? node?.type ?? '')))
   // Exactly one way out. Two of them would be two answers to "how do I see the
   // rest", and the one in the list is the one that gets clipped.
-  check('the card offers exactly one way out', byClass(card, 'dsse-more').length === 1, String(byClass(card, 'dsse-more').length))
+  check('the card offers exactly one way out', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
+  // Same circle as the 上一轮 badge — that is the whole request. The shared
+  // `.dsse-expand` rule draws it; the action rule is allowed to add behaviour but
+  // not to move it or reshape it, so the geometry is asserted on that rule alone.
+  check('the badge is the same circle the other card draws', (() => {
+    const shared = ruleOf('.dsse-expand')
+    return shared.includes('border-radius:999px') && shared.includes('width:26px') && shared.includes('height:26px') && shared.includes('left:50%') && shared.includes('translateX(-50%)') && shared.includes('bottom:8px')
+  })(), ruleOf('.dsse-expand').slice(0, 160))
+  // `width: 26px` on a 1px-bordered box is not one size, it is two. The 上一轮
+  // badge is a `div`, so those 26px are the content box and the border sits
+  // outside it — 28px across. This badge is a `button`, and the browser's own
+  // stylesheet puts buttons in `border-box`, so its 26px already include the
+  // border — 26px across. Same declaration, two diameters, and the whole point of
+  // this change was that the two badges read as one object. Pinning the box model
+  // in the shared rule is the only place that fixes both at once; the assertion
+  // reads that rule because a mock renderer never lays anything out, so a test
+  // that only measured the elements would pass on both sizes.
+  check('and both badges measure the box the same way', ruleOf('.dsse-expand').includes('box-sizing:border-box'), ruleOf('.dsse-expand').slice(0, 160))
+  // It is pressable now, so it has to take the pointer back from the shared rule
+  // that switches it off for the card-level badge.
+  check('the badge takes the pointer back so it can be pressed', ruleOf('.dsse-expand-action').includes('pointer-events:auto'), ruleOf('.dsse-expand-action').slice(0, 160))
+  check('and it looks pressable', ruleOf('.dsse-expand-action').includes('cursor:pointer'), ruleOf('.dsse-expand-action').slice(0, 160))
+  // The reserved strip follows the badge rather than the card's other state: a
+  // card with no badge needs no room, and an open card whose badge sits on top of
+  // its last line would hide the one thing the click was for.
+  check('and a badge reserves room for itself below the body', ruleOf('.dsse-card[data-badge="true"] .dsse-card-body').includes('padding-bottom:44px'), ruleOf('.dsse-card[data-badge="true"] .dsse-card-body').slice(0, 160))
 
   // Every row is a button, because clicking one opens a preview.
   const openRow = firstByClass(list, 'dsse-row-open')
@@ -3911,12 +3963,12 @@ async function openPanel(routes, options) {
   check('the rows look clickable', /\.dsse-row-open\{[^}]*cursor:pointer/.test(instance.styles.map((node) => String(node.textContent)).join('\n')))
 
   // The control is pressed through a guard rather than dereferenced: with the
-  // footer gone, `byClass(...)[0].props` throws, and a suite that throws prints no
+  // badge gone, `byClass(...)[0].props` throws, and a suite that throws prints no
   // tally — the mutation runner records that as a crash instead of a kill, which
   // reads as "this mutation was not testable" rather than "the card lost its only
   // way out".
   const press = (tree) => {
-    const control = byClass(tree, 'dsse-more')[0]
+    const control = byClass(tree, 'dsse-expand-action')[0]
     check('the card offers a control to press', control !== undefined && typeof control.props?.onClick === 'function')
     control?.props?.onClick?.()
   }
@@ -3927,7 +3979,13 @@ async function openPanel(routes, options) {
   check('opening the card shows every file', openNames.length === 7, JSON.stringify(openNames))
   check('and the order did not change', JSON.stringify(openNames) === JSON.stringify(rows.map((_, index) => `f${index + 1}.md`)), JSON.stringify(openNames))
   check('the list says it is open', firstByClass(openCard, 'dsse-files')?.props?.['data-open'] === 'true', String(firstByClass(openCard, 'dsse-files')?.props?.['data-open']))
-  check('and the control now offers the way back', textOf(firstByClass(openCard, 'dsse-foot')) === '收起', textOf(firstByClass(openCard, 'dsse-foot')))
+  // An open badge turns its chevron over and says what pressing it again will do.
+  // Without the flip the only difference between open and closed is the row count,
+  // and without the new label a screen reader keeps announcing "expand" over a
+  // control that now collapses.
+  check('and the badge now offers the way back', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label'] ?? '') === '收起', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label']))
+  check('and it reports itself open', firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-expanded'] === true, String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-expanded']))
+  check('and its chevron turned over', pointsUp(openCard) === true, String(pointsUp(openCard)))
   check('the header stops repeating the total it is showing', textOf(firstByClass(openCard, 'dsse-card-meta')).includes('全部 7 个'), textOf(firstByClass(openCard, 'dsse-card-meta')))
 
   press(openCard)
@@ -3963,9 +4021,11 @@ async function openPanel(routes, options) {
   check('and the plugin still asked for the service it could not get', JSON.stringify(instance.injectedServices).includes('sidebarRight'), JSON.stringify(instance.injectedServices))
   check('the missing sidebar is not a load failure', instance.registrations.length === 2, String(instance.registrations.length))
   // A card that already fits gets no control at all. Rendering one whenever the
-  // list is non-empty would put a button labelled "展开全部 1 个" under a single
-  // row — a control that cannot reveal anything.
-  check('a card that already fits offers nothing to expand', firstByClass(tree, 'dsse-foot') === undefined && firstByClass(tree, 'dsse-more') === undefined, textOf(tree).slice(0, 160))
+  // list is non-empty would put a badge labelled "展开全部 1 个" on a card with
+  // nothing behind it — a control that cannot reveal anything. And with no badge
+  // there is no strip to reserve, so the body keeps its normal padding.
+  check('a card that already fits offers nothing to expand', firstByClass(tree, 'dsse-expand') === undefined && firstByClass(tree, 'dsse-expand-action') === undefined, textOf(tree).slice(0, 160))
+  check('and it reserves no room for a badge it does not have', byClass(tree, 'dsse-card').every((node) => node.props?.['data-badge'] === 'false'), JSON.stringify(byClass(tree, 'dsse-card').map((node) => node.props?.['data-badge'])))
 }
 
 {

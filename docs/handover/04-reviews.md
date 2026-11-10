@@ -68,6 +68,8 @@
 | R-62 | 2026-11-10 | 第二轮：teardown 断言全程没点过一次（恒真）、`statTouchedFiles` 的 JSDoc 被并进邻函数 | 2 P2 | 2 / 0 |
 | R-63 | 2026-11-10 | 第三轮：判定可合入；变异数下限 99 而失败文案仍写 97 | 1 P3 | 1 / 0 |
 | R-64 | 2026-11-10 | 第四轮：无新增问题，判定可合入；提示两套历史变异脚本 ENOENT（非本补丁） | 0 | 0 / 0 |
+| R-65 | 2026-11-10 | 产出卡圆标 第一轮：两种圆标渲染差 2px（content-box vs border-box）、包 README 仍描述 `.dsse-foot` | 1 P2 + 1 P3 | 2 / 0 |
+| R-66 | 2026-11-10 | 第二轮：交接 01-status 仍把 `.dsse-foot` 写成当前实现、数字停在 2654/454/99 | 1 P3 | 1 / 0 |
 
 ---
 
@@ -1057,3 +1059,44 @@ ENOENT 崩溃：它们指向不存在的 `lib/outcome.js`、`lib/evidence.js`，
 
 **收尾判据。** 四轮里真正的行为缺陷只有两条（R-62 的两条 P2），且都在同一处：清理与证伪的归属。
 其余五条 P3 全是「断言看起来测了一件事，实际测了另一件」与文档对不上。第四轮无新增问题，收敛。
+
+---
+
+## 产出卡圆标（与上一轮卡片统一）· 两轮
+
+| 轮次 | runId | 报告 | 处置 |
+| --- | --- | --- | --- |
+| 第一轮 | `72637129-8cc2-4a17-999a-56c9b5d936e0` | 1 P2 + 1 P3 | 2 / 0 |
+| 第二轮 | `771edffe-0e83-4690-ad47-306670201834` | 1 P3 | 1 / 0 |
+| **合计** | — | **0** | **1 P2 + 2 P3** | **3 / 0** |
+
+**第一轮。** 审查独立复跑了四套测试与 108 条变异，逐条核对了两种 badge 形态、`data-badge`
+门、点击不会冒泡、两个降级场景（无侧栏 / 侧栏抛错），功能逻辑正确。两条 finding：
+
+- **[P2] 两种圆标实际渲染尺寸差 2px，几何断言测不出。** 审查在 Chrome 里用同一份规则实测：
+  装饰圆标（`div`）28.0×28.0、新圆标（`button`）26.0×26.0，仓库里没有任何全局 `box-sizing`
+  覆盖。而 `client.js` 的注释写着「same place and the same size」、`README.md` 记的是 28px。
+  → 修法：共享规则补 `box-sizing:border-box`（两张卡统一成 26px，而不是让按钮去迁就 `div`）；
+  新增断言 `and both badges measure the box the same way`；README 的 28px 改成 26px 并写明
+  44 − 26 − 8 = 10px 余量。详见 DEF-69。
+- **[P3] 包 README 仍描述已删除的 `.dsse-foot` 方案。** `packages/ui-evolve/README.md:265`
+  还写着「The expand/collapse control lives in a `.dsse-foot` sibling」，而那四条 CSS 与本轮
+  一起删掉了。`docs/handover/*` 是历史记录不回填，包 README 是当前文档必须跟着改。→ 整段重写，
+  补上两张卡为何一个装饰一个控件、`box-sizing` 的必要性、`data-badge` 门控。
+
+**第二轮。** 审查核对：`box-sizing:border-box` 确实让两种元素外径一致（button 的 `padding:0`
+由 action 规则提供、div 默认无 padding，两者都是 border-box 下的 26px）；新断言实测可证伪
+（删掉 `box-sizing` → 465 passed / 1 failed，唯一失败正是它）；109 条变异全杀；四条更新后的
+锚点仍各自唯一匹配；README 的 26px / 8px / 10px 与实现自洽；`:316` 的 `[aria-expanded="true"]`
+与新增的 `[data-badge="true"]` 门控互不重叠，两条规则都还需要。判定**可以合入**，只余一处：
+
+- **[P3] 交接状态文档仍把 `.dsse-foot` 写成当前实现。** `docs/handover/01-status.md:2753` 是
+  `index.md` 指定「接手时先读」的最后一节，其中仍写「出口移出列表，住在 `.dsse-foot` 这个兄弟
+  节点里」，数字块停在 2654 / 454 / 99，`03-defects.md:1070` 还把断言名写成已被替换掉的
+  `and it sits below the list`。→ 按「只能追加、不改旧条目」的规则，在 `01-status.md` 追加新节
+  说明「现在在哪」，并记入本轮。
+
+**收尾判据。** 两条 finding 都落在同一件事上：**「统一」被当成了「抄同一份声明」**。P2 是声明
+一样而渲染不一样，P3 是代码改了而文档没跟上。两轮的代码侧改动各自只动一行（`box-sizing`、
+一段 README），真正花时间的是确认「改完之后两张卡在真实浏览器里是不是同一个尺寸」——而这一
+点，只读规则文本的断言永远证明不了。

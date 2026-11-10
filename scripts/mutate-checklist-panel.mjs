@@ -395,15 +395,15 @@ const mutations = [
     // says how many there are, the list shows four, and nothing says the rest exist.
     label: 'the way out is never drawn at all',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                  ordered.length > FOLDED_FILES || filesOpen`,
-    to: `                  false`,
+    from: `                badgeAction: ordered.length > FOLDED_FILES || filesOpen`,
+    to: `                badgeAction: false`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'a card that already fits still offers to expand',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                  ordered.length > FOLDED_FILES || filesOpen',
-    to: '                  ordered.length > 0 || filesOpen',
+    from: '                badgeAction: ordered.length > FOLDED_FILES || filesOpen',
+    to: '                badgeAction: ordered.length > 0 || filesOpen',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -555,15 +555,15 @@ const mutations = [
     // pixels and nudge the text below it.
     label: 'the expand button pushes the card taller when it appears',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand{position:absolute;left:50%;`,
-    to: `.dsse-expand{position:static;`,
+    from: `.dsse-expand{box-sizing:border-box;position:absolute;left:50%;`,
+    to: `.dsse-expand{box-sizing:border-box;position:static;`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'the expand button is pushed back to the corner',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand{position:absolute;left:50%;transform:translateX(-50%);`,
-    to: `.dsse-expand{position:absolute;right:8px;`,
+    from: `.dsse-expand{box-sizing:border-box;position:absolute;left:50%;transform:translateX(-50%);`,
+    to: `.dsse-expand{box-sizing:border-box;position:absolute;right:8px;`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -580,6 +580,96 @@ const mutations = [
     file: 'packages/ui-evolve/lib/client.js',
     from: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}`,
     to: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none}`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The two badges are different elements — a `div` and a `button` — and the
+    // browser gives a button `border-box` but a div `content-box`. Without this
+    // declaration the same `width:26px` renders 26px in one card and 28px in the
+    // other, which is exactly the mismatch this round was asked to remove.
+    label: 'the two badges stop measuring the box the same way',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-expand{box-sizing:border-box;`,
+    to: `.dsse-expand{`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The badge is a real button on this card, not a picture of one. Losing the
+    // class takes it out of the lookup entirely, which is what a reader with a
+    // keyboard would experience: something on screen that cannot be reached.
+    label: 'the badge stops being a control at all',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                className: 'dsse-expand dsse-expand-action',`,
+    to: `                className: 'dsse-expand',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Without the flip the only difference between open and closed is the row
+    // count, and the arrow keeps pointing down at a list that is already showing.
+    label: 'the badge never turns its chevron over',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                children: jsx(Icon, { name: 'chevron', up: props.badgeAction.open === true }),`,
+    to: `                children: jsx(Icon, { name: 'chevron', up: false }),`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Open and closed would announce the same words over a control that does two
+    // different things, and "how many more" would stop being said anywhere.
+    label: 'the badge says the same thing open and closed',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                'aria-label': props.badgeAction.label,`,
+    to: `                'aria-label': '展开',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the badge forgets whether it is open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                'aria-expanded': props.badgeAction.open === true,`,
+    to: `                'aria-expanded': false,`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the badge answers no click',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                onClick: props.badgeAction.onClick,`,
+    to: `                onClick: undefined,`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The strip is only for cards that have a badge. Reserving it unconditionally
+    // takes forty-four pixels off every card that fits, which is the empty band
+    // the 上一轮 card lost in the same round of work.
+    label: 'every card reserves a strip for a badge it may not have',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        'data-badge': props.badgeAction === undefined ? 'false' : 'true',`,
+    to: `        'data-badge': 'true',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The shared rule switches the pointer off so the card-level badge is
+    // see-through. This card's badge is the click target, so it has to take the
+    // pointer back — without it the badge is a dead patch on a live card.
+    label: 'the badge never takes the pointer back',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-expand-action{pointer-events:auto;`,
+    to: `.dsse-expand-action{`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the badge does not look pressable',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-expand-action{pointer-events:auto;cursor:pointer;`,
+    to: `.dsse-expand-action{pointer-events:auto;`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Same defect as the 上一轮 card's reservation, wearing the new selector: the
+    // badge hangs on the bottom edge, which is where the last row of the list it
+    // just revealed ends.
+    label: 'a card with a badge lets the badge cover its last row',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}`,
+    to: ``,
     suites: ['test/client.test.mjs'],
   },
   {

@@ -35,6 +35,7 @@
 | 2026-11-09 | 速度显示最近几次平均 | 停下来后显示最近五条消息的加权平均（D-90），与实时读数按 实时>linger>平均>破折号 的优先级共存；`averageOf` 删掉不可达守卫（DEF-61）；补「有窗口无平均」用例（DEF-62）；2566 断言全绿，七套变异 58/81/21/44/15/14/11 全杀 |
 | 2026-11-09 | 速度改显「上一轮这一条」 | 生成中显示最近两秒，停下后显示刚结束那一轮的整轮速率并常驻（D-91，取代 D-90 的最近五条平均）；`/speed` 支持 `after=<revision>` 长轮询，比较基准是调用方自己的数（DEF-63）；下一次延迟由上一请求的实际挂起时长决定（DEF-64）；每一条读数都装过期重绘（DEF-65）；切会话中止在途请求；2607 断言全绿，七套变异 69/81/21/44/15/14/11 全杀 |
 | 2026-11-10 | 产出卡折叠 + 侧栏预览 | 顺序改由数据源给（被编辑的先后，最新在前，D-92）；折叠 4 行、出口钉在卡片底部、展开后列表自己滚（D-93，关闭 DEF-51）；行点击在右栏预览，走可选 `ctx.inject(["sidebarRight"])`，没有侧栏时退化为纯文本（D-94）；2654 断言全绿，七套变异 99/69/21/44/15/14/11 全杀 |
+| 2026-11-10 | 产出卡圆标与上一轮统一 | 折叠控件从「列表下方整宽文字按钮」改成与上一轮卡片**同一个**圆标（共享 `.dsse-expand` 几何 + `box-sizing:border-box`，产出卡额外挂 `.dsse-expand-action` 只管行为）；`Card` 新增可选 `badgeAction`：上一轮卡片的圆标是装饰（整卡可点），产出卡的圆标自己当按钮（行已是 button，卡片不能再吃点击）；`data-badge` 门控 44px 预留条带（D-95，取代 `.dsse-foot`）；2666 断言全绿，八套变异 109/69/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2791,3 +2792,60 @@ test/gutter-drift.test.mjs             20 passed
   `{ params: { line } }`，若将来能从工具调用里记下编辑行号，可以直接跳过去。
 - 侧栏预览走的是会话工作区解析（`remote.workspaceFiles.stat`），工作区外的文件地址是绝对路径形式；
   目前没有断言覆盖「侧栏真的能读工作区外的文件」，只覆盖了地址拼法。
+
+---
+
+## 2026-11-10 · 产出卡圆标：与上一轮卡片统一（更正上一节的 `.dsse-foot`）
+
+> 上一节（「产出卡：折叠 4 行 + 点击预览」）写的「出口移出列表，住在 `.dsse-foot` 这个兄弟节点里」
+> **已经不是当前实现**。按「只追加、不改旧条目」的规则，更正写在这里：`.dsse-foot` 与
+> `.dsse-more` 四条 CSS、以及产出卡 `Card` children 里的整个 footer 块，已全部删除。
+
+**需求。** 用户原话：「现在产出文件卡片的功能正常，但是实际的图形表现不好，你应该按照上一轮卡片的
+展开按钮进行设计，让整体的样式统一一些。」
+
+**现在在哪。** 产出卡的展开/收起控件是与上一轮卡片**同一个**圆形图标按钮：
+
+- 几何共享一条规则 `.dsse-expand`：26px、`border-radius:999px`、绝对定位卡片底边居中、
+  `bottom:8px`、内置 chevron（展开后 `up` 翻转）。
+- 产出卡额外挂 `.dsse-expand-action`，只加行为：`pointer-events:auto`、`cursor:pointer`、
+  `padding:0`、`font:inherit`、`:hover` 背景、`:focus-visible` 焦点环。
+- **`box-sizing:border-box` 写在共享规则里**——装饰圆标是 `div`（默认 content-box，外径 28px），
+  新圆标是 `button`（UA 默认 border-box，外径 26px），不写死就是同一条规则两个直径（DEF-69）。
+- 预留条带改由 `data-badge` 门控：`.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}`。
+  上一轮卡片原来的 `.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}` 仍在，
+  服务的是另一张卡，两条规则不重叠。
+
+**两张卡为何一个装饰一个控件。** 上一轮卡片整卡可点（`Card` 收 `onClick` + `clickable`），圆标是
+`role="img"` + `pointer-events:none` 的装饰，点提示等于点卡片，整卡即触发域。产出卡每行本身已是
+`<button>`（点击在右栏预览），卡片若也接点击就会吃掉行点击，所以走 `Card` 的新可选 prop
+`badgeAction`：圆标自己当控件，自带 `aria-expanded`、`aria-label`、`title`、焦点环。
+
+**当前数字（本节实测）。**
+```
+node test/run.mjs                      2666 passed / 0 failed
+test/client.test.mjs                    466 / test/mutations.test.mjs 39
+八套变异  109 / 69 / 21 / 44 / 15 / 14 / 11  全杀
+CRLF       0（113 文件）  sync-gutter 幂等，client.js sha256 前缀 f7d57dfe…
+```
+
+**两轮审查（R-65 / R-66），3 条全采纳 0 驳回。**
+- [P2] 两种圆标渲染差 2px（content-box vs border-box），只读规则文本的断言对两者都点头 → 共享规则补
+  `box-sizing:border-box`，新增断言 `and both badges measure the box the same way`，README 的 28px 改 26px。
+- [P3] 包 README 仍描述 `.dsse-foot` → 整段重写。
+- [P3] 本文件上一节仍把 `.dsse-foot` 写成当前实现 → 即本节。
+
+**踩坑。**
+1. **「统一」不是「抄同一份声明」。** `width:26px` + `border:1px` 在两种 `box-sizing` 下是两个尺寸；
+   mock renderer 不做布局，任何「读规则文本」的断言都能同时通过 26px 和 28px。
+2. **改一条共享规则的字符串前缀会同时打掉多条变异锚点。** 给 `.dsse-expand{` 加 `box-sizing` 后，
+   四条以 `.dsse-expand{position:absolute` 开头的锚点全部失效，`test/mutations.test.mjs` 的锚点检查
+   立刻报出来（这正是上一轮为 `mutate-checklist-panel.mjs` 补那块检查的价值）。
+3. **`edit` 报 `file changed since it was read` 时先重读**——本轮给 `.dsse-expand` 加 `box-sizing`
+   前刚跑过 `sync-gutter`，版本号变了，必须先 `ops_read_files` 再改。
+
+**下一步。**
+- 仍需用户重启宿主才能看到效果（`lib/client.js` 由渲染进程一次加载并缓存）。
+- `scripts/mutate-outcome.mjs` 与 `scripts/mutate-result-shape.mjs` 仍指向已不存在的
+  `lib/outcome.js`、`lib/evidence.js`（实际在 `packages/core/lib/`），跑起来 ENOENT；修好之前
+  「八套变异全杀」实际覆盖的是六套。
