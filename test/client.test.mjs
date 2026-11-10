@@ -3995,6 +3995,123 @@ async function openPanel(routes, options) {
 }
 
 {
+  // Two things the Host's own changed-files card has done for a while and this one
+  // did not: files no human wrote are named and counted separately instead of
+  // being mixed into the reader's work, and the files this turn touched come
+  // before the rest of the session. The fixture is built so that both choices are
+  // observable — the array order runs opposite to the turn order, so a card that
+  // merely drew the list it was handed fails on the first row.
+  const rows = [
+    { path: '/work/a.md', bytes: 10, mtimeMs: 100, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/b.md', bytes: 20, mtimeMs: 200, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+    { path: '/work/node_modules/x.js', bytes: 30, mtimeMs: 300, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/node_modules/x.js' },
+    { path: '/work/c.md', bytes: 40, mtimeMs: 400, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
+    { path: '/work/d.md', bytes: 50, mtimeMs: 500, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/d.md' },
+    { path: '/work/e.md', bytes: 60, mtimeMs: 600, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/e.md' },
+  ]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 2, calls: 3, failed: 0, turnFiles: 3,
+      summary: { text: 'edited three files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: rows,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const names = () => byClass(card, 'dsse-name').map((node) => textOf(node))
+  const meta = () => textOf(firstByClass(card, 'dsse-card-meta'))
+
+  // Folded, the four rows are this turn's files first, then the session's older
+  // ones. Keeping the handed order would give a.md first, and that is precisely
+  // the reading the card is supposed to spare the reader.
+  check('the folded card shows this turn before the rest', JSON.stringify(names()) === JSON.stringify(['b.md', 'c.md', 'e.md', 'a.md']), JSON.stringify(names()))
+  check('the generated files are not among the folded rows', names().includes('x.js') === false, JSON.stringify(names()))
+  check('the header counts the files a person wrote', meta().includes('5 个文件'), meta())
+  check('and says how many it left out', meta().includes('1 个生成'), meta())
+  // A card whose only hidden rows are generated files still needs a way to see
+  // them: filtering without an exit is deletion with extra steps.
+  const badge = firstByClass(card, 'dsse-expand-action')
+  check('the badge counts every file, including the hidden ones', String(badge?.props?.['aria-label'] ?? '') === '展开全部 6 个', String(badge?.props?.['aria-label']))
+
+  const press = (tree) => {
+    const control = byClass(tree, 'dsse-expand-action')[0]
+    check('the card offers a control to press', control !== undefined && typeof control.props?.onClick === 'function')
+    control?.props?.onClick?.()
+  }
+  press(card)
+  const opened = await instance.renderer.deepRender(instance.seat('cards'))
+  const openCard = byClass(opened, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const openNames = byClass(openCard, 'dsse-name').map((node) => textOf(node))
+  const groups = byClass(openCard, 'dsse-group')
+  const groupNames = (key) => {
+    const group = groups.find((node) => node.props?.['data-group'] === key)
+    return byClass(group, 'dsse-name').map((node) => textOf(node))
+  }
+
+  check('opening the card shows every file, generated ones included', openNames.length === 6, JSON.stringify(openNames))
+  check('this turn comes first', JSON.stringify(groupNames('fresh')) === JSON.stringify(['b.md', 'c.md', 'e.md']), JSON.stringify(groupNames('fresh')))
+  check('then the rest of the session', JSON.stringify(groupNames('earlier')) === JSON.stringify(['a.md', 'd.md']), JSON.stringify(groupNames('earlier')))
+  check('and the generated files last', JSON.stringify(groupNames('noise')) === JSON.stringify(['x.js']), JSON.stringify(groupNames('noise')))
+  check('the groups are drawn in that order', JSON.stringify(groups.map((node) => node.props?.['data-group'])) === JSON.stringify(['fresh', 'earlier', 'noise']), JSON.stringify(groups.map((node) => node.props?.['data-group'])))
+  // Only a group that sits beside another one needs a name: a heading over the
+  // only list on the card says nothing the card head has not already said.
+  check('the older group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'earlier')).includes('更早'), textOf(groups.find((node) => node.props?.['data-group'] === 'earlier')).slice(0, 60))
+  check('the generated group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'noise')).includes('生成文件'), textOf(groups.find((node) => node.props?.['data-group'] === 'noise')).slice(0, 60))
+  check('the rows this turn wrote carry no heading', firstByClass(groups.find((node) => node.props?.['data-group'] === 'fresh'), 'dsse-group-label') === undefined, textOf(groups[0]).slice(0, 60))
+  // The row says which kind of file it is, so the dimming rule has something to
+  // match even when the reader has scrolled past the group heading.
+  const noiseRow = byClass(openCard, 'dsse-row').find((node) => textOf(node).includes('x.js'))
+  check('a generated row says so on itself', noiseRow?.props?.['data-noise'] === 'true', String(noiseRow?.props?.['data-noise']))
+  check('and a written row does not', byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-noise'] === 'true').length === 1, String(byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-noise'] === 'true').length))
+
+  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  check('the groups are spaced as separate blocks', /\.dsse-group\{[^}]*display:grid/.test(sheet), '')
+  check('and the gap between them is drawn once', /\.dsse-group \+ \.dsse-group\{[^}]*margin-top/.test(sheet), '')
+  check('a group heading is quieter than a row', /\.dsse-group-label\{[^}]*label-tertiary/.test(sheet), '')
+  check('a generated row is dimmed', /\.dsse-row\[data-noise="true"\] \.dsse-name\{[^}]*label-tertiary/.test(sheet), '')
+}
+
+{
+  // The generated files can be the whole list — a build that touched nothing but
+  // its own output. The card still has to offer the way in, because the four
+  // written rows it can show number zero and the reader would otherwise be told
+  // "0 个文件" with no hint that six exist.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 0,
+      summary: { text: 'rebuilt' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [
+        { path: '/work/dist/out.js', bytes: 1, mtimeMs: 1, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/dist/out.js' },
+        { path: '/work/package-lock.json', bytes: 2, mtimeMs: 2, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/package-lock.json' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  check('a card with nothing but generated files shows no rows', byClass(card, 'dsse-name').length === 0, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
+  check('and still offers the way to them', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
+  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-card-meta')).includes('2 个生成'), textOf(firstByClass(card, 'dsse-card-meta')))
+}
+
+{
   // A Host without a right sidebar must still get a readable list. The row is a
   // plain div in that case: a button that does nothing when pressed is worse
   // than text, because it promises something the Host cannot deliver.

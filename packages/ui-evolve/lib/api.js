@@ -263,6 +263,66 @@ function newestFirstOf(paths, newestFirst) {
 }
 
 /**
+ * Paths that a person did not write.
+ *
+ * The output card answers "what did this session produce". Lockfiles, build
+ * output, dependency trees and caches are produced by tools the session ran,
+ * not chosen by anyone, and a single `npm install` can put two hundred of them
+ * on a list whose useful length is three. Claude Code's diff panel makes the
+ * same call and skips test and generated files outright.
+ *
+ * The predicate is deliberately conservative: a false negative costs one scrolled
+ * past row, while a false positive hides something the reader asked about. So it
+ * matches whole directory segments and known generated filenames only, never a
+ * substring and never a source directory — `src/build/`, `docs/dist.md` and
+ * `test/fixtures/lock.json` all stay visible.
+ *
+ * Filtering is not deletion. The client shows the counts and offers the same
+ * disclosure control it uses for the fold, so a skill that writes a lockfile is
+ * still auditable.
+ *
+ * @param {string} path - an absolute path.
+ * @param {string} [cwd] - the session's working directory, if known.
+ * @returns {boolean} whether the path is machine-generated.
+ */
+function isNoisePath(path, cwd) {
+  const normalized = String(path).replace(/\\/g, '/')
+  // Only the segments below the workspace count. A checkout can live anywhere:
+  // CI puts it at `/build/<repo>`, a developer at `D:/build/mine`, and some people
+  // open the output folder itself as a workspace. Judging the ancestors would
+  // call every file in all three generated, hide the whole list, and leave the
+  // card announcing "0 个文件" for a session that edited a dozen.
+  const root = typeof cwd === 'string' && cwd.length > 0 ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+  // Compared, and cut, without case. The two halves come from different places
+  // and neither normalises: `cwd` is whatever the session header says, the path is
+  // whatever the tool argument said. On Windows and macOS they are routinely the
+  // same directory written differently, and a case-sensitive comparison would
+  // decline to strip the prefix, fall through to judging every ancestor, and hide
+  // the whole list — the same mistake this parameter exists to prevent.
+  //
+  // The cut is taken from the folded string rather than from the original with the
+  // folded prefix's length: lowercasing is not length-preserving (`İ` becomes two
+  // code units), so slicing the original by the prefix length can land a character
+  // past the separator and turn `dist/` into `ist/` — which reads as a source file
+  // and hides a generated one, or the other way round. Every use of these segments
+  // below compares case-insensitively anyway, so folding the whole remainder costs
+  // nothing.
+  const folded = normalized.toLowerCase()
+  const foldedRoot = root.toLowerCase()
+  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded
+  const segments = scoped.split('/').filter((segment) => segment.length > 0)
+  // Never classify the file itself by extension alone: `package.json` and
+  // `cargo.lock` both live at the root and only the latter is generated.
+  const GENERATED_DIRS = new Set(['node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'coverage', '.pytest_cache', '.mypy_cache', '.gradle', '.idea'])
+  const GENERATED_FILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'cargo.lock', 'poetry.lock', 'pipfile.lock', 'composer.lock', 'gemfile.lock', 'uv.lock', 'go.sum'])
+  const GENERATED_SUFFIXES = ['.min.js', '.min.css', '.map', '.pyc', '.pyo', '.class', '.o', '.obj']
+  const name = segments[segments.length - 1] ?? ''
+  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true
+  if (GENERATED_FILES.has(name.toLowerCase())) return true
+  return GENERATED_SUFFIXES.some((suffix) => name.toLowerCase().endsWith(suffix))
+}
+
+/**
  * The address that opens this file in the Host's right sidebar.
  *
  * Mirrors the Host's own `fileAddressFor`: a path inside the session's working
@@ -300,13 +360,21 @@ function resourceAddress(sessionId, cwd, path) {
  * than guess, this resolves each one against the session's cwd and keeps only
  * what is really on disk.
  *
+ * Each file also carries two flags the card groups by. `turn` says the turn that
+ * just ended wrote it — the card answers "what did this turn do" first and "what
+ * has this session done" second, and only the server knows which is which
+ * because only it holds both `previous.paths` and the session's list. `noise`
+ * says a tool wrote it rather than a person; the client folds those away behind
+ * their own control instead of dropping them, so the list stays auditable.
+ *
  * @param {object} input - the request.
  * @param {string[]} input.paths - the candidate paths.
  * @param {string} [input.cwd] - the directory relative paths resolve against.
  * @param {string} [input.sessionId] - the session the addresses belong to.
- * @returns {Promise<Array<{ path: string, bytes: number, mtimeMs: number, address: string }>>} the existing files.
+ * @param {Set<string>} [input.turnPaths] - normalised paths the last turn wrote.
+ * @returns {Promise<Array<{ path: string, bytes: number, mtimeMs: number, address: string, turn: boolean, noise: boolean }>>} the existing files.
  */
-async function statTouchedFiles({ paths, cwd, sessionId }) {
+async function statTouchedFiles({ paths, cwd, sessionId, turnPaths }) {
   const seen = new Set()
   const out = []
   for (const raw of paths) {
@@ -318,7 +386,14 @@ async function statTouchedFiles({ paths, cwd, sessionId }) {
       const { stat } = await import('node:fs/promises')
       const info = await stat(absolute)
       if (!info.isFile()) continue
-      out.push({ path: absolute, bytes: info.size, mtimeMs: info.mtimeMs, address: resourceAddress(sessionId ?? '', cwd, absolute) })
+      out.push({
+        path: absolute,
+        bytes: info.size,
+        mtimeMs: info.mtimeMs,
+        address: resourceAddress(sessionId ?? '', cwd, absolute),
+        turn: turnPaths === undefined ? false : turnPaths.has(absolute),
+        noise: isNoisePath(absolute, cwd),
+      })
     } catch {
       // Not there, or not readable. The panel says "edited", not "exists", so a
       // missing file is a legitimate answer and needs no warning.
@@ -808,7 +883,16 @@ async function readPanel(deps, agentId, lang) {
   const remembered = typeof deps.filesSeen === 'function' ? deps.filesSeen(id) : []
   const fallback = newestFirstOf(previous === undefined ? [] : (previous.paths ?? []), false)
   const cwd = deps.cwdFor(id)
-  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd, sessionId: id })
+  // Which of those files the turn that just ended wrote. Resolved the same way
+  // `statTouchedFiles` resolves them, because the transcript records what the
+  // tool was handed — often a relative path — while the session list holds the
+  // absolute one, and a raw string comparison would answer "none of them".
+  const turnPaths = new Set()
+  for (const raw of Array.isArray(previous?.paths) ? previous.paths : []) {
+    if (typeof raw !== 'string' || raw.length === 0) continue
+    turnPaths.add(raw.startsWith('/') || /^[A-Za-z]:[\\/]/.test(raw) ? raw : join(cwd ?? process.cwd(), raw))
+  }
+  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd, sessionId: id, turnPaths })
 
   return {
     agent: id,
@@ -949,4 +1033,5 @@ export {
   decideCandidate,
   clampText,
   MAX_BODY_BYTES,
+  isNoisePath,
 }

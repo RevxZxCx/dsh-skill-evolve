@@ -361,15 +361,20 @@ const mutations = [
   {
     label: 'the output card folds at five rows again',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)',
-    to: '      const shown = filesOpen ? ordered : ordered.slice(0, 5)',
+    from: '        : [{ key: \'folded\', label: \'\', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]',
+    to: '        : [{ key: \'folded\', label: \'\', files: fresh.concat(earlier).slice(0, 5) }]',
     suites: ['test/client.test.mjs'],
   },
   {
+    // Replacing the folded branch outright is not a mutation, it is a syntax
+    // error: the ternary keeps a `?` arm and loses its `:`. A suite that cannot
+    // parse prints no tally, and the runner records that as "not testable" —
+    // which reads exactly like "nothing noticed". So the mutant keeps both arms
+    // and simply never takes the open one.
     label: 'the output card is folded even once it is open',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)',
-    to: '      const shown = ordered.slice(0, FOLDED_FILES)',
+    from: '      const groups = filesOpen === true',
+    to: '      const groups = false',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -395,14 +400,14 @@ const mutations = [
     // says how many there are, the list shows four, and nothing says the rest exist.
     label: 'the way out is never drawn at all',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                badgeAction: ordered.length > FOLDED_FILES || filesOpen`,
+    from: `                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen`,
     to: `                badgeAction: false`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'a card that already fits still offers to expand',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                badgeAction: ordered.length > FOLDED_FILES || filesOpen',
+    from: '                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen',
     to: '                badgeAction: ordered.length > 0 || filesOpen',
     suites: ['test/client.test.mjs'],
   },
@@ -479,10 +484,163 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The card is allowed to hide generated files only because it says so and
+    // keeps a way to show them. Each of the three parts is load-bearing: without
+    // the flag nothing is classified, without the count the header claims a list
+    // it is not showing, and without the gate on the badge a session whose only
+    // files are generated would show "0 个文件" with no way in.
+    label: 'a dependency is listed as the reader\'s own work',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true`,
+    to: `  if (false) return true`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'a lockfile is listed as the reader\'s own work',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: `  if (GENERATED_FILES.has(name.toLowerCase())) return true`,
+    to: `  if (false) return true`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // Lowercasing is not length-preserving, so folding the prefix and then cutting
+    // the original by the folded length eats a character of the first segment:
+    // `node_modules/` reads as `ode_modules/`, matches nothing, and a dependency is
+    // listed as the reader's own work.
+    label: 'the folded prefix is measured against the original path',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
+    to: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? normalized.slice(foldedRoot.length + 1) : folded',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // The two halves come from different places and neither normalises: `cwd` is
+    // whatever the session header says, the path is whatever the tool argument
+    // said. Comparing them case-sensitively declines to strip, falls through to
+    // judging every ancestor, and hides the whole list.
+    label: 'the workspace prefix is compared case-sensitively',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
+    to: '  const scoped = root.length > 0 && normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // The workspace can sit anywhere. `D:/build/mine`, `/build/<repo>` in CI, or
+    // the output folder opened directly as a project are all ordinary, and
+    // judging the ancestors calls every file inside generated — the card then
+    // draws no rows and says "0 个文件" about a session that edited a dozen.
+    // The workspace can sit anywhere. `D:/build/mine`, `/build/<repo>` in CI, or
+    // the output folder opened directly as a project are all ordinary, and
+    // judging the ancestors calls every file inside generated.
+    label: 'the directories above the workspace decide too',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
+    to: '  const scoped = folded',
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'a directory name only has to contain a generated one',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true`,
+    to: `  if (normalized.split('/').some((segment) => segment.includes('build'))) return true`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'every file counts as written this turn',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: `turn: turnPaths === undefined ? false : turnPaths.has(absolute),`,
+    to: `turn: true,`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'a relative path is compared without being resolved',
+    file: 'packages/ui-evolve/lib/api.js',
+    from: `    turnPaths.add(raw.startsWith('/') || /^[A-Za-z]:[\\\\/]/.test(raw) ? raw : join(cwd ?? process.cwd(), raw))`,
+    to: `    turnPaths.add(raw)`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    label: 'the folded card keeps the list order instead of this turn first',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]`,
+    to: `        : [{ key: 'folded', label: '', files: people.slice(0, FOLDED_FILES) }]`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the generated files are mixed in with the reader\'s work',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `      const noisy = ordered.filter((file) => file.noise === true)`,
+    to: `      const noisy = []`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a card holding only generated files offers no way in',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen`,
+    to: `                badgeAction: ordered.length > FOLDED_FILES || filesOpen`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the card never opens into groups',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                      'data-group': group.key,`,
+    to: `                      'data-group': 'folded',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the older files are dropped instead of grouped',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `            { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },`,
+    to: `            { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: [] },`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the older group has no heading at all',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `            { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },`,
+    to: `            { key: 'earlier', label: '', files: earlier },`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the generated group has no heading at all',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `            { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },`,
+    to: `            { key: 'noise', label: '', files: noisy },`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'every row claims to be generated',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `                            'data-noise': file.noise === true ? 'true' : 'false',`,
+    to: `                            'data-noise': 'true',`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the group heading is styled as loud as a row',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);`,
+    to: `.dsse-group-label{margin:0;padding:2px 6px 0;color:red;`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'a generated row looks like every other row',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}`,
+    to: ``,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the groups run together with no gap',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `.dsse-group + .dsse-group{margin-top:6px}`,
+    to: ``,
+    suites: ['test/client.test.mjs'],
+  },
+  {
     label: 'an orphaned file is listed with no address',
     file: 'packages/ui-evolve/lib/api.js',
-    from: 'address: resourceAddress(sessionId ?? \'\', cwd, absolute) }',
-    to: 'address: \'\' }',
+    from: 'address: resourceAddress(sessionId ?? \'\', cwd, absolute),',
+    to: 'address: \'\',',
     suites: ['test/api.test.mjs'],
   },
   {

@@ -11,7 +11,7 @@
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import {
   MAX_BODY_BYTES,
@@ -25,7 +25,8 @@ import {
   readCandidates,
   decideCandidate,
   readPanel,
-  statTouchedFiles
+  statTouchedFiles,
+  isNoisePath
 } from '../packages/ui-evolve/lib/api.js'
 
 let passed = 0
@@ -639,6 +640,148 @@ function deps(overrides = {}) {
     JSON.stringify(payload.files.map((file) => file.path)) === JSON.stringify([third, second, first]),
     JSON.stringify(payload.files.map((file) => file.path)),
   )
+}
+
+{
+  // Two flags decide how the card may present a file, and the Host answers both
+  // because only the Host holds the two inputs: the turn's own `paths` (what
+  // "this turn" means) and the absolute paths the session state remembers. A
+  // client that worked either out for itself would be guessing at path shapes it
+  // never sees.
+  const dir = tempDir('skill-evolve-files-flags-')
+  const written = join(dir, 'src', 'app.js')
+  const bundled = join(dir, 'node_modules', 'lib', 'index.js')
+  const lockfile = join(dir, 'package-lock.json')
+  const named = join(dir, 'docs', 'dist.md')
+  const built = join(dir, 'src', 'build', 'gen.js')
+  const builder = join(dir, 'src', 'builder', 'gen.js')
+  for (const file of [written, bundled, lockfile, named, built, builder]) {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, 'e')
+  }
+  const payload = await readPanel(
+    deps({
+      transcripts: { view: () => ({ turns: 1, previous: { turn: 1, calls: 5, failed: 0, paths: [written, bundled], commands: [], said: 'wrote five', tools: [] } }) },
+      filesSeen: () => [written, bundled, lockfile, named, built, builder],
+    }),
+    'agent-1',
+  )
+  const byPath = new Map(payload.files.map((file) => [file.path, file]))
+  check('a file this turn wrote says so', byPath.get(written)?.turn === true, JSON.stringify(byPath.get(written)))
+  check('and a file it did not write says so too', byPath.get(named)?.turn === false, JSON.stringify(byPath.get(named)))
+  // A build dependency is not the reader's work, and neither is a lockfile. The
+  // judgement is made on whole path segments and whole file names, so a project
+  // that owns `src/build/` or `docs/dist.md` keeps its files visible.
+  check("a dependency of the build is not the reader's work", byPath.get(bundled)?.noise === true, JSON.stringify(byPath.get(bundled)))
+  check('a lockfile is not either', byPath.get(lockfile)?.noise === true, JSON.stringify(byPath.get(lockfile)))
+  check('an output directory is one wherever it sits', byPath.get(built)?.noise === true, JSON.stringify(byPath.get(built)))
+  check("a directory that merely shares a prefix is still the reader's", byPath.get(builder)?.noise === false, JSON.stringify(byPath.get(builder)))
+  check('and so is a file that merely shares one', byPath.get(named)?.noise === false, JSON.stringify(byPath.get(named)))
+}
+
+{
+  // A checkout can live under a directory that happens to be called `build`. CI
+  // puts it at `/build/<repo>` and a developer may open `D:/build/mine` directly.
+  // Judging the whole absolute path would call every file inside generated: the
+  // card would draw no rows and announce "0 个文件" for a session that edited real
+  // source, and the turn grouping would go with them. Only the segments below the
+  // workspace may decide.
+  const parent = tempDir('skill-evolve-noise-ancestor-')
+  const dir = join(parent, 'build', 'project')
+  const source = join(dir, 'src', 'app.js')
+  const bundled = join(dir, 'node_modules', 'lib', 'index.js')
+  for (const file of [source, bundled]) {
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, 'e')
+  }
+  const payload = await readPanel(
+    deps({
+      cwdFor: () => dir,
+      filesSeen: () => [source, bundled],
+    }),
+    'agent-1',
+  )
+  const byPath = new Map(payload.files.map((file) => [file.path, file]))
+  check('a workspace under a directory called build keeps its source', byPath.get(source)?.noise === false, JSON.stringify(byPath.get(source)))
+  check('and still knows its own dependency directory', byPath.get(bundled)?.noise === true, JSON.stringify(byPath.get(bundled)))
+
+  // The two halves of the comparison come from different places and neither
+  // normalises its case: `cwd` is whatever the session header says, the file path
+  // is whatever the tool argument said. On Windows and macOS they are routinely
+  // the same directory written differently, and a case-sensitive prefix check
+  // would fail to strip, fall back to judging every ancestor, and hide the list.
+  const payloadCased = await readPanel(
+    deps({
+      // Uppercased on every platform: `cwd` only ever reaches string comparisons
+      // here (the stat call uses the absolute `source` unchanged), so a Host that
+      // reports one case and a tool argument that reports the other is ordinary
+      // anywhere. Guarding this on `win32` made the assertion tautological
+      // everywhere else, and the mutation it exists to kill would survive.
+      cwdFor: () => dir.toUpperCase(),
+      filesSeen: () => [source],
+    }),
+    'agent-1',
+  )
+  check('the workspace is recognised in either case', payloadCased.files[0]?.noise === false, JSON.stringify(payloadCased.files))
+
+  // Folding is not length-preserving: `İ` lowercases to two code units. Comparing
+  // folded while cutting the original by the folded prefix's length therefore
+  // leaves a few characters of the workspace's own name at the front of the
+  // remainder — and if that fragment happens to be a generated directory name, a
+  // source file is hidden as though a build had written it. The five-`İ` prefix
+  // and the workspace named `…build` are chosen so the fragment is exactly
+  // `build`; one `İ` would leave a fragment the segment filter absorbs, and the
+  // defect would not show.
+  const dotted = '\u0130'.repeat(5)
+  const plain = 'i\u0307'.repeat(5)
+  const foldedParent = tempDir('skill-evolve-noise-fold-')
+  const foldedDir = join(foldedParent, `${plain}build`)
+  const foldedSource = join(foldedDir, 'src', 'app.js')
+  mkdirSync(dirname(foldedSource), { recursive: true })
+  writeFileSync(foldedSource, 'e')
+  const payloadFolded = await readPanel(
+    deps({
+      cwdFor: () => join(foldedParent, `${dotted}build`),
+      filesSeen: () => [foldedSource],
+    }),
+    'agent-1',
+  )
+  check('a folded prefix does not leave a fragment of its own name behind', payloadFolded.files[0]?.noise === false, JSON.stringify(payloadFolded.files))
+}
+
+{
+  // Lowercasing is not length-preserving: `İ` (U+0130) becomes `i` plus a combining
+  // dot, so the folded prefix is one code unit longer than the original. Cutting
+  // the original by the folded length therefore lands past the separator and eats
+  // the first character of the first segment — `node_modules/` reads as
+  // `ode_modules/`, matches nothing, and a dependency is listed as the reader's own
+  // work. Folding the remainder and cutting that instead costs nothing, because
+  // every comparison below ignores case anyway.
+  // The path carries the long form and the cwd the short one, so folding grows the
+  // prefix by a code unit: the folded prefix measures six and the original path
+  // only five before the separator. Cutting the original by six eats the `n`.
+  check('a folded prefix does not eat the first segment', isNoisePath('/W/\u0130/node_modules/a.js', '/w/i\u0307') === true, String(isNoisePath('/W/\u0130/node_modules/a.js', '/w/i\u0307')))
+  check('and the same path outside it is still the reader\'s', isNoisePath('/W/\u0130/src/a.js', '/w/i\u0307') === false, String(isNoisePath('/W/\u0130/src/a.js', '/w/i\u0307')))
+}
+
+{
+  // The turn's `paths` are whatever the tool call carried, which in real sessions
+  // is routinely relative to the workspace. Resolving them against the same cwd
+  // the stat call uses is what makes the comparison mean anything: skip it and
+  // every relative path misses the absolute one session state remembers, leaving
+  // the flag false for the whole session.
+  const dir = tempDir('skill-evolve-files-relative-')
+  const file = join(dir, 'src', 'app.js')
+  mkdirSync(dirname(file), { recursive: true })
+  writeFileSync(file, 'e')
+  const payload = await readPanel(
+    deps({
+      cwdFor: () => dir,
+      transcripts: { view: () => ({ turns: 1, previous: { turn: 1, calls: 1, failed: 0, paths: ['src/app.js'], commands: [], said: 'wrote one', tools: [] } }) },
+    }),
+    'agent-1',
+  )
+  check("a relative path still counts as this turn's work", payload.files[0]?.turn === true, JSON.stringify(payload.files))
 }
 
 {

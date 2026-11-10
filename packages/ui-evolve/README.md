@@ -262,6 +262,18 @@ Three modules, top to bottom:
    first, while `previous.paths` is appended in call order (oldest first), so
    `newestFirstOf(paths, false)` reverses exactly that one.
 
+   **Two lists in one: this turn, then everything before it.** Recency alone
+   answers "what has this conversation worked on", but the question a reader
+   actually asks at the end of a reply is narrower — "what did *this* one touch".
+   So every row carries a `turn` flag, and the folded card draws the this-turn
+   files first, then fills the remaining rows from the earlier ones. The Host
+   computes the flag, not the Client, because the two lists live on different
+   sides: the card's rows come from the session's accumulated path map (which
+   outlives the turn), while the turn's own paths are on the transcript. Only the
+   Host holds both, and only the Host knows the session `cwd` — without which a
+   relative path in `previous.paths` compares unequal to the absolute path in the
+   map and every file reads as "not touched this turn".
+
    **Four rows, and the way out is not inside the list.** `FOLDED_FILES = 4`,
    matching the Host's own changed-files card. The control that reveals the rest
    is the *same round badge* the 上一轮 card already draws, in the same place and
@@ -284,6 +296,31 @@ Three modules, top to bottom:
    pushes the other two cards out of view. Only a card that actually draws a badge
    reserves the strip for it (`data-badge`), so a card that fits keeps its own
    padding. The header stops repeating the total once the list is showing it.
+
+   Once open, the list is three groups rather than one: this turn, 更早, and
+   生成文件, each with its own small heading and none drawn when empty. The
+   headings only appear where there is something to contrast — a first reply that
+   touched everything has no "更早" group to label.
+
+   **Generated files are folded away, not deleted.** `node_modules/`, `dist/`,
+   `build/`, the lockfiles, the minified bundles and source maps are things the
+   session touched without anyone deciding to write them; a card whose first four
+   rows are `node_modules` entries describes the build, not the work. So
+   `isNoisePath` classifies each path on the Host and the folded card draws only
+   the human files, with the header saying how many were set aside
+   (`5 个文件 · 1 个生成`) and a 生成文件 group waiting inside.
+
+   Two properties keep that from turning into the `DEF-51` mistake in reverse.
+   The badge appears whenever *anything* is hidden — including the case where the
+   only files are generated ones, `ordered.length > people.length` — because a
+   filter with no way out is a deletion. And the classifier is deliberately
+   conservative: it matches whole path segments and whole file names, never
+   substrings, and it only looks at the path *inside* the session's `cwd`. A
+   workspace that itself lives under `build/` would otherwise have every one of
+   its files classified as generated (`DEF-70`), which is why the prefix is
+   stripped first — case-insensitively and on the same folded string the slicing
+   uses, since `cwd` and a tool's path argument are not normalised to one another
+   (`DEF-71`, `DEF-72`).
 
    **A row opens the file in the right sidebar.** The panel asks for
    `sidebarRight` through `ctx.inject(["sidebarRight"], ...)` — an *optional*

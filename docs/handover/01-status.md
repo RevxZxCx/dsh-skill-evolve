@@ -36,6 +36,7 @@
 | 2026-11-09 | 速度改显「上一轮这一条」 | 生成中显示最近两秒，停下后显示刚结束那一轮的整轮速率并常驻（D-91，取代 D-90 的最近五条平均）；`/speed` 支持 `after=<revision>` 长轮询，比较基准是调用方自己的数（DEF-63）；下一次延迟由上一请求的实际挂起时长决定（DEF-64）；每一条读数都装过期重绘（DEF-65）；切会话中止在途请求；2607 断言全绿，七套变异 69/81/21/44/15/14/11 全杀 |
 | 2026-11-10 | 产出卡折叠 + 侧栏预览 | 顺序改由数据源给（被编辑的先后，最新在前，D-92）；折叠 4 行、出口钉在卡片底部、展开后列表自己滚（D-93，关闭 DEF-51）；行点击在右栏预览，走可选 `ctx.inject(["sidebarRight"])`，没有侧栏时退化为纯文本（D-94）；2654 断言全绿，七套变异 99/69/21/44/15/14/11 全杀 |
 | 2026-11-10 | 产出卡圆标与上一轮统一 | 折叠控件从「列表下方整宽文字按钮」改成与上一轮卡片**同一个**圆标（共享 `.dsse-expand` 几何 + `box-sizing:border-box`，产出卡额外挂 `.dsse-expand-action` 只管行为）；`Card` 新增可选 `badgeAction`：上一轮卡片的圆标是装饰（整卡可点），产出卡的圆标自己当按钮（行已是 button，卡片不能再吃点击）；`data-badge` 门控 44px 预留条带（D-95，取代 `.dsse-foot`）；2666 断言全绿，八套变异 109/69/21/44/15/14/11 全杀 |
+| 2026-11-10 | 产出卡噪音过滤 + 本轮分层 | 机器生成的文件（`node_modules/`、`dist/`、lockfile、产物后缀）默认不列但保留可查：头部写「N 个文件 · M 个生成」，展开态有「生成文件」一组（D-96）；本轮碰过的文件排在更早的前面，展开态分 本轮 → 更早 → 生成文件 三组（D-97，细化 D-92 的顺序语义）；`isNoisePath` 改为先剥工作区前缀再切段、折叠比较与折叠切片（DEF-70/71/72）；2703 断言全绿，八套变异 128/69/21/44/15/14/11 全杀 |
 
 ---
 
@@ -2849,3 +2850,71 @@ CRLF       0（113 文件）  sync-gutter 幂等，client.js sha256 前缀 f7d57
 - `scripts/mutate-outcome.mjs` 与 `scripts/mutate-result-shape.mjs` 仍指向已不存在的
   `lib/outcome.js`、`lib/evidence.js`（实际在 `packages/core/lib/`），跑起来 ENOENT；修好之前
   「八套变异全杀」实际覆盖的是六套。
+
+## 2026-11-10 · 产出卡：噪音过滤 + 本轮/更早分层
+
+**调研边界（必须如实说明）。** `web_search` 在本会话仍不可用（`Error: DeepSeek search has no API key
+for "DEEPSEEK_API_KEY"`），但 `advanced_search` 走 engine 可用（`bing` / `exa` / `tavily` 实测可通，
+`ddg` 失败）。下面四条外部依据都是通过 `advanced_search` + `web_fetch` 拿到的产品文档原文，不是凭印象。
+
+**外部依据。** ①Claude Code diff 面板：`The file list skips test files and generated files outright,
+and collapses every change made before this session into a single summary line at the bottom.`
+（<https://www.getclaudeskills.com/blog/claude-code-diff-panel-fullscreen-mode>）——噪音过滤 +
+「本轮 / 更早」分层，正是本轮补的两条。②VS Code files changed bar：`It lists every file the agent
+touched in that response.`（<https://code.visualstudio.com/learn/foundations/reviewing-and-controlling-agent-changes>）
+——每轮独占一个列表，印证我们这两张卡的划分不是自创。③vscode#324929：`The turn changes part now
+renders a N files changed +ins -del header with a View All File Changes action`——折叠态标题承载
+数字、展开入口在标题上，与 D-93/D-95 的圆标一致。④Termdeck：`A long diff shows its first 400 lines;
+Show more lines at the bottom adds the next 400.`（<https://termdeck.io/docs/reviewing-changes>）
+——折叠 + 显式出口。
+
+**现在在哪。**
+
+- 服务端 `packages/ui-evolve/lib/api.js`：新增 `isNoisePath(path, cwd)`（导出，供测试直接断言）；
+  `statTouchedFiles({ paths, cwd, sessionId, turnPaths })` 每个文件多带 `turn` 与 `noise` 两个布尔；
+  `readPanel` 构造 `turnPaths` 时把相对路径按 `cwd` 解析成绝对路径（**不解析就是「一个都没碰」**）。
+- 客户端 `packages/ui-evolve/lib/client.js`：`ordered` → `noisy` / `people` / `fresh` / `earlier` 四组派生；
+  折叠态是 `fresh.concat(earlier).slice(0, FOLDED_FILES)`（**不是 `people.slice`**，那等于没做优先级）；
+  展开态 `groups` 三组，后两组带「更早」「生成文件」小标题，空组不渲染；头部 `fileMeta` 在
+  有生成文件时写 `${people.length} 个文件 · ${noisy.length} 个生成`；圆标判据多一项
+  `ordered.length > people.length`（**只有生成文件被藏起来时出口也必须还在**）；每行 `data-noise`；
+  四条新 CSS（`.dsse-group`、`.dsse-group + .dsse-group`、`.dsse-group-label`、`.dsse-row[data-noise="true"]`）。
+
+**当前数字。**
+
+| 项目 | 数字 |
+|---|---|
+| `node test/run.mjs` | **2703 passed / 0 failed** |
+| `test/client.test.mjs` | 489 |
+| `test/api.test.mjs` | 240 |
+| `test/mutations.test.mjs` | 39 |
+| 八套变异 | **128** / 69 / 21 / 44 / 15 / 14 / 11 全杀 |
+| 全仓 CRLF | 0（113 个追踪文件） |
+| `sync-gutter` 幂等 | `client.js` sha256 = `1ebcb823631911d820d2824f9f0a75725f6ccfc0a140667661414efcf27618ba` |
+
+**两轮审查（R-67 / R-68）共 3 条，全部采纳 0 驳回。** 第一轮 1 P2：判据的适用域把工作区自己的名字
+也算进证据（DEF-70）。第二轮 1 P2 + 1 P3：大小写断言被平台守卫收窄成恒真（DEF-73）、比较与切片
+不在同一坐标系（DEF-72）。中间还有一条是我自查发现的（DEF-71 大小写敏感），没有单独的审查轮次，
+账本里如实注明。
+
+**四条踩坑。**
+
+1. **`parseAnchors` 不解析 `${}` 插值。** 含反引号与 `${root}` 的锚点用反引号模板串写，文件里留下
+   `\\`` 与 `\\${`，解码后带字面反斜杠、永远匹配不上源码，报 missing 而不是静默通过。**必须用单引号
+   字面量写这类锚点**——单引号里反引号和 `${` 都无需转义，解码后与源码逐字相等。
+2. **一次插入把前一条变异拆成了两半。** 我用 `s.index('    label: ...')` 定位插入点，落在注释块与
+   `label` 行之间，于是前一条变异只剩注释、我的新变异占了它的 `{`——`node --check` 直接 `Unexpected
+   token '{'`。**插入点应该用 `s.rindex('  {\n', 0, at)` 退到块首**，或按行号整段替换。
+3. **替换整块却忘了原本的闭合括号。** 重写三条变异时我给每条都补了 `},`，而原位置的 `},` 还在，
+   于是多了三个孤立 `}`。**替换一个完整的 `{...}` 块时，新内容要么自带闭合、要么只替换内部**，
+   不能两头都补。
+4. **`git ls-files` 默认 `core.quotepath=true`。** CRLF 检查脚本读第一个中文路径就 `ENOENT`
+   （DEF-42 的同一个坑）。凡是要拿 `git ls-files` 输出当路径用，一律加 `-c core.quotepath=false`。
+
+**下一步。**
+
+- 需要用户重启宿主才能看到效果（`lib/client.js` 由渲染进程一次加载并缓存）。
+- `scripts/mutate-outcome.mjs` 与 `scripts/mutate-result-shape.mjs` 仍指向已不存在的
+  `lib/outcome.js`、`lib/evidence.js`（实际在 `packages/core/lib/`），跑起来 ENOENT；修好之前
+  「八套变异全杀」实际覆盖的是六套。
+- 「噪音」的定义目前是路径形态；若日后要按文件内容或 `.gitignore` 判断，`isNoisePath` 是唯一入口。

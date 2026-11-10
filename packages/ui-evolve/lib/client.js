@@ -330,6 +330,10 @@ window.__ModuleLoader__.load({
 .dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
 .dsse-row-open{width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .dsse-row-open:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
+.dsse-group{display:grid;gap:3px}
+.dsse-group + .dsse-group{margin-top:6px}
+.dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
+.dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
 .dsse-badge{display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f4f8);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-badge-own{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
 .dsse-btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 11px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color 160ms ease,opacity 160ms ease}
@@ -2068,7 +2072,41 @@ window.__ModuleLoader__.load({
       // different one: a build step touching an old file would jump it to the top
       // of a list about editing.
       const ordered = files
-      const shown = filesOpen ? ordered : ordered.slice(0, FOLDED_FILES)
+      // Three groups, because the card is asked three different questions and
+      // answers the narrowest one first. `fresh` is the turn that just ended —
+      // "what did you just do". `earlier` is the rest of the session — "what has
+      // this conversation produced". `noisy` is what a tool wrote rather than a
+      // person: lockfiles, build output, dependency trees.
+      //
+      // Noise is separated rather than dropped. A turn that runs `npm install`
+      // can record two hundred files, and they would push the three that matter
+      // out of the four rows on screen; but a session that only ever touched a
+      // lockfile still has to say so, and being able to look is what makes the
+      // filtering trustworthy. So the fold counts people's files, and opening the
+      // card shows everything with the generated ones labelled in their own
+      // group.
+      const noisy = ordered.filter((file) => file.noise === true)
+      const people = ordered.filter((file) => file.noise !== true)
+      const fresh = people.filter((file) => file.turn === true)
+      const earlier = people.filter((file) => file.turn !== true)
+      // Folded, the four rows are the reader's own work, this turn's first. Open,
+      // the whole session is there in three labelled groups, so nothing is
+      // hidden without a way to see it.
+      const groups = filesOpen === true
+        ? [
+            { key: 'fresh', label: '', files: fresh },
+            { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },
+            { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },
+          ]
+        : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]
+      // What the header promises. The folded count is people's files, because
+      // that is what the rows are; the generated ones are named separately so the
+      // badge's total never contradicts the count beside it.
+      const fileMeta = filesOpen === true
+        ? `全部 ${ordered.length} 个`
+        : noisy.length === 0
+          ? `${people.length} 个文件`
+          : `${people.length} 个文件 · ${noisy.length} 个生成`
       // How many files the turn that just ended wrote. `files` is the whole
       // session's work now, so it cannot answer that question, and the two other
       // numbers on the same row are turn-scoped.
@@ -2388,13 +2426,18 @@ window.__ModuleLoader__.load({
                 // the open state has to say what is on screen rather than repeat the
                 // total. Both numbers sit in the header, where they cannot be scrolled
                 // out of view — that was the whole of DEF-51.
-                meta: filesOpen ? `全部 ${ordered.length} 个` : `${ordered.length} 个文件`,
+                meta: fileMeta,
                 // The fold's control is the same round badge the 上一轮 card uses,
                 // in the same place and the same size — two cards in one column
                 // should not teach the reader two shapes for one gesture. It has to
                 // be a real button here rather than card decoration: the rows are
                 // buttons too, and a card that swallowed clicks would eat them.
-                badgeAction: ordered.length > FOLDED_FILES || filesOpen
+                //
+                // It appears while the generated files are hidden too, even when
+                // people's files fit in four rows. A filter with no route to the
+                // filtered thing is indistinguishable from deletion, and the header
+                // would be naming a number the reader cannot reach.
+                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen
                   ? {
                       label: filesOpen ? '收起' : `展开全部 ${ordered.length} 个`,
                       open: filesOpen === true,
@@ -2405,36 +2448,44 @@ window.__ModuleLoader__.load({
                   jsx('div', {
                     className: 'dsse-list dsse-files',
                     'data-open': filesOpen === true ? 'true' : 'false',
-                    children: shown.map((file) => {
-                      const parts = splitPath(file.path)
-                      // A row is a button, not a div with a handler: it has to be
-                      // reachable by keyboard and announced as something that does
-                      // something. `canPreview` is false when this Host has no right
-                      // sidebar, in which case the row is not interactive at all
-                      // rather than looking clickable and doing nothing.
-                      //
-                      // These children are built in `Cards` and passed down, so `props`
-                      // in this closure is `Cards`' own — not `Card`'s. Reading the
-                      // opener off props here is how the first draft made every row
-                      // inert on every Host.
-                      const openable = canPreview === true && typeof file.address === 'string' && file.address.length > 0
-                      return jsxs(openable === true ? 'button' : 'div', {
-                        className: openable === true ? 'dsse-row dsse-row-open' : 'dsse-row',
-                        type: openable === true ? 'button' : undefined,
-                        title: `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}`,
-                        onClick: openable === true ? () => openFile(file.address) : undefined,
-                        children: [
-                          jsx('span', {
-                            className: 'dsse-row-main',
+                    children: groups.map((group) => group.files.length === 0 ? null : jsxs('div', {
+                      className: 'dsse-group',
+                      'data-group': group.key,
+                      children: [
+                        group.label === '' ? null : jsx('p', { className: 'dsse-group-label', children: group.label }),
+                        group.files.map((file) => {
+                          const parts = splitPath(file.path)
+                          // A row is a button, not a div with a handler: it has to be
+                          // reachable by keyboard and announced as something that does
+                          // something. `canPreview` is false when this Host has no right
+                          // sidebar, in which case the row is not interactive at all
+                          // rather than looking clickable and doing nothing.
+                          //
+                          // These children are built in `Cards` and passed down, so `props`
+                          // in this closure is `Cards`' own — not `Card`'s. Reading the
+                          // opener off props here is how the first draft made every row
+                          // inert on every Host.
+                          const openable = canPreview === true && typeof file.address === 'string' && file.address.length > 0
+                          return jsxs(openable === true ? 'button' : 'div', {
+                            className: openable === true ? 'dsse-row dsse-row-open' : 'dsse-row',
+                            type: openable === true ? 'button' : undefined,
+                            'data-noise': file.noise === true ? 'true' : 'false',
+                            title: `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}`,
+                            onClick: openable === true ? () => openFile(file.address) : undefined,
                             children: [
-                              jsx('span', { className: 'dsse-name', children: parts.name }),
-                              parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
+                              jsx('span', {
+                                className: 'dsse-row-main',
+                                children: [
+                                  jsx('span', { className: 'dsse-name', children: parts.name }),
+                                  parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
+                                ],
+                              }),
+                              jsx('span', { className: 'dsse-size', children: formatBytes(file.bytes) }),
                             ],
-                          }),
-                          jsx('span', { className: 'dsse-size', children: formatBytes(file.bytes) }),
-                        ],
-                      }, `file:${file.path}`)
-                    }),
+                          }, `file:${file.path}`)
+                        }),
+                      ],
+                    }, group.key)),
                   }),
                 ],
               }),

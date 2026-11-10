@@ -73,6 +73,10 @@
 | DEF-67 | 2026-11-10 | 「按编辑顺序、不按 mtime」的断言什么也没证明：fixture 的 `mtimeMs` 与数组顺序同向 | 测试数据把两个假说排成了同一个答案，证伪其中任何一个都得到相同输出 |
 | DEF-69 | 2026-11-10 | 两个圆标共用同一条 `.dsse-expand` 规则，但 `div` 是 content-box、`button` 是 border-box，渲染外径差 2px（28 vs 26） | 共用一条规则不等于共用默认值；只比对规则文本的断言对两种盒模型都点头 |
 | DEF-68 | 2026-11-10 | `scripts/mutate-checklist-panel.mjs` 从未被锚点下限表覆盖，坏了 9 个锚点也没人知道 | 它写路径字面量而表内循环靠常量解析目标，被跳过时退出码仍是 0 |
+| DEF-70 | 2026-11-10 | `isNoisePath` 判断绝对路径的**全部祖先段**：工作区本身位于 `build/`、`dist/`、`target/` 等目录下时（CI 的 `/build/<repo>`、`D:\build\mine`、把输出目录当 workspace 打开），整卡文件都被判成生成文件，卡片一行不显示、头部写「0 个文件 · N 个生成」 | 判据回答的是「工作区里这个文件是不是产物」，代码却拿整条绝对路径去问，把工作区自己的名字也算进了证据 |
+| DEF-71 | 2026-11-10 | 剥离工作区前缀时区分大小写：`cwd` 来自会话头、路径来自工具参数原文，两边都不规范化，Windows/macOS 上同一目录常有两种写法 → 剥离静默失败、退回全段判断，DEF-70 的症状重现 | 一个「尽力而为的规范化」如果只做了一半，失败是静默的，效果与完全没做相同 |
+| DEF-72 | 2026-11-10 | 大小写折叠后仍用**原始串**按折叠后的长度切片：`İ`（U+0130）小写化后是一个码元变两个，切片位置多吃或少吃一个字符 → `node_modules/` 读成 `ode_modules/`（依赖被当成读者的作品）或 `xbuild` 尾巴 `build` 命中判据（源码被藏） | 折叠改变了长度，就不能拿折叠后的长度去切没折叠的串；比较与切片必须发生在同一个坐标系里 |
+| DEF-73 | 2026-11-10 | 大小写断言的 `cwdFor` 写成 `process.platform === 'win32' ? dir.toUpperCase() : dir`，非 Windows 上两边大小写相同 → 断言恒真，对应变异在 Linux/macOS 上存活 | 一条只在某个平台才有内容的断言不是断言，是条件注释 |
 
 ---
 
@@ -1090,3 +1094,114 @@ revision 已经前进」这一类变化完全看不见。而一条回复恰好�
 
 **教训。** 两个元素标签不同，默认值就不同；共性必须显式写死，不能指望继承。而「复用同一条
 规则」只是复用的**一半**——复用的完整条件是「同一条规则 + 同样的默认值」。
+
+## DEF-70 · 判据看了整条路径，于是工作区自己的名字成了证据
+
+**现象。** 工作区位于一个叫 `build`、`dist`、`out`、`target`、`coverage`、`venv` 或 `.idea` 的目录
+下面时（CI 检出到 `/build/<repo>`、开发者的项目放在 `D:\build\mine`、或者干脆把输出目录当 workspace
+打开），产出卡显示「0 个文件 · N 个生成」并且一行都不画。文件都在，判据把它们全部归进了「生成」。
+
+**真因。** `isNoisePath(path)` 收的是绝对路径，切段之后用「任何一段是生成目录名」判定：
+
+```js
+const segments = normalized.split('/').filter((segment) => segment.length > 0)
+if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true
+```
+
+工作区在 `F:/build/proj` 时，`F:/build/proj/src/app.js` 的目录段是 `['F:', 'build', 'proj', 'src']`，
+`build` 在里面，于是 `src/app.js` 被判定为生成文件。判据本身没有错——它回答的是「这条路径上任何一级
+是不是生成目录」；错的是**这个问题的范围**：读者问的是「工作区里这个文件是不是构建产物」，工作区
+自己的名字根本不该进证据。
+
+**修法。** `isNoisePath(path, cwd)`：先剥掉 `cwd` 前缀，再对剩下的相对部分切段。
+
+```js
+const root = typeof cwd === 'string' && cwd.length > 0 ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
+const scoped = root.length > 0 && normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized
+const segments = scoped.split('/').filter((segment) => segment.length > 0)
+```
+
+剥离不掉时（路径在工作区外）退回整条路径——这是对的：工作区外的文件本来就没有「工作区内的位置」
+可言，按完整路径判断至少和 `.gitignore` 的直觉一致。
+
+**回归断言。** 工作区建在 `<tmp>/build/project`，里面放 `src/app.js` 与 `node_modules/lib/index.js`，
+断言前者 `noise === false`、后者 `noise === true`。探针：把 `const scoped = ...` 改成
+`const scoped = normalized` → 235 passed / 1 failed。
+
+**教训。** 一个函数收了一个参数却用来「限定问题的范围」，那么这个范围本身必须被断言覆盖——否则
+参数传与不传、传什么，都不会有人发现。这也是审查说的那句话：**判据的适用域是判据的一部分**。
+
+## DEF-71 · 一半的规范化比没有更糟
+
+**现象。** DEF-70 修完之后，在 Windows 上仍能复现同样的症状：卡片显示「0 个文件 · N 个生成」。
+但只在 `cwd` 与实际文件路径**大小写不一致**时出现。
+
+**真因。** 剥离前缀用的是严格比较：
+
+```js
+normalized.startsWith(`${root}/`)
+```
+
+`cwd` 来自会话头（宿主记录的路径），文件路径来自工具参数原文（模型写进 `str_replace` 的字符串），
+**两边都不做规范化**。Windows 与 macOS 的文件系统不区分大小写，所以两边经常是同一个目录的两种写法
+（`F:/Work/proj` 与 `f:/work/proj`），严格比较失败 → `scoped` 退回整条绝对路径 → DEF-70 的症状重现。
+
+**修法。** 两侧都 `toLowerCase()` 后比较（并且切片也走折叠串，见 DEF-72）。
+
+**回归断言。** 同一块 fixture 里多加一次读面板，`cwdFor: () => dir.toUpperCase()`——把 `cwd` 传成
+全大写、文件路径保持原样。断言 `files[0].noise === false`。探针：去掉 `toLowerCase()` → 236 passed /
+1 failed，失败项正是这条。
+
+**教训。** 「尽力而为的规范化」如果只做了一半（比较时折叠、切片时不折叠，或者这里折叠、那里不折叠），
+它的失败模式是**静默的**：前缀剥不掉时函数不会报错，它只是悄悄地退回到上一次修好的那个错误答案。
+凡是「匹配不上就退回默认行为」的分支，都必须有一条断言专门走那条分支。
+
+## DEF-72 · 折叠改变了长度，就不能拿折叠后的长度去切原串
+
+**现象。** 比较与切片用了两个坐标系：`normalized.toLowerCase().startsWith(`${root.toLowerCase()}/`)`
+判定命中，然后 `normalized.slice(root.length + 1)` 在原串上切。绝大多数路径上两者一致；含
+`İ`（U+0130，土耳其语大写 i 带点）的路径上不一致，因为 `'İ'.toLowerCase()` 是 `'i̇'`——**两个码元**。
+
+**后果是双向的。** 多切一个字符：`.../node_modules/a.js` 剥掉前缀后得到 `ode_modules/a.js`，判据
+匹配不上 → 依赖被当成读者自己的作品列出来（本该藏的没藏）。少切一个字符：工作区名叫 `xbuild` 时
+余下串的首段变成 `build`，恰好命中 `GENERATED_DIRS` → 真实的源码文件被藏起来（本该显示的没显示）。
+审查用探针验证了两种方向：`delta = 1` 时 `scoped` 是 `"/src/app.js"`（多切），反向是 `"rc/app.js"`（少切）。
+
+**修法。** 整个余下路径都在折叠串上切：
+
+```js
+const folded = normalized.toLowerCase()
+const foldedRoot = root.toLowerCase()
+const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded
+```
+
+代价为零：下面每一处比较（`GENERATED_DIRS.has` / `GENERATED_FILES.has(name.toLowerCase())` /
+`endsWith`）本来就不区分大小写，折叠整段不丢失任何信息。
+
+**回归断言。** 把 `isNoisePath` 从 `api.js` 导出，直接对它做两条断言：`isNoisePath('/W/İ/node_modules/a.js', '/w/i̇')`
+必须是 `true`（路径带短形、`cwd` 带长形，折叠后前缀六个码元而原串只有五个，按折叠长度切原串会吃掉 `n`），
+以及同一工作区里的 `src/a.js` 必须是 `false`。放在 `readPanel` 层的断言做不到这一点：构造一个
+「`stat` 能通过但两处大小写不同」的真实目录，比直接测纯函数难得多，而**这个缺陷恰恰藏在纯函数里**。
+
+**教训。** 「先规范化再比较」是一个整体动作：**比较、切片、后续一切取值，都必须发生在同一个坐标系里**。
+只折叠比较不折叠切片，等于引入了两套坐标系，而差异只在少数输入上显现——正是最难被普通用例发现的那类。
+
+## DEF-73 · 只在某个平台才有内容的断言不是断言
+
+**现象。** DEF-71 的回归断言写的是：
+
+```js
+cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
+```
+
+在 Windows 上有效。在 Linux/macOS 上 `dir.toUpperCase()` 不会被调用，`cwd` 与路径大小写完全相同，
+前缀比较必然成功——**断言与 `api.js` 的大小写处理无关，恒真**。审查实测：在非 Windows 上把
+`api.js` 改回大小写敏感，结果仍是 237 passed / 0 failed，对应变异存活。
+
+**修法。** 去掉平台判断，`cwdFor: () => dir.toUpperCase()`。这在任何平台都安全：`cwd` 在这个测试里
+只进入字符串比较（`isNoisePath` 与 `resourceAddress`），真正 `stat` 用的是未改动过的绝对 `source`，
+所以把 `cwd` 全大写不会导致文件找不到。审查实测改完后 237 passed。
+
+**教训。** 写「平台相关」的测试分支之前，先问它**保护的到底是什么**。这里想保护的是「两侧写法不同
+时仍能剥离前缀」，那是一个纯粹的字符串性质，与运行平台无关；把平台判断混进来，只是让断言在自己的
+开发机上通过。**如果一条断言在某个环境里恒为真，它在那个环境里就不是覆盖，是噪音。**
