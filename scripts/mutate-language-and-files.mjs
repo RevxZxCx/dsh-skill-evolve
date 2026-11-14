@@ -1219,11 +1219,11 @@ const mutations = [
   },
   {
     file: client,
-    label: "the menu shows the name of the route instead of the route",
+    label: "the menu prints the path beside the label again",
     suites: ['test/client.test.mjs'],
-    from: "                                jsx('span', { className: 'dsse-row-menuitem-value', children: target }),",
-    to: "                                jsx('span', { className: 'dsse-row-menuitem-label', children: label }),",
-    why: "the two labels are the part the reader already knows; the paths are the part they cannot reconstruct, so a menu that names the routes without showing them asks for a choice between two things it has not described",
+    from: "                              children: jsx('span', { className: 'dsse-row-menuitem-label', children: label }),",
+    to: "                              children: [jsx('span', { className: 'dsse-row-menuitem-label', children: label }), jsx('span', { className: 'dsse-row-menuitem-value', children: target })],",
+    why: "a long path can only be shown truncated, and a truncated path describes the clipboard's contents worse than the label does; it also makes the two entries different widths, which moves the eye away from the choice",
   },
   {
     file: client,

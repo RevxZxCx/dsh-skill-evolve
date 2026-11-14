@@ -325,7 +325,7 @@ div.dsse-row            (position:relative)
   div.dsse-row-actions  (绝对定位叠在 .dsse-size 上)
     button.dsse-row-copy  (22px，只在悬停/聚焦/菜单开着时显形)
 div.dsse-row-menu       ← 行的兄弟，不是子节点
-  button.dsse-row-menuitem  (标签 + 将要复制的那串字符)
+  button.dsse-row-menuitem  (只有标签：绝对路径 / 相对路径)
 ```
 
 三个决定值得记：
@@ -333,6 +333,7 @@ div.dsse-row-menu       ← 行的兄弟，不是子节点
 1. **菜单在文档流里，不做浮层**。`.dsse-card{overflow:hidden}` 与 `.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}` 都会裁掉浮到行外的东西，而长列表正是最需要它的场合；手写 bundle 也没有 `ReactDOM.createPortal` 的入口（D-146）。代价是打开时把下面的行往下推——接受，推一下比被裁掉好。
 2. **菜单必须是行的兄弟**。做子节点会成为 flex 的第二行，把行的中点连同复制按钮一起挪走。
 3. **成功/失败改成颜色而不是文字**。22px 放不下可读的中文，`data-ok` 上红绿，`aria-label` 上带文字给读屏（D-144 不变）。
+4. **菜单项只写文案，不显示路径**（D-151，用户 m15439）。第一版把「将要复制的路径」印在标签旁边，理由是「那才是读者无法重构的信息」。真机上它只能显示成 `F:\dsh-plugin\dsh-ski…`——被截断的路径比两个词更少地说明剪贴板里会是什么，还让两项长度不等。顺带纠正一个说法：路径从来没撑大过布局，菜单项由卡片定宽（实测改前改后都是 386px、两项各 378px）。
 
 **八个单元、六个审查者，修 14 处**（R-85）。最重的两条都是「测试看不见」的类型：
 图标上再按一次关不掉菜单（真机 `renders` 2→4 证实，只有按 4px 边缘才行）、

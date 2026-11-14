@@ -5094,12 +5094,14 @@ async function openPanel(routes, options) {
     check('and the menu is not inside the row', byClass(openedRow, 'dsse-row-menu').length === 0, String(byClass(openedRow, 'dsse-row-menu').length))
     const items = byClass(openedMenu, 'dsse-row-menuitem')
     check('the menu offers both paths', items.length === 2, String(items.length))
-    // The labels alone are the thing the reader already knows. The paths are the
-    // thing they cannot reconstruct, so both are on screen before the choice.
-    check('and the first names the absolute route', textOf(items[0]).includes('绝对路径'), textOf(items[0]))
-    check('and shows the absolute path', textOf(items[0]).includes('F:\\work\\src\\inside.ts'), textOf(items[0]))
-    check('and the second names the relative route', textOf(items[1]).includes('相对路径'), textOf(items[1]))
-    check('and shows the workspace-relative path', textOf(items[1]).includes('src/inside.ts'), textOf(items[1]))
+    // The label is the whole item. An earlier version printed the path next to
+    // it; a long path can only be truncated there, and a truncated path says
+    // less about what will be copied than the two words do.
+    check('and the first names the absolute route', textOf(items[0]) === '绝对路径', textOf(items[0]))
+    check('and the second names the relative route', textOf(items[1]) === '相对路径', textOf(items[1]))
+    // The path is not on screen, but it is still what lands on the clipboard --
+    // that is the half of the contract the label cannot show.
+    check('and neither item prints a path', items.every((item) => textOf(item).includes('\\') === false && textOf(item).includes('/') === false), JSON.stringify(items.map(textOf)))
     check('opening a menu adds both listeners', listenersNow().length === 2, JSON.stringify(listenersNow().map((row) => row.type)))
 
     // Escape closes it, and takes the listeners with it.
@@ -5167,7 +5169,7 @@ async function openPanel(routes, options) {
     const casedMenu = menuIn(await redraw(), 'Cased.ts')
     const casedItems = byClass(casedMenu, 'dsse-row-menuitem')
     if (casedItems.length === 2) {
-      check('a file spelled in another case is still inside the workspace', textOf(casedItems[1]).includes('Src/Cased.ts'), textOf(casedItems[1]))
+      check('a file spelled in another case is still inside the workspace', casedItems.length === 2, String(casedItems.length))
       casedItems[1].props.onClick()
       await redraw()
       check('and its relative path is cut at the workspace root', written[written.length - 1] === 'Src/Cased.ts', JSON.stringify(written[written.length - 1]))
@@ -5395,7 +5397,9 @@ async function openPanel(routes, options) {
     check('and wears the card radius', /\.dsse-row-menu\{[^}]*border-radius:9px/.test(sheet), '')
     check('and the card surface', /\.dsse-row-menu\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet), '')
     check('and a menu item is a full-width row', /\.dsse-row-menuitem\{[^}]*width:100%/.test(sheet), '')
-    check('and shows its path in the mono face', /\.dsse-row-menuitem-value\{[^}]*text-overflow:ellipsis/.test(sheet), '')
+    // Items are as wide as the menu, and the menu is inset from the card, so a
+    // long label ellipsises instead of pushing the layout wider.
+    check('and a long label cannot widen the menu', /\.dsse-row-menuitem-label\{[^}]*overflow:hidden/.test(sheet) && sheet.includes('dsse-row-menuitem-value') === false, '')
     // The outcome is a colour on the icon, because the control is 22px and no word
     // that fits there is long enough to read.
     check('success and failure are distinguishable without text', /\.dsse-row-copy\[data-ok="true"\]\{[^}]*color:/.test(sheet) && /\.dsse-row-copy\[data-ok="false"\]\{[^}]*color:/.test(sheet), '')

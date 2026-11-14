@@ -660,11 +660,11 @@ window.__ModuleLoader__.load({
 .dsse-row-menuitem{display:flex;align-items:baseline;gap:8px;width:100%;padding:4px 7px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .dsse-row-menuitem:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
 .dsse-row-menuitem:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
-.dsse-row-menuitem-label{flex:0 0 auto;font-size:max(.85em,11px)}
-/* The path itself, so the choice is made against the thing being copied: two
-   labels that only say 绝对 / 相对 leave the reader guessing what lands on the
-   clipboard, and the absolute path is the one they cannot reconstruct. */
-.dsse-row-menuitem-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8b92a1);font-family:var(--dsse-font-mono,var(--dsse-font-family,inherit));font-size:max(.8em,10px)}
+.dsse-row-menuitem-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:max(.85em,11px)}
+/* No path in the item. A long path can only be shown truncated, and a
+   truncated path describes the clipboard's contents worse than the label does;
+   it also makes the two entries different widths, which moves the eye. The
+   value still goes where it is useful -- into the clipboard on click. */
 .dsse-group{display:grid;gap:3px}
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
@@ -3080,10 +3080,7 @@ window.__ModuleLoader__.load({
                                 // lands where the reader already is.
                                 if (copyRef.current !== null) copyRef.current.focus()
                               },
-                              children: [
-                                jsx('span', { className: 'dsse-row-menuitem-label', children: label }),
-                                jsx('span', { className: 'dsse-row-menuitem-value', children: target }),
-                              ],
+                              children: jsx('span', { className: 'dsse-row-menuitem-label', children: label }),
                             }, `${key}:${which}`)
                           }
                           // Both items are derived from the same row, so the row can be

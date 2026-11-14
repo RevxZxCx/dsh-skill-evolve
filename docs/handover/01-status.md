@@ -54,6 +54,7 @@
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 | 2026-11-14 | 产出卡 S3：行内复制 | 一行从 `<button>` 改成 `div` 里两个兄弟按钮（打开 / 复制），动作层绝对定位叠在尺寸上——因为展开态的行容器有 `overflow-y:auto`，浮到行外的菜单会被裁掉。复制绝对路径与工作区相对路径（`relativePath` 单独一个函数：工作区外没有相对路径这个答案，编一个就是把 `../` 写进剪贴板）。没有 `navigator.clipboard` 就整层不渲染——这条我先写成「明文 http 所以是常态」，**被真机实测推翻**：loopback 算 secure context，按钮本来就画得出来。八单元独立审查后修 9 处（`İ` 折叠变长切错位、两条永远为真的断言、行高亮≠可点区、焦点下尺寸退出无障碍树、`aria-label` 不播报结果）。3413 断言全绿，三套突变 129/45/128 全杀，残留 0。**新增 DEF-121~126、D-138~145** |
 | 2026-11-14 | 复制改成悬停图标 + 展开菜单 | 用户 m14496 要求把两个中文小按钮换成一个复制图标，点开菜单再选绝对/相对。菜单做成**行的兄弟、在文档流内**——两个祖先（`.dsse-card{overflow:hidden}`、`.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`）都会裁掉浮层，而长列表正是最需要它的场合。八单元六个审查者 + 两轮后台审查：修 14 处，最重的是「图标上再按关不掉菜单」（真机 `renders` 2→4 证实）与「聚焦时透明按钮压住文件大小」。3459 断言全绿，突变 143/45/128 全杀，残留 0。**新增 DEF-127~132、D-146~150、R-85** |
+| 2026-11-14 | 复制菜单去掉路径，只留两个文案 | 用户 m15439 说长路径会把布局撑大。**撑大这件事不成立**——菜单项由卡片定宽（实测两项各 378px，去掉路径后宽度一个像素没变），真正的问题是长路径只能显示成 `F:\dsh-plugin\dsh-ski…`，那比两个词更少地说明剪贴板里会是什么。删掉 `dsse-row-menuitem-value` 与它的样式规则，`menuItem` 的 `children` 从两层变成一层；标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis`，长文案照样不会把菜单推宽。断言从「显示路径」改成「不显示路径」并加一条 CSS 反向断言（`sheet.includes('dsse-row-menuitem-value') === false`），防这条规则以死代码的形式回来。3458 断言全绿，突变 143/45/128 全杀，残留 0。**新增 D-151** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -3873,3 +3874,31 @@ S3 交付的是两个中文小按钮（「绝对」「相对」）并排躺在�
 - 按住 Shift 点复制按钮不会复制相对路径；菜单是这个功能唯一的入口。
 - 窄卡（168px）里按钮仍会盖住文件名的最后约 20px，这是 D-143 的既定代价。
 - 没有一条结论来自真实用户操作：全部是真机浏览器 + 程序化输入。
+
+## 2026-11-14 · 菜单去掉路径：一次「不成立的理由，成立的结论」
+
+用户说「不用显示实际的路径，只用显示复制绝对路径和相对路径即可，这样不会被长路径撑大布局」。
+
+**前半句我照做了，后半句要先纠正**：路径从来没撑大过布局。菜单项是 `.dsse-row-menuitem{width:100%}`，宽度由菜单定，菜单由 `margin:0 0 2px 22px` 挂在卡片里，所以外壳宽度不随内容变。真机读数印证——改前改后菜单都是 386px、两项各 378px，一个像素没动。
+
+真正的问题是**那个一直在起作用的截断**。`.dsse-row-menuitem-value` 有 `text-overflow:ellipsis`，长路径显示成 `F:\dsh-plugin\dsh-ski…`。一个被截断的路径对「剪贴板里会是什么」这个问题的回答，比「绝对路径」四个字更少——它看起来像信息，实际只是前半段。两项长度不一致还让眼睛在两条不等长的行之间来回。
+
+```
+div.dsse-row-menu
+  button.dsse-row-menuitem   (只有标签：绝对路径 / 相对路径)
+```
+
+改动四处：
+
+1. `menuItem` 的 `children` 从 `[label span, value span]` 变成单个 `label span`。`target` 参数保留——它仍然是点击时写进剪贴板的内容，只是不再当预览。
+2. 删掉 `.dsse-row-menuitem-value` 整条规则与它上面的注释。**留一条谁也匹配不上的规则，和审查里抓到的那条死属性是同一类事**：读代码的人会以为那是个功能。
+3. 标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap`。文案以后变长（比如加语言包）也撑不破菜单。
+4. 断言跟着行为走：原来两条 `and shows the absolute path` / `and shows the workspace-relative path` 合并成一条 `and neither item prints a path`（两项文本都不含 `\` 或 `/`），另加一条 CSS 反向断言。
+
+两处顺带变强：
+- `a file spelled in another case is still inside the workspace` 原来读的是菜单里的相对路径文本，现在读「菜单有两项」；而它下面那条 `and its relative path is cut at the workspace root` 本来就断言**点下去真的写进剪贴板的字符串**——后者才是这条用例真正要证的事，前者只是在看预览。
+- 真机渲染脚本同步改（菜单项模板去掉 value span、`role="menu"` → `role="group"`），并加读 `itemWidths` / `itemTexts`，这样「两项等宽」「文案只有两个词」是浏览器量出来的，不是我看图看出来的。
+
+一段值得记住的自省：用户给的理由不成立，**结论却成立**。如果我只按字面去「防止撑大」，我会加上 `max-width` 然后什么都没改变；如果我只反驳理由，菜单里的截断路径会继续留着。正确的是把两件事分开回报——理由纠正，改动照做。
+
+验证：client 套件 733 passed / 0 failed；全量 **3458 passed / 0 failed**；`mutate-language-and-files` **143 killed / 0 survived / 0 not applied / 0 crashed**；`mutate-persistence` 45 killed；`mutate-checklist-panel` 128 killed；`audit_leftovers.py` leftovers 0 / unresolved 0。真机读数：`{"items":2,"itemWidths":[378,378],"itemTexts":["绝对路径","相对路径"],"w":386,"h":55,"menuPosition":"static","inCard":true,"inFiles":true,"menuRight":423,"cardRight":424}`。
