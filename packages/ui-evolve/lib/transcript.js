@@ -22,6 +22,8 @@
  * turn ends.
  */
 
+import { writtenPaths } from '@revxz/dsh-evolve-core'
+
 /** How many tool calls one turn keeps before it stops recording detail. */
 const MAX_CALLS_PER_TURN = 200
 
@@ -37,11 +39,164 @@ const MAX_SAID_BLOCKS = 40
 /** Longest single assistant text block that is kept, in characters. */
 const MAX_SAID_CHARS = 2000
 
+/**
+ * How much of the user's own message one turn keeps, in characters.
+ *
+ * Same order as the per-message cap the prompt already applies to transcript
+ * material, and deliberately small: a person asking a question types a sentence
+ * or two, and a turn that opened by pasting a file is not asking anything the
+ * rest of the body does not already describe. Keeping more would only push
+ * assistant prose out of `MAX_INPUT_CHARS`.
+ */
+const MAX_ASKED_CHARS = 600
+
 /** Tool names whose arguments describe a file the session touched. */
 const EDIT_TOOLS = new Set(['edit', 'write', 'ops_write_file', 'ops_edit_file', 'ops_replace', 'ops_move', 'ops_copy', 'ops_remove'])
 
 /** Shell tools: a command may create or modify files, but nobody knows which. */
 const SHELL_TOOLS = new Set(['bash', 'ops_bash', 'shell', 'terminal', 'exec', 'run', 'pwsh', 'powershell'])
+
+/**
+ * The tool that lets the model *declare* what a turn produced.
+ *
+ * The other two sets are guesses about what a call implies: `edit` names a
+ * path, a shell command may mention one in a redirect. Both miss everything
+ * written by a program the turn ran — a script that calls `PIL` or `python-docx`
+ * and saves four files names them nowhere a transcript can see. Measured on one
+ * session: eight files on disk, four in the card, and no amount of reading the
+ * command line would have found the other four.
+ *
+ * So one tool asks instead of guessing. Nothing about it is special to the
+ * panel: the model calls it, the call arrives on `tool/call` like every other,
+ * and the paths are read here. Its `execute` only validates and answers.
+ */
+const REPORT_TOOLS = new Set(['report_output_files'])
+
+/**
+ * How many file rows one turn's card can hold.
+ *
+ * This is the sink: {@link Transcript#snapshot} merges declarations and
+ * inferences and keeps this many. Every other limit in the system is this
+ * number, not an independent one — a declaration cap above it would accept a
+ * call, report success, and then quietly lose the tail. That is the specific
+ * bug this constant exists to make impossible: one budget, stated once.
+ */
+const MAX_CARD_PATHS = 40
+
+/**
+ * How many declared paths one call may contribute.
+ *
+ * A model that lists two hundred files has misunderstood the tool, and a card
+ * that grew by two hundred rows would be the wrong answer to that. The limit is
+ * applied per call rather than per turn so a session that declares in three
+ * batches still records all three — each batch gets the same room, and the card
+ * decides what survives.
+ *
+ * Equal to {@link MAX_CARD_PATHS} on purpose. When these were two numbers (50
+ * here, 40 downstream) a schema-legal fifty-item call was truncated by the card
+ * while the tool answered `{ ok: true, recorded: 50 }`. One number, or the
+ * promise is written by one module and broken by another.
+ */
+const MAX_REPORTED_PATHS = MAX_CARD_PATHS
+
+/**
+ * Pull a list of filesystem paths out of a tool's arguments.
+ *
+ * Separate from {@link readPathArgument} on purpose. That one answers "which
+ * single file does this call name", and a `paths` array is not that question —
+ * teaching it to return an array would change the type every existing caller
+ * already branches on.
+ *
+ * Accepts the same JSON-in-a-string shape, drops anything that is not a
+ * non-empty string, and stops at {@link MAX_REPORTED_PATHS}. Duplicates are not
+ * removed here: the transcript already de-duplicates on snapshot, and doing it
+ * twice would hide which call declared what.
+ *
+ * @param {unknown} raw - the tool call arguments.
+ * @returns {string[]} the paths found, possibly empty.
+ */
+function readPathListArgument(raw) {
+  let value = raw
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+  const bag = /** @type {Record<string, unknown>} */ (value)
+  const list = bag.paths
+  if (!Array.isArray(list)) return []
+  const found = []
+  for (const entry of list) {
+    if (found.length >= MAX_REPORTED_PATHS) break
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (trimmed.length > 0) found.push(trimmed)
+  }
+  return found
+}
+
+/**
+ * The one tool a model reaches for on its own when it thinks "these are my
+ * deliverables".
+ *
+ * Added after a real run rather than in theory. A turn that wrote eight files
+ * through a script was given `report_output_files` and did not call it once; it
+ * called `present` with three of them instead. That is not disobedience — the
+ * host's own `present` means "declare existing files as final deliverables",
+ * which is exactly what the model was trying to say. Two tools with overlapping
+ * meaning is a design mistake, and the fix is not to argue with the model: it is
+ * to read the call it already makes.
+ *
+ * The two differ in what they can carry. `present` is capped by the host at four
+ * files, so it only ever covers the few the model judged worth delivering;
+ * `report_output_files` has no such cap and exists for the full list. Reading
+ * both is the point — one is certain to be called and narrow, the other is
+ * complete and optional.
+ */
+const PRESENT_TOOLS = new Set(['present'])
+
+/**
+ * Pull filesystem paths out of a `present`-shaped argument bag.
+ *
+ * The shape is `{ files: [{ path, description }] }` — objects, not bare
+ * strings, which is why {@link readPathListArgument} cannot read it: that one
+ * looks for `paths: string[]` and would return nothing here. `description` is
+ * ignored; the card already has its own idea of what a row says.
+ *
+ * Anything that is not an object with a non-empty string `path` is skipped
+ * silently. A malformed entry is the model's problem to notice, not a reason to
+ * refuse the paths that were readable.
+ *
+ * @param {unknown} raw - the tool call arguments.
+ * @returns {string[]} the paths found, possibly empty.
+ */
+function readPresentedPaths(raw) {
+  let value = raw
+  if (typeof raw === 'string') {
+    try {
+      value = JSON.parse(raw)
+    } catch {
+      return []
+    }
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return []
+  const bag = /** @type {Record<string, unknown>} */ (value)
+  const list = bag.files
+  if (!Array.isArray(list)) return []
+  const found = []
+  for (const entry of list) {
+    if (found.length >= MAX_REPORTED_PATHS) break
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
+    const candidate = /** @type {Record<string, unknown>} */ (entry).path
+    if (typeof candidate !== 'string') continue
+    const trimmed = candidate.trim()
+    if (trimmed.length > 0) found.push(trimmed)
+  }
+  return found
+}
 
 /**
  * Pull a filesystem path out of a tool's arguments.
@@ -106,6 +261,48 @@ function readCommandArgument(raw) {
 }
 
 /**
+ * Trim text to a budget counted in code points.
+ *
+ * `String#slice` counts UTF-16 units, so cutting between the two halves of an
+ * astral character (an emoji, a rare CJK ideograph) leaves a lone surrogate —
+ * which reaches the prompt as U+FFFD. The budget is a character budget, so it
+ * has to be spent in characters.
+ *
+ * @param {string} text
+ * @param {number} limit
+ * @returns {string}
+ */
+function clipCodePoints(text, limit) {
+  const chars = Array.from(text)
+  return chars.length <= limit ? text : chars.slice(0, limit).join('')
+}
+
+/**
+ * Read the text of a human message out of its content blocks.
+ *
+ * The host ships a user message as an array of typed blocks, and only the
+ * `text` ones are what the person typed — attachments, images and runtime
+ * context ride along in the same array. Non-text blocks are skipped rather than
+ * stringified: a summary that quotes "[object Object]" as the user's question is
+ * worse than one that quotes nothing.
+ *
+ * @param {unknown} content - the message content.
+ * @returns {string} the text, or '' when there is none.
+ */
+function readUserText(content) {
+  if (typeof content === 'string') return clipCodePoints(content.trim(), MAX_ASKED_CHARS)
+  if (!Array.isArray(content)) return ''
+  const parts = []
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue
+    if (block.type !== 'text') continue
+    const text = typeof block.text === 'string' ? block.text.trim() : ''
+    if (text.length > 0) parts.push(text)
+  }
+  return clipCodePoints(parts.join('\n\n'), MAX_ASKED_CHARS)
+}
+
+/**
  * Read a tool name out of an `assistant/message` content block.
  *
  * The host records tool calls in at least two shapes depending on version: a
@@ -138,6 +335,18 @@ class Transcript {
     this.calls = new Map()
     /** @type {string[]} paths this turn wrote, in first-touch order. */
     this.paths = []
+    /**
+     * Paths the turn *declared*, newest last.
+     *
+     * Kept apart from {@link paths} because the two lose a tie in opposite
+     * directions. `snapshot` keeps the first forty of `paths`, and a shell
+     * redirect is seen early while a declaration is the last call of the turn —
+     * so a busy turn would drop exactly the files the model went out of its way
+     * to name. Declarations therefore go in front of the merged list.
+     *
+     * @type {string[]}
+     */
+    this.declared = []
     /** @type {string[]} shell commands the turn ran, newest last. */
     this.commands = []
     /** @type {string[]} assistant text blocks from this turn, in order. */
@@ -158,6 +367,18 @@ class Transcript {
      * `hydrate` for the same agent would add the file's turns in again.
      */
     this.hydrated = false
+    /**
+     * What the person asked to start this turn, or '' between turns.
+     *
+     * The panel's own rows never show this — the transcript is on screen right
+     * above the sidebar. It exists because the summary needs it twice over: the
+     * turn's intent is the user's, and every other line the prompt carries
+     * describes consequences, so without this the model is told what happened
+     * and never what was wanted. It is also the only signal in the body that
+     * says which language to answer in, since the request to write in the
+     * conversation's language cannot be followed from machine output alone.
+     */
+    this.asked = ''
   }
 
   /**
@@ -170,13 +391,16 @@ class Transcript {
    * promises is "the turn before this one", so a local count is the honest one.
    *
    * @param {number} [index] - the turn number, when the caller has one.
+   * @param {string} [asked] - what the person said to open the turn.
    */
-  beginTurn(index) {
+  beginTurn(index, asked) {
     this.turns = Number.isFinite(index) ? index : this.turns + 1
     this.calls.clear()
     this.paths = []
+    this.declared = []
     this.commands = []
     this.said = []
+    this.asked = typeof asked === 'string' ? clipCodePoints(asked, MAX_ASKED_CHARS) : ''
     this.turn = this.turns
   }
 
@@ -198,8 +422,12 @@ class Transcript {
     if (data?.reason?.kind !== undefined && data.reason.kind !== 'completed') {
       this.calls.clear()
       this.paths = []
+      this.declared = []
       this.commands = []
       this.said = []
+      // Cleared with the rest: this turn produces no `previous`, so a question
+      // left here would ride along on whichever turn is folded next.
+      this.asked = ''
       this.turn = undefined
       return
     }
@@ -225,10 +453,17 @@ class Transcript {
       calls: calls.length,
       failed: failed.length,
       // Deduplicated: a turn that edits one file eight times should list it once.
-      paths: [...new Set(this.paths)].slice(0, 40),
+      //
+      // Declarations come first and the cap is applied after the merge, not
+      // before it. A turn sees a shell redirect early and a declaration last,
+      // so keeping the first forty of a single list would drop exactly the
+      // files the model named out loud — the ones this whole module exists to
+      // stop losing. Order inside each half is still first-touch.
+      paths: [...new Set([...this.declared, ...this.paths])].slice(0, MAX_CARD_PATHS),
       commands: this.commands.slice(-8),
       said: this.said.join('\n\n').slice(0, 1200),
       tools: tallyNames(calls),
+      asked: this.asked,
     }
   }
 
@@ -243,9 +478,37 @@ class Transcript {
     const path = readPathArgument(call.arguments)
     this.calls.set(key, { id: key, name: call.name, path })
     if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(path)
+    if (REPORT_TOOLS.has(call.name)) {
+      // The one path where a turn says what it made instead of the transcript
+      // inferring it. Goes to `declared`, not `paths`: a declaration is the
+      // last call of a turn, and `snapshot` keeps the first forty, so pushing
+      // it in call order would drop it exactly when the turn was busy enough
+      // to need it.
+      for (const declared of readPathListArgument(call.arguments)) this.declared.push(declared)
+    }
+    if (PRESENT_TOOLS.has(call.name)) {
+      // Read for the same reason as the branch above, with the opposite
+      // trade-off: this is the call a model makes without being told to, so it
+      // is the one that actually arrives. It carries at most four files, so it
+      // covers the few deliverables and misses the rest — which is exactly why
+      // both branches exist rather than one replacing the other.
+      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(delivered)
+    }
     if (SHELL_TOOLS.has(call.name)) {
       const command = readCommandArgument(call.arguments)
-      if (command !== undefined) this.commands.push(command.slice(0, 200))
+      if (command !== undefined) {
+        this.commands.push(command.slice(0, 200))
+        // A shell call names a command, not a path — but the command usually
+        // says which file it writes, and without this the card was blind to
+        // everything the session produced with a redirect. Measured on one
+        // 175-file session: 130 of the rows were temporary scripts written by
+        // `cat > x <<'EOF'`, and the file list held exactly none of them
+        // because no `edit`-family call ever named them.
+        //
+        // Read before the slice: the paths come out of the whole command, while
+        // `commands` keeps a short preview for the card's text.
+        for (const target of writtenPaths(command)) this.paths.push(target)
+      }
     }
   }
 
@@ -387,6 +650,15 @@ class TranscriptStore {
     if (existing.hydrated === true) return false
     existing.hydrated = true
     existing.turns += turns
+    // The turn that opened before this read was numbered from zero, because the
+    // file had not been read yet. Now that it has, the open turn's real number
+    // is the whole count. Renumbering it here is what keeps `turn/end` honest:
+    // it copies `turn` into `previous.turn` and into the sweep record, so a
+    // number one too small makes a restarted process file this turn's work
+    // under the previous turn's number — the card then shows the work it just
+    // did as "earlier", and the sweep claims to have described a turn that
+    // finished before the process started.
+    if (existing.turn !== undefined) existing.turn = existing.turns
     if (existing.previous === undefined) existing.previous = previous
     return true
   }
@@ -432,7 +704,7 @@ class TranscriptStore {
     const data = event?.data
     if (type === 'user/message') {
       if (data?.source?.kind !== 'user') return
-      this.for(agentId).beginTurn()
+      this.for(agentId).beginTurn(undefined, readUserText(data?.content))
       return
     }
     if (type === 'assistant/message') {
@@ -455,4 +727,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, EDIT_TOOLS, SHELL_TOOLS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, readPathArgument, readCommandArgument, readToolCallBlock, tallyNames }
+export { Transcript, TranscriptStore, EDIT_TOOLS, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedPaths, readCommandArgument, readToolCallBlock, readUserText, tallyNames }

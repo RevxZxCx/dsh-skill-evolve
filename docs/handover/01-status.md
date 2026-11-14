@@ -37,7 +37,18 @@
 | 2026-11-10 | 产出卡折叠 + 侧栏预览 | 顺序改由数据源给（被编辑的先后，最新在前，D-92）；折叠 4 行、出口钉在卡片底部、展开后列表自己滚（D-93，关闭 DEF-51）；行点击在右栏预览，走可选 `ctx.inject(["sidebarRight"])`，没有侧栏时退化为纯文本（D-94）；2654 断言全绿，七套变异 99/69/21/44/15/14/11 全杀 |
 | 2026-11-10 | 产出卡圆标与上一轮统一 | 折叠控件从「列表下方整宽文字按钮」改成与上一轮卡片**同一个**圆标（共享 `.dsse-expand` 几何 + `box-sizing:border-box`，产出卡额外挂 `.dsse-expand-action` 只管行为）；`Card` 新增可选 `badgeAction`：上一轮卡片的圆标是装饰（整卡可点），产出卡的圆标自己当按钮（行已是 button，卡片不能再吃点击）；`data-badge` 门控 44px 预留条带（D-95，取代 `.dsse-foot`）；2666 断言全绿，八套变异 109/69/21/44/15/14/11 全杀 |
 | 2026-11-10 | 产出卡噪音过滤 + 本轮分层 | 机器生成的文件（`node_modules/`、`dist/`、lockfile、产物后缀）默认不列但保留可查：头部写「N 个文件 · M 个生成」，展开态有「生成文件」一组（D-96）；本轮碰过的文件排在更早的前面，展开态分 本轮 → 更早 → 生成文件 三组（D-97，细化 D-92 的顺序语义）；`isNoisePath` 改为先剥工作区前缀再切段、折叠比较与折叠切片（DEF-70/71/72）；2703 断言全绿，八套变异 128/69/21/44/15/14/11 全杀 |
-
+| 2026-11-12 | 上一轮总结卡：语言跟对话、回合结束预生成 | 摘要语言改由**用户原话**决定（取代 D-78），删除整条 `?lang=` 管线；`transcript` 开始记用户提问（`asked`，600 字符、按码点截断）；`turn/end` 后 fire-and-forget 预生成（D-98），面板首开不再等 20 秒；上限 400 → 300 字 + `tidy()` 输出清洗（D-100）；`warm` 闸门是「开过面板」且可 `forget`（D-101）。2861 断言全绿、突变 30/30 全杀（本轮新增 7 条覆盖上一轮修的 P1）。**验收第 7 条（中文提问+英文回答仍中文）未跑**，需重启宿主 |
+| 2026-11-12 | 产出卡 S2 补丁：目录让位、图标重画 | 文件名不再被目录挤压：`.dsse-where` 视觉隐藏（仍留在无障碍树里，读屏没有 hover），完整路径进行 tooltip（D-108）。图标从「一张纸页 + 六个像素的记号」改为八个独立轮廓 + 六个桶各一个低饱和色（D-109，用户在预览页里选的就是这个组合），`doc` 与 `file` 保持灰、不主张任何性质，文件消失时图标跟着褪灰。新图标用独立类名 `.dsse-fileicon`，顺带撤掉 S2 误加在 `.dsse-row-icon` 上的尺寸规则——它把技能卡图标从 17px 压成了 14px（DEF-91）。2960 断言全绿，突变 51/128/44 全杀，残留审计 0 |
+| 2026-11-12 | 产出卡 S2：一行一个文件，八个图标桶 | `client.js` 单行化 28px、`FileIcon` 八桶线稿、目录从 payload `cwd` 减出来、大小写不敏感匹配；2950 断言全绿，突变 45/128/44 全杀，残留审计 0。**S3 行内复制、S4 折叠文案未开始** |
+| 2026-11-12 | 产出卡 S1：文件有身份，不只是一次 stat | `paths` 从 `Map<path, 序号>` 升级为 `Map<path, {seq, turn, at}>`，STATE_VERSION 1 → 2 但**读得动 v1**（`READABLE_VERSIONS`，老文件写一次自动升级，D-102）；每一行带三态 `available`/`missing`/`invalid`，被删的文件仍在卡上并划删除线（D-103）；`turn` 戳让「本轮」跨重启仍正确（D-104）；`readPanel` 返回 `cwd` 供卡片减出目录。2928 断言全绿，八套突变 37/128/44/15/69/14/11 全杀。**S2 单行化与图标、S3 复制、S4 折叠文案未开始** |
+| 2026-11-12 | 产出卡 S5：模型可以自己申报产出 | `report_output_files` 工具 + `transcript.js` 的 `REPORT_TOOLS` 读取；3010 断言全绿；`mutate-language-and-files` 61 杀；`mutate-persistence` 44 杀；`mutate-checklist-panel` 128 杀；残留审计 0。**S6 git 差分、S7 mtime 扫描、S8 三路合并未开始** |
+| 2026-11-12 | 产出卡 S5 补丁：读 `present`，一个容量常量 | `present` 的参数被当作申报读进来（`PRESENT_TOOLS` / `readPresentedPaths`），因为真实回合里模型一次没调我们给的 `report_output_files`、只调了宿主的 `present`；申报路径改存 `declared` 并在 `snapshot` 里排在推断路径**之前**再套上限，否则回合末尾才到来的申报正好被截掉。`MAX_CARD_PATHS = 40` 成为唯一容量常量，`MAX_REPORTED_PATHS` 直接等于它——此前 schema 写 50、卡只能装 40，越界调用会说「记录了 50」而实际被静默截断（P1）。超限不再「拒绝」，改为保留能装下的并如实汇报 `dropped`（P1）。3039 断言全绿；突变 73/44/128 全杀；残留审计 0 |
+| 2026-11-13 | 产出卡 S6：git 差分补上脚本的产出 | 回合被夹在两次读数之间：`turn/start` 读一次工作树，`turn/end` 再读一次，只记新出现的路径（D-117），所以脚本运行时写出的文件即便谁都没申报也会进卡。基线存的是 promise 而不是数组，慢的 `git status` 迟到无害（D-118）。四种失败（非仓库 / 没有 git / 超大仓库 / 干净工作树）一律答空，面板不显示错误（D-119）。修掉一个真缺陷：`workspaceFor` 只认 agent 形状，而事件流传的是 session，cwd 恒为空让整条链路静默失效（DEF-98 附近）。3106 断言全绿；突变 80/44/128 全杀；残留审计 0 |
+| 2026-11-13 | 产出卡 S6 补丁：多根、worktree、coverage | 仓库在工作区下面也能看见（向下一层找 `.git`，上限 20 个根）；worktree 判据用 `--absolute-git-dir` 与 `--git-common-dir` 比较（`--git-dir` 是相对 cwd 的，子目录下会误判）；看不见就说看不见——`coverage: partial` 落进状态文件，并且写在「零文件就早退」之前（D-120/121/122）。修掉一条断言级缺陷：新增的 `rememberSweep` 也会写盘，遮住了 `rememberTurn` 被禁用这件事（DEF-101）。3146 断言全绿；突变 85/44/128 全杀；残留审计 0 |
+| 2026-11-14 | 重启后第一轮被记成第 1 轮 | `hydrate` 把落盘的 `turns` 加到计数上，却没有动**正在进行中的那一轮**，于是重启后第一条消息开的轮被编号为 1，而文件说这是第 2 轮；`turn/end` 把这个号写进 `previous.turn`、`sweep.turn` 和每条路径的 `turn`，「刚刚做完的事」被归档到上一轮名下。真机样本 A 第二轮暴露：`turns: 2` 旁边躺着 `sweep.turn: 1`。修法：`hydrate` 里若已有打开的轮，按合并后的计数重新编号它。3153 断言全绿；突变 85/45/128 全杀；残留审计 0 |
+| 2026-11-14 | S7：mtime 扫描补上非仓库工作区 | 四路采集齐全；3235 断言全绿，突变 98/45/128 全杀，残留 0。**真机验收未做** |
+| 2026-11-14 | S7 审查与真机验收 | 四个审查者指向同一个 P0（`skipDirectory` 生产零调用）；coverage 扩三态并抽出 `mergeCoverage`；3258 断言全绿，三套突变 101/45/128 全杀；真机对比证明修的是真问题 |
+| 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -2918,3 +2929,624 @@ Show more lines at the bottom adds the next 400.`（<https://termdeck.io/docs/re
   `lib/outcome.js`、`lib/evidence.js`（实际在 `packages/core/lib/`），跑起来 ENOENT；修好之前
   「八套变异全杀」实际覆盖的是六套。
 - 「噪音」的定义目前是路径形态；若日后要按文件内容或 `.gitignore` 判断，`isNoisePath` 是唯一入口。
+
+---
+
+## 2026-11-12 · 上一轮总结卡：语言跟对话走、回合结束预生成
+
+**这一节取代的东西。** `2026-11-07 · 总结语言 + 产出卡改累计` 里的 D-78（总结语言由宿主
+`<html lang>` 指定）**已被取代**，见 D-99。那条决策当时是对的：宿主知道读者把界面设成了哪种语言。
+它错在把「界面语言」当成了「这个人说话的语言」——两者在同一个会话里可以不一致，而摘要复述的是
+**这个人刚才说的话**。用户 m01221 的决定是「用对话语言」。
+
+**决策记录。** D-98（回合结束预生成）、D-99（语言来自用户原话）、D-100（300 字上限与输出清洗）、
+D-101（`warm` 的闸门是「开过面板」）。
+
+### 现在在哪
+
+**服务端 / 会话状态**
+
+- `packages/ui-evolve/lib/transcript.js`：新增 `MAX_ASKED_CHARS = 600` 与 `clipCodePoints(text, limit)`
+  （`:51`、`:133`）；新增 `readUserText(content)`（`:150`），只取 `type === 'text'` 的块，附件与图片
+  跳过而不 `JSON.stringify`；`beginTurn(index, asked)` 第二参数（`:248`）；被放弃回合清 `asked`（`:274`）；
+  `snapshot()` 带 `asked`（`:304`）。**这是整条链里唯一一处「模型输入里有用户自己的字」的来源**——
+  在此之前 `transcript.js` 只记工具名、命令、路径，摘要提示词里没有任何一句是用户写的。
+- `packages/ui-evolve/lib/summarise.js`：`MAX_SUMMARY_CHARS` 400 → **300**（`:56`）；`INSTRUCTION` 增两段
+  （指向用户原话判断语言、禁止 `Summary:` 之类前言）；`renderPromptBody` 在最前面插入
+  `` `What the user asked:\n${asked}` ``（`:181`，空则整段不发）；新增 `tidy(text)`（`:293`）；
+  `summaryKey(turn, body)` 从三参数降为两参数；缓存命中返回 `at: hit.at`（`:490`，**不是 `Date.now()`**）；
+  超时/失败的 reason 字符串不变（`:554`）；新增 `warm()`（`:589`）、`markViewed()`（`:614`）、
+  `forget()`（`:632`）。**整块删除**：`LANGUAGE_NAMES` / `LANGUAGE_TAG` / `languageName` / `languageLine` /
+  `GENERIC_LANGUAGE_LINE`（595 → 544 行）。
+- `packages/ui-evolve/lib/api.js`：`readPanel(deps, agentId)` 去掉第三参 `lang`（`:871`）；在函数体开头、
+  任何 summary 分支之前 `markViewed(id)`（`:879`）；`langOf(raw)` 整个函数删除，调用点改
+  `readPanel(deps, agentId)`（`:637`）。
+- `packages/ui-evolve/lib/index.js`：`turn/end` 分支在 `rememberPaths` 之后 fire-and-forget 预生成
+  （`:388`）；`agent/disposed` 里 `summariser.forget(agentId)`（`:484`）。
+
+**客户端**
+
+- `packages/ui-evolve/lib/client.js`：`hostLanguage()` 整个函数删除；新增 `summaryReasonText(reason)`
+  （`:239`，**前缀匹配**，含 `the summary call failed` 与 `the model call failed` 两条）；新增
+  `formatAgo(at)`（`:271`）；`summaryText` 三分支、`summaryAgo` 只为成功摘要计算（`:2204`）；
+  卡片头部第四个 span（`:2461`）；`.dsse-head-ago`（`:362`）与父级 `.dsse-head-stats` 的收缩规则。
+- `packages/ui-evolve/README.md`：语言一节重写（不再是 `?lang=`，而是「prompt body 第一段是用户原话」）；
+  路由契约去掉 `?lang=<tag>`。
+
+**验证**
+
+- 全量 **2861 passed / 0 failed**。
+- 突变套件 `scripts/mutate-language-and-files.mjs`：**30 killed / 0 survived / 0 not applied / 0 crashed**。
+  本轮新增 7 条，专门覆盖第一轮审查修掉的 P1——**没有这 7 条，那个 P1 明天复发时 2858 个断言仍然全绿**
+  （见 DEF-77）。
+- 运行测试必须带临时目录环境变量，否则 `mkdtemp` 在默认 `Temp` 下报 `EPERM ... -4048`：
+  `TMPDIR=F:/dsh-plugin/dsh-skill-evolve/.tmp-test TMP=... TEMP=... node test/run.mjs`。
+
+### 尚未验收的一项
+
+**验收判据第 7 条没跑**：中文提问 + 英文回答的会话，摘要必须仍是中文。这需要**重启宿主**——
+`client.js` 是手写 bundle、无构建步骤，改动不重启不生效。代码侧的准备已完成（`asked` 进 prompt、
+语言句指向它），运行时效果等重启后确认。
+
+### 一个不属于本次的发现
+
+审查单元 u1 在 `packages/core/lib/shellpaths.js` 上报了一条 P1：`writtenPaths` 的分词器把 `\` 当
+POSIX 转义（`shellpaths.js:110`），于是 `echo hi > .\build\log.txt` 被解析成 `.buildlog.txt`、
+`C:\tmp\out.txt` 只剩 `C:`。**这个文件是上一个会话遗留的未提交特性**（`git show HEAD:packages/core/lib/index.js`
+里 `writtenPaths` 命中 0 次，`shellpaths.js` 是 untracked），不在本次改动范围内，未修。记录在此，
+以免下一个人以为是摘要卡引入的。
+
+## 2026-11-12 · 产出卡 S1：文件有身份，不只是一次 stat
+
+这一节取代 D-79 关于「一行代表什么」的隐含说法，并给 docs/10 的 P0/P1 一个正式落点——
+docs/10 已被 docs/18 取代，但 P0（缺失文件不要消失）与 P1（`turn` 跨重启）在 S1 里兑现了。
+
+**根因（docs/18 §一）。** Qoder 的一行代表一个**产出物**（自带 `artifactId`、`kind`、四态生命周期）；
+本项目的一行代表**一次成功的 `fs.stat`**——`statTouchedFiles` 里 `if (!info.isFile()) continue` 与
+catch 分支的空注释就是字面证据。于是「编辑后删掉」与「从未碰过」在卡上无法区分，这是 S1 要修的
+唯一一件事，S2/S3 都只是外观。
+
+**改了什么（逐文件）。**
+- `packages/ui-evolve/lib/session-state.js` —— `STATE_VERSION = 2`；新增 `READABLE_VERSIONS = new Set([1, 2])`
+  与 `readPathEntry`（v1 的裸数字归一化为 `{seq, turn: undefined, at: undefined}`）；`rememberPaths(sessionId, paths, turn)`
+  增第三参；`pathsSeen` 返回 `[{path, turn, at}]`；`document()` 写对象；`load()` 合并时**只移位 `seq`**，
+  `turn`/`at` 是事实不是本进程计数器。
+- `packages/ui-evolve/lib/index.js` —— `turn/end` 时从 `current` 读 `paths` **和** `turn`，两者都早于
+  `record()`；`rememberPaths(agentId, ended, endedTurn)`。
+- `packages/ui-evolve/lib/api.js` —— `statTouchedFiles` 从「过滤器」改成「解析器」，每个候选都出一行，
+  带 `status`；`ENOENT`/`ENOTDIR` → `missing`，其他 `stat` 失败 → `invalid`，成功但 `!isFile()` → `missing`；
+  新增 `readStat` 注入点（测试用）；`readPanel` 返回 `cwd`。
+- `packages/ui-evolve/lib/client.js` —— 行带 `data-status`；`missing`/`invalid` 不划删除线以外的任何动作：
+  不可点、`cursor:default`、hover 不再变色、右侧写「已删除」/「无法读取」而不是大小。
+
+**决策。** D-102（双版本读而不是迁移）、D-103（缺失行进折叠态）、D-104（`turn` 快照优先、存储号只作 fallback）。
+
+**验证。** `node test/run.mjs` = **2928 passed / 0 failed**；八套突变
+`37/128/44/15/69/14/11` killed，**0 survived / 0 not applied / 0 crashed**。
+测试必须带 `TMPDIR/TMP/TEMP=F:/dsh-plugin/dsh-skill-evolve/.tmp-test`，否则 `mkdtemp` 报 `EPERM -4048`。
+
+**两处遗留（不属本次改动）。** ①`packages/core/lib/shellpaths.js` 的 `writtenPaths` 在 Windows 上把
+`\` 当 POSIX 转义（上个会话遗留的未提交特性），会让 `C:	mp\out.txt` 只剩 `C:`。
+②`scripts/mutate-outcome.mjs` 与 `keys`/`mutate-result-shape.mjs` 指向已不存在的 `lib/outcome.js`，
+与本次无关，已在 01-status 三次记录过。
+
+
+## 2026-11-12 · 产出卡 S2：一行一个文件，八个图标桶
+
+S1 让一行代表一个文件而不是一次 `stat`。S2 让这一行**读起来**像 Qoder 的产出行：
+一个图标、文件名、它所在的目录，都在同一行里。
+
+### 1. 为什么是八桶而不是按扩展名画图标
+
+Qoder 每个扩展名一个彩色图标，因为那是它自己的 App 图标语言。宿主的图标是
+24 网格线稿、`currentColor`、1.7 线宽 —— 把彩色图标放进来像贴纸。所以
+`FileIcon`（`packages/ui-evolve/lib/client.js:440`）沿用 `Icon` 的语法，八个桶共
+享同一张纸（`M7 3h7l4 4v14H7z` + 折角 `M14 3v4h4`），只在纸上换记号。
+
+未识别的扩展名落空桶。理由是**错图标比通用图标更糟**：通用图标说的是「我不知道」，
+错图标说的是「这是一个 PDF」而它其实不是。
+
+### 2. 目录不再靠猜
+
+`fileParts(path, cwd)`（`client.js:352`）用 payload 里的 `cwd` 减出相对部分。
+以前 `splitPath` 取末三段的前两段 —— 那是猜，`a/b/c/d/e.ts` 的目录既不是 `c/d`
+也不是 `b/c/d`，得看工作区在哪。老服务器不发 `cwd` 时回退 `splitPath`，所以升级
+顺序不受限。
+
+**大小写**：Windows 上路径不区分大小写，而两侧来源不同（workspace 来自会话头，
+文件路径来自工具调用），所以比较时两侧都转小写、切片仍用原串 —— 否则
+`C:\Work\src\a.ts` 配 `C:\work` 会把整个绝对路径当目录显示。
+
+### 3. 行高是算术的前提
+
+`.dsse-row` 是 28px 单行，`FILE_LIST_MAX_PX = 8 * 28 + 7 * 3` 据此算出 245px 的
+展开高度。这两个数字必须同时成立，所以 `.dsse-row` 加了 `box-sizing:border-box`：
+没有它，2px 的上下内边距会加在 `min-height` 之上，每行变 32px，245px 只装得下
+7 行 —— 而计数说 8 行可见。
+
+### 4. 验证
+
+- 全量 `2950 passed / 0 failed`
+- `mutate-language-and-files` 45 killed、`mutate-checklist-panel` 128 killed、
+  `mutate-persistence` 44 killed，全部 0 survived / 0 not applied / 0 crashed
+- `_edit/audit_leftovers.py` 残留审计 0
+
+### 5. 审查
+
+四个审查者全部在返回前失败（`failed before it finished. It left no closing
+message.`），没有任何意见产出。改为脚本复核 + 自审，见 R-71。这一轮的两处缺陷
+（大小写、`box-sizing`）都是自审发现的，不是审查者发现的 —— 这一点应该记住。
+
+### 6. 已知偏差（记录不修）
+
+`.dsse-list{gap:3px}` 与 `FILE_LIST_MAX_PX` 里的 `7 * 3` 一致；但
+`.dsse-group + .dsse-group{margin-top:6px}` 是另一个数。展开态若同时有「本轮」与
+「更早」两组，跨组处会多占 6px，245px 就少装一点。影响只是早滚一像素级，且只在
+展开且分组时出现，判 P3。
+
+## 2026-11-12 · 产出卡 S2 补丁：目录让位、图标重画
+
+这一节记录 S2 验收后用户提的三条意见里，前两条的改动。第三条是采集缺口，只做了
+诊断，没有改代码（见本节末）。
+
+### 1. 目录不再印在文件名旁边
+
+S2 把目录从「名字下面一行」挪到「名字右边同一行」，本意是一行装更多信息。320px 面板
+下这个本意不成立：`test8` 这样的目录要吃掉 30–40px，而文件名本来就不够宽，于是
+`code.py` 被截成 `code.p…`。**目录回答的是「两个同名文件哪个是我改的」，这个问题
+一轮里出现不了几次；文件名回答的是「这是不是我刚才写的那个」，每行都要回答。**
+
+`.dsse-where` 保留在 DOM 里但裁成 1px（`clip:rect(0,0,0,0)`），`.dsse-name` 恢复成
+`display:block` 独占整行。完整路径写在行的 `title` 上。**不删 DOM 的原因**：屏幕阅读器
+没有 hover，删掉之后用键盘或读屏的人再也无法区分两个同名文件。代价写在明处——鼠标
+用户要悬停才知道目录（D-108）。
+
+### 2. 图标重画成八个独立轮廓 + 六个色
+
+S2 的图标是「一张共用纸页 + 六个像素的记号」，14px 下八行看起来一样。改成八个独立
+轮廓（花括号 / 尖括号 / 井号 / 网格 / 横线 / 山与太阳 / 箱子 / 空白页），16px，线宽 1.8；
+六个桶各一个低饱和色，`doc` 与 `file` 保持灰（D-109）。配套一条规则：**文件消失时
+图标跟着褪回灰色**，否则一行里亮着的图标和划掉的名字在说两件事。
+
+### 3. 顺带修掉一处 S2 的误伤（DEF-91）
+
+S2 加的 `.dsse-row-icon{width:14px;...}` 让技能卡图标从 17px 缩成了 14px——这个类名
+在 `client.js` 里原本**没有任何规则**，只是技能卡的包裹元素，尺寸由 `.dsse-icon` 决定。
+已删除该规则，新图标改用独立类名 `.dsse-fileicon`（D-110）。
+
+### 4. 采集缺口：诊断完成，未改代码
+
+用户报告的第三个现象是「让模型创建八个文件，卡上只有四个，更早里也找不到」。核查结论：
+**那四个文件从未被记录，不是显示问题。** 该回合只有 4 次 `write`，另外四个
+（`doc.docx`/`image.png`/`archive.zip`/`empty.bin`）是 `ops_bash` 跑一个 Python 脚本
+在运行时写出的。`transcript.js:318` 只对编辑类工具收参数里的路径，`:319-332` 对 shell
+类工具只从命令行文本里抠**重定向**路径——脚本运行时写出的文件两条路都不经过。
+
+三条候选方案已给用户（解析脚本 / `fs.watch` / 回合结束按 mtime 扫工作区），**排期待定**。
+
+### 5. 验证
+
+2960 断言全绿；`mutate-language-and-files` 51 killed、`mutate-checklist-panel` 128 killed、
+`mutate-persistence` 44 killed，全部 0 survived / 0 not applied / 0 crashed；
+`audit_leftovers.py` 0 残留。
+
+### 6. 一处事故，值得单独记
+
+一次 `edit` 把断言并到了上一行注释末尾，整条 `check('a source file is marked as code', ...)`
+变成注释。后果不是测试变红，而是**测试仍然全绿**——直到跑
+`every bucket is drawn on the same silhouette again` 突变时它 SURVIVED，才发现那条断言
+已经不执行了。这是本轮最值得记的一件事：**删掉一条断言，测试不会变红。** 也正因为
+如此，突变测试不是「额外保险」，它是唯一能发现「断言消失」的手段。
+
+## 2026-11-12 · S5：让模型自己说这一轮产出了什么
+
+### 为什么
+
+`docs/19` 记的那个会话：`F:\test\test8\` 有 8 个文件，卡上 4 行。缺的 4 个由 `_mk8.py` 在运行时写出，脚本源码里只有字符串字面量提到它们，命令行里没有重定向，工具参数里没有 `path`。**采集规则的两条路都是推断，而这件事推不出来。**
+
+这就是 C 方案。工具名叫 `report_output_files`，不叫 `present_files`：Qoder 里后者会触发预览与交付链路，我们只是记账，名字必须只主张它做的事。
+
+### 改了什么
+
+- `packages/ui-evolve/lib/report-tool.js`（新，189 行）：工具定义。`parameters.properties.paths` 是 `string[]`，`minItems: 1`、`maxItems: MAX_REPORTED_PATHS`（50）；`note` 可选。`execute` 只做四件事：非数组拒绝、清洗后为空拒绝、超 50 拒绝、否则返回 `{ ok, recorded, ignored }`。`output.render` 把拒绝渲染成「Not recorded」，把空申报渲染成「Nothing to record」——两者都不能读成成功。
+- `packages/ui-evolve/lib/transcript.js`：新增 `REPORT_TOOLS`、`MAX_REPORTED_PATHS`、`readPathListArgument`；`noteCall` 里加一个分支。**没有改 `readPathArgument`**：它的返回类型是每个既有调用方都在分支的单值，教会它返回数组会改掉那个类型。
+- `packages/ui-evolve/lib/index.js`：`ctx.inject(['tools'], ...)` 注册。**没有写进 `inject` 常量**——不需要 tools 的 profile 仍能显示面板，把「没有工具服务」变成「没有卡片」是错的交换。
+- 验证要点：工具不自己记录。路径由 `transcript.js` 从 `tool/call` 事件读取，与其余采集规则同一条路，因此工具结果迟到或不到都不影响卡片。
+
+### 决策
+
+- D-111：申报与推断走同一条读取路径，`execute` 不持有状态。
+- D-112：`readPathArgument` 不改成多值。
+- D-113：工具数量断言从 7 改成 8，并单独断言 `report_output_files` 在册。
+
+### 缺陷
+
+- DEF-92：`test/index.test.mjs` 把工具数钉在 7，加第八个工具后全量套件红。**这是断言正确工作了**——它挡住了「一个工具悄悄不再被注册」这件事，而那种失败在面板上只表现为文件缺失。
+
+### 一个被修好的检查工具
+
+`_edit/audit_leftovers.py` 的 `FILES` 是手写字典，不含新文件；解析不出目标的变异被 `continue` **静默跳过**，于是它对两个新文件打印了 `leftovers: 0`。我把一处变异真放进 `report-tool.js` 验证，它仍然说 0。改成从脚本自身解析 `path.join(repo, ...)` 别名，并把「解析不出目标」计为 `unresolved` 且以退出码 2 失败。复验：注入后 `leftovers: 2`，恢复后 0。
+
+教训与 DEF-90 同源：**一个不能区分「干净」与「没跑」的检查器，比没有更危险**，因为它签发的是通行证。
+
+### 验证
+
+- `node test/run.mjs` → **3010 passed / 0 failed**
+- `mutate-language-and-files.mjs` → **61 killed / 0 survived / 0 not applied / 0 crashed**（新增 10 条）
+- `mutate-persistence.mjs` → 44 killed，全杀
+- `mutate-checklist-panel.mjs` → 128 killed，全杀
+- `audit_leftovers.py` → `leftovers: 0`、`unresolved: 0`（修好之后的值）
+- 新增断言：`test/transcript.test.mjs` 15 条、`test/report-tool.test.mjs` 33 条（新文件）
+
+### 还没做
+
+S6（git 差分）、S7（mtime 扫描）、S8（三路合并 + 折叠文案）。`docs/19` 定了顺序与理由；S6 之前 `F:\test` 这类非仓库目录只有 S5 一条通路。
+
+## 2026-11-12 · S5 补丁：读模型真正发出的那次调用
+
+### 为什么
+
+S5 上了 `report_output_files`，真机验证时模型**一次都没调它**。它调了宿主的 `present`，报了三个文件，卡片上一条都没有。
+
+这不是模型不听话。宿主的 `present` 描述是 `Declare existing files as final deliverables for the user`，语义与我们要表达的完全重合，而模型的描述里写的是 "the sidebar list that shows what a turn made"——模型不知道 "sidebar" 指的是什么。**同一个会话里有两个语义重叠的工具时，模型选它熟悉的那个。**
+
+结论：修法不是跟模型讲道理，是**读它已经发出的那次调用**。
+
+### 改了什么
+
+- `packages/ui-evolve/lib/transcript.js:159` 新增 `PRESENT_TOOLS = new Set(['present'])`。
+- `transcript.js:176` 新增 `readPresentedPaths(raw)`：读 `files[].path`（对象数组），与 `readPathListArgument` 读 `paths`（字符串数组）是两种形状，不能复用。
+- `transcript.js:349` 新增 `this.declared = []`，与 `this.paths` 分开；`beginTurn`（`:400`）与 `endTurn` 的放弃分支（`:425`）都清空。
+- `transcript.js:489` `noteCall` 里新增 `PRESENT_TOOLS` 分支，push 进 `declared`。
+- `transcript.js:462` `snapshot()` 合并顺序改为 `[...this.declared, ...this.paths]`，**声明在前**，再套 `MAX_CARD_PATHS`。
+- `packages/ui-evolve/lib/report-tool.js:86` 描述整句重写，开头就写明 `This is not 'present'` 并解释两者分工（`present` 交付出「值得打开的少数几个」，这个记录全集）。
+- `report-tool.js:146` 超限不再返回 `{ ok: false, code: 'too-many' }`，改为 `{ ok: true, recorded: kept.length, ignored, dropped }`。
+
+### 决策
+
+D-114、D-115、D-116。
+
+### 缺陷
+
+DEF-94（schema 的上限比下游容量大）、DEF-95（拒绝一个已经发生的事实）、DEF-96（测试直调导致 CRASHED 冒充「测不出」）、DEF-97（两条突变锚点不唯一，守卫其实一直没生效）。
+
+### 验证
+
+- `node test/run.mjs` → **3039 passed / 0 failed**。
+- `test/transcript.test.mjs` 130 / 0；`test/report-tool.test.mjs` 37 / 0。
+- `mutate-language-and-files.mjs` **73 killed / 0 survived / 0 not applied / 0 crashed**。
+- `mutate-persistence.mjs` **44 killed**；`mutate-checklist-panel.mjs` **128 killed**。
+- `audit_leftovers.py` → `leftovers: 0`、`unresolved: 0`。
+
+### 还没做
+
+S6（git 差分）、S7（mtime 扫描）、S8（三路合并 + 折叠文案）。另外**这一轮同样没有真实模型第二次调用验证**——`present` 通路是把「模型已经调了 `present`」这个事实接住，逻辑上必成，但仍需重启宿主后由真实回合确认卡片上出现那三个文件。
+
+---
+
+## 2026-11-13 · S6：不让模型申报，直接问仓库
+
+### 为什么
+
+S5 让模型申报产出，真机上确实把 8 个文件里的 3 个补进了卡。但申报是一条**可选**通路：模型得想起来调它。实测那两次回合里模型调的是宿主的 `present`（已被 S5 补丁读进来），而 `empty.bin` 这种「脚本产出的 0 字节文件」谁都没提，仍然缺席。凡是依赖模型记得做的采集，都会在长会话里丢掉一部分。
+
+`git status` 不问意愿，只答事实：这一轮结束时，工作树里多了哪些路径。Qoder 走的就是这条路——它不是监听文件系统，而是让宿主侧的 git 差分服务记录 `turn_file_change_sets`。
+
+### 为什么不监听文件系统
+
+`docs/19` 已经否决过，这里只记结论：大仓库上 `fs.watch` 的事件量比面板本身贵；而且它报的是「谁在读这个盘」，不是「这一轮写了什么」。前者会把编译器的临时文件也算进来。
+
+### 为什么不直接记 `git status` 的输出
+
+`git status` 是**累计的**：它列出所有未提交的改动，包括五轮以前那些。每个回合都记一遍，等于把旧工作反复顶到卡片最上面，还标成「本轮」。所以一个回合必须被**夹**起来：开始时读一次作为基线，结束时再读一次，只留差集（D-117）。
+
+### 改了什么
+
+| 文件 | 改了什么 |
+|---|---|
+| `packages/ui-evolve/lib/git-changes.js`（新，253 行） | `parsePorcelain` 解 `--porcelain=v1 -z`（NUL 分隔、路径不加引号、重命名的两条记录只留新路径）；`runGit` 走 `execFile`，2 秒超时、8MB 缓冲；`findRepositoryRoot` 逐级上溯找 `.git`（用 `existsSync` 而非目录判断，因为 worktree 与 submodule 的 `.git` 是文件）；`changedFiles` 先把路径 join 到**仓库根**（不是会话目录）；`newestChanges` 做集合差 |
+| `packages/ui-evolve/lib/git-watch.js`（新，146 行） | `GitWatch` 按会话存基线；`start` 只存 promise 不 await；`finish` 消费基线、再读一次、返回差集；`forget` 在会话销毁时清掉。另导出 `readChanges` 作为生产读取器 |
+| `packages/ui-evolve/lib/index.js` | `apply(ctx, config, options)` 新增第三参数 `options.changes`（测试接缝，否则这一包唯一 spawn 进程的部分只能靠真仓库测）；`turn/start` 分支开基线；`turn/end` 在 `rememberPaths` 之后 fire-and-forget 收尾，结果走同一条 `rememberPaths`；`agent/disposed` 里 `forget` |
+| `packages/ui-evolve/lib/index.js`（`workspaceFor`） | 同时接受 agent 与 session 两种形状——这是复用既有函数时踩的坑，见 DEF-99 |
+
+### 验证
+
+- `node test/run.mjs` → **3106 passed / 0 failed**（改前 3039）。
+- `mutate-language-and-files.mjs` → **80 killed / 0 survived / 0 not applied / 0 crashed**（改前 73，新增 7 条：重命名配对、join 到 root、差集、基线不复用、无基线不自作主张、`workspaceFor` 两形状、差分结果真的写进状态）。
+- `mutate-persistence.mjs` 44 killed、`mutate-checklist-panel.mjs` 128 killed，均 0 survived。
+- `audit_leftovers.py` → leftovers 0 / unresolved 0。
+
+### 还没做
+
+**没有在真仓库里让模型跑过一个回合。** 所有断言都建立在注入的 reader 上：它证明「差分到了哪一步、写进了谁」，不证明「`git status` 在真实仓库上返回了我以为的形状」。`parsePorcelain` 的字节形状是在 `F:\dsh-plugin\_tmp_git` 造的真仓库里实测的（`b'R  new.txt'` 紧跟 `b'old.txt'`），但那是手工复现，不是端到端。
+
+另一个已知边界：**用户测试用的 `F:\test` 不是 git 仓库**，所以 A 方案对那个场景完全无效。S7 的 mtime 扫描就是为这类工作区准备的。
+
+## 2026-11-13 · S6 补丁：把「能看见多少」也记下来
+
+### 为什么
+
+S6 的真机验收没通过，但失败方式很有信息量：用户在 `F:\test` 里让模型跑了 12 个回合，`git init` 建在 `F:\test\test8`，卡片上一个 git 文件都没有。
+
+两件事同时成立：`findRepositoryRoot` 只会往**上**找，而仓库在**下面**；`git status` 只看得见未提交的改动，而那一轮的最后一条命令就是 `git commit`。
+
+第三条是逆向 Qoder 时发现的：它的 `turn_file_change_sets` 表有 `coverage TEXT CHECK IN ('complete','partial')`，还有 `roots_json`（复数）与逐文件的 `root_id`。它在结构上就承认「我可能只看见了一部分」，而我们的返回值只有一个数组，**看不见和没发生长得一模一样**。
+
+### 改了什么
+
+| 文件 | 改了什么 |
+|---|---|
+| `packages/ui-evolve/lib/git-changes.js` | 新增 `MAX_CHILD_ROOTS = 20`、`SKIP_DIRECTORIES`、`findChildRepositories`（只看**一级**子目录，`node_modules` 之类跳过）、`describeRepository`（一次 `rev-parse --show-toplevel --absolute-git-dir --git-common-dir` 同时拿到根与 worktree 判定）、`sweepChanges`（返回 `{ paths, roots, coverage }`）；`changedFiles` 保留旧契约，改为转发 `sweepChanges(...).paths` |
+| `packages/ui-evolve/lib/git-watch.js` | `Reading = { paths, coverage }`；`asReading` 把老 reader 的裸数组读成 `complete`；`finish` 的 coverage 取**两端较弱者**；`readChanges` 改走 `sweepChanges` |
+| `packages/ui-evolve/lib/session-state.js` | 新增 `sweep` 字段（`{ turn, coverage }`）、`readSweep`、`rememberSweep`、`sweepSeen`；`document()` 落盘；`keepsDocument` **不**认 `sweep`（只有 coverage 没有文件不算内容） |
+| `packages/ui-evolve/lib/api.js` | 面板返回体新增 `sweep`，无申报时为 `null`（与 `'complete'` 必须可区分） |
+| `packages/ui-evolve/lib/index.js` | `turn/end` 里 `rememberSweep` 写在早退**之前**；deps 表新增 `sweepSeen` |
+
+### 三条边界各自的做法
+
+1. **仓库在工作区下面**：`findRepositoryRoot` 命中就直接用它（工作区在仓库内时，它已经回答了下面全部内容）；否则 `findChildRepositories` 看一级子目录。超过 `MAX_CHILD_ROOTS` 记 `capped`，最后把 coverage 置 `partial`。
+2. **worktree**：`rev-parse --absolute-git-dir` 与 `--git-common-dir` 不同即为 worktree。用 `--absolute-git-dir` 而不是 `--git-dir`，因为后者是**相对当前目录**的路径（根下 `.git`，`deep/inner` 下是 `../../.git`），拿来比会误判。这与 Qoder 脚本里 `test "$git_directory" = "$common_git_directory"` 是同一判据。
+3. **coverage**：任何一个 root 读不出来、`status` 非 0、超 2000 改动、或 root 数达到上限，都记 `partial`。纯文件夹（看过、没有东西）记 `complete`。
+
+### 决策
+
+D-120（多根：先向上再向下一层，上限 20）、D-121（worktree 用 `--absolute-git-dir` 比 `--git-common-dir`）、D-122（coverage 两端取弱、写在早退之前、`null` 与 `'complete'` 分开）。
+
+### 验证
+
+- `node test/run.mjs` → **3146 passed / 0 failed**（改前 3106）。
+- `mutate-language-and-files.mjs` → **85 killed / 0 survived / 0 not applied / 0 crashed**（改前 80）。
+- `mutate-persistence.mjs` → **44 killed / 0 survived**（中途出现过 43 killed / 1 survived，见 DEF-101：新增 `turn/start` 后转杀）。
+- `mutate-checklist-panel.mjs` → **128 killed / 0 survived**。
+- `audit_leftovers.py` → leftovers 0 / unresolved 0。
+
+### 还没做
+
+真机验收仍缺一个**合格样本**：工作区根**就是**仓库根，且改动保持未提交。用户前一次的样本两条都不满足，所以这次改动之后再没验证过完整链路。
+
+## 2026-11-14 · S7：文件被碰过，也是这一轮发生过的事
+
+### 为什么要有第四路
+
+A（git）与 C（申报）都依赖「有人说出路径」：git 靠仓库自己知道，C 靠模型开口。
+两条路在真机上都被证明会哑：
+
+- **A 在非仓库工作区完全无效。** `F:\test` 上实测 `fatal: not a git repository`。
+  那不是配置问题，是那个目录本来就不是仓库。
+- **A 看不见「已经是 `??` 的文件又被改写」。** 对照实验逐字节相同：
+  `?? out/a.txt` 改内容前后 `git status` 输出没有差别，差集为空。
+  `git status` 报的是状态码不是内容，状态码没变就没有事件。
+
+`mtime` 是这两处的共同兜底：它不问谁写的、也不问仓库知不知道，只回答
+「这个文件在本轮开始之后被动过」。
+
+### 改了什么
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/api.js` | 噪声规则从 `isNoisePath` 函数体内提到模块级，并导出 `isGeneratedDirectory(segment)` |
+| `packages/ui-evolve/lib/scan-changes.js` | 新增。`scanChanges({cwd, since, maxEntries, maxDepth, maxMs, now})` → `{paths, truncated}` |
+| `packages/ui-evolve/lib/scan-watch.js` | 新增。`scanReading(cwd, since, budgets)` + `ScanWatch`（`start`/`finish`/`forget`） |
+| `packages/ui-evolve/lib/index.js` | `turn/start` 开扫描基线；`turn/end` 用 `Promise.all` 同时收两路，git 优先 |
+| `packages/ui-evolve/lib/git-watch.js` | 守卫顺序：先取并删基线，再判断 `cwd` 与 reader |
+| `test/scan-changes.test.mjs` | 新增，42 断言 |
+| `test/scan-watch.test.mjs` | 新增，35 断言 |
+| `test/index.test.mjs` | +3 块端到端（扫描独答 / git 压制扫描 / 截断上报） |
+| `scripts/mutate-language-and-files.mjs` | +13 条突变，另修 2 条漂移到旧 `turn/end` 形状的锚点 |
+
+### 三条规则，写在代码里也写在这里
+
+1. **复用而不是另写一份。** 噪声规则提到模块级，遍历器与 `isNoisePath` 问同一个函数。
+   两份实现必然漂移，而且漂移是静默的——遍历器收进来、卡片又滤掉。
+2. **三个上限都必须在，且截断要说出来。** 5000 个条目 / 8 层 / 1500ms。
+   到达任何一个就停，`truncated: true`，面板显示 `partial`。
+   一个不承认自己停手的遍历，比不遍历更糟：它把「没读」说成「没有」。
+3. **扫描只补位，不替代。** `fromGit.length > 0 ? fromGit : fromScan`。
+   `mtime` 分不出「这轮写的」与「`git checkout` 重写的」，所以只要 git 有话说，
+   扫描就闭嘴。这条不是性能优化，是正确性。
+
+### 决策
+
+- **D-124**：`mtime` 作为第四路兜底，且只在 git 无答案时采用。
+- **D-125**：噪声规则提升到模块级并导出 `isGeneratedDirectory`。
+- **D-126**：`scanReading` 接收预算参数（为可测，也为将来按工作区规模调）。
+
+### 缺陷
+
+- **DEF-104**：两个 bracket 的 `finish` 都在取基线之前检查 `cwd`，`cwd` 为空时基线留在 Map 里。
+- **DEF-105**：`scanReading` 零覆盖——所有测试都注入 reader，`truncated → partial` 无人观察，其突变 SURVIVED（第一次修还修错了地方，见记录）。
+
+### 验证
+
+全量 `node test/run.mjs` **3235 passed / 0 failed**；
+`mutate-language-and-files` **98 killed / 0 survived / 0 not applied / 0 crashed**；
+`mutate-persistence` **45 killed** 全杀；`mutate-checklist-panel` **128 killed** 全杀；
+`audit_leftovers.py` **leftovers: 0 / unresolved: 0**。
+
+### 还没做
+
+- **真机验收没做。** docs/19 §七 S7 行的验收方式是「在 `F:\test`（非 git）里跑脚本，文件出现」，
+  这需要重启宿主后在真实会话里跑一轮。
+- `source: 'scan'` 标记没做——那是 S8 的合并与来源标记。
+- `out` 是否该继续算噪声（它当前在 `GENERATED_DIRS` 里，样本 A 的四个文件因此进了「生成文件」组）待定。
+
+## 2026-11-14 · S7 审查：一个从未被调用的参数
+
+### 审查怎么做的
+
+按 `bounded-diff-code-review` 的单元上限（≤200 行 / ≤3 文件）切了八个单元：
+`s7a`/`s7b` 是 `scan-changes.js` 与 `scan-watch.js` 全文，`s7c`/`s7d` 是 `index.js` 的接线与
+依赖表 hunk，`s7e`/`s7f` 是 `api.js` 的噪声规则与导出表，`s7g`/`s7h` 是两个测试文件。
+派了四个 subagent（s7a、s7b、s7c+d、s7e），三个有实质返回，都自己跑了代码。
+
+### 四个人指向同一个 P0
+
+`s7a`、`s7b`、`s7e` 独立地发现同一件事：
+
+`packages/ui-evolve/lib/scan-watch.js:46` 调 `scanChanges({ cwd, since, ...budgets })`，
+**从不传 `skipDirectory`**；而 `scan-changes.js:103` 的默认值是 `() => false`。
+`isGeneratedDirectory` 在 `api.js` 里定义、在 `:1175` 导出，**生产代码里零调用点**——
+但 `scan-changes.js:77` 的注释写着「The production value is `isGeneratedDirectory`」。
+
+`s7a` 的实测：`node_modules` 里 6000 个文件 + 一个真正被编辑的 `src/real.js`，
+扫描返回 4997 条**全是依赖**、`coverage: 'partial'`，真正的文件不在结果里。
+然后 `index.js` 把这些交给 `rememberPaths`，200 条上限再把真文件挤掉。
+
+**这是 DEF-105 的第二次发作**：钩子存在、测试注入过、生产从不使用。
+我上一轮的每条测试都注入了 `skipDirectory`，所以证明了「钩子会被问到」，
+从未证明「生产真的传了」。**一个可以被注入的接缝，默认值就是它最危险的部分。**
+
+### 改了什么
+
+1. `scan-changes.js` 的默认值改为 `isGeneratedDirectory`（真正的接线，不是补测试）。
+2. `isGeneratedDirectory` 收窄为 `GENERATED_DIRS.has(segment.toLowerCase())`，
+   **去掉 `scratchName`**。`s7e` 的判断值得原样记下：修好 P0 之后，
+   `_posts`、`_build`、`.git` 会从「理论问题」变成「活缺陷」，所以这个决定必须同批做。
+   前导下划线规则是为临时**文件**写的，用在目录上会剪掉 Jekyll 的 `_posts`/`_layouts`/`_data`
+   与 Hugo 的 `_build`——全是源码。
+3. `GENERATED_DIRS` 增加 `.git`。`s7e` 实测本仓库自己的 `.git` 有 1167 条被扫描、
+   895 条进结果，占 23% 的预算。`git-changes.js:68` 的 `SKIP_DIRECTORIES` 本来就含 `.git`，
+   两张表已经漂移过。
+4. `scan-watch.js` 的空读从常量改为 `emptyReading()` 每次新对象（消费方 mutate 会污染所有会话）；
+   reader 抛错从 `complete` 改为 `partial`——把「扫崩了」说成「干净的空回合」，
+   违反这个模块自己定的诚实规则。
+
+### coverage 变成三个词
+
+`s7c` 的 P1 指出：`finish()` 把「没有基线」编码成 `complete`。这不是措辞问题——
+`complete` 的意思是「我看了，就这些」，而「没有基线」的意思是「我从来没看过」。
+两者合并之后，宿主每重启一次，就会替一轮没人扫过的回合背书，还会覆盖掉上一轮的 `partial` 提醒。
+
+第三态命名为 `none`。**它不是 `partial` 的近义词**：`partial` 是「看了，但没看完」，
+`none` 是「没看」。三种词对应三种能被说出口的事实。
+
+### 缺陷
+
+- **DEF-106**：`skipDirectory` 在生产路径上从来没被传，`isGeneratedDirectory` 零调用点。
+  为什么测试没抓到：所有测试都注入了这个钩子，只验证了「钩子会被问到」。
+- **DEF-107**：coverage 扩成三态之后，三处 `=== 'partial'` 单值判断把它打回两态
+  （`git-watch.js` 的 `asReading`、`scan-watch.js` 的 `asReading`、`GitWatch.finish` 的合并）。
+  为什么测试没抓到：`none` 是我这一轮新加的词，没有任何断言要求它活到面板。
+  我新写的端到端断言第一次运行就红了——`FAIL a bracket that never looked is not reported as clean
+  {"turn":1,"coverage":"complete"}`。**这次是断言先写、代码后修，顺序对了。**
+  修法不是打三处补丁，而是抽出 `packages/ui-evolve/lib/coverage.js` 的 `mergeCoverage`，
+  让三个调用点问同一个函数。**一条规则有三个实现，就是三条规则。**
+
+### 真机验收（我自己做的）
+
+用户要求「真机验收你也应该自己做」。做法：派一个 subagent 在非 git 目录里跑脚本写文件，
+然后读它自己的状态文件。
+
+第一次读到的（**旧构建**）：
+```
+sweep {'turn': 1, 'coverage': 'partial'}
+stored paths: F:\dsh-plugin\dsh-skill-evolve\.git\index
+```
+唯一的路径是 `.git/index`（被 git 命令 touch 的），我让它写的 `out3/` 三个文件一条都没有。
+**这就是 P0 的现场证据**：预算被 `.git` 吃光，真正的产出反而没扫到。
+
+补丁后在同一台机器上直接跑 `scanChanges`：
+```
+scanned 5000 truncated true returned 63
+paths under .git: 0
+paths under node_modules: 0
+out3 hits: 3
+```
+同样 5000 条预算，`out3/` 三个文件全进结果，`.git` 与 `node_modules` 零条。
+
+### 验证
+
+全量 `node test/run.mjs` **3258 passed / 0 failed**；
+`mutate-language-and-files` **101 killed / 0 survived / 0 not applied / 0 crashed**；
+`mutate-persistence` **45 killed / 0 survived**；
+`mutate-checklist-panel` **128 killed / 0 survived / 0 not applied**；
+`audit_leftovers.py` **leftovers: 0 / unresolved: 0**。
+
+三套突变串行跑（DEF-103 的教训），每套跑完都过一遍残留审计。
+
+### 卡片截图
+
+GUI 需要带 token 的 URL，token 只在宿主内存里，磁盘上找不到。改为用插件自己的资源渲染：
+把 `client.js` 里 `const CSS = ...` 的样式表原样切出来，按 `FILE_MARKS` 逐桶生成图标，
+拼成和 `jsxs` 同构的行，再交给 Chrome 渲染成图。**不是手画的近似图**——
+样式表是同一份字节，图标是同一张表。脚本 `F:\dsh-plugin\_edit\render_card.py`。
+
+看到的结果与设计一致：四个 `.js` 是 `code` 桶的蓝色花括号；`.json`/`.csv` 落 `data` 桶的绿色网格；
+`.txt`/`.bin` 落 `file` 桶的无色空纸（不猜就不上色）；缺失行划删除线、图标褪灰、右侧写「已删除」。
+
+一处观察记录：`.json` 用网格图标略像电子表格，这是按扩展名分桶的固有代价，不修。
+
+### 还没做
+
+- 截图是渲染产物，不是宿主里的实拍——token 拿不到是硬限制。样式与图标同源，但
+  「宿主 React 是否接受这些元素形状」「真实窗口里的几何」仍未验证。
+- `source: 'scan'` 标记与三路合并文案属于 S8。
+- 样本 B（多根）/ 样本 C（worktree）仍未跑。
+## 2026-11-14 · 样本 B 与样本 C：两个真实仓库，不是两个 fake runner
+
+用户 m09864 指出「样本 B（多根）/ 样本 C（worktree）仍未跑」。此前的多根与 worktree 断言全部靠注入 `run` 的 fake runner——单元测试证明了「两道算术会拼对」，从未证明「真实 `git` 在这个盘上会这样回答」。这一节补的是后者。
+
+### 样本 B：工作区不是仓库，仓库在它下面
+
+这是 `F:\test` / `F:\test\test8` 那个真机场景的最小复现。父目录 `sample-b/parent` 不是仓库，里面两个子仓库各有一个未提交的新文件。
+
+```
+findRepositoryRoot(parent)   -> undefined           (向上找：没有)
+findChildRepositories(parent) -> [alpha-repo, beta-repo]
+sweepChanges({cwd: parent})  -> roots    : [alpha-repo, beta-repo]
+                                coverage : complete
+                                paths    : alpha-repo/alpha-new.js
+                                           beta-repo/beta-new.py
+```
+
+四个字段都对：向上确实没找到，向下找到恰好两个，两个根各自拼自己的 base，而 `complete` 是诚实的——该看的都看了。
+
+### 样本 B 的回合差分（走生产类 `GitWatch`，不注入）
+
+基线时刻两个文件已经脏，回合中每个根各自再加一个：
+
+```
+baseline : 2 条, coverage complete
+turn 中  : alpha-repo/alpha-mid.js, beta-repo/beta-mid.py
+loose.txt（父目录里，不属任何仓库）-> 没有被算作这一轮
+```
+
+前两条进卡而基线里那两条没有进，说明 `newestChanges` 在真实数据上做对了它唯一的工作。`loose.txt` 不进是**正确**的：git 那一路上它不属于任何仓库，而第四路（mtime 扫描）本来就负责兜住它——两路分工不是重复。
+
+### 样本 C：worktree
+
+```
+wt-branch/.git            -> 文件（内容 `gitdir: .../main-repo/.git/worktrees/wt-branch`）
+--absolute-git-dir        -> .../main-repo/.git/worktrees/wt-branch
+--git-common-dir          -> .../main-repo/.git
+两者不相等                -> worktree: true
+sweepChanges(wt-branch)   -> roots [wt-branch], coverage complete, paths [wt-branch/wt-new.js]
+```
+
+`.git` 在 worktree 里是**文件**，这就是 `findRepositoryRoot` 用 `existsSync` 而不是目录检查的原因（`git-changes.js:170`）。同一仓库的另一个 checkout 上跑同样的扫描，`status` 各自只报自己的文件，互不泄漏——worktree 不是同一份工作区的副本，它有自己的 index 与工作树。
+
+### 三个边界（都不是新写法，是既有代码的真机确认）
+
+1. **一个子仓库坏掉**：手工把 `gamma-broken/.git` 改成空目录加假 `HEAD`。结果 `children` 里仍有三个、`roots` 只有两个、`coverage = partial`。这正是 `coverage` 存在的理由——它承认「有一个我没读到」，而不是假装那两个就是全部。
+2. **20 个子仓库上限**：造 22 个。`findChildRepositories` 返回 20，`sweepChanges` 读 20 个根、`coverage = partial`。上限本身没能回答的问题被如实写进了 `coverage`。
+3. **普通 checkout 的 `--git-common-dir` 是相对路径**：在仓库根它打印 `.git`，从子目录打印 `../../.git`。直接与 `--absolute-git-dir` 比较会**在每一个普通仓库上误报 worktree**。实测：
+
+```
+普通 checkout   naive 比较: gitDir !== commonDir -> true   （错的）
+                resolve 之后: worktree: false             （对的）
+worktree        resolve 之后: worktree: true
+```
+
+所以 `describeRepository` 那句 `resolve(directory, rawCommon)` 不是防御性编程，它是这个判据成立的前提。这一条此前只在 fake runner 里以「返回绝对路径」的形式被喂过，真 git 在仓库根给的是相对路径——如果当初 fake 里写的是相对路径，这条 bug 早就被抓到了。
+
+### 关于 `worktree` 这个字段
+
+`describeRepository` 算出了它，`sweepChanges` 的返回体里**没有**它，`grep -rn "\.worktree" packages test scripts` 零命中。也就是说它今天是一个只被计算、从不被读的值。这不是缺陷（计算它只需与另两行共享同一次 `rev-parse`，没有额外进程），但也不该被写成「已在用」。记录在此，避免下次有人以为面板已经在区分 worktree。
+
+### 这次验收证明了什么、没证明什么
+
+证明了：多根发现、worktree 识别、回合差分、`coverage` 的两条降级路径（坏根 / 上限）在**真实 git 2.56.0.windows.2、真实 NTFS、真实仓库**上的行为与断言一致。
+
+没证明：真实宿主的回合里这些路径会被触发——那需要一次带工具调用的真机会话（S7 已做过，见上一节），以及宿主重启后才生效的补丁。也没证明 macOS/Linux 上的行为：`--git-common-dir` 的相对/绝对规则在那里相同，但本节的证据只来自一台 Windows 机器。
+
+清理：两套样本目录与六个探针脚本已全部删除，产品代码零改动。

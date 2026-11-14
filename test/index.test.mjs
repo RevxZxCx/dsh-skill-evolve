@@ -286,7 +286,14 @@ try {
   agent.push({ type: 'user/message', seq: 1, data: { role: 'user', content: [{ type: 'text', text: 'The PDF has no text layer, so pdftotext returns nothing. Use OCR instead.' }], source: { kind: 'user' } } })
   agent.push({ type: 'tool/result', seq: 2, data: { message: { role: 'tool', content: [{ type: 'text', text: 'ocr_scan.py --dpi 300 wrote 12 rows to table.csv' }] } } })
 
-  check('seven tools registered', host.tools.size === 7, [...host.tools.keys()].join(','))
+  // Eight, not the detector's seven: `ui-evolve` registers one tool of its own
+  // now — `report_output_files`, the one a model calls to say what a turn made.
+  // The count is asserted on purpose. A tool that stops being registered is a
+  // capability the model silently loses, and nothing else in this suite would
+  // notice: the panel keeps rendering, the card keeps filling from `edit` calls,
+  // and the only symptom is the missing files.
+  check('eight tools registered', host.tools.size === 8, [...host.tools.keys()].join(','))
+  check('the panel registers its own tool', host.tools.has('report_output_files') === true, [...host.tools.keys()].join(','))
   check('the panel routes are registered', host.routes.has('/api/ui-evolve') === true, [...host.routes.keys()].join(','))
 
   // --- the panel's "suggest a skill" button, end to end ---------------------
@@ -338,7 +345,7 @@ try {
       type: 'user/message',
       seq: 98,
       time: Date.now(),
-      data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'list the directory' }] } }
+      data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'list the directory' }] }
     })
     host.emit('session/event', agent, {
       type: 'tool/call',
@@ -2597,6 +2604,395 @@ try {
   check('a detector mounted second is still reachable per request', payload.data?.ok === true, res.body)
 }
 
+// ---------------------------------------------------------------------------
+// The git bracket, wired to the event stream
+// ---------------------------------------------------------------------------
+//
+// `git-changes.test.mjs` owns the porcelain parsing and `git-watch.test.mjs` owns
+// the bracket arithmetic. Neither can see whether the plugin ever opens or
+// closes that bracket: a plugin that builds a `GitWatch` and never calls it
+// passes both suites. This block is the only place a real stream frame has to
+// become a row on the output card.
+//
+// The reader is injected through the third `apply` argument, which exists for
+// exactly this: the alternative is a test that needs a repository on disk, and a
+// test nobody can run is not a test.
+{
+  const root = await makeTempRoot('skill-evolve-git-')
+  process.env.DSH_HOME = root
+
+  const answers = [
+    // `turn/start`: the working tree already holds one untracked file.
+    ['C:/work/old.txt'],
+    // `turn/end`: a script wrote a new one, and the old one is still uncommitted.
+    ['C:/work/old.txt', 'C:/work/report.docx'],
+  ]
+  const asked = []
+  const changes = async (cwd) => {
+    asked.push(cwd)
+    const next = answers.shift()
+    return next === undefined ? [] : next
+  }
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes })
+
+  const agent = fakeAgent('git-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '跑一下生成脚本' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, toolCall('ops_bash', 'git_call_1'))
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 4, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  // The start reading is taken in a microtask so a slow `git status` never
+  // blocks the turn, so nothing is measured yet at this point. Both readings are
+  // asserted after they have had their chance to land — and the stream is what
+  // is under test here, not the ordering inside `GitWatch`, which
+  // `git-watch.test.mjs` owns.
+  await new Promise((done) => { setTimeout(done, 10) })
+  check('the bracket reads the workspace the session runs in', asked.length === 2 && asked[0] === 'C:/work', JSON.stringify(asked))
+  check('and reads it again when the turn ends', asked.length === 2 && asked[1] === 'C:/work', JSON.stringify(asked))
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    // The route drains on 'close' and writes a status head; a stub without
+    // these throws inside `json()` instead of exercising the route.
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const paths = (payload.data?.files ?? []).map((file) => file.path)
+  check('a file a script wrote appears on the card', paths.some((path) => path.endsWith('report.docx')) === true, JSON.stringify(paths))
+  check('and the file that was already dirty is not attributed to the turn', paths.some((path) => path.endsWith('old.txt')) === false, JSON.stringify(paths))
+}
+
+{
+  // A workspace that is not a repository has to be a quiet no-op. `F:\test` —
+  // the workspace of the session this feature was built against — is exactly
+  // that case, so the failing path is the common one.
+  const root = await makeTempRoot('skill-evolve-git-none-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => [] })
+
+  const agent = fakeAgent('git-none-agent', 'F:/test')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '生成八个文件' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, toolCall('write', 'git_none_call_1'))
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 4, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    // The route drains on 'close' and writes a status head; a stub without
+    // these throws inside `json()` instead of exercising the route.
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  check('a workspace with no repository still answers the panel', payload.ok !== false && payload.data !== undefined, res.body.slice(0, 120))
+  check('and adds no rows of its own', (payload.data?.files ?? []).length <= 1, JSON.stringify(payload.data?.files))
+}
+
+{
+  // Coverage is the sweep's confession, and a confession nobody reads is not a
+  // confession. `session-state.test.mjs` proves it is stored; this proves it
+  // reaches the panel payload — the only place the card could learn it. It runs
+  // as its own stream because the interesting case ends a turn with no new files:
+  // the doubt exists precisely when there is nothing to show.
+  const root = await makeTempRoot('skill-evolve-git-partial-')
+  process.env.DSH_HOME = root
+
+  const answers = [
+    { paths: [], coverage: 'partial' },
+    { paths: [], coverage: 'partial' },
+  ]
+  const changes = async () => {
+    const next = answers.shift()
+    return next === undefined ? { paths: [], coverage: 'complete' } : next
+  }
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes })
+
+  const agent = fakeAgent('git-partial-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '看看那个大仓库' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  // The turn wrote nothing, so the caveat is the only thing it has to say — and
+  // that is exactly the case where silence would be read as "clean".
+  check('a half-read sweep reaches the panel', payload.data?.sweep?.coverage === 'partial', JSON.stringify(payload.data?.sweep))
+  check('and it names the turn it could not finish reading', payload.data?.sweep?.turn === 1, JSON.stringify(payload.data?.sweep))
+}
+
+{
+  // A session that has never been swept answers `null`, not `complete`. The panel
+  // has to be able to tell "no claim was made" from "a claim of completeness" —
+  // otherwise every session from before this feature existed looks verified.
+  const root = await makeTempRoot('skill-evolve-git-unswept-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => ({ paths: [], coverage: 'complete' }) })
+
+  const agent = fakeAgent('git-unswept-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  check('a session no sweep has visited makes no claim', payload.data?.sweep === null, JSON.stringify(payload.data?.sweep))
+}
+
+
+
+{
+  // The case that motivated S7, and the reason it exists at all: a workspace
+  // that is not a repository. Measured on this machine — `F:\\test` answers
+  // `fatal: not a git repository`, so the git sweep can only say "nothing", and
+  // until now that silence was reported as "the turn produced nothing".
+  //
+  // The scan is injected rather than run against a real tree: what this block
+  // has to prove is the wiring — that a scan answer reaches the card when git
+  // had none — and a real tree would prove the walker, which
+  // `scan-changes.test.mjs` already does with a budget it can drive.
+  const root = await makeTempRoot('skill-evolve-scan-only-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => ({ paths: [], coverage: 'complete' }),
+    scan: async () => ({ paths: ['C:/work/out/report.docx'], coverage: 'complete' }),
+  })
+
+  const agent = fakeAgent('scan-only-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '生成一份报告' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const paths = (payload.data?.files ?? []).map((file) => file.path)
+  check('a workspace git cannot read is covered by the scan', paths.includes('C:/work/out/report.docx'), JSON.stringify(paths))
+  check('and the turn counts as read', payload.data?.sweep?.coverage === 'complete', JSON.stringify(payload.data?.sweep))
+}
+
+{
+  // When both brackets answer, git wins. Not because it is newer, but because it
+  // knows *why* a file changed: a modification time cannot tell a file this turn
+  // wrote from one a `git checkout` rewrote. Merging them into one list would put
+  // the second kind on the card under a heading that says "produced".
+  const root = await makeTempRoot('skill-evolve-scan-shadowed-')
+  process.env.DSH_HOME = root
+
+  // The git bracket is a difference, so the baseline has to say something
+  // different from the finish. Returning the same list twice makes the two
+  // readings cancel out and the sweep answer "nothing changed" — which is how
+  // this block first failed, and worth stating here so the next reader does not
+  // mistake it for a merge bug.
+  const gitAnswers = [{ paths: [], coverage: 'complete' }, { paths: ['C:/work/src/real.ts'], coverage: 'complete' }]
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
+    scan: async () => ({ paths: ['C:/work/stale.json'], coverage: 'complete' }),
+  })
+
+  const agent = fakeAgent('scan-shadowed-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '改一下' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const paths = (payload.data?.files ?? []).map((file) => file.path)
+  check('git answers, so the scan does not add a row', paths.includes('C:/work/stale.json') === false, JSON.stringify(paths))
+  check('and the git answer is the one on the card', paths.includes('C:/work/src/real.ts'), JSON.stringify(paths))
+}
+
+{
+  // A truncated walk is the scan's own `partial`. It only becomes the turn's
+  // caveat when the scan was the one answering — a truncated scan behind a
+  // complete git reading says nothing about the files git already named.
+  const root = await makeTempRoot('skill-evolve-scan-partial-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => ({ paths: [], coverage: 'complete' }),
+    scan: async () => ({ paths: [], coverage: 'partial' }),
+  })
+
+  const agent = fakeAgent('scan-partial-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '看看' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  check('a walk that gave up reaches the panel as partial', payload.data?.sweep?.coverage === 'partial', JSON.stringify(payload.data?.sweep))
+}
+
+{
+  // The third state, end to end. A bracket that reports `none` never looked at
+  // the workspace: no baseline, no cwd, or a reader that was never wired. If the
+  // merge flattens that into `complete`, the card tells the reader "nothing else
+  // was produced" about a turn nobody swept -- and it also overwrites a standing
+  // `partial` caveat from the turn before. Where the caveat is written, the third
+  // state is checked here rather than in a unit, because the merge is the only
+  // place both brackets are visible at once.
+  const root = await makeTempRoot('skill-evolve-scan-none-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => ({ paths: [], coverage: 'none' }),
+    scan: async () => ({ paths: [], coverage: 'complete' }),
+  })
+
+  const agent = fakeAgent('scan-none-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '看看' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  check('a bracket that never looked is not reported as clean', payload.data?.sweep?.coverage === 'none', JSON.stringify(payload.data?.sweep))
+  check('and it still names the turn', payload.data?.sweep?.turn === 1, JSON.stringify(payload.data?.sweep))
+}
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

@@ -476,7 +476,18 @@ function boot(options) {
   // is affected.
   const clock = { at: settings.now ?? 0, real: settings.now === undefined }
   if (clock.real === false) clock.at = settings.now
-  const DateStub = { now: () => (clock.real === true ? Date.now() : clock.at) }
+  // `now()` is what the bundle reads for ages and grace periods, and freezing it
+  // is why this stub exists. It also needs a constructor: the card formats a
+  // summary's timestamp with `new Date(at).toLocaleString()` for its tooltip, and
+  // a bare `{ now }` makes that throw at render time. The real `Date` is the right
+  // thing to build — the point of the stub is a fixed clock, not a fake calendar.
+  const DateStub = function DateStub(...args) {
+    return args.length === 0 ? new Date(clock.real === true ? Date.now() : clock.at) : new Date(...args)
+  }
+  DateStub.now = () => (clock.real === true ? Date.now() : clock.at)
+  DateStub.parse = Date.parse
+  DateStub.UTC = Date.UTC
+  DateStub.prototype = Date.prototype
 
   const moduleTable = (id) => {
     requested.push(id)
@@ -1006,6 +1017,169 @@ check(
 }
 
 // ---------------------------------------------------------------------------
+// A failed summary says so in the reader's language
+//
+// The reasons are English sentences produced by the summariser and matched here
+// by prefix. That split is a hazard worth a test: the two files have no type
+// between them, so a reason spelled one way and matched another way renders as
+// the generic fallback and nothing fails. It shipped exactly once —
+// `the summary call failed: …` was matched as `the model call failed` — and the
+// card said "暂无摘要" for the one failure a person is most likely to hit.
+//
+// Every reason below is copied from a return statement in summarise.js. The
+// assertion is that the panel does not show the generic fallback for it, which
+// is the only claim that stays true as the wording evolves.
+// ---------------------------------------------------------------------------
+
+{
+  const reasons = [
+    'turned off',
+    'turned off in settings',
+    'no completed turn yet',
+    'the turn left nothing to summarise',
+    'no model service available',
+    'no model route is available',
+    'the summary call timed out',
+    'the summary call failed: 401 Unauthorized',
+    'the summary call failed: fetch failed',
+    'the model call failed: stream ended early',
+    'the model returned nothing',
+  ]
+  for (const reason of reasons) {
+    const routes = panelRoutes()
+    routes['/api/ui-evolve/panel'] = {
+      ok: true,
+      data: { turn: 7, calls: 1, failed: 0, turnFiles: 0, summary: { reason }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+    }
+    const instance = boot({ routes })
+    instance.module.apply(instance.ctx)
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    const tree = await instance.renderer.deepRender(instance.seat('cards'))
+    check(`a failure reason is translated rather than shown raw: ${reason}`, textOf(tree).includes(reason) === false, textOf(tree).slice(0, 160))
+    check(`and it does not fall through to the generic line: ${reason}`, textOf(tree).includes('暂无摘要') === false, textOf(tree).slice(0, 160))
+  }
+
+  // "Nothing was shown raw" is too weak on its own: a card that prints one fixed
+  // sentence for every reason passes it, and so does a transposed mapping —
+  // somebody reading "摘要生成超时" because the model returned nothing would wait
+  // for a retry instead of re-running the turn. So the copy is grouped by what a
+  // reader can act on, and the property asserted is the one that matters:
+  // **different groups read differently, and every reason in a group reads the
+  // same**. The second half is not redundant — it is what catches a transposition
+  // that lands a specific sentence in the wrong group.
+  //
+  // The groups are deliberately coarse. A 401 and a dropped socket are one class
+  // to the reader ("the call failed, try again"); the difference between them
+  // belongs in the tooltip, which is asserted separately below.
+  // Distinctness across groups alone is not enough: **swapping two branches'
+  // sentences** keeps every group distinct while telling an idle reader
+  // "摘要生成超时" when the model simply returned nothing. So each group also
+  // carries the one word a reader could not do without — the meaning of that
+  // failure, not its wording. A reworded sentence still contains it; a
+  // transposed one does not.
+  const copyGroups = new Map([
+    ['turned off', { word: '关闭', reasons: ['turned off', 'turned off in settings'] }],
+    ['no completed turn', { word: '回合', reasons: ['no completed turn yet'] }],
+    ['nothing to summarise', { word: '可总结', reasons: ['the turn left nothing to summarise'] }],
+    ['no model service', { word: '模型服务', reasons: ['no model service available'] }],
+    ['no model route', { word: '路由', reasons: ['no model route is available'] }],
+    ['timeout', { word: '超时', reasons: ['the summary call timed out'] }],
+    ['call failed', { word: '失败', reasons: ['the summary call failed: 401 Unauthorized', 'the summary call failed: fetch failed', 'the model call failed: stream ended early'] }],
+    ['empty', { word: '没有返回', reasons: ['the model returned nothing'] }],
+  ])
+  const rendered = new Map()
+  for (const [group, entry] of copyGroups) {
+    for (const reason of entry.reasons) {
+      const routes = panelRoutes()
+      routes['/api/ui-evolve/panel'] = {
+        ok: true,
+        data: { turn: 7, calls: 1, failed: 0, turnFiles: 0, summary: { reason }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+      }
+      const instance = boot({ routes })
+      instance.module.apply(instance.ctx)
+      firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+      const tree = await instance.renderer.deepRender(instance.seat('cards'))
+      rendered.set(reason, { group, word: entry.word, text: textOf(tree) })
+    }
+  }
+
+  const byGroup = new Map()
+  for (const [reason, { group, word, text }] of rendered) {
+    check(`the reader is told what kind of failure this is: ${reason}`, text.includes(word), `${JSON.stringify(reason)} renders ${JSON.stringify(text)}, which never says ${JSON.stringify(word)}`)
+    const prior = byGroup.get(group)
+    check(`a reason reads the same as its own class: ${reason}`, prior === undefined || prior.text === text, `${JSON.stringify(prior?.reason)} and ${JSON.stringify(reason)} differ inside ${group}`)
+    if (prior === undefined) byGroup.set(group, { reason, text })
+  }
+  // Distinctness across classes, which is the only version of "specific" that
+  // does not pin the wording.
+  const groups = [...byGroup.keys()]
+  for (let i = 0; i < groups.length; i += 1) {
+    for (let j = i + 1; j < groups.length; j += 1) {
+      const a = byGroup.get(groups[i])
+      const b = byGroup.get(groups[j])
+      check(`"${groups[i]}" and "${groups[j]}" do not read the same`, a.text !== b.text, `both render ${JSON.stringify(a.text)}`)
+    }
+  }
+}
+
+{
+  // The English original is not thrown away — it is moved to a tooltip, which is
+  // where a reader who wants to report a 401 can still find it.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: { turn: 7, calls: 1, failed: 0, turnFiles: 0, summary: { reason: 'the summary call failed: 401 Unauthorized' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  check('the failure is stated in words', textOf(tree).includes('摘要生成失败'), textOf(tree).slice(0, 160))
+  // The tooltip lives on the <p>, not on the .dsse-clip box: the box is what the
+  // fade is drawn on, and a title there would cover the padding too.
+  const paragraph = firstByClass(tree, 'dsse-text')
+  check('the provider message survives in the tooltip', paragraph?.props?.title === 'the summary call failed: 401 Unauthorized', String(paragraph?.props?.title))
+}
+
+{
+  // A dated card says how old the telling is. The timestamp has to come from the
+  // payload: computing it at render time would make every 8-second poll claim a
+  // fresh summary, which reads as the model having just run.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 7, calls: 1, failed: 0, turnFiles: 0,
+      summary: { text: 'Fixed the fixture.', at: Date.now() - 5 * 60 * 1000 },
+      pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const ago = firstByClass(tree, 'dsse-head-ago')
+  check('a summary carries the time it was written', ago !== undefined && textOf(ago).includes('更新于'), textOf(ago))
+  check('the age is relative, not a clock reading', /更新于\s*5\s*分钟前/u.test(textOf(ago)), textOf(ago))
+}
+
+{
+  // A failed summary has no time, and producing one would be a lie of a specific
+  // kind: "生成失败 · 3 分钟前" invites the reader to wait for a retry that is
+  // never scheduled, because the only retry is the next completed turn.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: { turn: 7, calls: 1, failed: 0, turnFiles: 0, summary: { reason: 'the summary call timed out' }, pendingCandidates: 0, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [] },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  check('a failure is not given a time', firstByClass(tree, 'dsse-head-ago') === undefined, textOf(tree).slice(0, 160))
+}
+
+// ---------------------------------------------------------------------------
 // Opening: the cards fetch, unwrap and render
 // ---------------------------------------------------------------------------
 
@@ -1072,13 +1246,14 @@ check(
     instance.calls.some((row) => row.url.endsWith('/models')),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
-  // The reader's language is the host's, and the host writes it to `<html lang>`.
-  // Without it the model picks a language from the transcript, which is how a
-  // Chinese reader kept getting English summaries. The attribute is read at ask
-  // time rather than captured once, so the fixture sets it before boot.
+  // The summary is written in the language of the conversation, which the model
+  // reads out of the transcript, so the panel no longer sends the interface
+  // language. `<html lang>` still exists for the host's own use; what this
+  // asserts is that the bundle has stopped treating it as a second source of
+  // truth for a question the transcript already answers.
   check(
-    'the panel is told which language the reader uses',
-    instance.calls.some((row) => row.url.includes('lang=zh-CN')),
+    'the panel asks for no interface language',
+    instance.calls.some((row) => row.url.includes('/panel?')) && instance.calls.every((row) => row.url.includes('lang=') === false),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
   // The timer is the panel's only way of learning anything. It cannot be told
@@ -3094,6 +3269,15 @@ function byAction(node, action) {
   check('the card header aligns on the baseline', source.includes('.dsse-card-head{display:flex;align-items:baseline;'), 'the header still centres its row')
   check('the header no longer centres', source.includes('.dsse-card-head{display:flex;align-items:center;') === false, 'a centring header survives')
   check('the stats sit at the far edge', source.includes('.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;'), 'the stats are not pushed right')
+  // The timestamp is the fourth thing in a row that already overflowed a narrow
+  // card. An ellipsis on the child alone never engages: the flex parent keeps
+  // `max-content` width, so the row runs past `.dsse-card{overflow:hidden}` and
+  // the span is cut off at the card edge with no text-overflow at all. The
+  // shrink has to be permitted on the parent, and the counts have to refuse it
+  // so the thing that gives way is the timestamp, not the numbers.
+  check('the stats row may shrink', source.includes('.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap;min-width:0;overflow:hidden}'), 'the stats row still refuses to shrink, so the timestamp is clipped instead of ellipsized')
+  check('a count never gives way', source.includes('.dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px;flex:0 0 auto}'), 'a count can shrink, so the numbers lose digits before the timestamp loses letters')
+  check('the timestamp is the part that gives way', source.includes('.dsse-head-ago{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}'), 'the timestamp cannot shrink into an ellipsis')
   check('the header keeps no room for a button that is gone', source.includes('.dsse-card-head{display:flex;align-items:baseline;gap:8px;min-height:') === false, 'the header still reserves a minimum height')
   check('the icon buttons keep their own centring', source.includes('.dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}'), 'the icon buttons lost their vertical placement')
 }
@@ -3262,58 +3446,60 @@ function byAction(node, action) {
 }
 
 // ---------------------------------------------------------------------------
-// The language is read from the host, and read again every time
+// The panel no longer asks the host what language to answer in
 // ---------------------------------------------------------------------------
-
-// `<html lang>` is the only place the bundle can find out what language the
-// reader uses: the host's locale preference lives in settings, which the client
-// does not get, and an unset preference is resolved by the browser. The host
-// writes the result of that resolution to the attribute, so the attribute is the
-// answer whether the reader chose a language or left it to the browser.
+//
+// It used to: the bundle read `<html lang>` and appended `?lang=`, and the
+// summariser turned that tag into a prompt sentence. The summary is now written
+// in the language of the conversation, which is the language the user typed in,
+// and the model reads that directly from the transcript. Keeping the query would
+// leave two answers to one question — and the interface language is the wrong
+// one of the two: a person reading a Chinese UI while working in English asked
+// for English work.
+//
+// These assertions are the removal's guard rail. They fail if somebody
+// reintroduces the parameter, whether from `documentElement.lang` or anywhere
+// else, because every panel request is inspected rather than one call site.
 {
-  // No attribute is not a reason to guess. A wrong language is obeyed, while a
-  // missing one lets the model read the transcript and decide for itself, which
-  // is the behaviour that predates this path.
-  const instance = boot({ routes: panelRoutes(), lang: '' })
-  instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  await instance.renderer.deepRender(instance.seat('cards'))
-  check(
-    'a host that names no language asks without one',
-    instance.calls.some((row) => row.url.includes('/panel?')) && instance.calls.every((row) => row.url.includes('lang=') === false),
-    JSON.stringify(instance.calls.map((row) => row.url)),
-  )
-}
-
-{
-  // The attribute is read when the panel asks, not when the bundle loads: a
-  // reader who changes the interface language gets the new one on the next poll
-  // rather than after a restart.
   const instance = boot({ routes: panelRoutes(), lang: 'en-GB' })
   instance.module.apply(instance.ctx)
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   await instance.renderer.deepRender(instance.seat('cards'))
   check(
-    'the first ask carries the language the host set',
-    instance.calls.some((row) => row.url.includes('lang=en-GB')),
+    'the first ask carries no language',
+    instance.calls.some((row) => row.url.includes('/panel?')) && instance.calls.every((row) => row.url.includes('lang=') === false),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
+
+  // A host that names no language is the same case now, and it must stay the
+  // same case: if the two ever diverge again, something is reading the
+  // attribute. Written as its own boot because the fixture resolves the
+  // attribute before the bundle runs.
+  const unnamed = boot({ routes: panelRoutes(), lang: '' })
+  unnamed.module.apply(unnamed.ctx)
+  firstByClass(await unnamed.renderer.render(unnamed.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await unnamed.renderer.deepRender(unnamed.seat('cards'))
+  check(
+    'a host that names no language asks the same way',
+    unnamed.calls.some((row) => row.url.includes('/panel?')) && unnamed.calls.every((row) => row.url.includes('lang=') === false),
+    JSON.stringify(unnamed.calls.map((row) => row.url)),
+  )
+
+  // The attribute is read (or not) when the panel asks, so changing it between
+  // polls is the case that would catch a reintroduced read inside the polling
+  // path. Called through `?.` rather than inside an `if`: a missing poll must
+  // fail the assertion below rather than silently skip it while the suite stays
+  // green.
   instance.document.documentElement.lang = 'ja'
   const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
   check('the panel is still polling', poll !== undefined, JSON.stringify(instance.timers.map((row) => row.ms)))
-  // Called through `?.` rather than inside an `if`: the assertion below is the
-  // only thing that reads the language of a later poll. Guarding it on `poll`
-  // turns a fixture change into no assertion at all while the suite stays green,
-  // and calling it bare turns the same change into a crash the mutation scripts
-  // score as "survived". A missing poll must fail the assertion, not skip it and
-  // not take the tally line with it.
   const before = instance.calls.length
   poll?.fn?.()
   await settle()
   const after = instance.calls.slice(before)
   check(
-    'a language changed between polls is picked up',
-    after.length > 0 && after.every((row) => row.url.includes('lang=ja')),
+    'a host language changed between polls changes nothing',
+    after.length > 0 && after.every((row) => row.url.includes('lang=') === false),
     JSON.stringify(after.map((row) => row.url)),
   )
 }
@@ -3954,13 +4140,25 @@ async function openPanel(routes, options) {
   })(), JSON.stringify(instance.openedResources))
 
   // Opening the card scrolls instead of growing without bound.
+  //
+  // The height is pinned to the number instead of matched as a bare `\d+`:
+  // eight rows is the promise, and a row that shrank from 36px to 28px has to
+  // take the reservation with it or the list scrolls with a gap below the last
+  // row. `\d+` accepted both numbers, so the assertion could not tell that the
+  // row height and the reservation had drifted apart.
   check('the list scrolls once it is open, and only then', (() => {
     const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
     const closed = /\.dsse-files\{/.test(sheet)
-    const open = /\.dsse-files\[data-open="true"\]\{[^}]*max-height:\d+px/.test(sheet) && /\.dsse-files\[data-open="true"\]\{[^}]*overflow-y:auto/.test(sheet)
+    const open = /\.dsse-files\[data-open="true"\]\{[^}]*max-height:245px/.test(sheet) && /\.dsse-files\[data-open="true"\]\{[^}]*overflow-y:auto/.test(sheet)
     return closed && open
   })())
   check('the rows look clickable', /\.dsse-row-open\{[^}]*cursor:pointer/.test(instance.styles.map((node) => String(node.textContent)).join('\n')))
+
+  // The reservation above is arithmetic over the row height, so the row has to
+  // *be* that height. Without `border-box` the 2px of vertical padding is added
+  // to `min-height` and every row is 32px, which quietly makes the 245px
+  // reservation hold seven rows instead of eight.
+  check('a row measures what the reservation assumes', /\.dsse-row\{[^}]*box-sizing:border-box/.test(instance.styles.map((node) => String(node.textContent)).join('\n')))
 
   // The control is pressed through a guard rather than dereferenced: with the
   // badge gone, `byClass(...)[0].props` throws, and a suite that throws prints no
@@ -4176,6 +4374,464 @@ async function openPanel(routes, options) {
   }
   check('a preview that cannot open does not throw into the cards', threw === false)
   check('and the cards are still on screen afterwards', textOf(tree).includes('a summary worth keeping'), textOf(tree).slice(0, 160))
+}
+
+{
+  // A file that was edited and then deleted is still something this turn did. The
+  // old card dropped it, because a row only existed once `stat` agreed the file
+  // did — which made "deleted after editing" and "never touched" the same
+  // sentence. Three states are the whole point of the change; the row survives,
+  // and it says which of the three it is.
+  const rows = [
+    { path: '/work/there.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/there.md' },
+    { path: '/work/gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.md' },
+    { path: '/work/locked.md', bytes: null, mtimeMs: null, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/locked.md' },
+  ]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 2, calls: 4, failed: 0, turnFiles: 2,
+      summary: { text: 'wrote one file and removed another' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: rows,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const names = byClass(card, 'dsse-name').map((node) => textOf(node))
+  const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
+
+  check('a deleted file is still listed', names.includes('gone.md'), JSON.stringify(names))
+  check('and so is one that cannot be read', names.includes('locked.md'), JSON.stringify(names))
+  check('so all three rows are drawn', byClass(card, 'dsse-row').length === 3, String(byClass(card, 'dsse-row').length))
+
+  // The state travels on the row, because the dimming and the strike-through are
+  // CSS and a mock renderer lays nothing out: asserting the attribute is the only
+  // way to know the rule has something to match.
+  check('a deleted row says it is deleted', rowOf('gone.md')?.props?.['data-status'] === 'missing', String(rowOf('gone.md')?.props?.['data-status']))
+  check('an unreadable row says that instead', rowOf('locked.md')?.props?.['data-status'] === 'invalid', String(rowOf('locked.md')?.props?.['data-status']))
+  check('a present row says it is available', rowOf('there.md')?.props?.['data-status'] === 'available', String(rowOf('there.md')?.props?.['data-status']))
+
+  // A selector only paints something if the element it names is really there. The
+  // rule below needs a `.dsse-name` *inside* the row; the tree has to contain that
+  // relationship, or the CSS assertion is testing text nobody matches. Asserting
+  // both halves rules out the descendant combinator being dropped from the
+  // selector as well: the row itself must not carry `.dsse-name`.
+  check('the deleted row still carries its own name element', byClass(rowOf('gone.md'), 'dsse-name').length === 1, String(byClass(rowOf('gone.md'), 'dsse-name').length))
+  check('and the row element is not the name element', String(rowOf('gone.md')?.props?.className ?? '').includes('dsse-name') === false, String(rowOf('gone.md')?.props?.className))
+
+  // Where the size used to be, the reason it is not a size any more.
+  check('the deleted row does not report a size', textOf(rowOf('gone.md')).includes('已删除'), textOf(rowOf('gone.md')))
+  check('the unreadable row says it cannot be read', textOf(rowOf('locked.md')).includes('无法读取'), textOf(rowOf('locked.md')))
+  // The exact figure, not a loose unit match: `/B|K|M/` accepts a broken `formatBytes`
+  // that returns the letter `B` alone, which is not a size anyone can use.
+  check('and the present row still reports its size', textOf(rowOf('there.md')).includes('10 B'), textOf(rowOf('there.md')))
+
+  // Clicking a row that is not there would open an empty preview and teach the
+  // reader that the click is broken. It is a div, and it says why.
+  // The `rowOf(...) !== undefined` guard is load-bearing: `?.props?.onClick` is
+  // also undefined when the row was never drawn, so without it these two checks
+  // would pass on a card that dropped missing files entirely — the very defect
+  // the three states exist to prevent.
+  check('the deleted row is drawn at all', rowOf('gone.md') !== undefined, String(rowOf('gone.md')))
+  check('the deleted row offers no preview', rowOf('gone.md') !== undefined && rowOf('gone.md')?.props?.onClick === undefined, String(typeof rowOf('gone.md')?.props?.onClick))
+  check('and it is not dressed as a button', rowOf('gone.md') !== undefined && rowOf('gone.md')?.type !== 'button', String(rowOf('gone.md')?.type))
+  check('its title carries the reason instead of the invitation', String(rowOf('gone.md')?.props?.title ?? '').includes('已被删除或移动') && String(rowOf('gone.md')?.props?.title ?? '').includes('点击在侧栏预览') === false, String(rowOf('gone.md')?.props?.title))
+  check('the unreadable row gives its own reason', String(rowOf('locked.md')?.props?.title ?? '').includes('文件存在但无法读取'), String(rowOf('locked.md')?.props?.title))
+  check('a present row still invites the click', String(rowOf('there.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(rowOf('there.md')?.props?.title))
+
+  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  check('a row that is gone is struck through', /\.dsse-row\[data-status="missing"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
+  check('the strike-through covers unreadable rows too', /\.dsse-row\[data-status="invalid"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
+  check('a gone row does not highlight under the pointer', /\.dsse-row\[data-status="missing"\]:hover[^{]*\{background:transparent\}/.test(sheet), '')
+  check('and the reason takes the place of the size in italics', /\.dsse-size-gone\{font-style:italic\}/.test(sheet), '')
+}
+
+{
+  // A row from an older Host has no status field at all. Reading it as "gone"
+  // would strike through every file on the card the first time the panel is
+  // opened against a build that predates the three states.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'edited one file' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [{ path: '/work/old.md', bytes: 9, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/old.md' }],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const row = firstByClass(tree, 'dsse-row')
+  check('a row with no status is treated as present', row?.props?.['data-status'] === 'available', String(row?.props?.['data-status']))
+  check('and it is still openable', typeof row?.props?.onClick === 'function', String(typeof row?.props?.onClick))
+  check('and it still reports its size rather than a reason', textOf(row).includes('9 B'), textOf(row))
+}
+
+{
+  // Two numbers describe one list, so they have to add up. The header names what a
+  // person wrote (and, separately, what was generated); the badge names the size of
+  // the whole list. If they disagree the reader has no way to tell which one lied —
+  // and a file that is only missing would vanish from the header but stay in the
+  // list, which is exactly how the counts drifted before.
+  const rows = [
+    { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/b.md' },
+    { path: '/work/c.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/c.md' },
+    { path: '/work/d.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/d.md' },
+    { path: '/work/e.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/e.md' },
+    { path: '/work/f.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/f.md' },
+    { path: '/work/node_modules/g.js', bytes: 1, mtimeMs: 1, turn: false, noise: true, status: 'available', address: 'dsh-resource://file/session/session-a/work/node_modules/g.js' },
+  ]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 2, failed: 0, turnFiles: 2,
+      summary: { text: 'touched seven files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: rows,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const meta = textOf(firstByClass(card, 'dsse-card-meta'))
+  const badge = firstByClass(card, 'dsse-expand-action')
+
+  const written = Number((meta.match(/(\d+) 个文件/u) ?? [])[1])
+  const generated = Number((meta.match(/(\d+) 个生成/u) ?? [])[1] ?? 0)
+  const total = Number((String(badge?.props?.['aria-label'] ?? '').match(/(\d+) 个/u) ?? [])[1])
+  check('the header and the badge describe the same list', written + generated === total, `${meta} / ${String(badge?.props?.['aria-label'])}`)
+  check('and the missing and unreadable files are still counted in it', written === 6 && total === 7, `${meta} / ${String(badge?.props?.['aria-label'])}`)
+  // The fold shows four rows; the badge names the whole list, not the hidden
+  // remainder, because the header's own count is what a reader checks against it.
+  check('the folded card draws four rows', byClass(card, 'dsse-name').length === 4, String(byClass(card, 'dsse-name').length))
+  check('and the badge still names the whole list, not the hidden part', total === 7, String(total))
+}
+
+// ---------------------------------------------------------------------------
+// S2: the row became one line with a glyph, and the directory became relative to
+// the workspace. Nothing before this block noticed either change — the card drew
+// the same names and the same sizes, so 597 assertions stayed green while the
+// whole feature could have been absent. That is the shape of DEF-80: a change is
+// only covered when something asserts the new thing exists.
+// ---------------------------------------------------------------------------
+{
+  // The glyph is a function component, so the harness expands it into real nodes
+  // before these assertions can see it. Asking for `dsse-row-icon` is therefore
+  // asking the question the reader asks: is there a mark here at all.
+  //
+  // `rowNamed` walks outwards from the name to its row. The name element is the
+  // one that carries the visible text, so it is the easiest thing to find; but
+  // the glyph is a **sibling** of the name inside `dsse-row-main`, not a child of
+  // the name. Searching the name for an icon finds nothing and the assertion
+  // reads as "no icons anywhere", which is how the first draft of this block
+  // failed twelve checks against working code.
+  const rowNamed = (tree, name) => byClass(tree, 'dsse-row').find((row) => textOf(firstByClass(row, 'dsse-name')) === name)
+  const iconOf = (row) => byClass(row, 'dsse-fileicon')[0]
+  const markOf = (row) => JSON.stringify(iconOf(row)?.props?.children ?? [])
+  const bucketOf = (row) => iconOf(row)?.props?.['data-bucket']
+
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 4,
+      summary: { text: 'wrote four kinds of file' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: '/work',
+      files: [
+        { path: '/work/run.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/page.html', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/theme.css', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/work/data.json', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+
+  const codeRow = rowNamed(tree, 'run.ts')
+  const markupRow = rowNamed(tree, 'page.html')
+  const styleRow = rowNamed(tree, 'theme.css')
+  const dataRow = rowNamed(tree, 'data.json')
+
+  check('a file row carries a glyph', codeRow !== undefined && iconOf(codeRow) !== undefined, String(iconOf(codeRow)))
+  // Each bucket is a different outline now, not a different mark on one page. The
+  // assertions name the stroke that only that bucket draws — a single shared
+  // silhouette would produce eight identical arrays and fail all four.
+  check('a source file is marked as code', bucketOf(codeRow) === 'code' && markOf(codeRow).includes('M10 4.5c-2.6 0-2.6 7.5-5.4 7.5'), markOf(codeRow))
+  check('a page is marked as markup', bucketOf(markupRow) === 'markup' && markOf(markupRow).includes('M9.5 4.5L3.5 12l6 7.5'), markOf(markupRow))
+  check('a stylesheet is marked as style', bucketOf(styleRow) === 'style' && markOf(styleRow).includes('M10.4 3.5L7.6 20.5'), markOf(styleRow))
+  check('structured data is marked as data', bucketOf(dataRow) === 'data' && markOf(dataRow).includes('M3.5 5h17v14h-17z'), markOf(dataRow))
+  check('the four marks are not all the same', new Set([markOf(codeRow), markOf(markupRow), markOf(styleRow), markOf(dataRow)]).size === 4, 'marks collapsed together')
+
+  // The stroke colour is inherited rather than set on the svg, so that a row can
+  // recolour its glyph in CSS when the file is gone.
+  //
+  // Scoped to the `.dsse-fileicon` rule on purpose. Searching the whole sheet for
+  // `stroke:currentColor` found `.dsse-icon` — the panel's own control glyphs —
+  // and passed happily with the file glyph painted `#333`, so the assertion was
+  // about the sheet, not about the thing it named.
+  const sheet = String(instance.styles.map((node) => String(node.textContent)).join('\n'))
+  check('the glyph inherits the colour instead of setting one', (() => {
+    const rule = /\.dsse-fileicon\{[^}]*\}/u.exec(sheet)
+    return rule !== null && rule[0].includes('stroke:currentColor')
+  })(), '')
+  // Colour is a grouping cue and nothing else, so it is asserted per bucket. The
+  // sheet-wide search this block used to do matched `.dsse-icon` and would pass
+  // with every file glyph painted one flat colour.
+  const ruleFor = (bucket) => {
+    // Sliced rather than matched: this selector contains `[`, `]` and `{`, and a
+    // template literal quietly eats the backslashes that would have escaped them.
+    const marker = `.dsse-fileicon[data-bucket="${bucket}"]{`
+    const at = sheet.indexOf(marker)
+    if (at < 0) return ''
+    const close = sheet.indexOf('}', at)
+    return close < 0 ? '' : sheet.slice(at, close + 1)
+  }
+  check('a source file is tinted', ruleFor('code').includes('#4c7fb8'), ruleFor('code'))
+  check('the six tints are six different colours', (() => {
+    const values = ['code', 'markup', 'style', 'data', 'image', 'archive']
+      .map((bucket) => (/color:(#[0-9a-f]{6})/u.exec(ruleFor(bucket)) ?? [])[1])
+    return values.every((value) => typeof value === 'string') && new Set(values).size === 6
+  })(), ['code', 'markup', 'style', 'data', 'image', 'archive'].map(ruleFor).join(' | '))
+  // The two buckets that make no claim about the file keep the neutral grey: a card
+  // of eight rows should not be eight colours deep.
+  check('the buckets that claim nothing stay grey', ruleFor('doc') === '' && ruleFor('file') === '', ruleFor('doc') + ruleFor('file'))
+  // A missing file must lose its tint. Colour is a claim about what the file is
+  // worth reading as, and a struck-through grey name beside a bright blue glyph
+  // says two different things on one line.
+  check('a row whose file is gone drops its colour', /\.dsse-row\[data-status="missing"\] \.dsse-fileicon[^{]*\{[^}]*color:var\(--dsw-alias-label-tertiary/u.test(sheet), '')
+}
+
+{
+  // The remaining buckets, plus the one that must not guess. Each of these has a
+  // distinct outline, so the assertion can name it.
+  const rowNamed = (tree, name) => byClass(tree, 'dsse-row').find((row) => textOf(firstByClass(row, 'dsse-name')) === name)
+  const iconOf = (row) => byClass(row, 'dsse-fileicon')[0]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 4,
+      summary: { text: 'wrote more files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: '/work',
+      files: [
+        { path: '/work/notes.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/shot.png', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/dist.zip', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/work/Makefile.qqq', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+        { path: '/work/run.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://e' },
+        { path: '/work/page.html', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://f' },
+        { path: '/work/theme.css', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://g' },
+        { path: '/work/data.json', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://h' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+
+  const docRow = rowNamed(tree, 'notes.md')
+  const imageRow = rowNamed(tree, 'shot.png')
+  const archiveRow = rowNamed(tree, 'dist.zip')
+  const unknownRow = rowNamed(tree, 'Makefile.qqq')
+
+  const marksOf = (row) => JSON.stringify(iconOf(row)?.props?.children ?? [])
+  const bucketOf = (row) => iconOf(row)?.props?.['data-bucket']
+
+  check('prose is marked as a document', bucketOf(docRow) === 'doc' && marksOf(docRow).includes('M5 3.5h14v17H5z'), marksOf(docRow))
+  check('a picture is marked with a picture', bucketOf(imageRow) === 'image' && marksOf(imageRow).includes('"circle"'), marksOf(imageRow))
+  check('a bundle is marked as an archive', bucketOf(archiveRow) === 'archive' && marksOf(archiveRow).includes('M4 8.5h16'), marksOf(archiveRow))
+  // The blank page is the point: an unknown extension must produce the page outline
+  // and nothing else, because a wrong mark tells the reader something false about a
+  // file they wrote. The page and its fold are one path here, not two.
+  const unknownMarks = iconOf(unknownRow)?.props?.children
+  check('an extension nobody knows gets the blank page', Array.isArray(unknownMarks) && unknownMarks.length === 1, JSON.stringify(unknownMarks))
+  check('and that page is the one outline that claims nothing', bucketOf(unknownRow) === 'file' && marksOf(unknownRow).includes('M5 3.5h10l4 4v13H5zM15 3.5v4h4'), marksOf(unknownRow))
+  // Eight buckets, eight outlines, and no bucket borrowing another's shape. Four are
+  // read from this block's rows and four from the block above; every one of the eight
+  // is named here so a fallback to the generic page cannot pass unnoticed.
+  check('the four buckets here are four different shapes', new Set([marksOf(docRow), marksOf(imageRow), marksOf(archiveRow), marksOf(unknownRow)]).size === 4, [marksOf(docRow), marksOf(imageRow), marksOf(archiveRow), marksOf(unknownRow)].join(' | '))
+}
+
+{
+  // The directory beside the name: relative to the workspace when the file is
+  // inside it, and the last three segments when it is not — or when the server is
+  // old enough not to send a workspace at all.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 3,
+      summary: { text: 'wrote files in three places' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: '/work',
+      files: [
+        { path: '/work/src/lib/inner.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/top.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/deep/a/b/c/d.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/elsewhere/x/y/z/e.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+
+  const rowOf = (name) => byClass(tree, 'dsse-name').find((node) => textOf(node) === name)?.props?.children
+  const whereOf = (name) => {
+    const rows = byClass(tree, 'dsse-row')
+    for (const row of rows) {
+      const nameNode = firstByClass(row, 'dsse-name')
+      if (textOf(nameNode) !== name) continue
+      const where = firstByClass(row, 'dsse-where')
+      return where === undefined ? '' : textOf(where)
+    }
+    return undefined
+  }
+
+  check('a nested file shows the path from the workspace', whereOf('inner.ts') === 'src/lib', String(whereOf('inner.ts')))
+  check('a file at the workspace root shows no directory at all', whereOf('top.md') === '', String(whereOf('top.md')))
+  check('a deeper file keeps its whole directory, not three segments', whereOf('d.ts') === 'deep/a/b/c', String(whereOf('d.ts')))
+  // Outside the workspace there is no relative path to compute, so the row falls
+  // back to the tail. Three segments is a guess, but it is the guess every build
+  // before S2 made, and a row that suddenly showed nothing would be a regression
+  // dressed as a fix.
+  check('a file outside the workspace falls back to its tail', whereOf('e.ts') === 'y/z', String(whereOf('e.ts')))
+  // The name is still the whole name: shortening the directory must not eat it.
+  check('the name survives the directory being shortened', whereOf('inner.ts') !== undefined && rowOf('inner.ts') !== undefined, '')
+}
+
+{
+  // An older server sends no workspace. The row must still draw a directory —
+  // falling back to the last three segments — rather than collapsing to names
+  // that two files can share.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'one file' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [{ path: '/work/src/lib/inner.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' }],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const where = firstByClass(tree, 'dsse-where')
+  check('without a workspace the directory is the tail of the path', where !== undefined && textOf(where) === 'src/lib', String(textOf(where)))
+}
+
+{
+  // Windows paths are case-insensitive, and the two halves arrive from different
+  // places: the workspace from the session header, the file from whatever a tool
+  // was handed. Without folding case, this row draws its whole absolute path as
+  // its directory, right beside rows drawing `src`.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'one file' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: 'C:\\work',
+      files: [
+        { path: 'c:\\Work\\src\\a.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: 'C:\\WORK\\b.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const rows = byClass(tree, 'dsse-row')
+  const inner = rows.find((row) => textOf(firstByClass(row, 'dsse-name')) === 'a.ts')
+  const root = rows.find((row) => textOf(firstByClass(row, 'dsse-name')) === 'b.md')
+  const where = (row) => textOf(firstByClass(row, 'dsse-where'))
+  check('a file under the workspace in another case shows the same directory', inner !== undefined && where(inner) === 'src', String(where(inner)))
+  check('and it never repeats the absolute path it was matched against', inner !== undefined && String(where(inner)).includes('C:') === false, String(where(inner)))
+  check('a root file has no directory even when its case differs', root !== undefined && where(root) === '', String(where(root)))
+}
+
+// The directory left the visible row: at 320px it was taking width from the
+// name, which is the thing being scanned. It is still rendered — a screen
+// reader has no hover — but it must not paint. These assertions are the only
+// thing keeping a future layout edit from quietly putting it back.
+{
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 3, calls: 4, failed: 0, turnFiles: 3,
+      summary: { text: 'eight files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: 'C:\\work',
+      files: [
+        { path: 'C:\\work\\test8\\code.py', bytes: 1314, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  const dirRule = /\.dsse-where\{[^}]*\}/u.exec(sheet)?.[0] ?? ''
+  const nameRule = /\.dsse-name\{[^}]*\}/u.exec(sheet)?.[0] ?? ''
+  const row = byClass(tree, 'dsse-row').find((node) => textOf(firstByClass(node, 'dsse-name')) === 'code.py')
+  check('the directory is clipped away instead of printed', dirRule.includes('clip:rect(0,0,0,0)'), dirRule)
+  check('and it takes no width from the name', dirRule.includes('position:absolute') && dirRule.includes('width:1px'), dirRule)
+  check('the name is a block of its own again, not a shrinking sibling', nameRule.includes('display:block'), nameRule)
+  check('the name is never told to shrink against a sibling', nameRule.includes('flex:0 1 auto') === false, nameRule)
+  const title = String(row?.props?.title ?? '')
+  check('the full path is still reachable, on the row tooltip', title.includes('test8') && title.includes('code.py'), title)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

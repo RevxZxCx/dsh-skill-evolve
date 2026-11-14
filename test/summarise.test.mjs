@@ -16,10 +16,9 @@ import {
   Summariser,
   collectText,
   finishFailure,
-  languageLine,
-  languageName,
   renderPromptBody,
-  summaryKey
+  summaryKey,
+  tidy
 } from '../packages/ui-evolve/lib/summarise.js'
 
 let passed = 0
@@ -175,54 +174,138 @@ check('the same turn and body give the same key', summaryKey(3, 'abc') === summa
 check('a different turn gives a different key', summaryKey(3, 'abc') !== summaryKey(4, 'abc'))
 check('a different body gives a different key', summaryKey(3, 'abc') !== summaryKey(3, 'abd'))
 check('a missing turn is represented', summaryKey(undefined, 'abc').startsWith('?:'), summaryKey(undefined, 'abc'))
-// The language is part of the key because the summary it produces is different
-// prose. Without it, switching the interface language would keep serving the
-// cached English text for a turn that can never change again — the reader would
-// be stuck in the old language until the conversation ended.
-check('a different language gives a different key', summaryKey(3, 'abc', 'Chinese') !== summaryKey(3, 'abc', 'Japanese'), summaryKey(3, 'abc', 'Japanese'))
-check('no language keeps the old key', summaryKey(3, 'abc', undefined) === summaryKey(3, 'abc'), summaryKey(3, 'abc', undefined))
+// A third component used to exist for the interface language. It is gone: the
+// summary is written in the language of the conversation, so the language is
+// inside `body` already, and a key that also carried it separately would answer
+// "these are different" for two bodies that are the same. That matters for
+// `warm`, which runs at the end of a turn with no request context to read a tag
+// from — a key it cannot reproduce is a key it can never hit.
+check('the key ignores a third argument', summaryKey(3, 'abc', 'Chinese') === summaryKey(3, 'abc'), summaryKey(3, 'abc', 'Chinese'))
 
 // ---------------------------------------------------------------------------
-// languageName / languageLine
+// The prompt names the language of the conversation, not the interface
 // ---------------------------------------------------------------------------
+//
+// The old pair — `languageName`/`languageLine` — turned a query-string tag into
+// a sentence telling the model what language to answer in. It is gone. These
+// assertions are what keeps the replacement honest: the instruction has to point
+// at the user's own words, because that is the only part of the prompt that
+// carries a language the assistant did not choose.
+check(
+  'the instruction asks for the language the user wrote in',
+  INSTRUCTION.includes('the language of what the user asked'),
+  INSTRUCTION.slice(0, 400),
+)
+// Being explicit about what the language is *not* matters here: the tool names
+// and paths in this prompt are English no matter who is reading, so a model
+// reading "English everywhere" answers a Chinese question in English — which is
+// the exact bug the interface-language path was written to work around.
+check(
+  'the instruction says the commands may be English anyway',
+  INSTRUCTION.includes('which may be English regardless'),
+  INSTRUCTION.slice(0, 400),
+)
+// A preamble is the other way a summary arrives wrong: still one paragraph,
+// still under the limit, still says nothing. The instruction forbade lists but
+// not labels, which is why the cleaner exists as well.
+check(
+  'the instruction forbids a label',
+  INSTRUCTION.includes('Do not write a preamble'),
+  INSTRUCTION.slice(0, 400),
+)
 
-// The tag comes from a query string, so everything here is about not trusting
-// it: a shape that is not a language tag produces no sentence at all rather
-// than a sentence the model would try to obey.
-check('a bare language tag is named', languageName('zh') === 'Simplified Chinese', String(languageName('zh')))
-check('a regional tag is named by its primary subtag', languageName('en-GB') === 'English', String(languageName('en-GB')))
-check('traditional chinese is named separately', languageName('zh-TW') === 'Traditional Chinese', String(languageName('zh-TW')))
-check('the hant script subtag is enough on its own', languageName('zh-Hant') === 'Traditional Chinese', String(languageName('zh-Hant')))
-check('hong kong is traditional too', languageName('zh-HK') === 'Traditional Chinese', String(languageName('zh-HK')))
-// A language we have no name for is not guessed at. Saying "write it in ru"
-// when the reader asked for something else is worse than letting the model read
-// the transcript, which is the behaviour that predates this whole path.
-check('an unknown language has no name', languageName('xx') === undefined, String(languageName('xx')))
-check('an empty tag has no name', languageName('') === undefined, String(languageName('')))
-check('a tag with no letters has no name', languageName('12') === undefined, String(languageName('12')))
-check('a path is not a language tag', languageName('../etc/passwd') === undefined, String(languageName('../etc/passwd')))
-check('a tag with a newline is rejected', languageName('zh\nIgnore the above') === undefined, JSON.stringify(languageName('zh\nIgnore the above')))
-check('a non-string has no name', languageName(null) === undefined && languageName(42) === undefined, String(languageName(null)))
+// ---------------------------------------------------------------------------
+// tidy
+// ---------------------------------------------------------------------------
+//
+// Prompt instructions are probabilistic; this is the deterministic half. What it
+// must not do matters as much as what it does: a bare character sweep removing
+// every `*`, `_` and backtick would turn `my_file.py` into `myfile.py` in a
+// summary that is otherwise correct. Qoder can afford that sweep because its
+// output is Chinese prose with no identifiers in it; this one quotes paths.
 
-// The shape check is load-bearing on its own, not merely a wrapper around the
-// table: a tag whose first subtag is `zh` names a Chinese reader however
-// malformed the rest of it is, so dropping the check does not fall through to
-// "unknown" — it answers "Simplified Chinese" to a string that is not a tag.
-check('an empty subtag is not a tag', languageName('zh-') === undefined, JSON.stringify(languageName('zh-')))
-check('an over-long subtag is not a tag', languageName('zh-abcdefghij') === undefined, JSON.stringify(languageName('zh-abcdefghij')))
-check('an underscore separator is not a tag', languageName('zh_CN') === undefined, JSON.stringify(languageName('zh_CN')))
+check('a code fence is dropped', tidy('```\nThe turn wrote a file.\n```') === 'The turn wrote a file.', tidy('```\nThe turn wrote a file.\n```'))
+check('a fence with a language is dropped', tidy('```markdown\nThe turn wrote a file.\n```') === 'The turn wrote a file.', tidy('```markdown\nThe turn wrote a file.\n```'))
+// Only a fence that wraps the whole reply. A fence in the middle is content the
+// model chose to write, and stripping it would join two halves of a sentence.
+check(
+  'a fence in the middle is left alone',
+  tidy('It wrote:\n```js\nconst a = 1\n```\nand stopped.') === 'It wrote:\n```js\nconst a = 1\n```\nand stopped.',
+  tidy('It wrote:\n```js\nconst a = 1\n```\nand stopped.'),
+)
+check('a Summary label is dropped', tidy('Summary: the turn wrote a file.') === 'the turn wrote a file.', tidy('Summary: the turn wrote a file.'))
+check('a Chinese label is dropped', tidy('\u603b\u7ed3\uff1a\u8fd9\u4e00\u8f6e\u5199\u4e86\u4e00\u4e2a\u6587\u4ef6\u3002') === '\u8fd9\u4e00\u8f6e\u5199\u4e86\u4e00\u4e2a\u6587\u4ef6\u3002', tidy('\u603b\u7ed3\uff1a\u8fd9\u4e00\u8f6e\u5199\u4e86\u4e00\u4e2a\u6587\u4ef6\u3002'))
+check('a bold label is dropped too', tidy('**Summary:** the turn wrote a file.') === 'the turn wrote a file.', tidy('**Summary:** the turn wrote a file.'))
+// A label in the middle of a sentence is not a label.
+check(
+  'a colon mid-sentence is not a label',
+  tidy('The turn ended without a summary: it ran out of time.') === 'The turn ended without a summary: it ran out of time.',
+  tidy('The turn ended without a summary: it ran out of time.'),
+)
+check('bold text loses its markers', tidy('It **finished** the work.') === 'It finished the work.', tidy('It **finished** the work.'))
+// Italic markers are left alone on purpose: `__finished__` and `__name__` are
+// indistinguishable, and one of them is a Python identifier that must survive.
+check('underscore emphasis is left alone', tidy('It __finished__ the work.') === 'It __finished__ the work.', tidy('It __finished__ the work.'))
+// The whole reason the cleaner is not a character sweep.
+check('an underscore inside a filename survives', tidy('It edited my_file.py and left.') === 'It edited my_file.py and left.', tidy('It edited my_file.py and left.'))
+check('a dunder survives', tidy('The check is __name__ == "__main__".') === 'The check is __name__ == "__main__".', tidy('The check is __name__ == "__main__".'))
+check('a lone asterisk survives as multiplication', tidy('It computed 2 * 3 and moved on.') === 'It computed 2 * 3 and moved on.', tidy('It computed 2 * 3 and moved on.'))
+check('an unbalanced marker survives', tidy('It wrote **half of a thought.') === 'It wrote **half of a thought.', tidy('It wrote **half of a thought.'))
+check('the result is trimmed', tidy('   text   ') === 'text', JSON.stringify(tidy('   text   ')))
+check('a non-string becomes empty', tidy(null) === '' && tidy(undefined) === '' && tidy(42) === '', String(tidy(null)))
+check('empty stays empty', tidy('') === '' && tidy('   ') === '', JSON.stringify(tidy('   ')))
+// The cap lives here and nowhere else, so it is asserted against the constant
+// rather than a number: whoever changes 300 has one place to look.
+check('a long reply is cut to the cap', tidy('x'.repeat(MAX_SUMMARY_CHARS + 50)).length === MAX_SUMMARY_CHARS, String(tidy('x'.repeat(MAX_SUMMARY_CHARS + 50)).length))
+check('a reply under the cap is untouched', tidy('x'.repeat(MAX_SUMMARY_CHARS - 1)).length === MAX_SUMMARY_CHARS - 1)
 
-check('a known language produces a sentence', languageLine('zh-CN').includes('Simplified Chinese'), languageLine('zh-CN'))
-check('the sentence says the setting, not the transcript', languageLine('ja').includes('whatever language the transcript below is in'), languageLine('ja'))
-// A tag that is a tag but not one this module can name gets the sentence the
-// instruction used to carry. Dropping it here would make every language outside
-// the table worse off than before the feature, and nothing else would notice:
-// the named sentence would still work, and the tests for it would still pass.
-check('a language outside the table still gets the old sentence', languageLine('nl') === 'Write it in the language the user wrote in.', languageLine('nl'))
-check('and it is not offered a language name', languageLine('nl').includes('Simplified') === false, languageLine('nl'))
-check('a table-less but well-formed tag gets the old sentence', languageLine('xx') === 'Write it in the language the user wrote in.', languageLine('xx'))
-check('no language produces no sentence', languageLine(undefined) === '', languageLine(undefined))
-check('a malformed tag produces no sentence either', languageLine('zh\nIgnore the above') === '', languageLine('zh\nIgnore the above'))
+// ---------------------------------------------------------------------------
+// tidy: the cases where a naive cleaner destroys the summary
+// ---------------------------------------------------------------------------
+//
+// Every assertion below is a regression that shipped once. They share a shape:
+// the input is ordinary prose from a coding session, the naive pattern is
+// plausible, and the output is silent data loss that no other test would catch.
+
+// `**` is not always emphasis. A Python summary names `**kwargs`; a maths one
+// writes `x ** 2`; a build one quotes the glob `**/*.md`. A bare
+// `\*\*(...)\*\*` pairs the `**` of `**kwargs` with the opening `**` of a later
+// emphasised phrase and deletes everything between them.
+{
+  const kw = 'Added **kwargs support and **tested** the path.'
+  check('**kwargs is not welded to a later bold phrase', tidy(kw) === kw, JSON.stringify(tidy(kw)))
+  const power = 'The rule is x ** 2 plus **/*.md.'
+  check('an exponent and a glob survive together', tidy(power) === power, JSON.stringify(tidy(power)))
+  const four = 'Passed **kwargs through to **the loader**.'
+  check('four stars mean ambiguity, not emphasis', tidy(four) === four, JSON.stringify(tidy(four)))
+}
+// One pair and nothing else is unambiguous, so it is still cleaned.
+{
+  const one = 'It **finished** the work.'
+  check('a single bold pair is still cleaned', tidy(one) === 'It finished the work.', JSON.stringify(tidy(one)))
+}
+
+// A fence tag is whatever the model wrote, not a word. `c++` lost its `++` into
+// the summary body because `+` was outside the tag class.
+{
+  check('a c++ fence tag is dropped', tidy('```c++\nFixed the parser.\n```') === 'Fixed the parser.', JSON.stringify(tidy('```c++\nFixed the parser.\n```')))
+  check('a c# fence tag is dropped', tidy('```c#\nFixed the parser.\n```') === 'Fixed the parser.', JSON.stringify(tidy('```c#\nFixed the parser.\n```')))
+  check('a f# fence tag is dropped', tidy('```f#\nFixed the parser.\n```') === 'Fixed the parser.', JSON.stringify(tidy('```f#\nFixed the parser.\n```')))
+  // "``` markdown" is an ordinary spelling; a pattern that only allowed
+  // "```markdown" shipped the word `markdown` as the first line of the card.
+  check('a fence with a space before the tag is dropped', tidy('``` markdown\nFixed the parser.\n```') === 'Fixed the parser.', JSON.stringify(tidy('``` markdown\nFixed the parser.\n```')))
+  check('a fence with a space after the tag is dropped', tidy('```markdown \nFixed the parser.\n```') === 'Fixed the parser.', JSON.stringify(tidy('```markdown \nFixed the parser.\n```')))
+}
+
+// Truncation counts characters, not UTF-16 code units: a cut between the halves
+// of a surrogate pair leaves a lone high surrogate that renders as `�`.
+{
+  const emoji = '\u{1F600}'.repeat(MAX_SUMMARY_CHARS)
+  const cut = tidy(emoji)
+  const lone = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u.test(cut)
+  check('a cut never splits a surrogate pair', lone === false, JSON.stringify(cut.slice(-4)))
+  check('and the emoji are counted as characters', Array.from(cut).length === MAX_SUMMARY_CHARS, String(Array.from(cut).length))
+}
 
 // ---------------------------------------------------------------------------
 // resolveRoute
@@ -453,88 +536,69 @@ check('a malformed tag produces no sentence either', languageLine('zh\nIgnore th
 }
 
 {
-  // The language sentence has to sit between the instruction and the wrapper:
-  // after the instruction, because the instruction is what the message is
-  // recognised by, and before the wrapper, because anything after it reads as
-  // part of the transcript the model is being asked to summarise.
+  // The user's own words travel into the prompt, and they are the only part of
+  // it that carries a language the assistant did not choose. That is the whole
+  // basis for dropping the interface-language query: the model reads the
+  // language off this line instead of being told one.
   const llm = fakeLlm()
   const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
-  await summariser.summarise({ agentId: 'a', snapshot, language: 'zh-CN' })
+  await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, asked: '\u4fee\u597d\u90a3\u4e2a\u6d4b\u8bd5' } })
   const sent = llm.log.stream.messages[0].content[0].text
-  check('a language puts a sentence in the prompt', sent.includes('Write it in Simplified Chinese'), sent.slice(0, 400))
-  check('the sentence still starts with the instruction', sent.startsWith(INSTRUCTION), sent.slice(0, 40))
-  check('the sentence sits after the instruction', sent.indexOf('Write it in Simplified Chinese') > INSTRUCTION.length - 1, String(sent.indexOf('Write it in Simplified Chinese')))
-  check('the sentence sits before the wrapper', sent.indexOf('Write it in Simplified Chinese') < sent.indexOf(TRANSCRIPT_OPEN), JSON.stringify({ clause: sent.indexOf('Write it in Simplified Chinese'), open: sent.indexOf(TRANSCRIPT_OPEN) }))
-  check('the sentence adds no marker of its own', sent.split(TRANSCRIPT_OPEN).length - 1 === 1 && sent.split(TRANSCRIPT_CLOSE).length - 1 === 1)
-  // Once, not merely before the wrapper. `indexOf` finds the first copy, so a
-  // sentence that is also said inside the transcript satisfies every assertion
-  // above while handing the model a language instruction the same prompt tells
-  // it to treat as data.
-  check('the sentence is said exactly once', sent.split('Write it in Simplified Chinese').length - 1 === 1, String(sent.split('Write it in Simplified Chinese').length - 1))
-  check('and the transcript ends the message', sent.endsWith(TRANSCRIPT_CLOSE), JSON.stringify(sent.slice(-40)))
+  check('the prompt carries what the user asked', sent.includes('\u4fee\u597d\u90a3\u4e2a\u6d4b\u8bd5'), sent.slice(0, 500))
+  check('and it is labelled as the question', sent.includes('What the user asked:'), sent.slice(0, 500))
+  check('the label is inside the transcript wrapper', sent.indexOf('What the user asked:') > sent.indexOf(TRANSCRIPT_OPEN), JSON.stringify({ label: sent.indexOf('What the user asked:'), open: sent.indexOf(TRANSCRIPT_OPEN) }))
+  check('and the wrapper still ends the message', sent.endsWith(TRANSCRIPT_CLOSE), JSON.stringify(sent.slice(-40)))
+  // Still one instruction, still one wrapper: the new line must not have been
+  // appended after the closing marker, where it would read as a second request.
+  check('the new line adds no marker of its own', sent.split(TRANSCRIPT_OPEN).length - 1 === 1 && sent.split(TRANSCRIPT_CLOSE).length - 1 === 1)
 }
 
 {
-  // No language is not the same as an unknown one: the first is a host that
-  // says nothing, the second is a host that named a language this module cannot
-  // translate. They now differ on purpose: an unknown tag gets the instruction
-  // own old sentence, so nobody is worse off than before this path existed; a
-  // missing tag gets none at all.
-  const llm = fakeLlm()
-  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
-  await summariser.summarise({ agentId: 'a', snapshot, language: 'xx' })
-  const sent = llm.log.stream.messages[0].content[0].text
-  check('a language outside the table still says something', sent.includes('Write it in the language the user wrote in.'), sent.slice(0, 400))
-  check('and it names no language it does not know', sent.includes('Write it in Simplified') === false, sent.slice(0, 400))
-  check('and it does not leave a blank line where one would be', sent.includes('\n\n\n') === false, JSON.stringify(sent.slice(INSTRUCTION.length, INSTRUCTION.length + 120)))
-}
-
-{
-  // No language at all is the third case, and the only one that says nothing:
-  // the host did not publish one, so the model reading the transcript is the
-  // older behaviour, and it is better than a sentence about a language nobody
-  // chose.
+  // A turn with no recorded question gets no line at all, not an empty label.
+  // "What the user asked:" followed by nothing is a claim that the user said
+  // nothing, and an assistant-only turn (a queued task, a continuation) is not
+  // that claim.
   const llm = fakeLlm()
   const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
   await summariser.summarise({ agentId: 'a', snapshot })
   const sent = llm.log.stream.messages[0].content[0].text
-  check('a host that says nothing gets no language sentence', sent.includes('Write it in') === false, sent.slice(0, 400))
-  check('and the prompt is the instruction and the transcript alone', sent.startsWith(INSTRUCTION) && sent.endsWith(TRANSCRIPT_CLOSE), JSON.stringify(sent.slice(INSTRUCTION.length, INSTRUCTION.length + 80)))
+  check('a turn with no question says nothing about one', sent.includes('What the user asked') === false, sent.slice(0, 400))
 }
 
 {
-  // Same turn, same transcript, different language: two calls, not one cache
-  // hit. Without the language in the key the second reader gets the first
-  // reader's prose.
+  // The old interface-language sentence must be gone from the prompt entirely.
+  // Asserted on the sent text rather than on the exports, because the failure
+  // being guarded against is a sentence that creeps back in from anywhere.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, asked: 'hello' }, language: 'zh-CN' })
+  const sent = llm.log.stream.messages[0].content[0].text
+  check('no interface-language sentence is sent', sent.includes('Write it in') === false, sent.slice(0, 400))
+  check('and the prompt is the instruction, a wrapper, and nothing else', sent.startsWith(INSTRUCTION) && sent.endsWith(TRANSCRIPT_CLOSE), JSON.stringify(sent.slice(INSTRUCTION.length, INSTRUCTION.length + 80)))
+}
+
+{
+  // A `language` argument that a stale caller still passes must change nothing:
+  // not the prompt, and not the cache key. Two requests that differ only in a
+  // language nobody reads are one purchase.
   const llm = fakeLlm()
   const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
   await summariser.summarise({ agentId: 'a', snapshot, language: 'zh-CN' })
-  await summariser.summarise({ agentId: 'a', snapshot, language: 'ja' })
-  check('a second language is a second call', llm.log.prepare.length === 2, String(llm.log.prepare.length))
   const again = await summariser.summarise({ agentId: 'a', snapshot, language: 'ja' })
-  check('the same language twice is still one call for it', llm.log.prepare.length === 2, String(llm.log.prepare.length))
-  check('and the cached answer is returned', again.text === 'A summary.', JSON.stringify(again))
-  check('switching back is a cache hit too', (await summariser.summarise({ agentId: 'a', snapshot, language: 'zh-CN' })).text === 'A summary.' && llm.log.prepare.length === 2, String(llm.log.prepare.length))
+  check('a language argument is not a second call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  check('and the cached answer comes back', again.text === 'A summary.', JSON.stringify(again))
 }
 
 {
-  // A tag the table does not know is not the same request as no tag at all: the
-  // first asks for the generic sentence, the second asks for nothing. Keying the
-  // cache on the *name* gave both the same key, so whichever ran first answered
-  // for the other — and the two prompts differ in exactly the respect the cache
-  // is supposed to notice. `log.stream` is the last call, so each prompt is read
-  // before the next request overwrites it.
+  // A different question is a different turn to summarise, even when the tool
+  // calls happen to line up: the question is what the summary is about.
   const llm = fakeLlm()
   const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
-  await summariser.summarise({ agentId: 'a', snapshot, language: 'nl' })
-  const generic = llm.log.stream.messages[0].content[0].text
-  await summariser.summarise({ agentId: 'a', snapshot })
-  const silent = llm.log.stream.messages[0].content[0].text
-  check('a table-less language is not the no-language request', llm.log.prepare.length === 2, String(llm.log.prepare.length))
-  check('and the one that named a language got the generic sentence', generic.includes('Write it in the language the user wrote in.'), String(generic).slice(0, 300))
-  check('while the one that named none got no sentence', silent.includes('Write it in') === false, String(silent).slice(0, 300))
-  await summariser.summarise({ agentId: 'a', snapshot, language: 'nl' })
-  check('and asking for the table-less one again is still one call', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+  await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, asked: 'first question' } })
+  await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, asked: 'second question' } })
+  check('a different question is a second call', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+  await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, asked: 'first question' } })
+  check('and returning to the first is a cache hit', llm.log.prepare.length === 2, String(llm.log.prepare.length))
 }
 
 {
@@ -708,6 +772,90 @@ check('a malformed tag produces no sentence either', languageLine('zh\nIgnore th
   await summariser.summarise({ agentId: 'a', snapshot })
   check('a failed call leaves nothing cached', summariser.cache.size === 0, String(summariser.cache.size))
   check('a failed call clears its in-flight entry', summariser.inflight.size === 0, String(summariser.inflight.size))
+}
+
+// ---------------------------------------------------------------------------
+// The cleaner is applied to what the model said, not only to literals
+// ---------------------------------------------------------------------------
+//
+// `tidy` has its own assertions above, and every one of them would still pass
+// if `run` stopped calling it: they exercise the function directly. The whole
+// point of the cleaner is that it sits on the one path where a rule can be
+// certain rather than probable, so the wiring needs its own assertion.
+{
+  const llm = fakeLlm({ chunks: [{ type: 'text-delta', text: '**Summary:** The turn wrote my_file.py.' }] })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const result = await summariser.summarise({ agentId: 'a', snapshot })
+  check('the model output is cleaned before it is returned', result.text === 'The turn wrote my_file.py.', JSON.stringify(result.text))
+  check('and the cleaned text is what gets cached', summariser.cache.size === 1, String(summariser.cache.size))
+}
+
+{
+  // A fence arrives often enough that dropping it has to happen end to end.
+  const llm = fakeLlm({ chunks: [{ type: 'text-delta', text: '```markdown\nIt stopped after one edit.\n```' }] })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const result = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a fenced reply reaches the card unfenced', result.text === 'It stopped after one edit.', JSON.stringify(result.text))
+}
+
+// ---------------------------------------------------------------------------
+// The timestamp belongs to the summary, not to the reader
+// ---------------------------------------------------------------------------
+//
+// The card shows "更新于 …" and the panel repaints every eight seconds. If the
+// cached branch stamped `Date.now()` instead of the value stored with the text,
+// the label would say "刚刚" forever and mean nothing, so the repeat has to
+// report the same instant as the first answer.
+{
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  const again = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a summary carries the instant it was written', typeof first.at === 'number' && first.at > 0, JSON.stringify(first))
+  check('re-reading the cache moves the timestamp', again.at === first.at, `${again.at} vs ${first.at}`)
+}
+
+// ---------------------------------------------------------------------------
+// The warm gate lets go of a session that closed
+// ---------------------------------------------------------------------------
+//
+// `warm` exists so a turn does not cost a model call while somebody waits for
+// the card. The gate that makes it affordable is "somebody has this panel open
+// now", and a set that only ever grows answers the weaker question "did anybody
+// ever open it" — which, on a host running for days, is every session.
+{
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  summariser.warm({ agentId: 'a', snapshot })
+  check('an unopened panel is not warmed', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+
+  summariser.markViewed('a')
+  summariser.warm({ agentId: 'a', snapshot })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('an opened panel is warmed', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  summariser.markViewed('b')
+  summariser.forget('b')
+  summariser.warm({ agentId: 'b', snapshot })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('a forgotten session is not warmed again', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  summariser.forget('')
+  summariser.forget(undefined)
+  summariser.markViewed('')
+  summariser.markViewed(undefined)
+  check('a nameless session never enters the gate', summariser.viewed.size === 1, String(summariser.viewed.size))
+}
+
+{
+  // The gate is checked before the config, but both must be able to refuse.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: false }) })
+  summariser.markViewed('a')
+  summariser.warm({ agentId: 'a', snapshot })
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  check('a disabled panel is not warmed', llm.log.prepare.length === 0, String(llm.log.prepare.length))
 }
 
 // ---------------------------------------------------------------------------

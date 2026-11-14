@@ -458,6 +458,43 @@ console.log('persistence — the panel describes a conversation, not a process')
 }
 
 // ---------------------------------------------------------------------------
+// The turn a file was written in is written down with it
+// ---------------------------------------------------------------------------
+//
+// "This turn" on the card cannot come from the transcript after a restart: the
+// snapshot of a finished turn is gone by the next one, so the only durable
+// source is the number stamped into session state at `turn/end`. If the handler
+// stops handing that number over, nothing throws — the card simply files every
+// file under "earlier", which looks like a quiet conversation.
+
+{
+  const home = await makeTempRoot('dsse-persist-turn-stamp-')
+  process.env.DSH_HOME = home
+
+  const host = fakeHost()
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  const session = fakeSession('session-turn-stamp', home)
+  host.agents.set(session.id, session)
+
+  const early = join(home, 'early.js')
+  const late = join(home, 'late.js')
+  await writeFile(early, 'one\n', 'utf8')
+  await writeFile(late, 'two\n', 'utf8')
+
+  work(host, session, { said: 'wrote the early one', edit: early, turn: 1 })
+  work(host, session, { said: 'wrote the late one', edit: late, turn: 2 })
+
+  const path = join(stateDir(home), `${session.id}.json`)
+  check('the session was written down before the stamp is read', await waitForFile(path), path)
+  const stored = JSON.parse(await readFile(path, 'utf8'))
+  check(
+    'the turn a file was written in is stored beside its position',
+    stored?.paths?.[late]?.turn === 2 && stored?.paths?.[early]?.turn === 1,
+    JSON.stringify(stored?.paths)
+  )
+}
+
+// ---------------------------------------------------------------------------
 // An event that arrives before the first poll does not erase the history
 // ---------------------------------------------------------------------------
 
@@ -945,6 +982,68 @@ console.log('persistence — the panel describes a conversation, not a process')
     globalThis.setInterval = realSetInterval
     process.off('unhandledRejection', onRejection)
   }
+}
+
+// ---------------------------------------------------------------------------
+// A sweep that never answers must not be able to stop the turn being written
+// ---------------------------------------------------------------------------
+//
+// `rememberTurn` looked redundant once the sweep started calling `schedule()`
+// too: both write the same document, so disabling one of them changed nothing
+// observable. It is not redundant. The sweep's write lives in a `.then`, and a
+// `.then` on a promise that never settles never runs. The synchronous call is
+// the only write the turn is guaranteed to get.
+//
+// The turn below is deliberately the emptiest one that still counts: it spoke
+// and finished, and it loaded no skill, called no tool and edited no file. Those
+// three would each schedule a write of their own and hide the one under test.
+// What is left is exactly the shape `keepsDocument` calls content on the
+// strength of `previous` alone — a conversation whose whole value is the
+// sentence it just finished.
+{
+  const root = await makeTempRoot('dsse-persist-hanging-sweep-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  let hang = undefined
+  const changes = () =>
+    new Promise((resolve) => {
+      hang = resolve
+    })
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes })
+
+  const session = fakeSession('session-hanging-sweep')
+  host.agents.set(session.id, session)
+  // The bracket only closes on a baseline, and a baseline only exists if the turn
+  // was seen to start. Without this the sweep answers "nothing" immediately and
+  // the write below would be scheduled by the sweep's own handler — the opposite
+  // of what this block is for.
+  host.emit('session/event', session.session, {
+    type: 'turn/start',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1 }
+  })
+  work(host, session, { said: 'I looked the thing up and it was fine.' })
+
+  const path = join(stateDir(root), `${session.id}.json`)
+  check('a turn whose sweep hangs is still written down', await waitForFile(path), `no file at ${path}`)
+
+  const store = new SessionStore({ root: stateDir(root) })
+  const stored = await store.read(session.id)
+  check('and it names the turn that finished', stored?.previous?.turn === 1, JSON.stringify(stored?.previous)?.slice(0, 200))
+  check(
+    'and it keeps what the turn said',
+    JSON.stringify(stored?.previous?.said ?? '').includes('looked the thing up') === true,
+    JSON.stringify(stored?.previous)?.slice(0, 300)
+  )
+  // Nothing else in this turn could have scheduled the write, so its presence is
+  // the whole claim: the synchronous call is what wrote it.
+  check('and nothing else in this turn asked for a write', (stored?.skills === undefined || Object.keys(stored.skills).length === 0) === true, JSON.stringify(stored?.skills))
+  // The sweep is still out there. Releasing it here keeps the promise from being
+  // garbage collected mid-test and lets the handler run against a store the test
+  // is about to drop — which is the honest shape of "the panel already answered".
+  if (hang !== undefined) hang({ paths: [], coverage: 'complete' })
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

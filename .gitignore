@@ -5,3 +5,15 @@ node_modules/
 # live in scripts/ and have tests of their own.
 .research/
 packages/*/node_modules/
+# Scratch space the test suites are pointed at (TMPDIR/TMP/TEMP). The directory has
+# to exist before a run, so it is created on disk and left behind.
+.tmp-test/
+# Probe files the harness or an earlier session left behind. They are locked by a
+# running process, so they cannot be removed; they must not show up as changes.
+.write-probe.txt
+scripts/tmp-*.py
+# Review units cut out of `git diff` for the bounded-diff-code-review skill. They
+# are generated per round from the working tree, so committing them would store a
+# snapshot of a diff that no longer exists in the next round.
+.review/
+

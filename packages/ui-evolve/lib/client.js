@@ -73,9 +73,14 @@ window.__ModuleLoader__.load({
      * which is enough that opening a five-file list never scrolls.
      *
      * Written as rows rather than pixels so it stays tied to the row height the
-     * stylesheet sets: eight rows of 36px with a 3px gap is 8 × 36 + 7 × 3.
+     * stylesheet sets: eight rows of 28px with a 3px gap is 8 × 28 + 7 × 3.
+     *
+     * The row got shorter in S2, and this constant has to follow it: the height
+     * here is a promise about how many rows fit before the list scrolls, and a
+     * stale number would either scroll early (leaving a gap) or scroll late
+     * (hiding a row that the count says is visible).
      */
-    const FILE_LIST_MAX_PX = 8 * 36 + 7 * 3
+    const FILE_LIST_MAX_PX = 8 * 28 + 7 * 3
 
     /**
      * How often the speed badge asks while the model is writing.
@@ -202,27 +207,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The language the host is currently rendering in, as a query value.
-     *
-     * The host has no locale service a plugin can ask, but its locale plugin
-     * writes the answer onto `<html lang>` — including when the person never
-     * chose one and the browser decided. That attribute is therefore the only
-     * place the panel can learn what language its reader is reading, and the
-     * summary is written in it.
-     *
-     * Returns `""` rather than a guess when the attribute is missing: a wrong
-     * language is worse than none, because none falls back to the model's own
-     * reading of the transcript, while a wrong one is an instruction it obeys.
-     *
-     * @returns {string} e.g. `zh-CN`, or `""`.
-     */
-    function hostLanguage() {
-      if (typeof document === "undefined" || document?.documentElement === undefined) return ""
-      const lang = document.documentElement.lang
-      return typeof lang === "string" ? lang.trim() : ""
-    }
-
-    /**
      * Format a tokens-per-second reading for the badge.
      *
      * Two significant-ish digits under ten, whole numbers above it, matching
@@ -237,6 +221,84 @@ window.__ModuleLoader__.load({
       const value = Math.max(0, tps)
       if (value >= 10) return String(Math.round(value))
       return String(Math.round(value * 10) / 10)
+    }
+
+    /**
+     * Turn a summary's failure reason into something the reader can act on.
+     *
+     * The reasons come from `summarise.js` and are English prose written for a
+     * log: "no model route is available", "the summary call failed: 401". Shown
+     * verbatim in a Chinese card they read as a crash, so the card says what to
+     * do instead and keeps the original in the row's title, where it costs no
+     * space and is still reachable.
+     *
+     * Prefix matching, not equality, and that is the whole reason this is a
+     * function rather than a lookup table: the failure path interpolates the
+     * provider's message (`the summary call failed: ${message}`), so an exact
+     * match would miss every real failure and silently fall through to the
+     * generic line. The generic line is a floor, not an answer.
+     *
+     * @param {string} reason - the reason from the panel payload.
+     * @returns {{ text: string, detail: string }} what to show, and the original.
+     */
+    function summaryReasonText(reason) {
+      const raw = typeof reason === "string" ? reason.trim() : ""
+      const detail = raw === "" ? "" : raw
+      if (raw === "") return { text: "暂无摘要", detail }
+      if (raw.startsWith("turned off")) return { text: "摘要已在设置中关闭", detail }
+      if (raw.startsWith("no completed turn")) return { text: "还没有完成的回合", detail }
+      if (raw.startsWith("the turn left nothing")) return { text: "这一轮没有可总结的内容", detail }
+      if (raw.startsWith("no model service")) return { text: "宿主没有可用的模型服务", detail }
+      if (raw.startsWith("no model route")) return { text: "没有可用的模型路由，请先在设置里指定摘要模型", detail }
+      if (raw.startsWith("the summary call timed out")) return { text: "摘要生成超时，稍后会自动重试", detail }
+      if (raw.startsWith("the model returned nothing")) return { text: "模型没有返回内容", detail }
+      if (raw.startsWith("the summary call failed")) return { text: "摘要生成失败", detail }
+      if (raw.startsWith("the model call failed")) return { text: "摘要生成失败", detail }
+      if (raw === "open a conversation first") return { text: "先打开一个会话", detail: "" }
+      return { text: "暂无摘要", detail }
+    }
+
+    /**
+     * Render a timestamp as how long ago it was.
+     *
+     * Relative rather than absolute because the only question the card answers
+     * is whether the summary still describes the work in front of you — "3 分钟
+     * 前" answers it, "14:32" makes the reader do arithmetic against a clock
+     * they then have to find.
+     *
+     * `Intl.RelativeTimeFormat` is used when the host has it and a plain floor
+     * of minutes otherwise; an unknown `at` yields `""` so the caller can drop
+     * the whole line rather than print a placeholder.
+     *
+     * @param {number | undefined} at - epoch milliseconds.
+     * @returns {string} e.g. `刚刚`, or `""`.
+     */
+    function formatAgo(at) {
+      if (typeof at !== "number" || Number.isFinite(at) === false || at <= 0) return ""
+      const seconds = Math.max(0, Math.round((Date.now() - at) / 1000))
+      if (seconds < 45) return "刚刚"
+      const steps = [
+        { limit: 45 * 60, divisor: 60, unit: "minute" },
+        { limit: 22 * 3600, divisor: 3600, unit: "hour" },
+        { limit: 26 * 86400, divisor: 86400, unit: "day" },
+      ]
+      for (const step of steps) {
+        if (seconds < step.limit) {
+          const value = -Math.round(seconds / step.divisor)
+          try {
+            if (typeof Intl === "object" && typeof Intl.RelativeTimeFormat === "function") {
+              return new Intl.RelativeTimeFormat("zh-CN", { numeric: "auto" }).format(value, step.unit)
+            }
+          } catch {
+            // A host whose Intl lacks the unit data is not a reason to lose the
+            // line; fall through to the arithmetic below.
+          }
+          const unitText = step.unit === "minute" ? "分钟前" : step.unit === "hour" ? "小时前" : "天前"
+          return `${Math.abs(value)} ${unitText}`
+        }
+      }
+      const days = Math.round(seconds / 86400)
+      return `${days} 天前`
     }
 
     /**
@@ -270,6 +332,148 @@ window.__ModuleLoader__.load({
       return { name, where }
     }
 
+    /**
+     * The name of a file and the directory it sits in, as the row shows them.
+     *
+     * Same question as `splitPath`, with one more thing to answer it from: the
+     * session's workspace. When the file is inside it, the directory is the one
+     * the reader would type — `src/lib`, not `Users/me/projects/app/src/lib`.
+     * Three tail segments are a guess at what disambiguates; the workspace is the
+     * answer. A file at the workspace root has no directory to show, so the row
+     * spends that width on the name instead.
+     *
+     * Falling back to `splitPath` matters: `cwd` is a field a newer server sends,
+     * and a client talking to an older one still has to draw something sane.
+     *
+     * @param {string} path - an absolute path.
+     * @param {string} cwd - the workspace root, or `""` when it is unknown.
+     * @returns {{ name: string, where: string }} the two halves.
+     */
+    function fileParts(path, cwd) {
+      if (typeof path !== "string" || path.length === 0) return { name: "", where: "" }
+      const normal = path.split("\\").join("/")
+      const root = typeof cwd === "string" && cwd.length > 0 ? cwd.split("\\").join("/").replace(/\/+$/u, "") : ""
+      if (root !== "") {
+        const prefix = root + "/"
+        // Compared without case, sliced with it. Windows paths are
+        // case-insensitive and the two halves arrive from different places: the
+        // workspace from the session header, the file from whatever a tool was
+        // handed. A turn that writes `C:/Work/src/a.ts` into a session whose
+        // header says `c:\work` means the same file, and would otherwise show its
+        // whole absolute path as the directory — beside rows showing `src`.
+        if (normal.toLowerCase().startsWith(prefix.toLowerCase()) === true) {
+          const inside = normal.slice(prefix.length).split("/").filter((part) => part.length > 0)
+          if (inside.length > 0) {
+            return { name: inside[inside.length - 1], where: inside.slice(0, inside.length - 1).join("/") }
+          }
+        }
+      }
+      return splitPath(path)
+    }
+
+    /**
+     * Which glyph a file gets, by extension.
+     *
+     * Eight buckets, not eighty: the row is 28 pixels tall and the icon answers
+     * "what kind of thing is this" at a glance, not "which language exactly". The
+     * buckets are chosen so that a wrong guess is impossible to make — a `.json`
+     * and a `.yaml` really are both structured data — and everything unlisted
+     * lands on the blank page rather than on a guess. A wrong icon is worse than a
+     * generic one: it tells the reader something false about a file they wrote.
+     *
+     * @param {string} name - the file name, extension included.
+     * @returns {string} one of `code`, `markup`, `style`, `data`, `doc`, `image`,
+     *   `archive`, `file`.
+     */
+    function fileBucket(name) {
+      if (typeof name !== "string") return "file"
+      const dot = name.lastIndexOf(".")
+      if (dot <= 0 || dot === name.length - 1) return "file"
+      const ext = name.slice(dot + 1).toLowerCase()
+      if (CODE_EXTENSIONS.has(ext) === true) return "code"
+      if (MARKUP_EXTENSIONS.has(ext) === true) return "markup"
+      if (STYLE_EXTENSIONS.has(ext) === true) return "style"
+      if (DATA_EXTENSIONS.has(ext) === true) return "data"
+      if (DOC_EXTENSIONS.has(ext) === true) return "doc"
+      if (IMAGE_EXTENSIONS.has(ext) === true) return "image"
+      if (ARCHIVE_EXTENSIONS.has(ext) === true) return "archive"
+      return "file"
+    }
+
+    // Extensions are the only evidence a row has, so these lists are the whole
+    // classifier. They are deliberately generous inside a bucket and deliberately
+    // empty across them: a name appears in exactly one set, so the answer cannot
+    // depend on the order the checks run in.
+    const CODE_EXTENSIONS = new Set([
+      "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "py", "rb", "go", "rs",
+      "java", "kt", "kts", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php",
+      "swift", "m", "mm", "scala", "clj", "cljs", "ex", "exs", "erl", "hs", "lua",
+      "pl", "pm", "r", "jl", "dart", "vue", "svelte", "astro", "sh", "bash", "zsh",
+      "fish", "ps1", "bat", "cmd", "asm", "sol", "zig", "nim", "cr",
+    ])
+    const MARKUP_EXTENSIONS = new Set(["html", "htm", "xhtml", "xml", "xsl", "xslt", "plist", "rss", "atom"])
+    const STYLE_EXTENSIONS = new Set(["css", "scss", "sass", "less", "styl", "stylus", "pcss"])
+    const DATA_EXTENSIONS = new Set([
+      "json", "jsonc", "json5", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
+      "csv", "tsv", "sql", "db", "sqlite", "lock", "ndjson", "jsonl", "avro", "parquet",
+    ])
+    const DOC_EXTENSIONS = new Set(["md", "markdown", "mdx", "txt", "rst", "adoc", "asciidoc", "tex", "pdf", "doc", "docx", "rtf", "odt", "org"])
+    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "avif", "svg", "tif", "tiff", "psd", "heic"])
+    const ARCHIVE_EXTENSIONS = new Set(["zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "jar", "war", "whl", "nupkg", "vsix", "apk", "ipa"])
+
+    /**
+     * One outline per bucket, on the same 24-unit grid as `Icon`.
+     *
+     * These used to share a page silhouette and differ only in a small mark on
+     * it. At fourteen pixels that mark was under four pixels wide — the eight
+     * buckets were, in practice, one page. So the silhouettes themselves differ
+     * now: braces for code, angle brackets for markup, a hash for style, a grid
+     * for data, ruled lines for prose, a hill and a sun for pictures, a box for
+     * archives, and the page kept for the bucket that knows nothing.
+     *
+     * @type {Record<string, string[]>}
+     */
+    const FILE_MARKS = {
+      code: ['M10 4.5c-2.6 0-2.6 7.5-5.4 7.5 2.8 0 2.8 7.5 5.4 7.5M14 4.5c2.6 0 2.6 7.5 5.4 7.5-2.8 0-2.8 7.5-5.4 7.5'],
+      markup: ['M9.5 4.5L3.5 12l6 7.5M14.5 4.5l6 7.5-6 7.5'],
+      style: ['M10.4 3.5L7.6 20.5M16.4 3.5l-2.8 17M3.5 9h17M3.5 15h17'],
+      data: ['M3.5 5h17v14h-17zM3.5 10h17M3.5 14.5h17M9.2 5v14M14.8 5v14'],
+      doc: ['M5 3.5h14v17H5zM8.5 8h7M8.5 12h7M8.5 16h4'],
+      image: ['M3.5 18.5l4.8-6.2 3.7 4.4 2.9-3.5 5.6 5.3z'],
+      archive: ['M4 8.5h16M4 8.5v11h16v-11M10 8.5V4.5h4v4M12 11.5v5M10.8 11.5h2.4'],
+      file: ['M5 3.5h10l4 4v13H5zM15 3.5v4h4'],
+    }
+
+    /**
+     * The glyph for one file row.
+     *
+     * Kept apart from `Icon` on purpose. `Icon` is the panel's own vocabulary —
+     * close, refresh, settings — and it is a chain of `if`s that returns one of a
+     * dozen marks. Eight file types spliced into that chain would turn one list of
+     * controls into two unrelated ones and make every future lookup slower.
+     *
+     * Drawn in the same grammar as `Icon` — a 24-unit grid, no fill, `currentColor`
+     * inherited from the row, round caps and joins — but one step bolder: a sixth
+     * of a pixel more stroke, at sixteen rather than fourteen. The bucket also
+     * picks a colour, which is the one place this card stops being monochrome.
+     * Colour is carried by the class name's sibling attribute rather than by the
+     * `stroke` attribute so a missing row can drop it back to grey in CSS; an
+     * inline attribute would win the cascade and leave a bright icon beside
+     * struck-through grey text.
+     *
+     * @param {{ name: string }} props - the file name, extension included.
+     * @returns {any} the svg.
+     */
+    function FileIcon(props) {
+      const bucket = fileBucket(props?.name)
+      const marks = Object.prototype.hasOwnProperty.call(FILE_MARKS, bucket) === true ? FILE_MARKS[bucket] : FILE_MARKS.file
+      const children = marks.map((d, index) => jsx('path', { key: `mark${index}`, d }))
+      if (bucket === 'image') {
+        children.push(jsx('circle', { key: 'sun', cx: '7.8', cy: '7.4', r: '2.2' }))
+      }
+      return jsxs('svg', { className: 'dsse-fileicon', 'data-bucket': bucket, viewBox: '0 0 24 24', 'aria-hidden': 'true', children })
+    }
+
     const CSS = `
 .dsse-toggle{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font-family:var(--dsse-font-family,inherit);font-size:var(--dsse-font-size,inherit);line-height:var(--dsse-line-height,inherit);font-weight:500;cursor:pointer;white-space:nowrap}
 .dsse-toggle:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
@@ -299,9 +503,10 @@ window.__ModuleLoader__.load({
 .dsse-card-title{margin:0;font-size:.94em;line-height:1.4;font-weight:600;white-space:nowrap}
 .dsse-card-meta{margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);text-align:right}
 .dsse-card-head .dsse-icon-btn{width:30px;height:30px;border-radius:7px;align-self:center}
-.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
-.dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px}
+.dsse-head-stats{display:flex;align-items:baseline;gap:8px;margin-left:auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap;min-width:0;overflow:hidden}
+.dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px;flex:0 0 auto}
 .dsse-head-stat b{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;font-variant-numeric:tabular-nums}
+.dsse-head-ago{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsse-clip{position:relative;overflow:hidden}
 .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
 .dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}
@@ -320,11 +525,34 @@ window.__ModuleLoader__.load({
 .dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}
 .dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
-.dsse-row{display:flex;align-items:center;gap:7px;min-width:0;min-height:36px;padding:5px 6px;border-radius:7px}
+.dsse-row{display:flex;align-items:center;gap:6px;min-width:0;min-height:28px;padding:2px 6px;border-radius:7px;box-sizing:border-box}
 .dsse-row:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
+/* .dsse-row-icon deliberately has no rule: it is the wrapper the skill rows put
+   around Icon, and Icon already sizes itself. An earlier pass gave this class
+   a width here and quietly shrank those rows to 14px. */
+/* The glyph is the only colour on this card, and only as a grouping cue: eight
+   buckets, eight hues, all at low saturation so they read as tints of grey rather
+   than as a second palette. Size goes to 16px here because a 14px row cannot show
+   an outline's shape — the shape is the whole point of having eight of them. */
+.dsse-fileicon{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--dsw-alias-label-tertiary,#8b92a1)}
+.dsse-fileicon[data-bucket="code"]{color:#4c7fb8}
+.dsse-fileicon[data-bucket="markup"]{color:#b06a4a}
+.dsse-fileicon[data-bucket="style"]{color:#8a6aa8}
+.dsse-fileicon[data-bucket="data"]{color:#2f8a72}
+.dsse-fileicon[data-bucket="image"]{color:#a8654f}
+.dsse-fileicon[data-bucket="archive"]{color:#b08a3e}
+/* doc and file stay grey on purpose: they are the two buckets that make no claim
+   about what the file is worth reading as. */
+.dsse-row[data-status="missing"] .dsse-fileicon,.dsse-row[data-status="invalid"] .dsse-fileicon{color:var(--dsw-alias-label-tertiary,#8b92a1)}
 .dsse-row-main{flex:1;min-width:0}
 .dsse-name{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--dsse-font-mono,var(--dsse-font-family,inherit));font-size:max(.9em,12px)}
-.dsse-where{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
+/* The directory is not drawn on the row any more: at 320px it cost the name
+   more than it was worth, and two rows with one name are rare enough that a
+   hover can answer "which one" on the one occasion it comes up. It stays in
+   the markup, hidden from sight but not from assistive technology, because the
+   tooltip is a pointer-only affordance and a screen reader still needs to hear
+   which directory a row came from. */
+.dsse-where{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .dsse-size{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
 .dsse-files{display:grid;gap:3px}
 .dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
@@ -334,6 +562,11 @@ window.__ModuleLoader__.load({
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
 .dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
+.dsse-row[data-status="missing"] .dsse-name,.dsse-row[data-status="invalid"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1);text-decoration:line-through}
+
+.dsse-row[data-status="missing"],.dsse-row[data-status="invalid"]{cursor:default}
+.dsse-row[data-status="missing"]:hover,.dsse-row[data-status="invalid"]:hover{background:transparent}
+.dsse-size-gone{font-style:italic}
 .dsse-badge{display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f4f8);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-badge-own{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
 .dsse-btn{min-height:36px;display:inline-flex;align-items:center;justify-content:center;gap:7px;padding:7px 11px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit;font-weight:500;cursor:pointer;white-space:nowrap;transition:background-color 160ms ease,opacity 160ms ease}
@@ -1137,7 +1370,7 @@ window.__ModuleLoader__.load({
         className: 'dsse-clip',
         'data-clipped': overflowing === true ? 'true' : 'false',
         'data-expanded': expanded === true ? 'true' : 'false',
-        children: jsx('p', { ref, className: 'dsse-text dsse-tiny', children: props.text }),
+        children: jsx('p', { ref, className: 'dsse-text dsse-tiny', title: props.title, children: props.text }),
       })
     }
 
@@ -1854,9 +2087,9 @@ window.__ModuleLoader__.load({
                 // the chevron alone says "there is a direction", not how many rows
                 // are behind it.
                 title: props.badgeAction.label,
+                onClick: props.badgeAction.onClick,
                 'aria-label': props.badgeAction.label,
                 'aria-expanded': props.badgeAction.open === true,
-                onClick: props.badgeAction.onClick,
                 children: jsx(Icon, { name: 'chevron', up: props.badgeAction.open === true }),
               }),
         ],
@@ -1937,9 +2170,7 @@ window.__ModuleLoader__.load({
           // the open settings dialog went with it.
           if (quiet !== true) setState((prior) => (prior.status === "ready" ? prior : { ...prior, status: "loading" }))
           try {
-            const lang = hostLanguage()
-            const query = lang === "" ? "" : `&lang=${encodeURIComponent(lang)}`
-            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}${query}`)
+            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`)
             if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
             setState({ status: "ready", data })
             setError("")
@@ -2066,6 +2297,12 @@ window.__ModuleLoader__.load({
       const skills = Array.isArray(data?.skills?.skills) ? data.skills.skills : []
       const mcp = Array.isArray(data?.mcp) ? data.mcp : []
       const files = Array.isArray(data?.files) ? data.files : []
+      // The workspace the paths are relative to. The server sends it once per
+      // payload rather than turning every path into a relative one, because the
+      // absolute path is also what the row's tooltip shows and what the copy
+      // action would need. Absent on an older server, in which case the row falls
+      // back to the last three directory segments.
+      const cwd = typeof data?.cwd === "string" ? data.cwd : ""
       // The order is the one the conversation wrote them in, newest first, and it
       // arrives that way — `pathsSeen` walks session state's path map backwards.
       // Sorting by mtime here was a second answer to the same question and a
@@ -2128,11 +2365,24 @@ window.__ModuleLoader__.load({
       // "no" on every Host and quietly render plain text everywhere.
       const canPreview = typeof openResource === 'function'
 
+      // Three cases, and the third is why this is not a one-line ternary.
+      //
+      // A `reason` is a log line, not a sentence for a reader: it is English,
+      // it names the failing subsystem, and several of them are conditions the
+      // person can fix in the settings dialog next to this card. `summaryReason`
+      // translates them and keeps the original for the row's `title`.
+      const hasSummaryText = summary?.text !== undefined && String(summary.text).length > 0
+      const summaryReason = hasSummaryText
+        ? { text: "", detail: "" }
+        : summaryReasonText(summary?.reason ?? (state.status === "no-session" ? "open a conversation first" : "no completed turn yet"))
       const summaryText = state.status === 'loading'
         ? '正在读取本轮数据…'
-        : summary?.text !== undefined && String(summary.text).length > 0
+        : hasSummaryText
           ? String(summary.text)
-          : String(summary?.reason ?? (state.status === "no-session" ? "open a conversation first" : "no completed turn yet"))
+          : summaryReason.text
+      // Only a summary that exists has a time. A failure reason is not dated:
+      // "生成失败 · 3 分钟前" would imply the retry is stale.
+      const summaryAgo = hasSummaryText ? formatAgo(summary?.at) : ""
 
       const providerOptions = React.useMemo(() => {
         const rows = []
@@ -2383,10 +2633,20 @@ window.__ModuleLoader__.load({
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(commands) }), jsx('span', { children: '命令' })] }),
                     jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(turnFiles) }), jsx('span', { children: '文件' })] }),
+                    // Dated only when there is a summary to date. Placed after the
+                    // counts rather than before them because the counts are what
+                    // the turn *was* and the time is only how fresh the telling of
+                    // it is — the card is about the work, not about the model call.
+                    summaryAgo === ''
+                      ? null
+                      : jsx('span', { className: 'dsse-head-ago', title: `摘要生成于 ${new Date(summary.at).toLocaleString()}`, children: `更新于 ${summaryAgo}` }),
                   ],
                 }),
                 children: jsx(Clip, {
                   text: summaryText,
+                  // The English original, reachable without spending card space on
+                  // it. Empty when the card is showing a real summary.
+                  title: summaryReason.detail === '' ? undefined : summaryReason.detail,
                   expanded,
                   // The measurement is reported with the turn it measured, so a late
                   // report cannot describe text that is no longer on screen. A hidden
@@ -2454,7 +2714,7 @@ window.__ModuleLoader__.load({
                       children: [
                         group.label === '' ? null : jsx('p', { className: 'dsse-group-label', children: group.label }),
                         group.files.map((file) => {
-                          const parts = splitPath(file.path)
+                          const parts = fileParts(file.path, cwd)
                           // A row is a button, not a div with a handler: it has to be
                           // reachable by keyboard and announced as something that does
                           // something. `canPreview` is false when this Host has no right
@@ -2465,14 +2725,31 @@ window.__ModuleLoader__.load({
                           // in this closure is `Cards`' own — not `Card`'s. Reading the
                           // opener off props here is how the first draft made every row
                           // inert on every Host.
-                          const openable = canPreview === true && typeof file.address === 'string' && file.address.length > 0
+                          // A row is openable only when the file is really there.
+                          // `missing` and `invalid` both mean "the thing you
+                          // edited is not a file I can open right now", and a row
+                          // that looks clickable but does nothing is worse than
+                          // one that says so. An absent status means available:
+                          // that is what every row meant before the three states
+                          // existed, and a client may talk to an older server.
+                          const status = typeof file.status === 'string' ? file.status : 'available'
+                          // Only the two states this build knows how to explain count as
+                          // gone. A fourth name from a newer server would otherwise render
+                          // a row with no reason, no size and no click — the worst of both
+                          // outcomes — so it falls back to what every row meant before the
+                          // states existed.
+                          const gone = status === 'missing' || status === 'invalid'
+                          const openable = gone === false && canPreview === true && typeof file.address === 'string' && file.address.length > 0
+                          const note = status === 'missing' ? '文件已被删除或移动' : status === 'invalid' ? '文件存在但无法读取' : ''
                           return jsxs(openable === true ? 'button' : 'div', {
                             className: openable === true ? 'dsse-row dsse-row-open' : 'dsse-row',
                             type: openable === true ? 'button' : undefined,
                             'data-noise': file.noise === true ? 'true' : 'false',
-                            title: `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}`,
+                            'data-status': status,
+                            title: note === '' ? `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}` : `${String(file.path)}\n${note}`,
                             onClick: openable === true ? () => openFile(file.address) : undefined,
                             children: [
+                              jsx(FileIcon, { name: parts.name }),
                               jsx('span', {
                                 className: 'dsse-row-main',
                                 children: [
@@ -2480,7 +2757,10 @@ window.__ModuleLoader__.load({
                                   parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
                                 ],
                               }),
-                              jsx('span', { className: 'dsse-size', children: formatBytes(file.bytes) }),
+                              jsx('span', {
+                                className: gone === true ? 'dsse-size dsse-size-gone' : 'dsse-size',
+                                children: status === 'missing' ? '已删除' : status === 'invalid' ? '无法读取' : formatBytes(file.bytes),
+                              }),
                             ],
                           }, `file:${file.path}`)
                         }),

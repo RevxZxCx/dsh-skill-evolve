@@ -1045,23 +1045,25 @@ for (const reason of ['gone', 'archived']) {
 {
   const { state, root } = await fixture()
   state.rememberPaths('files', ['a.js', 'b.js'])
-  check('a file is remembered', state.pathsSeen('files').includes('a.js'), JSON.stringify(state.pathsSeen('files')))
-  check('the newest file comes first', state.pathsSeen('files')[0] === 'b.js', JSON.stringify(state.pathsSeen('files')))
+  const names = () => state.pathsSeen('files').map((file) => file.path)
+  check('a file is remembered', names().includes('a.js'), JSON.stringify(state.pathsSeen('files')))
+  check('the newest file comes first', names()[0] === 'b.js', JSON.stringify(state.pathsSeen('files')))
 
   // The whole point: a later turn that touches something else does not retire
   // what the earlier turns did.
   state.rememberPaths('files', ['c.js'])
   check('a later turn keeps the earlier files', state.pathsSeen('files').length === 3, JSON.stringify(state.pathsSeen('files')))
-  check('and the newest is still first', state.pathsSeen('files')[0] === 'c.js', JSON.stringify(state.pathsSeen('files')))
+  check('and the newest is still first', names()[0] === 'c.js', JSON.stringify(state.pathsSeen('files')))
 
   // Editing something again moves it forward instead of duplicating it. The
   // delete-before-set is what makes this true: a Map that never deletes keeps
   // the file in its original slot and the list stops being a recency order.
   state.rememberPaths('files', ['a.js'])
   const reordered = state.pathsSeen('files')
-  check('editing a file again moves it to the front', reordered[0] === 'a.js', JSON.stringify(reordered))
-  check('and does not list it twice', reordered.filter((file) => file === 'a.js').length === 1, JSON.stringify(reordered))
-  check('and the others keep their order', reordered[1] === 'c.js' && reordered[2] === 'b.js', JSON.stringify(reordered))
+  const reorderedNames = reordered.map((file) => file.path)
+  check('editing a file again moves it to the front', reorderedNames[0] === 'a.js', JSON.stringify(reordered))
+  check('and does not list it twice', reorderedNames.filter((file) => file === 'a.js').length === 1, JSON.stringify(reordered))
+  check('and the others keep their order', reorderedNames[1] === 'c.js' && reorderedNames[2] === 'b.js', JSON.stringify(reordered))
   await done(root)
 }
 
@@ -1072,7 +1074,7 @@ for (const reason of ['gone', 'archived']) {
   const { state, root } = await fixture()
   state.rememberPaths('junk', [null, 42, '', 'kept.js', undefined, {}])
   const seen = state.pathsSeen('junk')
-  check('only strings count as paths', seen.length === 1 && seen[0] === 'kept.js', JSON.stringify(seen))
+  check('only strings count as paths', seen.length === 1 && seen[0].path === 'kept.js', JSON.stringify(seen))
   state.rememberPaths('junk', [])
   check('an empty list changes nothing', state.pathsSeen('junk').length === 1, JSON.stringify(state.pathsSeen('junk')))
   state.rememberPaths('junk', undefined)
@@ -1124,9 +1126,10 @@ for (const reason of ['gone', 'archived']) {
   await state.load('restart')
   const seen = state.pathsSeen('restart')
   check('files survive a restart', seen.length === 4, JSON.stringify(seen))
+  const seenNames = seen.map((file) => file.path)
   check(
     'and they keep their order',
-    seen[0] === 'later.js' && seen[1] === 'one.js' && seen[2] === 'three.js' && seen[3] === 'two.js',
+    seenNames[0] === 'later.js' && seenNames[1] === 'one.js' && seenNames[2] === 'three.js' && seenNames[3] === 'two.js',
     JSON.stringify(seen)
   )
   // The merge shifts what memory knew above what the file knew, and adds the
@@ -1136,12 +1139,12 @@ for (const reason of ['gone', 'archived']) {
   const merged = state.document('restart')
   check(
     'and they come back on the ticks they were written with',
-    merged?.paths?.['one.js'] === 9 && merged?.paths?.['two.js'] === 2 && merged?.paths?.['three.js'] === 5,
+    merged?.paths?.['one.js']?.seq === 9 && merged?.paths?.['two.js']?.seq === 2 && merged?.paths?.['three.js']?.seq === 5,
     JSON.stringify(merged?.paths)
   )
   check(
     'and the file written before the load is lifted above all of them',
-    merged?.paths?.['later.js'] === 10,
+    merged?.paths?.['later.js']?.seq === 10,
     JSON.stringify(merged?.paths)
   )
   check(
@@ -1164,8 +1167,8 @@ for (const reason of ['gone', 'archived']) {
   const kept = state.pathsSeen('capped')
   check('a long session does not remember every file it ever touched', kept.length < many.length, String(kept.length))
   check('and it keeps a screenful worth', kept.length >= 100, String(kept.length))
-  check('and the newest edit is the one it keeps first', kept[0] === 'file-259.js', kept[0])
-  check('and the oldest is the one that goes', kept.includes('file-0.js') === false, kept[kept.length - 1])
+  check('and the newest edit is the one it keeps first', kept[0]?.path === 'file-259.js', JSON.stringify(kept[0]))
+  check('and the oldest is the one that goes', kept.some((file) => file.path === 'file-0.js') === false, JSON.stringify(kept[kept.length - 1]))
   await done(root)
 }
 
@@ -1194,7 +1197,7 @@ for (const reason of ['gone', 'archived']) {
   await state.load('merged-cap')
   const merged = state.pathsSeen('merged-cap')
   check('a merge does not carry two full lists at once', merged.length <= 200, String(merged.length))
-  check('and the memory entries are the ones that survive it', merged.includes('memory-199.js'), merged[0])
+  check('and the memory entries are the ones that survive it', merged.some((file) => file.path === 'memory-199.js'), JSON.stringify(merged[0]))
   const written = state.document('merged-cap')
   check(
     'and the document written back is capped too',
@@ -1224,8 +1227,8 @@ for (const reason of ['gone', 'archived']) {
   await state.load('huge-file')
   const read = state.pathsSeen('huge-file')
   check('an oversized file is read down to the cap', read.length <= 200, String(read.length))
-  check('and the newest entries are the ones kept', read[0] === 'stale-599.js', read[0])
-  check('and the oldest are the ones dropped', read.includes('stale-0.js') === false, read[read.length - 1])
+  check('and the newest entries are the ones kept', read[0]?.path === 'stale-599.js', JSON.stringify(read[0]))
+  check('and the oldest are the ones dropped', read.some((file) => file.path === 'stale-0.js') === false, JSON.stringify(read[read.length - 1]))
   await done(root)
 }
 
@@ -1444,13 +1447,13 @@ for (const reason of ['gone', 'archived']) {
   stateB.rememberPaths('edited', ['src/a.js'])
   await stateB.flush('edited')
   const written = await storeB.read('edited')
-  check('the second process writes only files down', written?.paths?.['src/a.js'] === 1, JSON.stringify(written?.paths))
+  check('the second process writes only files down', written?.paths?.['src/a.js']?.seq === 1, JSON.stringify(written?.paths))
 
   await stateA.release('edited')
   const after = await filesIn(root)
   check('a file list is not an orphan', after.includes('edited.json') === true, JSON.stringify(after))
   const kept = await storeB.read('edited')
-  check('and the file list survived the other process leaving', kept?.paths?.['src/a.js'] === 1, JSON.stringify(kept?.paths))
+  check('and the file list survived the other process leaving', kept?.paths?.['src/a.js']?.seq === 1, JSON.stringify(kept?.paths))
 
   await done(root)
 }
@@ -1803,6 +1806,226 @@ for (const reason of ['gone', 'archived']) {
   check('the count written back is the one the transcript holds', written?.turns === 8, JSON.stringify(written?.turns))
   check('and it is not the count the record grabbed before the read', written?.turns !== 3, JSON.stringify(written?.turns))
 
+  await done(root)
+}
+
+// ---------------------------------------------------------------------------
+// The file list gained two facts: which turn wrote a file, and when
+// ---------------------------------------------------------------------------
+
+// A bare position cannot say either of them, so the stored shape changed. What
+// must not change is the readability of files written before it: a session from
+// an older build still has its order, and the two facts it never recorded come
+// back as "unknown" rather than as an invented zero.
+{
+  const { state, store, root } = await fixture()
+  await store.write('v1', {
+    state: 1,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 9,
+    paths: { 'one.js': 9, 'two.js': 2, 'three.js': 5 },
+  })
+  await state.load('v1')
+  const seen = state.pathsSeen('v1')
+  const names = seen.map((file) => file.path)
+  check('a version 1 file still loads', seen.length === 3, JSON.stringify(seen))
+  check('and it keeps the order it was written with', names[0] === 'one.js' && names[1] === 'three.js' && names[2] === 'two.js', JSON.stringify(names))
+  check(
+    'and the turn it cannot know is unknown rather than zero',
+    seen.every((file) => file.turn === undefined),
+    JSON.stringify(seen)
+  )
+  check(
+    'and the time it cannot know is unknown too',
+    seen.every((file) => file.at === undefined),
+    JSON.stringify(seen)
+  )
+  await done(root)
+}
+
+{
+  // The turn number is what lets the card say "this turn" after a restart. The
+  // only other source is the previous turn's snapshot, which is gone once the
+  // next turn ends — so a number that is not written down is a number the card
+  // can never recover.
+  const { state, store, root } = await fixture()
+  state.rememberPaths('turns', ['a.js'], 7)
+  state.rememberPaths('turns', ['b.js'], 8)
+  const seen = state.pathsSeen('turns')
+  check('the newest file carries its turn', seen[0]?.path === 'b.js' && seen[0]?.turn === 8, JSON.stringify(seen))
+  check('and the older one carries its own', seen[1]?.path === 'a.js' && seen[1]?.turn === 7, JSON.stringify(seen))
+
+  await state.flush('turns')
+  const stored = await store.read('turns')
+  check('the turn is written down', stored?.paths?.['b.js']?.turn === 8, JSON.stringify(stored?.paths))
+  check('and the position is kept beside it', stored?.paths?.['b.js']?.seq === 2, JSON.stringify(stored?.paths))
+
+  // Read back by a second process: the numbers have to survive the round trip,
+  // not just the in-memory record.
+  const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  await second.load('turns')
+  const reloaded = second.pathsSeen('turns')
+  check('the turn survives a restart', reloaded[0]?.turn === 8, JSON.stringify(reloaded))
+  // Equal to what went to disk, not merely numeric: a reader that re-stamps
+  // `at` on load would satisfy `typeof === 'number'` while destroying the fact
+  // the field exists to record.
+  check('and so does the time', reloaded[0]?.at === stored?.paths?.['b.js']?.at, JSON.stringify([reloaded[0], stored?.paths?.['b.js']]))
+  await done(root)
+}
+
+{
+  // A number that arrives as a string is not a turn. Coercing it would move a
+  // file into this turn's group on the strength of a value the writer never
+  // meant as a number, which is worse than admitting the file has no opinion.
+  const { state, store, root } = await fixture()
+  await store.write('bad-turn', {
+    state: 2,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 4,
+    paths: {
+      'good.js': { seq: 4, turn: 3, at: 1000 },
+      'stringly.js': { seq: 3, turn: '3', at: '1000' },
+      'numberless.js': { seq: 2 },
+      'junk.js': 17,
+    },
+  })
+  await state.load('bad-turn')
+  const byPath = new Map(state.pathsSeen('bad-turn').map((file) => [file.path, file]))
+  check('a well-formed entry keeps both facts', byPath.get('good.js')?.turn === 3 && byPath.get('good.js')?.at === 1000, JSON.stringify([...byPath]))
+  // Present-but-blank and silently-dropped look identical through `?.turn`, and
+  // dropping the entry would erase a file the reader edited. Both are asserted.
+  check('a string entry is kept, not dropped', byPath.get('stringly.js') !== undefined, JSON.stringify([...byPath.keys()]))
+  check('a string is not a turn', byPath.get('stringly.js')?.turn === undefined, JSON.stringify(byPath.get('stringly.js')))
+  check('and a string is not a time either', byPath.get('stringly.js')?.at === undefined, JSON.stringify(byPath.get('stringly.js')))
+  check('an entry with no facts is kept too', byPath.get('numberless.js') !== undefined, JSON.stringify([...byPath.keys()]))
+  check('an entry without the facts still keeps its position', byPath.get('numberless.js')?.turn === undefined, JSON.stringify(byPath.get('numberless.js')))
+  // The value, not merely the presence. `pathsSeen` reports no `seq`, so the
+  // position is observable only through order: 17 is the largest in this fixture,
+  // and `seq: 0` would sort the file last instead of first.
+  check('a bare number is still readable as its own position', state.pathsSeen('bad-turn')[0]?.path === 'junk.js', JSON.stringify(state.pathsSeen('bad-turn')))
+  await done(root)
+}
+
+{
+  // A fresh write is version 2, whatever the file it replaced said. This is the
+  // whole migration: read either, write the new one, and the old file upgrades
+  // itself on the next write without a migration step.
+  const { state, store, root } = await fixture()
+  await store.write('upgrade', {
+    state: 1,
+    turns: 2,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    // Deliberately not equal to the document counter: a migration that stamps
+    // the old entry with `sequence` instead of its own position would pass if
+    // the two numbers happened to match.
+    sequence: 4,
+    paths: { 'kept.js': 7 },
+  })
+  await state.load('upgrade')
+  state.rememberPaths('upgrade', ['added.js'], 2)
+  await state.flush('upgrade')
+  const stored = await store.read('upgrade')
+  check('an old file is upgraded by being written once', stored?.state === 2, String(stored?.state))
+  check('and the file it knew is still there', stored?.paths?.['kept.js'] !== undefined, JSON.stringify(stored?.paths))
+  check(
+    'and the upgraded entry is the new shape',
+    typeof stored?.paths?.['kept.js'] === 'object' && stored?.paths?.['kept.js']?.seq === 7,
+    JSON.stringify(stored?.paths)
+  )
+  await done(root)
+}
+
+{
+  // A version this build does not know is not guessed at. Refusing it costs one
+  // session's file list; reading it as if it were version 2 would put invented
+  // rows in front of the reader.
+  const { state, store, root } = await fixture()
+  await store.write('future', { state: 99, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 1, paths: { 'x.js': 1 } })
+  await state.load('future')
+  check('a version from the future is refused', state.pathsSeen('future').length === 0, JSON.stringify(state.pathsSeen('future')))
+  // An empty list is also what a session with no record at all returns, so the
+  // refusal alone cannot be told apart from "this session was never seen". A
+  // write has to prove the record exists and is usable.
+  state.rememberPaths('future', ['later.js'], 1)
+  check('and the refused session still records what happens next', state.pathsSeen('future').length === 1, JSON.stringify(state.pathsSeen('future')))
+  await done(root)
+}
+
+{
+  // What a sweep could see is a fact about a turn, not a file. It has to survive a
+  // refresh — the whole point is that a later reader can caveat the file list it
+  // was handed — so the same round trip `paths` gets is asserted here.
+  const { state, store, root } = await fixture()
+  check('a session nothing has swept claims nothing', state.sweepSeen('swept') === undefined, JSON.stringify(state.sweepSeen('swept')))
+  state.rememberSweep('swept', 3, 'partial')
+  // A path too: coverage alone is not content, so without one `document()` refuses
+  // the file and the round trip below would prove nothing.
+  state.rememberPaths('swept', ['out/doc.docx'], 3)
+  check('a partial sweep is remembered', state.sweepSeen('swept')?.coverage === 'partial', JSON.stringify(state.sweepSeen('swept')))
+  check('and it names the turn it swept', state.sweepSeen('swept')?.turn === 3, JSON.stringify(state.sweepSeen('swept')))
+  await state.flush('swept')
+  const stored = await store.read('swept')
+  check('the doubt is written down, not just held in memory', stored?.sweep?.coverage === 'partial', JSON.stringify(stored?.sweep))
+  // A second sweep replaces the first: this describes the newest turn, and a
+  // history of coverage claims is something no reader asks for.
+  state.rememberSweep('swept', 4, 'complete')
+  check('a later clean sweep replaces the caveat', state.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(state.sweepSeen('swept')))
+  await state.flush('swept')
+  const replaced = await store.read('swept')
+  check('and the file agrees', replaced?.sweep?.coverage === 'complete' && replaced?.sweep?.turn === 4, JSON.stringify(replaced?.sweep))
+  const reloaded = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
+  await reloaded.load('swept')
+  check('coverage survives a reload', reloaded.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(reloaded.sweepSeen('swept')))
+  await done(root)
+}
+
+{
+  // Coverage on its own is not content. A session whose only recorded fact is
+  // "I could not see everything" has nothing to show, and giving it a file would
+  // make the pruner carry a document that says nothing for every session that
+  // ever finished a turn in a half-readable repository.
+  const { state, store, root } = await fixture()
+  state.rememberSweep('only-coverage', 1, 'partial')
+  check('coverage alone is not a reason to write a file', state.document('only-coverage') === undefined, JSON.stringify(state.document('only-coverage')))
+  await done(root)
+}
+
+{
+  // A stored value this build does not recognise is read as the plain case: not
+  // knowing a word is not evidence that something was skipped, and inventing a
+  // caveat would put an apology on a card that has nothing to apologise for.
+  const { state, store, root } = await fixture()
+  await store.write('odd-coverage', {
+    state: 2,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 1,
+    paths: {},
+    sweep: { turn: 2, coverage: 'mostly' },
+  })
+  await state.load('odd-coverage')
+  check('an unknown coverage word reads as complete', state.sweepSeen('odd-coverage')?.coverage === 'complete', JSON.stringify(state.sweepSeen('odd-coverage')))
+  check('and the turn it names is kept', state.sweepSeen('odd-coverage')?.turn === 2, JSON.stringify(state.sweepSeen('odd-coverage')))
+  // A sweep entry that is not an object at all is refused rather than guessed at,
+  // for the same reason `readPathEntry` refuses a non-number position.
+  await store.write('bad-sweep', { state: 2, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 1, paths: {}, sweep: 'partial' })
+  const other = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
+  await other.load('bad-sweep')
+  check('a sweep that is not an object is not read as one', other.sweepSeen('bad-sweep') === undefined, JSON.stringify(other.sweepSeen('bad-sweep')))
   await done(root)
 }
 

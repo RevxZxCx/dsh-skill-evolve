@@ -57,7 +57,29 @@ const WRITE_DELAY_MS = 1000
  * changing what an existing field means does, because an old file would then be
  * read as if its values meant what they say now.
  */
-const STATE_VERSION = 1
+const STATE_VERSION = 2
+
+/**
+ * The versions this build can read.
+ *
+ * v1 stored `paths` as `{ [file]: position }`. v2 stores
+ * `{ [file]: { seq, turn, at } }`, because a number cannot say which turn edited
+ * the file or when — and the card needs both: `turn` decides whether a file
+ * belongs under "this turn" or "earlier" after a restart, and `at` is when the
+ * file was produced rather than when it was last written to disk.
+ *
+ * The bump is a *reader* change, not a migration: `readState` normalises either
+ * shape into the v2 one, and every write emits v2. So an old file is upgraded by
+ * being read once and written once, with no migration step and no backup — the
+ * data it held is exactly the data the v2 record holds, minus the two facts v1
+ * never had.
+ *
+ * Going backwards is deliberately unsupported: a build that only knows v1 reads
+ * a v2 file as "not mine" and starts from empty, which looks the same as a
+ * session that has not edited anything yet. Losing history to a downgrade is
+ * cheaper than holding the format back for it.
+ */
+const READABLE_VERSIONS = new Set([1, STATE_VERSION])
 
 /**
  * How many edited files a session remembers.
@@ -91,7 +113,7 @@ function isRecord(value) {
  */
 function readState(stored) {
   if (!isRecord(stored)) return undefined
-  if (stored.state !== STATE_VERSION) return undefined
+  if (READABLE_VERSIONS.has(stored.state) === false) return undefined
   const skills = new Map()
   if (isRecord(stored.skills)) {
     for (const [name, entry] of Object.entries(stored.skills)) {
@@ -117,11 +139,20 @@ function readState(stored) {
   // Absent in every file written before the output card became cumulative, and
   // that is a readable state, not a broken one: an older session simply has no
   // remembered paths and starts accumulating from its next turn.
+  //
+  // Two shapes arrive here. v2 writes an object per file; v1 wrote a bare
+  // number, which says where the file sits in recency order and nothing else.
+  // Both are normalised to the object shape so nothing downstream has to ask
+  // which version it is reading — a bare number becomes
+  // `{ seq, turn: undefined, at: undefined }`, and `undefined` is the honest
+  // value for two facts a v1 file never recorded. The card treats an unknown
+  // turn as "earlier" and an unknown time as "no timestamp to show", which is
+  // what a session from before this change should look like.
   const paths = new Map()
   if (isRecord(stored.paths)) {
-    for (const [file, at] of Object.entries(stored.paths)) {
-      if (typeof at !== 'number' || !Number.isFinite(at)) continue
-      paths.set(file, at)
+    for (const [file, raw] of Object.entries(stored.paths)) {
+      const entry = readPathEntry(raw)
+      if (entry !== undefined) paths.set(file, entry)
     }
   }
   // A file written by an older build that had no cap, or by the merge path
@@ -131,11 +162,55 @@ function readState(stored) {
   // newest `MAX_PATHS` on the way in, so the file shrinks on the next write
   // instead of staying large forever.
   if (paths.size > MAX_PATHS) {
-    const newest = [...paths.entries()].sort((a, b) => b[1] - a[1]).slice(0, MAX_PATHS)
+    const newest = [...paths.entries()].sort((a, b) => b[1].seq - a[1].seq).slice(0, MAX_PATHS)
     paths.clear()
-    for (const [file, at] of newest) paths.set(file, at)
+    for (const [file, entry] of newest) paths.set(file, entry)
   }
-  return { skills, tools, servers, paths, sequence }
+  return { skills, tools, servers, paths, sweep: readSweep(stored.sweep), sequence }
+}
+
+/**
+ * One remembered file, in whichever shape the file on disk used.
+ *
+ * @param {any} raw - a `{ seq, turn, at }` object (v2) or a bare position (v1).
+ * @returns {{ seq: number, turn: number | undefined, at: number | undefined } | undefined} the entry, or undefined when the value says nothing usable.
+ */
+function readPathEntry(raw) {
+  const finite = value => typeof value === 'number' && Number.isFinite(value)
+  if (finite(raw)) return { seq: raw, turn: undefined, at: undefined }
+  if (isRecord(raw) === false) return undefined
+  if (finite(raw.seq) === false) return undefined
+  // A wrong-typed `turn` or `at` is dropped to undefined rather than clamped: a
+  // turn of `"3"` is not turn 3, and inventing one would move a file into this
+  // turn's group on the strength of a value the writer never meant as a number.
+  return {
+    seq: raw.seq,
+    turn: finite(raw.turn) ? raw.turn : undefined,
+    at: finite(raw.at) ? raw.at : undefined,
+  }
+}
+
+/**
+ * The sweep's own account of the last turn, in whichever shape the file used.
+ *
+ * Two fields only: which turn was swept and whether the sweep could see all of
+ * it. A document written before this existed has no `sweep` at all, and that is
+ * not an error — it means "this turn made no claim about completeness", which is
+ * exactly what an older build could honestly say.
+ *
+ * @param {any} raw - the stored value.
+ * @returns {{ turn: number | undefined, coverage: 'complete' | 'partial' | 'none' } | undefined} the entry, or undefined when unusable.
+ */
+function readSweep(raw) {
+  if (isRecord(raw) === false) return undefined
+  const turn = typeof raw.turn === 'number' && Number.isFinite(raw.turn) ? raw.turn : undefined
+  // `none` and `partial` survive a round trip; anything else is read as
+  // `complete`. The asymmetry is deliberate: a value this build does not
+  // recognise is not evidence that something was skipped, and claiming doubt the
+  // writer never expressed would put an apology on the card — but the two words
+  // that DO carry doubt must not be lost, or the field would only ever weaken.
+  const coverage = raw.coverage === 'partial' || raw.coverage === 'none' ? raw.coverage : 'complete'
+  return { turn, coverage }
 }
 
 /**
@@ -169,6 +244,18 @@ function blankRecord() {
      * holds a position, `sequence` hands out the next one.
      */
     paths: new Map(),
+    /**
+     * What the last turn's git sweep could see.
+     *
+     * Not a file list — `paths` is that. This is the sweep's own admission about
+     * its reach: a turn that produced nothing inside a repository the sweep could
+     * only half read is a different fact from a turn that produced nothing at
+     * all. Both look identical in `paths`, so the doubt has to be stored beside
+     * it or it is lost.
+     *
+     * `undefined` until a sweep reports, and that means "no claim", not "clean".
+     */
+    sweep: undefined,
     sequence: 0,
     snapshot: undefined,
     timer: undefined,
@@ -482,7 +569,10 @@ class SessionState {
       const shift = state.sequence
       for (const [name, skill] of current.skills) current.skills.set(name, { ...skill, at: skill.at + shift })
       for (const [server, at] of current.servers) current.servers.set(server, at + shift)
-      for (const [file, at] of current.paths) current.paths.set(file, at + shift)
+      // Only the position moves. `turn` and `at` are facts about the work, not
+      // about this process's counter, and shifting them would invent a turn
+      // number and a timestamp the transcript never produced.
+      for (const [file, entry] of current.paths) current.paths.set(file, { ...entry, seq: entry.seq + shift })
       // A skill both sides know keeps `tool` if either of them saw it. The two
       // routes are not equal evidence: `tool` means the model chose to load the
       // skill, `gesture` means a person typed its name. Letting memory's
@@ -600,14 +690,27 @@ class SessionState {
    * it was on first touch, which is what "the work I just did" means to someone
    * reading the card.
    *
+   * `turn` is the number of the turn that just ended. It is written down rather
+   * than recomputed, because the only other source is the transcript's previous
+   * snapshot — which the panel can still see for the newest turn but not for any
+   * turn after the next one ends. Without it, a restart turned every file into
+   * "earlier" and the card quietly forgot which work was the latest.
+   *
    * @param {string} sessionId - the session.
    * @param {string[]} paths - the paths the finished turn wrote.
+   * @param {number | undefined} [turn] - the turn that wrote them, when known.
    * @returns {void}
    */
-  rememberPaths(sessionId, paths) {
+  rememberPaths(sessionId, paths, turn) {
     if (!Array.isArray(paths) || paths.length === 0) return
     const entry = this.entry(sessionId)
     if (entry === undefined) return
+    const stamp = Number.isFinite(turn) ? turn : undefined
+    // Through the injected clock, like every other timestamp this module writes.
+    // Reading `Date.now()` directly let one document carry two contradictory
+    // times — the paths' `at` in real wall-clock time while `updated` followed the
+    // clock the tests (and any future caller) supply.
+    const at = this.now()
     let touched = false
     for (const file of paths) {
       if (typeof file !== 'string' || file.length === 0) continue
@@ -615,7 +718,7 @@ class SessionState {
       // insertion order and a re-set keeps the old slot, and this list's whole
       // order is "most recently edited first".
       entry.paths.delete(file)
-      entry.paths.set(file, ++entry.sequence)
+      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at })
       touched = true
     }
     if (touched === true) {
@@ -640,7 +743,7 @@ class SessionState {
    */
   trimPaths(entry) {
     if (entry.paths.size <= MAX_PATHS) return
-    const ordered = [...entry.paths.entries()].sort((a, b) => a[1] - b[1])
+    const ordered = [...entry.paths.entries()].sort((a, b) => a[1].seq - b[1].seq)
     const excess = entry.paths.size - MAX_PATHS
     for (let index = 0; index < excess; index += 1) {
       const oldest = ordered[index]
@@ -654,13 +757,20 @@ class SessionState {
    * The order is the record's own positions, descending — the panel sorts by
    * mtime when it can and falls back to this, so the two agree.
    *
+   * Each entry carries the turn that last wrote the file and when that happened,
+   * because the panel cannot reconstruct either: `turn` is what puts a file in
+   * "this turn" after a restart, and `at` is when the file was produced rather
+   * than when it was last written to disk, which is what `mtimeMs` reports.
+   *
    * @param {string} sessionId - the session.
-   * @returns {string[]} the paths, or an empty list.
+   * @returns {Array<{ path: string, turn: number | undefined, at: number | undefined }>} the files, or an empty list.
    */
   pathsSeen(sessionId) {
     const entry = this.bySession.get(sessionId)
     if (entry === undefined || entry.paths.size === 0) return []
-    return [...entry.paths.entries()].sort((a, b) => b[1] - a[1]).map(([file]) => file)
+    return [...entry.paths.entries()]
+      .sort((a, b) => b[1].seq - a[1].seq)
+      .map(([file, at]) => ({ path: file, turn: at.turn, at: at.at }))
   }
 
   /**
@@ -684,6 +794,50 @@ class SessionState {
     const entry = this.entry(sessionId)
     if (entry === undefined) return
     this.schedule(sessionId)
+  }
+
+  /**
+   * A turn was swept, and this is how much of it the sweep could see.
+   *
+   * Written even when the sweep found no files, because the two facts it can
+   * record — "clean" and "could only half see" — are both invisible in `paths`.
+   * A turn that produced nothing inside a repository the sweep could only
+   * partially read looks exactly like a turn that produced nothing at all, and
+   * only one of those deserves to be believed without a caveat.
+   *
+   * Deliberately not subject to `keepsDocument`: coverage with no files is a
+   * claim about a turn, not content of its own. A session whose only fact is
+   * "I could not see everything" still has nothing to show.
+   *
+   * @param {string} sessionId - the session.
+   * @param {number | undefined} turn - the turn that was swept, when known.
+   * @param {'complete' | 'partial' | 'none'} coverage - how much the sweep could see, or `none` when no sweep ran.
+   * @returns {void}
+   */
+  rememberSweep(sessionId, turn, coverage) {
+    const entry = this.entry(sessionId)
+    if (entry === undefined) return
+    const stamp = typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
+    // Both words that carry doubt are stored as given. `complete` is the plain
+    // case, and writing it for every ordinary turn would grow the file to say
+    // nothing. Same vocabulary as `readSweep`, from the other side.
+    const claim = coverage === 'partial' || coverage === 'none' ? coverage : 'complete'
+    const next = { turn: stamp, coverage: claim }
+    // Replacing rather than accumulating: this describes the newest sweep, and a
+    // list of historical coverage claims is not something any reader wants.
+    entry.sweep = next
+    this.schedule(sessionId)
+  }
+
+  /**
+   * What the last sweep could see, for the panel to caveat its own file list.
+   *
+   * @param {string} sessionId - the session.
+   * @returns {{ turn: number | undefined, coverage: 'complete' | 'partial' | 'none' } | undefined} the claim, or undefined when no sweep has reported.
+   */
+  sweepSeen(sessionId) {
+    const entry = this.bySession.get(sessionId)
+    return entry === undefined ? undefined : entry.sweep
   }
 
   /**
@@ -758,7 +912,7 @@ class SessionState {
     const servers = {}
     for (const [server, at] of entry.servers) servers[server] = at
     const paths = {}
-    for (const [file, at] of entry.paths) paths[file] = at
+    for (const [file, remembered] of entry.paths) paths[file] = { seq: remembered.seq, turn: remembered.turn, at: remembered.at }
     return {
       state: STATE_VERSION,
       turns: snapshot?.turns,
@@ -767,6 +921,7 @@ class SessionState {
       tools: [...entry.tools],
       servers,
       paths,
+      sweep: entry.sweep === undefined ? undefined : { turn: entry.sweep.turn, coverage: entry.sweep.coverage },
       sequence: entry.sequence,
     }
   }

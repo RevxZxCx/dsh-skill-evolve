@@ -343,7 +343,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
 
 {
   const store = new TranscriptStore()
-  store.record('a', { type: 'user/message', data: { source: { kind: 'user' }, message: { content: [{ type: 'text', text: 'hi' }] } } })
+  store.record('a', { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] } })
   check('a transcript exists before disposal', store.view('a') !== undefined)
   store.forget('a')
   check('forget releases the transcript', store.view('a') === undefined)

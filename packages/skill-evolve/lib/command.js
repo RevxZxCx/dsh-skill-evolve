@@ -17,6 +17,19 @@
  * @module dsh-skill-evolve/command
  */
 
+import { stripHeredocs } from '@revxz/dsh-evolve-core'
+
+/**
+ * Re-exported, not re-implemented.
+ *
+ * The file card needs the same scan to read a command without its heredoc body,
+ * and it lives in another package that cannot import this one (the dependency
+ * direction is skill-evolve → core). Two copies would eventually disagree about
+ * the same command, so the implementation moved to core and this binding stays
+ * here for the callers that already import it from this module.
+ */
+export { stripHeredocs }
+
 /** Shell tools whose `command`/`script` argument carries a command line. */
 export const SHELL_TOOLS = new Set(['bash', 'pwsh', 'powershell', 'shell', 'terminal', 'exec', 'run'])
 
@@ -108,35 +121,6 @@ const CONTROL_PREFIX = /^(?:do|then|else|elif)\s+/i
 const FLAG_TAKES_VALUE = /^-(?:[sSpPeEnNmMoOfFcCbBhH]|remote|device|user|port|target|filter|format|config|dir)$/
 
 const PATHISH = /[/\\]/
-
-/**
- * Drop heredoc bodies. They are program text, and splitting them into "steps"
- * produced 16,718 bogus labels on one real session before this was added.
- *
- * @param {string} command
- * @returns {string}
- */
-export function stripHeredocs(command) {
-  let out = ''
-  let rest = String(command)
-  for (;;) {
-    const m = rest.match(/<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/)
-    if (m === null) return out + rest
-    out += rest.slice(0, m.index)
-    const marker = m[2]
-    const bodyStart = m.index + m[0].length
-    const lines = rest.slice(bodyStart).split('\n')
-    let consumed = 0
-    let found = false
-    for (let i = 0; i < lines.length; i += 1) {
-      consumed += lines[i].length + 1
-      if (lines[i].trim() === marker) { found = true; break }
-    }
-    // An unterminated heredoc means the rest of the input is body.
-    if (!found) return out
-    rest = rest.slice(bodyStart + consumed)
-  }
-}
 
 /**
  * Reduce a token to the executable's name: strip quotes, directories and a

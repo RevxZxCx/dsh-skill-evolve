@@ -415,15 +415,15 @@ const mutations = [
     // A button that does nothing when pressed promises what the Host cannot do.
     label: 'every row is a button, whether or not it can open anything',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                      const openable = canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
-    to: '                      const openable = typeof file.address === \'string\' && file.address.length > 0',
+    from: '                          const openable = gone === false && canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
+    to: '                          const openable = gone === false && typeof file.address === \'string\' && file.address.length > 0',
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'the rows are never clickable at all',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                      const openable = canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
-    to: '                      const openable = false',
+    from: '                          const openable = gone === false && canPreview === true && typeof file.address === \'string\' && file.address.length > 0',
+    to: '                          const openable = false',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -491,14 +491,14 @@ const mutations = [
     // files are generated would show "0 个文件" with no way in.
     label: 'a dependency is listed as the reader\'s own work',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true`,
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true`,
     to: `  if (false) return true`,
     suites: ['test/api.test.mjs'],
   },
   {
     label: 'a lockfile is listed as the reader\'s own work',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (GENERATED_FILES.has(name.toLowerCase())) return true`,
+    from: `  if (GENERATED_FILES.has(lowerName)) return true`,
     to: `  if (false) return true`,
     suites: ['test/api.test.mjs'],
   },
@@ -541,15 +541,20 @@ const mutations = [
   {
     label: 'a directory name only has to contain a generated one',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true`,
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true`,
     to: `  if (normalized.split('/').some((segment) => segment.includes('build'))) return true`,
     suites: ['test/api.test.mjs'],
   },
   {
     label: 'every file counts as written this turn',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `turn: turnPaths === undefined ? false : turnPaths.has(absolute),`,
-    to: `turn: true,`,
+    from: `    const turn =
+      turnPaths !== undefined
+        ? turnPaths.has(absolute)
+        : Number.isFinite(recordedTurn) && Number.isFinite(turnNow)
+          ? recordedTurn === turnNow
+          : false`,
+    to: `    const turn = true`,
     suites: ['test/api.test.mjs'],
   },
   {
@@ -1084,7 +1089,11 @@ function writeWithRetry(path, content) {
       return
     } catch (error) {
       if (attempt === 4) throw error
-      const spin = new Date.now() + 200
+      // `Date.now()` is a number, not a constructor: `new Date.now()` threw here,
+      // which is the one branch whose whole job is to keep a lock from leaving
+      // mutated source on disk. A throw in the restore path is a corrupted
+      // checkout, so this had to be a spin, not a new object.
+      const spin = Date.now() + 200
       while (Date.now() < spin) { /* wait out the transient lock */ }
     }
   }

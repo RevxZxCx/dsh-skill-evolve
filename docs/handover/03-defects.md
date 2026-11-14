@@ -77,6 +77,33 @@
 | DEF-71 | 2026-11-10 | 剥离工作区前缀时区分大小写：`cwd` 来自会话头、路径来自工具参数原文，两边都不规范化，Windows/macOS 上同一目录常有两种写法 → 剥离静默失败、退回全段判断，DEF-70 的症状重现 | 一个「尽力而为的规范化」如果只做了一半，失败是静默的，效果与完全没做相同 |
 | DEF-72 | 2026-11-10 | 大小写折叠后仍用**原始串**按折叠后的长度切片：`İ`（U+0130）小写化后是一个码元变两个，切片位置多吃或少吃一个字符 → `node_modules/` 读成 `ode_modules/`（依赖被当成读者的作品）或 `xbuild` 尾巴 `build` 命中判据（源码被藏） | 折叠改变了长度，就不能拿折叠后的长度去切没折叠的串；比较与切片必须发生在同一个坐标系里 |
 | DEF-73 | 2026-11-10 | 大小写断言的 `cwdFor` 写成 `process.platform === 'win32' ? dir.toUpperCase() : dir`，非 Windows 上两边大小写相同 → 断言恒真，对应变异在 Linux/macOS 上存活 | 一条只在某个平台才有内容的断言不是断言，是条件注释 |
+| DEF-74 | 2026-11-12 | `this.log.warn` 不存在，catch 自己抛 `TypeError`，把要报告的失败升级成 unhandled rejection | 该路径只在 `run()` 自己抛错时到达，测 `warm` 的断言从未真的触发 rejection；`.warn` 语法合法，`node --check` 通过 |
+| DEF-75 | 2026-11-12 | 粗体正则删掉中间的词（`**kwargs` + `**tested**` 被配成一对），数据丢失 | 全部断言只问「该清洗的清洗了」，没有一条问「不该清洗的是否原样保留」；docstring 还描述了一个没实现的守卫 |
+| DEF-76 | 2026-11-12 | 附件块被序列化成 `[object Object]` 当作「用户说的话」写进 prompt | 夹具的 `human()` 一直只构造纯文本块，从未构造带附件的用户消息 |
+| DEF-77 | 2026-11-12 | 修好的 P1 零覆盖：删掉新加的失败文案分支，2858 个断言仍全绿 | `summaryReasonText` 此前完全没有断言；修法是补 11 条断言 + 7 条突变，不是只改代码 |
+| DEF-78 | 2026-11-12 | 夹具的用户消息形状错（写成助手的 `data.message.content`），生产代码反而对 | 两种形状共用 `content` 字段名，夹具错在与断言正交的维度上，于是能错多年而不失败 |
+| DEF-88 | 2026-11-12 | `fileParts` 大小写敏感匹配，Windows 上整条绝对路径被当目录 | S2 |
+| DEF-89 | 2026-11-12 | 行实际 32px，预留值按 28px 算，8 行只装得下 7 行 | S2 |
+| DEF-90 | 2026-11-12 | 突变运行器在还原写失败时把变异留在源码里（5 处） | S2 |
+| DEF-91 | 2026-11-12 | 给 `.dsse-row-icon` 加尺寸规则，把技能卡图标从 17px 悄悄压成 14px | S2 |
+| DEF-79 | 2026-11-12 | 存储的轮次号压过本轮路径快照，「本轮」在重启后认错文件：`turnNow` 是本进程计数器（重启从 1 起），旧文件上的 `turn: 1` 被当成这一轮写的 | 只测了「没有快照时用存储号」，没有一条测「两者冲突时谁赢」；端到端复现要「跑完一回合再开面板」这个顺序 |
+| DEF-80 | 2026-11-12 | `turn/end` 传的 `endedTurn` 完全没被固定：删掉第三参，268 个断言仍全绿 | `turn` 只写进会话文件、只在下一次开面板时才有可观察后果，而没有任何断言读那份文件里的 `turn` |
+| DEF-81 | 2026-11-12 | `session-state.js` 的 `document()` 里 `for (const [file, entry] of entry.paths)` 与外层参数同名 → `ReferenceError: Cannot access 'entry' before initialization` | `node --check` 抓不到变量遮蔽；崩溃时套件不打 tally 行，运行器记为「无结果」而不是失败 |
+| DEF-82 | 2026-11-12 | `client.js` 的行渲染出现**两个 `title:` 属性**，后者覆盖前者，缺失文件的「文件已被删除或移动」永远显示不出来 | 重复对象键在 JS 里合法，`node --check` 与「相邻重复行」扫描都不报错（两行不相邻）；断言只查 `data-status` 与右侧文案，没查 `title` |
+| DEF-83 | 2026-11-12 | `const gone = status !== 'available'` 把任何未识别的状态都当「已消失」，于是那行没有原因、没有大小、没有删除线、不可点，却仍会 hover 高亮 | 三态断言只覆盖 `missing`/`invalid`/`available` 三个已知值，第四种值不在任何夹具里 |
+| DEF-84 | 2026-11-12 | `rememberPaths` 里的 `const at = Date.now()` 绕过模块注入的时钟，同一份文档里 `paths[*].at` 与 `updated` 可能互相矛盾 | 注入时钟的既有断言只测 `updated`，新加的 `at` 没有一条断言查它的来源 |
+| DEF-85 | 2026-11-12 | files-flags 测试块把夹具建在系统临时目录却沿用默认 `cwdFor: process.cwd()`，`isNoisePath` 剥不掉前缀、`Temp` 命中 `TEMP_DIRS`，该断言在 Windows 系统 temp 下恒失败 | 本地一直带 `TMPDIR=.tmp-test`（工作区内、不叫 `Temp`）跑，于是断言永远成立；一条断言的成立依赖环境变量，它就不是断言 |
+| DEF-86 | 2026-11-12 | 新断言里出现 `files[1].status` / `seen[1].path` / `reloaded[0].turn`，归属能力被破坏时抛 `TypeError`、套件不打 tally，**被记为 CRASHED 而不是 KILLED** | 突变运行器靠 tally 行区分「发现」与「无法测试」，而 `check()` 里的直接下标解引用能把前者变成后者 |
+| DEF-87 | 2026-11-12 | `test/client.test.mjs` 的三条 CSS 断言只读渲染出的样式表字符串，删掉选择器里的后代组合子（删除线视觉上彻底消失）仍然全绿 | 断言问的是「这段 CSS 文字存在吗」，而它想证明的是「删除线挂在名字元素上」 |
+| DEF-92 | 2026-11 | `test/index.test.mjs` 把工具数钉死，第八个工具注册后全量套件红 | 断言本来就是为此存在的；但**它只钉数量不钉名字**，见 D-113 |
+| DEF-93 | 2026-11 | 残留审计脚本对新文件静默跳过，打印了假的 `leftovers: 0` | 检查器的失败模式是「不报告」，而没有人给检查器本身写检查 |
+| DEF-97 | 2026-11 | 两条突变锚点不唯一，脚本报 NOT APPLIED 而对应守卫其实从没被验证 | 突变套件只统计「杀了几条」，`not applied` 混在汇总行里，`of 73` 的差值没人算 |
+| DEF-96 | 2026-11 | 测试直调被测函数，实现抛错时整份文件崩掉，报 CRASHED | 崩溃与失败在测试输出里都是「不绿」，但突变运行器把 CRASHED 单独计数，而没人核对那个数字 |
+| DEF-95 | 2026-11 | 超限时返回 `too-many` 拒绝，而路径早已被记录 | 断言只问「超限有没有被拒」，没问「拒绝之后实际发生了什么」 |
+| DEF-94 | 2026-11 | schema 的申报上限（50）大于卡片的容量（40），合法调用被静默截断 | 断言只问「schema 与代码是否一致」，两处都是 50 于是全绿；没有一条断言问**下游能不能装下** |
+| DEF-98 | 2026-11-13 | `git-watch.js` 没有导出 `readChanges`，整包在 import 阶段就崩 | 已修 |
+| DEF-99 | 2026-11-13 | `workspaceFor` 只认 agent 形状，事件流传 session → cwd 恒空，git 差分对每个会话静默失效 | 已修 |
+| DEF-100 | 2026-11-13 | 文件系统预检被套在注入的 runner 上，10 条断言全红 | 已修 |
 
 ---
 
@@ -1205,3 +1232,632 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 **教训。** 写「平台相关」的测试分支之前，先问它**保护的到底是什么**。这里想保护的是「两侧写法不同
 时仍能剥离前缀」，那是一个纯粹的字符串性质，与运行平台无关；把平台判断混进来，只是让断言在自己的
 开发机上通过。**如果一条断言在某个环境里恒为真，它在那个环境里就不是覆盖，是噪音。**
+
+## DEF-74 · 报错的地方自己报了个错
+
+**现象。** `warm()` 的 catch 处理器写 `this.log.warn('the warm-up summary failed ...', error)`。
+`log` 在每个调用方都是**裸函数**（`index.js:72` 是 `const log = (...parts) => {...}`，`api.js` 的类型是
+`(message: string) => void`），它没有 `.warn`。所以这个 catch 一旦执行就抛
+`TypeError: this.log.warn is not a function`，把「记录一次摘要失败」升级成 **unhandled rejection**。
+
+**触发。** 面板被打开过一次（`viewed` 里有这个会话），之后任意一个 `summarise` 拒绝的回合。
+
+**为什么测试没抓到。** 三处原因叠加：①`warm` 的这条路径**只在 `run()` 自己抛错时**才走到——`run()`
+内部 catch 覆盖了所有它能存活的失败，所以正常失败根本不进这个 catch；②测 `warm` 的那几条断言用
+的是「不抛、调用次数对」，从未让它真的触发 rejection；③`this.log.warn` 在语法上完全合法，
+`node --check` 与任何类型检查都过。
+
+**修法。** 改成 `this.log(\`the warm-up summary failed outside its own handler: ${error?.message ?? error}\`)`。
+
+**教训。** 一个 catch 处理器是代码里**最难被测试覆盖**的部分，因为进入它需要先制造一个它本来要
+处理的事故。所以 catch 里只该做**确定不会失败的事**——调用一个已知形状的裸函数、写一个字段。
+任何「看起来像 logger API」的猜测（`.warn` / `.error` / `.debug`）都是在赌。
+
+## DEF-75 · 清洗器删掉了中间的词
+
+**现象。** `tidy()` 的粗体正则 `\*\*([^\n*]+)\*\*` 没有任何边界检查，会把**不是一对**的两颗星配起来：
+
+| 输入 | 输出 |
+|---|---|
+| `Added **kwargs support and **tested** the path.` | `Added kwargs support and tested** the path.` |
+| `The rule is x ** 2 plus **/*.md.` | `The rule is x  2 plus /*.md.` |
+| `Passed **kwargs through to **the loader**.` | `Passed kwargs through to the loader**.` |
+
+中间那些词**直接消失**。这不是外观问题，是数据丢失。
+
+**为什么测试没抓到。** `tidy` 的原始断言全是「该清洗的被清洗了」（`**bold**` → `bold`），没有一条
+问「不该清洗的是否原样保留」。而 `**kwargs` 这种输入在任何 Python 会话里都会出现。
+
+**另一个更值得记的点：docstring 当时写的是错的。** 原注释说「`2 * 3` 需要空格，所以模式已要求两侧
+有空格」——但**模式只要求两颗星相邻**，从未要求两侧空格。注释描述了一个没实现的守卫，于是下一个
+读代码的人（包括写它的我）会以为已经安全。
+
+**修法。** 两段守卫：先数 `**` 出现次数，**只有恰好两对（4 个）时才尝试清洗**；清洗时要求内侧非空白
+（`(?=\S)…(?<=\S)`）。理由：两对星标意味着源码本身有歧义，段落级规则分不清强调与运算符/glob，
+**留下标记只是外观瑕疵，删掉中间的词是数据丢失**。
+
+## DEF-76 · 附件会被序列化成 `[object Object]` 当作「用户说的话」
+
+**现象。** 读用户原话时如果直接对 content 数组做 `String(content)` 或 `JSON.stringify`，图片、文件、
+运行时上下文这些块会变成 `[object Object]` —— 而它会被 prompt 当作**这个人问的问题**引用。
+
+**为什么测试没抓到。** 测试夹具的 `human()` 一直只构造纯文本块，从未构造带附件的用户消息。
+这个夹具的错误还连带着掩盖了另一个更严重的问题（见 DEF-78）：夹具里用户消息的形状是错的。
+
+**修法。** `readUserText(content)` 只取 `block.type === 'text'` 的块，其余 `continue`。**跳过而非
+序列化**：摘要引用 `[object Object]` 比引用空更糟——前者会让模型以为用户发了一段乱码。
+
+补的断言里有一条直接守这件事：`asked.includes('[object') === false`。
+
+## DEF-77 · 修好的 bug 没有任何断言守着它
+
+**现象。** 第一轮审查报了一条 P1：`client.js` 的失败文案映射写 `the model call failed`，但
+`run()` 主失败路径实际发的是 `the summary call failed: ${message}`（`summarise.js:554`）。于是
+**401、过期 key、网络错误这些用户最常撞上的失败，全部显示「暂无摘要」**。修法是在映射表里加一条分支。
+
+**为什么这条单独记一条缺陷。** 因为它修完之后，**`summaryReasonText` 仍然是零覆盖**——
+2858 个断言全绿，而把那条新加的分支删掉，测试也全绿。也就是说这个修复**没有任何东西拦着它复发**。
+审查实测：删掉 `the summary call failed` 分支 → 4 failed（只有补了断言之后）；在补断言之前，是 0 failed。
+
+**修法（两层）。** ①新增 11 条 reason 的逐条断言；②在突变脚本里补 7 条突变，专门覆盖本轮修的
+每一处——包括这条（`the failure copy matches a phrase the summariser never says`）。
+**做完之后 2861 断言 + 30 条突变全杀。做之前 2858 断言全绿、突变套件对这个 bug 无反应。**
+
+**教训。** 「修了一个 bug」和「这个 bug 不会再回来」是两件事。前者改代码，后者要**同时**留下一条
+会失败的断言和一个会杀掉修复的突变。只做前者的修复，在下一次重构里和没修过的代码没有区别。
+
+## DEF-78 · 测试夹具的用户消息形状是错的，而生产代码是对的
+
+**现象。** 解压真实存档 `C:\Users\26903\.dsh\sessions\--F-dsh-plugin--\session-7012802f-...\session.v4.jsonl.zstd`
+（1.2 亿字符）核对后确认：
+
+| 事件 | 真实形状 | 正文在哪 |
+|---|---|---|
+| `user/message` | `data = { id, role, source, content }` | **`data.content`** |
+| `assistant/message` | `data = { message, step, stream, turn, usage }` | `data.message.content` |
+| `turn/end` | `data = { reason, turn }` | — |
+| DEF-101 | 2026-11-13 | 断言在测「代码能跑通」，不在测「那条路被走到过」 | 新增的 `rememberSweep` 也会写盘，遮住了被禁用的那一处 |
+| DEF-102 | 2026-11-14 | 重启后的第一轮被编号成第 1 轮 | 合并落盘计数时没有动已经打开的那一轮 |
+| DEF-103 | 2026-11-14 | 两套突变并行跑，互相把对方还原成自己的备份 | 还原成功但内容是别人写的变异体；删除型变异无法被残留审计判为残留 |
+| DEF-104 | 2026-11-14 | 两个 bracket 的 finish 在取基线前检查 cwd | cwd 为空时基线留在 Map，下一轮从上一轮的起点算 |
+| DEF-105 | 2026-11-14 | scanReading 零覆盖，其突变 SURVIVED | truncated→partial 的翻译无人观察；第一次修还修错了位置 |
+| DEF-106 | 2026-11-14 | 遍历器的目录过滤在生产路径上从未被传，`isGeneratedDirectory` 零调用点 | 每条测试都注入了 `skipDirectory`，只证明了「钩子会被问到」，没证明「生产传了」 |
+| DEF-107 | 2026-11-14 | coverage 扩成三态后，三处 `=== 'partial'` 单值判断把它打回两态 | 新词 `none` 没有任何断言要求它活到面板；写到面板那条端到端断言是修之前才补的 |
+
+而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
+`transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
+`ui-evolve/lib/index.js:431` 也读 `data.content`，三处一致。
+
+**为什么这个错误能活这么久。** 因为**两种形状共享 `content` 这个字段名**——夹具写错了形状，
+被测代码读的字段却恰好还在（`data.message.content` 里的 `content` 也存在于 `data.message` 之下，
+而夹具同时把正文放在了 `data.content` 能读到的地方，或断言只检查了「有东西」而非「是这句话」）。
+一个夹具能错多年而不失败，通常是因为它**错在了与断言正交的那个维度上**。
+
+**修法。** 修 5 处夹具（`test/transcript.test.mjs` 的 `human()` / `runtimeContext()` / `toolResult()`、
+`test/index.test.mjs`、`test/panel-wiring.test.mjs:346`），并在 `human()` 上加了 doc 注释记录这次核对
+与「两个形状共有一个字段名正是夹具能错多年的原因」。
+
+**教训。** **夹具应该来自真实数据，不能来自对数据形状的猜测。** 这个仓库有真实会话存档可用
+（`session.v4.jsonl.zstd`），任何时候怀疑事件形状，解压一份比读代码快、也比读代码准。
+
+## DEF-79 · 存储的轮次号压过路径快照，「本轮」在重启后认错文件
+
+**症状。** 重启后先跑完一回合、再打开面板时，一个几小时前写过的文件会被标成「本轮改过」。
+反方向也错：存储的轮次号与新快照冲突时存储号获胜，把快照刚列出的文件否决掉。
+
+**根因。** `turnNow` 来自 `previous.turn`，是**本进程的计数器**（`transcript.js` 重启后从 1 起）；
+`session-state` 里的 `turn` 戳来自写它的那个进程。两个进程的 `1` 不是同一个 `1`。
+我把「存储号」当成更可信的一方，因为它更持久——**但持久不等于正确**。
+
+**为什么测试没抓到。** 我只测了「文档里没有轮次号时退回快照」这一条路径。真正出问题的用例需要
+「快照非空 **且** 存储号与快照冲突」，而默认夹具里两者永远由同一次 `turn/end` 产生，不会冲突。
+审查者用 `paths [{brand-new.js,1},{old.js,1},{newer.js,7}]` + `turnNow=1` + `turnPaths={brand-new.js}`
+端到端复现，那才是真实的重启形状。
+
+**修法。** 快照优先，存储号只作 fallback。补 4 条断言：冲突时快照赢、快照列出的文件是本轮、
+无快照时用存储号、存储号匹配时仍标本轮。
+
+## DEF-80 · `turn/end` 传的轮次号完全没被固定
+
+**症状。** 把 `rememberPaths(agentId, ended, endedTurn)` 的第三个参数删掉，`268 passed, 0 failed`。
+
+**根因。** `turn` 写进会话文件后，唯一的可观察后果是「下一次开面板时本轮/更早分组对不对」，
+而没有任何断言读过那份文件里的 `turn` 字段。它是纯新增数据，谁都没在看。
+
+**为什么测试没抓到。** 三态与顺序的断言都只经过 `readPanel`，而 `readPanel` 的夹具自己构造
+`previous`，绕过了持久化的 `turn`。**「数据写对了」和「数据被人用了」是两件事**——我测了后者的形状，
+却没有一条测前者真的存在。
+
+**修法。** `test/persistence.test.mjs` 新增一块：两个回合各写一个文件 → 等会话文件落盘 →
+读 JSON 断言 `paths[late].turn === 2 && paths[early].turn === 1`。同时补一条突变
+`the turn a file was written in never leaves the transcript`（`mutate-language-and-files.mjs`，
+`file: index`），验证删掉参数会让这条断言变红。**这条缺陷是我自己用突变发现的，不是审查者报的。**
+
+## DEF-81 · `document()` 里的变量与外层参数同名
+
+**症状。** `session-state.js:832` 抛 `ReferenceError: Cannot access 'entry' before initialization`，
+`persistence.test.mjs` 与 `session-state.test.mjs` 两个文件直接崩。
+
+**为什么测试没抓到。** 抓到了——是测试发现的。这里记的是**工具链抓不到**：`node --check` 只解析语法，
+同名变量遮蔽是运行时错误。
+
+**教训。** 它发生在「测试文件崩溃」这一层：崩掉时不打 tally 行，运行器把整轮记为「无结果」，
+这会掩盖同一轮里真正的 FAIL。这条与 DEF-86 是同一种伤害。
+
+## DEF-82 · 两个 `title:` 属性，后一个覆盖前一个
+
+**症状。** 行渲染里新增的 `title: note === '' ? ... : ...` 之后还留着一行旧的 `title: ...`。
+缺失文件的「文件已被删除或移动」永远显示不出来，因为旧值把新值盖掉了。
+
+**为什么测试没抓到。** 重复对象键在 JavaScript 里**合法**（后者生效，不报错），`node --check` 通过；
+「相邻重复行」扫描也漏过，因为两行中间隔着 `onClick`。断言只查了 `data-status` 与右侧文案，
+没有一条读 `title`。
+
+**教训。** 手写 bundle 里多写一行合法但错误的属性，类型检查与语法检查都抓不到。
+**凡是有「同一个属性的两个来源」的地方，都要有一条断言读最终值。**
+
+## DEF-83 · 未知状态被当成「已消失」
+
+**症状。** Host 发来第四种状态（如 `{status:'moved'}`）时，那行没有原因、没有大小、没有删除线、
+不可点，却仍会在 hover 时高亮——一条死行。
+
+**为什么测试没抓到。** 夹具只构造 `available`/`missing`/`invalid` 三个已知值。
+**三态断言证明了三个值各自正确，没有证明第四个值被安全处理。**
+
+**修法。** `const gone = status === 'missing' || status === 'invalid'`，注释写明「宁可当可用，
+也不做一条死行」。
+
+## DEF-84 · 路径时间戳绕过注入时钟
+
+**症状。** `rememberPaths` 里的 `const at = Date.now()` 用真实墙钟，而同一份文档的 `updated`
+走 `this.now()`。一份文档里两个时间来源。
+
+**为什么测试没抓到。** 注入时钟的既有断言只测 `updated`，新加的 `at` 没有任何断言查它的来源。
+
+## DEF-85 · 一条断言依赖它跑在哪台机器的哪个目录
+
+**症状。** `test/api.test.mjs` 的 files-flags 块把夹具建在系统临时目录，却沿用 `deps()` 默认的
+`cwdFor: () => process.cwd()`。`isNoisePath` 剥不掉不匹配的前缀、退回逐段判断，`Temp` 命中 `TEMP_DIRS`，
+断言拿到 `noise: true` 而它期望 `false`。在 Windows 的系统 temp 下基线直接红，
+连带把 `mutate-language-and-files.mjs` 的 `BASELINE FAILED` 守卫也触发。
+
+**为什么测试没抓到。** 它没被抓到，是因为**我一直带着 `TMPDIR=.tmp-test` 跑**（工作区内的目录，
+不叫 `Temp`），断言于是永远成立。审查者用系统 temp 跑一次就露了。
+
+**教训。** **一条断言的成立如果依赖环境变量，它就不是断言。** 修法是显式声明 `cwdFor: () => dir`，
+让夹具与工作区的关系成为测试的一部分；修完后带不带 `TMPDIR` 都是 264/0。
+
+## DEF-86 · 新断言把「被发现」变成「无法测试」
+
+**症状。** 三条突变报 CRASHED 而非 KILLED：`files[1].status`、`seen[1].path`、`reloaded[0].turn`
+在归属能力被破坏时抛 `TypeError`，套件在打印 `N passed, N failed` 之前就死了。
+
+**为什么测试没抓到。** 这不是测试没抓到，是**测试自己的失败方式错了一档**：崩掉等于放弃诊断，
+会把「这里有断言」和「这里什么都不测」在报告里变成同一个样子。
+
+**修法。** 全部改成可选链，并把 `invalid is not missing` 从「不等于 undefined 且不等于 missing」
+改成直接断言具体值。修后三条全部 KILLED。
+
+**教训。** 任何 `check(...)` 里出现 `x[0].field` 都可能把「被发现」变成「无法测试」。
+
+## DEF-87 · CSS 断言只问「这段文字在不在」
+
+**症状。** 三条断言读渲染出的样式表源码字符串，把选择器 `.dsse-row[data-status="missing"] .dsse-name`
+的后代组合子去掉（删除线视觉上彻底消失），594 个断言仍全绿。
+
+**为什么测试没抓到。** 断言问的是「这段 CSS 文字存在吗」，而它想证明的是「删除线挂在名字元素上」。
+
+**修法。** 新增两条结构断言：`the deleted row still carries its own name element`
+（`byClass(row, 'dsse-name').length === 1`）与 `and the row element is not the name element`
+（行自身 className 不含 `dsse-name`）。两条一起，后代组合子被删掉就会红。
+另外给「行不存在」与「行存在但属性对」两类断言都加了存在性前置，避免可选链吞掉要证明的失败。
+
+
+## DEF-88 · `fileParts` 大小写敏感匹配，Windows 上整条绝对路径被当目录
+
+`packages/ui-evolve/lib/client.js` 的 `fileParts` 原来写
+`normal.startsWith(prefix) === true`。Windows 文件系统不区分大小写，而两侧来源不同：
+workspace 来自 `agent?.session?.header?.cwd`（`index.js` 的 `workspaceFor`），
+文件路径来自工具调用记录。`C:\Work\src\a.ts` 配 `C:\work` 就匹配失败，
+落回退分支，把 `C:/work` 整段当成目录显示在文件名旁边。
+
+**为什么测试没抓到**：三条目录断言都用了同一个大小写的夹具（`/work` 配
+`/work/src/...`）。断言是对的，夹具太一致 —— 它们证明了「相同大小写时对」，
+而这个缺陷只在混合大小写时出现。修法是两侧 `toLowerCase()` 比较、原串切片，
+并加三条用小写 cwd 配大写路径的断言，加一条把比较改回严格形式的突变。
+
+## DEF-89 · 行实际 32px，预留值按 28px 算，8 行只装得下 7 行
+
+`FILE_LIST_MAX_PX` 与 `.dsse-row` 是一对必须同时成立的数字，但只有前者被断言。
+`.dsse-row` 少了 `box-sizing:border-box`，`min-height:28px` 之上再加
+`padding:2px 6px` 就是 32px。
+
+**为什么测试没抓到**：`max-height` 断言原本用 `\d+`，任何数字都过 —— 它证明了
+「有个高度」而不是「高度是这个」。先把断言收紧成字面 `245px`，再补
+`a row measures what the reservation assumes` 钉住 `border-box`，
+最后加一条删掉 `box-sizing` 的突变。这样两个数字互相绑定，改任一个都会红。
+
+## DEF-90 · 突变运行器在还原写失败时把变异留在源码里
+
+`scripts/mutate-*.mjs` 的模式是「备份 → 就地改源码 → 跑测试 → 还原」。在 Windows 上
+目标文件会被监视进程瞬时占用，写盘抛 `errno -4094` / `code UNKNOWN`；抛错位置正好
+落在还原分支的 `try` 里，于是**变异后的源码留在磁盘上**。一轮下来五处：三个在
+`client.js`（关闭动画、候选过滤、徽标点击），一个在 `session-state.js`（空记录永不
+清理），一个在 `summarise.js`（语言约束段落）。
+
+**为什么测试没抓到**：这不是被测代码的缺陷，是工具把自己的输出留在现场。它看起来
+像「测试通过了」，因为那一轮跑的正是变异后的代码。真正的信号是全量套件在下一轮
+才红，而那时改动者已经不记得自己跑过突变。
+
+修法三层：①`mutate-checklist-panel.mjs` 的写盘重试本身写错成
+`new Date.now() + 200`（`Date.now()` 是数字不是构造器），一进重试就
+`TypeError: Date.now is not a constructor` —— 保护机制先坏，改为 `Date.now() + 200`；
+②`mutate-language-and-files.mjs` 与 `mutate-persistence.mjs` 加
+`writeWithRetry(path, content)`（6 次尝试、`60 * (attempt + 1)` ms 退避），替换全部
+`fs.writeFileSync`，含 `finally` 里的兜底恢复；③新增 `_edit/audit_leftovers.py`：
+解析每个突变数组，逐条查源码里 `from` 的命中数，`from` 为 0 而 `to` ≥ 1 判
+`LEFT MUTATED`。**每次跑完突变必须跑它，0 才算跑完。**
+
+## DEF-91 · 给 `.dsse-row-icon` 加尺寸规则，把技能卡图标从 17px 悄悄压成 14px
+
+**现象**：S2 之后，面板上「技能与 MCP」卡里的技能图标变小了一圈。没有报错，没有断言变红，
+视觉上也不刺眼——只是它和上一轮截图不一样了。
+
+**根因**：S2 给新的文件图标定尺寸时，写的是 `.dsse-row-icon{width:14px;height:14px;...}`。
+这个类名确实出现在 `client.js` 里，但它**从来没有任何 CSS 规则**——它只是技能卡
+`jsx('span', { className: 'dsse-row-icon', 'data-kind': item.kind, children: jsx(Icon, { name: item.kind }) })`
+的包裹元素，真实尺寸由 `.dsse-icon`（17px）决定。新规则一加，包裹元素的 14px 就把
+里面的 svg 压住了。
+
+**为什么测试没抓到**：`client.test.mjs` 里有断言检查 `.dsse-icon` 的规则文本，
+但没有一条断言问「技能卡的图标最终渲染成多大」。尺寸是 CSS 级联的结果，而这个级联
+跨越了两个互不相识的规则块（`.dsse-row-icon` 与 `.dsse-icon`），只读单条规则的断言
+看不见它们的关系。这和 DEF-87 是同一个毛病：**断言问的是「这段文字在不在」，
+而它想证的是「渲染出来是什么」。**
+
+**修法**：删掉那条规则（`.dsse-icon` 会重新接管尺寸），并在原处留一行注释
+`dsse-row-icon deliberately has no rule`；新图标改用独立类名 `.dsse-fileicon`。
+
+## DEF-92 · 工具数量断言让全量套件变红
+
+**症状。** 加完 `report_output_files` 后 `test/index.test.mjs` 报 `1 failed`：`seven tools registered skill_candidate_submit,...,report_output_files`。全量套件因此从 3010 变成 3009/1，突变脚本第一步就 `BASELINE FAILED`。
+
+**判断：这是断言正确工作了。** 它挡住的是「一个工具悄悄不再被注册」——面板照常渲染、卡片照常从 `edit` 调用填、唯一的症状是某些文件消失。改断言时把数量改成 8，并**另加一条名字断言**，因为数量相等不能排除「删一个加一个」。
+
+### 为什么测试没抓到
+
+它抓到了。这条记在这里是因为它揭示了一个结构性缺口：断言只钉数量时，两个互不相关的工具可以一进一出而全部断言保持绿色。D-113 是补齐。
+
+## DEF-93 · 残留审计脚本对新文件静默跳过
+
+**症状。** `_edit/audit_leftovers.py` 报 `leftovers: 0`，而它其实一条新变异都没检查。
+
+**怎么发现的。** 没有靠读代码，靠**主动注入**：我手动把 `if (recorded.length > MAX_REPORTED_PATHS) {` 改成 `if (false) {`，再跑审计，它仍然说 `leftovers: 0`。那一刻才知道这个数字是假的。
+
+**两处根因，先后暴露：**
+
+1. `FILES` 是手写字典（五个旧文件），`transcript` 与 `report` 不在里面。解析失败后代码执行 `if not f: continue`——**静默跳过**。
+2. 修了第 1 处之后仍然报 0，因为另一边 `entries()` 里手写的别名桩不含新别名，探针 `node` 进程抛 `ReferenceError: transcript is not defined`，`entries()` 捕获后 `return []`——**又一次静默**。
+
+**修法。** 两处硬编码都改成从脚本自身解析（`const <alias> = path.join(repo, ...)` 正则），并且：
+
+- 解析不出目标不再跳过，计入 `unresolved` 并打印；
+- `unresolved > 0` 时以退出码 2 结束，不是 0。
+
+**复验方式写进流程：** 每次跑完突变，除了看 `leftovers: 0`，还要能证明它抓得住——本轮用一次真实注入确认（`leftovers: 2`），恢复后回到 0。
+
+### 为什么测试没抓到
+
+审计脚本不在测试套件里，它是手动跑的一次性工具，而**没有人给检查器本身写检查**。这已经不是第一次：DEF-90 是同一个脚本的「还原失败却没人知道」，这次是「检查失败却报干净」。两次的共同点是脚本用**静默跳过**表达「这条我不管」，而调用方把它读成「这条没问题」。
+
+**教训：** 一个一次性诊断工具的错误比被测代码的错误更贵——被测代码错了，测试会红；工具错了，它签发的是通行证。
+
+## DEF-94 · schema 的申报上限大于卡片容量
+
+**症状。** `report-tool.js` 的 `maxItems: MAX_REPORTED_PATHS` 是 50，`transcript.js:462` 的 `slice(0, 40)` 是 40。一条完全合规的五十条申报，前四十条进卡、后十条消失，而工具回答「50 条已记录」。
+
+**根因。** 两个模块各自定义了自己的上限，谁都没错，合起来错。这是审查者（r5c）读出来的，不是测试红出来的。
+
+**修法。** `MAX_CARD_PATHS = 40` 定义一次，`MAX_REPORTED_PATHS = MAX_CARD_PATHS`。见 D-115。
+
+### 为什么测试没抓到
+
+`test/report-tool.test.mjs:68` 有一条 `the schema states the same cap the code enforces`，它断言 `maxItems === MAX_REPORTED_PATHS`——**两处都是 50，所以它一直是绿的**。这条断言问的是「写下来的两个数是否一致」，而真正的问题在第三个地方（卡片容量）。**一致性断言只能守住它自己圈住的那两个点。**
+
+---
+
+## DEF-95 · 拒绝一个已经发生的事实
+
+**症状。** 超限申报返回 `{ ok: false, code: 'too-many' }`，错误信息劝模型「拆成几次调用」。而实际上前 50 条路径在 `execute` 被调用之前就已经由 `tool/call` 事件读进 `this.paths`/`this.declared` 了。
+
+**根因。** 把「校验」写在了「采集」的下游，却用校验的结果去描述采集。采集先发生，校验无法撤销它。
+
+**修法。** 改成 `{ ok: true, recorded: kept.length, dropped }`，把事实说出来。见 D-116。
+
+### 为什么测试没抓到
+
+那条断言写的是 `one path over the cap is refused`——它把「拒绝」当成了正确行为。**断言把缺陷写成了规范**，这是本项目第二次出现同一形状的问题（DEF-05 也是这个）。
+
+---
+
+## DEF-96 · 直调测试让 CRASHED 冒充「测不出」
+
+**症状。** 把 `if (!Array.isArray(list)) return []` 弱化成 `if (list === undefined) return []`，突变结果是 `CRASHED` 而不是 `KILLED`——因为 `readPresentedPaths({ files: {} })` 抛 `TypeError: list is not iterable`，整份测试文件崩掉，一条断言都没跑完。
+
+**根因。** 断言写成 `check('...', readPresentedPaths({ files: {} }).length === 0)`——**被测函数在 `check` 之前就执行了**，它一抛，`check` 根本没被调用。
+
+**修法。** 加 `survives(fn)` 包一层 `try/catch`，抛错时返回 `{ threw: true, error }` 并让断言失败。同样的回归现在是一条普通红灯。
+
+### 为什么测试没抓到
+
+按仓库约定 `CRASHED` 要归零，但它是**运行器**的计数器，不是断言的结论。断言从未表达「这个调用可以抛错」或「它不该抛错」——它只是没能在抛错时做出判断。**一个连断言都没跑完的测试，在汇总行里和一条干净的测试长得一样。**
+
+---
+
+## DEF-97 · 两条突变锚点不唯一，守卫从未被验证
+
+**症状。** 突变套件报 `NOT APPLIED anchor is not unique`，两条：一条锚在 `for (const declared of readPathListArgument(...)) this.paths.push(...)`（代码已改成 `this.declared`），一条锚在 `if (!Array.isArray(list)) return []`（`readPathListArgument` 与 `readPresentedPaths` 各有一份）。
+
+**根因。** 新写的 `readPresentedPaths` 与旧的 `readPathListArgument` 结构相似，锚点自然撞车。而汇总行 `70 killed ... (of 73)` 里那 3 条的差额，没人去看。
+
+**修法。** 锚点带上唯一上文：`this.declared.push` vs `this.paths.push`；`const list = bag.files` 只存在于 `readPresentedPaths`。
+
+### 为什么测试没抓到
+
+这里该问的是「为什么**突变套件**没喊」。它喊了，但喊在行尾，而汇总行是绿的。**一个把失败混在汇总数字里的检查器，和 DEF-93 那个签发假通行证的脚本是同一个毛病**：调用方只读最后一行。
+
+---
+
+## DEF-98 · 一个只在计划里存在的导出
+
+**症状**：`node test/index.test.mjs` 直接以
+
+```
+SyntaxError: The requested module './git-watch.js' does not provide an export named 'readChanges'
+```
+
+退出。不是某条断言红了，是**整个模块图加载失败**。
+
+**根因**：`index.js` 里写了 `import { GitWatch, readChanges } from './git-watch.js'`，而 `git-watch.js` 只 `export class GitWatch`。`readChanges` 是我在方案里描述过、却没落进代码的那一半——适配 `(cwd) => Promise<string[]>` 接口的函数。
+
+**为什么测试没抓到**：抓到了，而且抓得很彻底。ESM 的具名导入在链接阶段就校验，所以这不是一条漏网的断言，是一次加载期崩溃。记在这里是因为它花的时间值得记住：**在改调用方之前，先确认被调用方真的有那个名字**。`node --check` 只看单文件语法，看不见跨模块的导出表。
+
+**修法**：在 `git-watch.js` 里加 `export function readChanges(cwd) { return changedFiles({ cwd }) }`，并把它放在具名导出而非内联 lambda，好让 `apply` 里的接缝读作「注入这个，或者用真的那个」。
+
+---
+
+## DEF-99 · 复用一个函数，却没看它接受什么形状
+
+**症状**：接线完成、`git-watch.test.mjs` 19/0、`git-changes.test.mjs` 42/0 全绿，而端到端测试两条断言红：
+
+```
+FAIL the bracket reads the workspace the session runs in []
+FAIL and reads it again when the turn ends 0
+```
+
+`asked` 是空的——一个 `git` 读数都没发生。
+
+**根因**：`workspaceFor(agent)` 的实现是 `agent?.session?.header?.cwd`。它原本只服务于一个调用点（`cwdFor(agentId)`，那个调用点传的是 `service('agents').get(id)`，确实是 agent）。而 git 接线有两处传的是**session**：
+
+- `turn/start`：`workspaceFor(session)`
+- `turn/end`：`const cwd = workspaceFor(session)`
+
+session 的形状是 `{ id, header }`，没有 `.session`。于是 `agent?.session?.header?.cwd` 恒为 `undefined` → `''`。而 `GitWatch.start` 的第一条守卫就是 `if (typeof cwd !== 'string' || cwd.length === 0) return`——静默返回，不报错，不开基线。整条链路**从未运行过一次**。
+
+**为什么测试没抓到**：单元测试各自都过了，因为它们各自喂的形状是对的：
+
+- `git-watch.test.mjs` 直接传 `'F:/repo'`，绕过 `workspaceFor`。
+- `git-changes.test.mjs` 直接传 `cwd`，同样绕过。
+- `index.test.mjs` 里既有的面板测试用的是 `cwdFor`，那条路传 agent，是对的。
+
+缺口在两者之间：**没有任何测试同时覆盖「事件流真的把 session 传进来」和「workspaceFor 真的读得出 cwd」**。而这类边界正是分离成两个包之后最容易漏的地方——单元测试各守一半，中间的接线没人守。
+
+**修法**：`workspaceFor` 改为读两种形状，`subject?.session?.header?.cwd ?? subject?.header?.cwd`，并在注释里写清为什么两半会不一致。补一条突变（`the workspace is only read from an agent, never from a session`），它现在会杀死 3 条断言。
+
+**教训**：一个返回空字符串的函数，和一个正确的函数，在类型上无法区分。凡是「拿不到就静默退化为空」的接缝，都必须有一条端到端断言证明它曾经拿到过。
+
+---
+
+## DEF-100 · 预检被套在了不该套的调用方上
+
+**症状**：给 `changedFiles` 加了「先走文件系统、确认是仓库，再 spawn git」的预检之后，`test/git-changes.test.mjs` **10 条断言同时变红**。
+
+**根因**：那 10 条用注入的 runner 描述一个**不在这块磁盘上**的仓库（`F:/big`、`F:/nowhere`）。预检先 `existsSync` 一看不存在，直接 `[]`，注入的 runner 一次都没被调用——它描述的场景被一个问题之外的原因挡掉了。
+
+**为什么测试没抓到**：这次是测试抓到的，而且抓到得很干净。记在这里是因为它揭示了一条设计约束：**「这个路径存在吗」和「这个路径描述什么」是两个问题**。注入 runner 的调用方只在回答后者。
+
+**修法**：`const injected = typeof options?.run === 'function'`，预检只在 `injected === false` 时执行。注释里写明理由。
+
+**教训**：一个为了省开销而加的前置检查，会改变被检查代码的**语义**，而不只是它的速度。加预检时必须问：这个检查对每一种调用方都成立吗。
+
+## DEF-101 · 断言在测「代码能跑通」，不在测「那条路被走到过」
+
+**症状**：S6 补丁加完之后，`mutate-persistence.mjs` 里的 `a finished turn is not worth writing down`（把 `rememberTurn` 包进 `if (false)`）从 KILLED 变成 **SURVIVED**。此前一直是被杀的。
+
+**根因**：`turn/end` 里新增的 `rememberSweep` 也会 `schedule()`，于是在正常路径上 `rememberTurn` 变成了「第二条写盘的路」。禁掉它，另一条路照写，磁盘上照样有文件，断言全绿。
+
+**为什么 `rememberTurn` 仍然必要**：`rememberSweep` 在 `gitWatch.finish(...).then(...)` 里。`finish` 一旦挂起（网络盘上的 git、卡住的 `rev-parse`），那个 `.then` 永远不执行，而 `rememberTurn` 是同步的、必然发生的那一次。**所以存活不是假警报，它指出的是「这条断言没有把场景造出来」。**
+
+**为什么第一次补的测试也没抓到**：我造的 fixture 让那个回合加载了 skill、调了 MCP 工具、编辑了文件——这三件事各自都会 `schedule()`，把被测的那一次完全遮住。**要观察的那次写盘，必须是没有别人能触发的场景。**
+
+**修法**：在 `test/persistence.test.mjs` 末尾加一块 `a turn whose sweep hangs is still written down`，fixture 只有一句 assistant 发言（不加载 skill、不调工具、不编辑文件），reader 返回一个永不 resolve 的 promise，断言文件确实写出来、`previous.turn === 1`、`previous.said` 含那句话、且 `skills` 为空（证明没有别的来源触发过写盘）。
+
+**第二个坑（同一个测试）**：第一版忘了发 `turn/start`。没有 `turn/start` 就没有基线，`finish` 拿到 `pending === undefined` 立刻返回 `nothing`，`.then` 立即执行并把 sweep 写了出去——「挂起」根本没发生，测试用真实行为证明了它想证伪的东西。**造「永不发生」的场景之前，先确认它本来会发生的那个前提确实成立了。**
+
+**验证**：注入 `if (false)` 后该测试 **3 条失败**（「still written down」「names the turn」「keeps what the turn said」），恢复后 77/0；`mutate-persistence` 回到 **44 killed / 0 survived**。
+
+**教训**：一条断言变绿有两种原因——代码正确，或者它走的那条路根本没被走到。前者是证据，后者是噪音，而两者在输出里长得一样。
+
+## DEF-102 · 重启后的第一轮被编号成第 1 轮，而它其实是第 N 轮
+
+**现象**：`C:\Users\26903\.dsh\plugin-data\skill-evolve\sessions\session-be2090ac-*.json`
+在第二个回合结束后同时写着 `turns: 2`、`previous.turn: 1`、`sweep.turn: 1`。
+
+**机制**：`SessionState.load()` 是异步的，`ctx.on('session/event')` 是同步回调。
+宿主重启后第一条 `user/message` 先到，`transcripts.for(agentId)` 新建空 transcript
+（`turns = 0`），`beginTurn(undefined)` 把它推到 1 并设 `this.turn = 1`。
+读盘完成之后 `restore` 调 `hydrate`，`existing.turns += turns` 得到 2，
+但 `existing.turn` 仍是 1。
+
+**为什么测试没抓到**：`test/transcript.test.mjs` 里既有「先造 live 事件再 hydrate」的块，
+也有「空 transcript 接受落盘数据」的块，但**没有一块同时断言 `turns` 与 `view().current.turn`**。
+前者只断言 `turns` 的和，后者根本没有打开的轮。缺的那条断言是
+「合并之后，正在进行的这一轮用的是哪个号」——一个两个块都没问的问题。
+
+**修法**：`hydrate` 里 `if (existing.turn !== undefined) existing.turn = existing.turns`。
+新增两块断言（共 6 条）：先开轮再 hydrate 时 `current.turn` 被改写、
+`turn/end` 之后 `previous.turn` 与它一致、且不覆盖文件里那条 finished turn；
+以及没有打开的轮时只取计数、不做编号。
+
+**这一条属于哪一类**：与 DEF-101 同类——不是算错，是**某个数字有两个来源而没人对账**。
+新增的突变 `the turn that opened before the file was read keeps the number it invented`
+禁掉那一行，2 条断言失败。
+
+
+## DEF-103 · 两套突变同时跑，各自把对方还原成了自己的备份
+
+**现象**：`mutate-language-and-files.mjs` 与 `mutate-checklist-panel.mjs` 并行运行后，
+`audit_leftovers.py` 报 2 处残留，全量套件 3 条断言红：
+
+```
+ANCHOR GONE   a missing file keeps its colour                    client.js  from=0 to=0
+LEFT MUTATED  the decide route accepts any content type          api.js     from=0 to=1
+
+packages/ui-evolve/lib/api.js:223   if (false) {                  ← 应为 declaredType.length > 0 && !isJson
+packages/ui-evolve/lib/client.js   .dsse-row[data-status="missing"] .dsse-fileicon{...}  ← 整条被删
+```
+
+**机制**：每个突变脚本对每个条目做「读原文件 → 写变异体 → 跑测试 → 写回备份」。
+两个脚本同时跑时，A 写着变异体、B 读到它当作自己的备份，随后 B 把那份变异体写回去——
+**还原操作成功了，只是还原的是错误的内容**。两份「备份」互相覆盖，最后留下的既不是 A 的原始、
+也不是 B 的原始。这与 DEF-90（还原写盘失败留下变异）是同一个设计的两面：
+那个是「还原没发生」，这个是「还原发生了但内容已经被别人污染」。
+
+**为什么审计没挡住**：`audit_leftovers.py` 检查的是「`from` 命中 0 而 `to` 命中 ≥1」。
+`client.js` 那条 `to` 是空字符串（删除型变异），所以命中数恒为 0——它只能报
+`ANCHOR GONE`，不能判 `LEFT MUTATED`。也就是说**删除型变异天然无法被这个审计判定为残留**，
+只能靠「锚点消失了」这条弱信号间接发现。本次能发现，是因为顺带跑了全量套件。
+
+**修法**：
+1. `api.js` 的 `if (false)` 改回 `if (declaredType.length > 0 && !isJson)`。
+2. `client.js` 补回 `.dsse-row[data-status="missing"] .dsse-fileicon,...{color:...tertiary}`
+   ——这条规则的缺失同时说明**图标在已删除的行上不会褪色**，属视觉回归。
+3. 三套突变改为**串行**执行（同一后台命令里 `node a; node b; node c`）。
+
+**教训**：突变脚本不是幂等的，它们对同一批文件有写意图。
+「跑得快一点」在这里换回来的是两次错误的备份还原，而且**还原操作本身不报错**。
+串行跑完整套要几分钟，比事后判断哪一行被谁改坏便宜得多。
+
+
+## DEF-104 · 基线在「用不上」的早退分支里没有被消费
+
+**症状。** `ScanWatch.finish` 与 `GitWatch.finish` 都先检查 `cwd` 是不是非空字符串，
+再取基线。`cwd` 为空时直接返回，基线留在 Map 里。
+
+**后果。** 下一次 `turn/end` 会用上一轮的起点去算这一轮——把一个可能很长的区间
+记成一件事。如果会话 id 被复用，区间可以跨越整个宿主 uptime。
+
+**怎么发现的。** 不是读代码看出来的。`test/scan-watch.test.mjs` 里那条
+`but the baseline is still consumed` 直接失败：
+
+```
+FAIL but the baseline is still consumed
+29 passed, 1 failed
+```
+
+**为什么测试没抓到（在此修复之前）。** `git-watch.test.mjs` 有一条一模一样的
+形状，但它从来没测过「`cwd` 为空时基线是否被消费」——它测的是「不读 workspace」，
+而那次读取恰恰证明不了 Map 的状态。
+
+**修法。** 两个 `finish` 都改成先 `get` + `delete`，再判断 `cwd` 与 reader。
+顺带把注释改成解释**为什么**必须先取：一句「反正要消费」在代码里是看不出来的，
+下一个人重排几个 `if` 就会把它改回去。
+
+**教训。** 守卫的顺序本身就是一个决定。把「清理」写在使用之后的任何位置，
+都会在某个早退分支上被跳过。
+
+## DEF-105 · 一条翻译零覆盖，而它的突变说 SURVIVED
+
+**症状。** `mutate-language-and-files` 报 `SURVIVED  a truncated walk is reported as
+a complete answer`——把 `scanReading` 里 `found.truncated === true ? 'partial' :
+'complete'` 换成常量 `'complete'`，全部套件照绿。
+
+**根因。** 那道缝没有任何断言。`scan-watch.test.mjs` 的每条用例都注入 reader
+（测的是 bracket 的生命周期），`scan-changes.test.mjs` 的每条用例都直调
+`scanChanges`（测的是遍历）。夹在中间的 `scanReading`——唯一把 `truncated`
+翻译成面板用词 `partial` 的地方——没人调用过。
+
+**第一次修，修错了。** 我在 `scan-watch.test.mjs` 里加了断言，但写的是
+`await scanChanges({ ..., maxEntries: 3 })` 然后断言 `budget.truncated === true`。
+那断言的是**事实**，不是**那句话**：把翻译改坏，`scanChanges` 照样返回 `truncated`。
+再跑，仍然 SURVIVED。修法是把预算参数透传进 `scanReading`（D-126），
+断言它返回的 `coverage`。
+
+**为什么测试没抓到（在这条断言之前）。** 两层测试各自完整，接缝处空白。
+这与 DEF-99（`workspaceFor` 只认 agent 形状，两个单元各喂对形状）是同一种形状：
+**两个绿的东西之间的那条线，没有人为它写过一句话。**
+
+**教训。** 突变 SURVIVED 时，第一反应容易是「补个断言」；
+要先问「我补的断言在测哪一层」。测下层的事实、改上层的一句话，两件事都叫「加了测试」，
+但只有一件会让突变死掉。
+
+## DEF-106 · 遍历器的目录过滤在生产路径上从未被传
+
+**症状**：`scanReading` 调 `scanChanges({ cwd, since, ...budgets })`，从不传 `skipDirectory`。
+`scan-changes.js` 的默认值是 `() => false`，所以生产遍历一个目录都不跳。
+同一份文件里 `:77` 的注释却写着「The production value is `isGeneratedDirectory`」。
+
+**为什么这是缺陷而不是配置**：`isGeneratedDirectory` 在 `api.js` 定义、在 `:1175` 导出，
+**生产代码里零调用点**。审查者 `s7e` 的原话值得保留：
+「the lift is correct and harmless; the abstraction it exposes is what's wrong,
+and it is currently unreachable.」
+
+**实测后果**：`node_modules` 里 6000 个文件 + 一个真正被编辑的 `src/real.js`，
+扫描返回 4997 条全是依赖，真文件不在结果里；随后 `rememberPaths` 的 200 条上限
+把剩下的位置也占满。在非仓库工作区——正是这条通路存在的理由——没有任何东西兜住。
+
+**真机现场的同一件事**：让一个会话在非 git 目录里写三个文件，读它自己的状态文件：
+```
+sweep {'turn': 1, 'coverage': 'partial'}
+stored paths: F:\dsh-plugin\dsh-skill-evolve\.git\index
+```
+唯一一条是 `.git/index`，三个真正写出来的文件一条都没有。补丁后同样的机器上
+`scanChanges` 返回 `paths under .git: 0` / `outNodes: 0` / `out3 hits: 3`。
+
+**为什么测试没抓到**：`test/scan-changes.test.mjs` 的每条断言都注入 `skipDirectory`，
+`test/scan-watch.test.mjs` 也是。它们证明了「钩子会被问到」，而那正是唯一不需要证明的部分。
+**要证明的是默认值，不是注入。** 修法因此不是补一条注入断言，而是
+改默认值 + 写一条**不注入**的断言（走 `scanReading`，真的在临时目录里建一个 `node_modules`）。
+注入验证确认它有效：把默认值改回 `() => false` → scan-changes 3 failed、scan-watch 2 failed。
+
+**教训**：**一个可以被注入的接缝，它最危险的部分是默认值。**
+注入让测试变容易，也让「生产没接线」永远不被发现——因为测试替生产做了那件事。
+
+---
+
+## DEF-107 · coverage 扩成三态后，三处单值判断把它打回两态
+
+**症状**：新增 `none` 之后，三处代码写的是 `value?.coverage === 'partial' ? 'partial' : 'complete'`。
+`none` 落进 else 分支，变成 `complete`。
+更糟的是 `GitWatch.finish` 的合并：`before.coverage === 'partial' || after.coverage === 'partial' ? 'partial' : 'complete'`，
+两端都是 `none` 时返回 `complete`。
+
+**后果**：`none` 的原意是「没机会看」。变成 `complete` 之后，面板会告诉用户
+「这一轮没有产出别的文件」，而真相是「这一轮没人检查过」。
+它还覆盖掉上一轮的 `partial`——提醒单向变弱，且永不恢复。
+
+**为什么测试没抓到**：`none` 是我在这一轮为了修 DEF-106 才引入的词，
+当时没有任何断言跨过「存储 → 合并 → 面板」这条链。
+**这一次的顺序是对的：先写端到端断言，它立刻红了。**
+```
+FAIL a bracket that never looked is not reported as clean {"turn":1,"coverage":"complete"}
+```
+那句 FAIL 就是缺陷的完整描述。
+
+**修法**：不是打三处补丁，而是抽出 `packages/ui-evolve/lib/coverage.js` 的 `mergeCoverage`，
+三个调用点改为问它，并给这个函数单独写 10 条断言（`test/coverage.test.mjs`）。
+**三份相同逻辑能同时错，就能同时再错一次**——所以要让它只剩一份。
+
+**教训**：给一个枚举加词，等于给**每一处比较**加一次机会。
+加词之前先问：这个值在代码里有几个读者？如果答案是「我数不清」，
+那先把它收敛成一次函数调用，再加词。

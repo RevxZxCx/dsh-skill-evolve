@@ -29,6 +29,31 @@ import { fileURLToPath } from 'node:url'
 
 const repo = fileURLToPath(new URL('..', import.meta.url))
 
+/**
+ * Write a file, retrying while the platform holds it.
+ *
+ * Windows returns `EBUSY`/`UNKNOWN` (`errno -4094`) when a watcher or indexer
+ * has the file open for a moment. A plain `writeFileSync` throws, and that throw
+ * lands inside the `finally` that restores the original — so the mutated source
+ * stays on disk and the next run reads a file that is already wrong. A failed
+ * mutate is a skipped mutation; a failed restore is a corrupted checkout.
+ *
+ * @param {string} path - the file to write.
+ * @param {string} content - the exact bytes to write.
+ */
+function writeWithRetry(path, content) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.writeFileSync(path, content, 'utf8')
+      return
+    } catch (error) {
+      if (attempt === 5) throw error
+      const until = Date.now() + 60 * (attempt + 1)
+      while (Date.now() < until) { /* wait out the transient lock */ }
+    }
+  }
+}
+
 function failures(output) {
   // Every suite has to have reported. A run that names several suites and reads
   // only the first tally would count a suite that crashed as one that passed —
@@ -153,6 +178,14 @@ const mutations = [
     from: '    if (existing.hydrated === true) return false\n    existing.hydrated = true\n    existing.turns += turns',
     to: '    if (existing.hydrated === true) return false\n    return false\n    existing.hydrated = true\n    existing.turns += turns',
     why: 'A file read takes milliseconds, and events arrive during it. Refusing the file because memory is no longer empty throws away the only fact memory cannot reconstruct — how many turns came before this process started — so the panel announces turn 1 for a conversation that had reached turn 8.',
+  },
+  {
+    file: transcript,
+    label: 'the turn that opened before the file was read keeps the number it invented',
+    suites: ['test/transcript.test.mjs'],
+    from: '    if (existing.turn !== undefined) existing.turn = existing.turns',
+    to: '    if (false) existing.turn = existing.turns',
+    why: 'The count and the open turn disagree after a restart unless the open turn is moved with it. Adding the stored turns without renumbering leaves `turns: 2` beside an open turn of `1`, and every later consumer of that number — `previous.turn`, the sweep record, each path window — files this turn under the one that had already finished. Nothing crashes and the card still draws; it just puts the work that just happened under the wrong turn.',
   },
   {
     file: transcript,
@@ -447,7 +480,7 @@ try {
       continue
     }
     try {
-      fs.writeFileSync(mutation.file, original.replace(mutation.from, mutation.to), 'utf8')
+      writeWithRetry(mutation.file, original.replace(mutation.from, mutation.to))
       const failed = failures(run(mutation.suites))
       if (failed > 0) {
         killed += 1
@@ -462,7 +495,7 @@ try {
     } finally {
       // Restored per mutation, not per run: a later anchor is read from disk, and
       // leaving one mutation in place would make every following run meaningless.
-      fs.writeFileSync(mutation.file, original, 'utf8')
+      writeWithRetry(mutation.file, original)
     }
   }
 } finally {
@@ -470,7 +503,7 @@ try {
   // an interrupt landing between the write and that restore.
   for (const file of new Set(mutations.map((mutation) => mutation.file))) {
     const backup = backups.get(file)
-    if (backup !== undefined) fs.writeFileSync(file, backup, 'utf8')
+    if (backup !== undefined) writeWithRetry(file, backup)
   }
 }
 

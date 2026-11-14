@@ -77,3 +77,56 @@ node scripts/mutate-checklist-panel.mjs # 清单卡片的变异
 **新的分层。** 与其它文档的边界因此多了两层：`packages/*/README.md` 是每个包自己的说明（它拥有什么、怎么配、故意不做什么），配置键只在各自的包里列；`docs/00-文档索引.md` 是编号文档的导航，按目的分类并标出每份的状态。
 
 **规矩固化。** `docs/00-文档索引.md` 末尾写了四条维护规矩，其中两条是既有约定的复述：`handover/` 只增不改（用户 m20052 定），旧编号文档不改写。另两条是新的：包的 README 跟着包走、根 README 不重复列配置键（重复的那份会先过期）；新增编号文档时同步更新索引表的状态栏。
+
+---
+
+## 更正 2026-11-12：改代码时该跑的命令不止四条
+
+上面「怎么用」一节写的四条命令是 2026-11-10 时的全部。此后新增了六套变异，那一节已经不全——
+按它跑会漏掉摘要、速度、持久化、会话存储、bundle、观察窗口、结果形状这几块的变异。**原文不改**
+（本文件只增不改），新清单在这里：
+
+```bash
+node test/run.mjs                           # 全量断言
+node test/mutate-panel.mjs                  # 面板连接
+node scripts/mutate-guards.mjs              # 几何守卫
+node scripts/mutate-checklist-panel.mjs     # 清单卡片
+node scripts/mutate-language-and-files.mjs  # 摘要语言/清洗/失败文案/产出文件
+node scripts/mutate-speed.mjs               # 速度读数
+node scripts/mutate-persistence.mjs         # 持久化
+node scripts/mutate-session-store.mjs       # 会话存储
+node scripts/mutate-bundle.mjs              # 客户端 bundle
+node scripts/mutate-outcome.mjs             # 加载后观察窗口
+node scripts/mutate-result-shape.mjs        # 结果形状
+```
+
+哪几套是「必须归零」的，取决于改了什么：改动落在哪个模块，就跑到那一个套件归零为止；
+不知道范围时全部跑一遍。
+
+**测试与突变都必须带临时目录。** 本机默认 `%TEMP%` 不让 `mkdtemp`，`test/skillfile`、`usage`、
+`api`、`index` 这些用临时目录的用例会直接报 `EPERM ... -4048`（错误码 -4048），看起来像测试坏了，
+其实是环境。先建目录再跑：
+
+```bash
+mkdir -p .tmp-test
+TMPDIR=$PWD/.tmp-test TMP=$PWD/.tmp-test TEMP=$PWD/.tmp-test node test/run.mjs
+```
+
+**这条坑值得记下来的原因**：`EPERM` 出现在毫无关系的位置（某个用临时目录的用例），而报错信息里
+没有「这是权限」以外的线索，所以第一反应通常是去查那个用例的代码——那会花掉比建一个目录多得多的
+时间。环境问题要以环境问题的速度解决。
+
+
+## 更正 2026-11-12：S2 那一节的重复
+
+`01-status.md` / `02-decisions.md` / `03-defects.md` / `04-reviews.md` 里
+2026-11-12 的 S2 条目一度**各出现两次**。原因是我写的 `_edit/doc_s2.py` 在跑第二遍时
+才因为索引表的锚点字符串不匹配而退出，而四份文件的追加发生在那一步之前 —— 于是
+第二次运行时又把同样的内容追加了一遍。
+
+修法是删掉末尾那份重复（连同索引表里重复的一行）。这件事与「只增不改」不冲突：
+重复段从未进过 HEAD，删除它对 `git diff` 不产生任何 `-` 行，检查过
+`git diff -U0 docs/handover/ | grep -c '^-[^-]'` = 0。
+
+教训是**幂等**：一个会向多个文件追加内容的脚本，失败时必须报告「已经写了哪些」，
+或者干脆先检查目标内容是否已存在再写。

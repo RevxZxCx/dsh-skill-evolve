@@ -33,12 +33,16 @@
  */
 
 import { Config } from './config.js'
+import { GitWatch, readChanges } from './git-watch.js'
+import { ScanWatch, scanReading } from './scan-watch.js'
+import { createReportTool } from './report-tool.js'
 import { TranscriptStore, readToolCallBlock } from './transcript.js'
 import { Summariser } from './summarise.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
 import { SessionState } from './session-state.js'
 import { SpeedMeter } from './speed.js'
 import { SKILL_GESTURE, readSkillArgument } from '@revxz/dsh-evolve-core'
+import { mergeCoverage } from './coverage.js'
 
 /** Cordis plugin name. */
 export const name = 'ui-evolve'
@@ -66,9 +70,14 @@ export { Config }
  *
  * @param {any} ctx - the cordis context.
  * @param {object} config - validated {@link Config} values.
+ * @param {object} [options] - seams the tests use, never the host.
+ * @param {Function} [options.changes] - replaces the git reading. The bracket
+ *   around each turn is the only part of this package that shells out, and a
+ *   test that needed a real repository to exercise it would be a test nobody
+ *   runs on a machine without git.
  * @returns {void}
  */
-export function apply(ctx, config) {
+export function apply(ctx, config, options) {
   const log = (...parts) => {
     try {
       ctx.logger?.info?.(`[ui-evolve] ${parts.join(' ')}`)
@@ -140,14 +149,43 @@ export function apply(ctx, config) {
   }
 
   /**
-   * The workspace root for an agent, taken from the session header.
+   * The workspace root for an agent or a session, taken from the session header.
    *
-   * @param {any} agent - the agent.
+   * Accepts both shapes on purpose. Most callers have an agent, but the
+   * `session/event` stream hands over the session itself — and that is the
+   * shape the git bracket needs, because the header is what the turn is running
+   * against while the registry may not hold an agent yet. Reading only
+   * `agent.session.header` made every stream-driven call answer `''`, which
+   * silently disabled the whole bracket: no workspace, no reading, no error.
+   *
+   * @param {any} subject - an agent, or a session.
    * @returns {string} absolute path, or `''` when unknown.
    */
-  function workspaceFor(agent) {
-    const cwd = agent?.session?.header?.cwd
+  function workspaceFor(subject) {
+    const cwd = subject?.session?.header?.cwd ?? subject?.header?.cwd
     return typeof cwd === 'string' ? cwd : ''
+  }
+
+  /**
+   * The weakest claim either bracket is willing to make about a turn.
+   *
+   * Delegates to `mergeCoverage` so the turn-level merge and the before/after
+   * merge inside `GitWatch.finish` cannot drift: `none` > `partial` > `complete`
+   * in severity, weakest wins, and `none` dominates because a turn with a
+   * bracket that never looked cannot be called fully seen no matter how
+   * carefully the other bracket read. Collapsing it to `complete` would make the
+   * card vouch for work nobody checked, which is the one thing this field exists
+   * to prevent.
+   *
+   * An unrecognised value counts as `complete`: an injected reader written
+   * before this vocabulary existed is not evidence that something was skipped.
+   *
+   * @param {unknown} git - the git bracket's coverage, if it reported.
+   * @param {unknown} scan - the scan bracket's coverage, if it reported.
+   * @returns {'complete' | 'partial' | 'none'} the claim to store.
+   */
+  function coverageOf(git, scan) {
+    return mergeCoverage(git, scan)
   }
 
   // ------------------------------------------------------------ collection --
@@ -180,6 +218,39 @@ export function apply(ctx, config) {
    * speed, it is a number with no meaning.
    */
   const speeds = new SpeedMeter()
+
+  /**
+   * What `git status` said before each turn, per session.
+   *
+   * The third source for the output card, after the tools that name a path and
+   * the model's own declaration. It exists because a script that writes four
+   * files at runtime names none of them, and it is a baseline rather than a
+   * watch because watching a large workspace costs more than the card is worth.
+   *
+   * `changes` is `readChanges` in production; the substitution point exists so a
+   * test can drive the bracket without a repository on disk.
+   */
+  const gitWatch = new GitWatch({ changes: options?.changes ?? readChanges })
+
+  /**
+   * What the workspace looked like when each turn opened, per session.
+   *
+   * The fourth source, and the only one that works in a directory that is not a
+   * repository. The git sweep answers most turns and answers them precisely, but
+   * it can say nothing at all about `F:\test` — measured, `fatal: not a
+   * repository` — and it cannot see a file that was already untracked and got
+   * rewritten, because `??` before and `??` after are the same word.
+   *
+   * A modification time is the weaker fact: it says a file was touched, not by
+   * whom. `git checkout`, `npm install` and a build all touch files nobody chose
+   * to produce. So this source is only consulted when the others had nothing to
+   * say, and the merge in S8 decides how that gets labelled.
+   *
+   * `read` is `scanReading` in production; the substitution point exists so a
+   * test can drive the bracket without a directory tree on disk.
+   */
+  const scanWatch = new ScanWatch({ read: options?.scan ?? scanReading })
+
 
   /**
    * What the panel remembers about each conversation.
@@ -351,6 +422,21 @@ export function apply(ctx, config) {
     const agentId = session?.id
     if (typeof agentId !== 'string' || agentId.length === 0) return
 
+    // The git bracket opens here and closes on `turn/end` below, so a turn that
+    // runs a script is measured the same way whether the script names its output
+    // or not. The start reading is taken from the session header rather than the
+    // agent registry: the header is what the turn is actually running against,
+    // and a reopened session has one before the registry has an agent.
+    if (event?.type === 'turn/start') {
+      gitWatch.start(agentId, workspaceFor(session))
+      // The clock starts on the same event, and independently of the git
+      // bracket: a directory that is not a repository still has a turn, and a
+      // turn still has a beginning.
+      scanWatch.start(agentId)
+      transcripts.record(agentId, event)
+      return
+    }
+
     // The output card lists the session's work, not this turn's, so the paths a
     // turn touched have to outlive it. Read *before* `record` folds the turn:
     // `endTurn` either moves the paths into `previous` or — for a turn the host
@@ -358,7 +444,13 @@ export function apply(ctx, config) {
     // before this one in both cases. That read the wrong turn twice: it re-issued
     // a fresh tick for files an interrupted turn never touched, pushing stale
     // work to the top of the list, and it dropped the edits that turn did make.
-    const ended = event?.type === 'turn/end' ? transcripts.view(agentId)?.current?.paths : undefined
+    const ending = event?.type === 'turn/end' ? transcripts.view(agentId)?.current : undefined
+    const ended = ending?.paths
+    // The turn number has to come from the same read as the paths, and for the
+    // same reason: `previous.turn` names the *other* turn, and an abandoned turn
+    // sets no `previous` at all. Without this the card can only say "earlier"
+    // after a restart, because the number never leaves this process.
+    const endedTurn = ending?.turn
 
     transcripts.record(agentId, event)
 
@@ -368,7 +460,37 @@ export function apply(ctx, config) {
     // document that had not changed.
     if (event?.type === 'turn/end') {
       sessionState.rememberTurn(agentId)
-      if (ended !== undefined) sessionState.rememberPaths(agentId, ended)
+      if (ended !== undefined) sessionState.rememberPaths(agentId, ended, endedTurn)
+      // Both halves of both brackets, started together. Not awaited: this handler
+      // returns to the host's event loop, and a `git status` that takes a second
+      // on a large workspace must not hold up the turn that just finished.
+      //
+      // They are not equally trusted, and the code below says so rather than
+      // pretending to merge them. `git status` names files the repository
+      // considers changed; a modification time names files that were touched,
+      // which includes every file a checkout or a build rewrote. So the scan only
+      // speaks when git has nothing to say — the two cases that motivated it are
+      // both silences: a workspace that is not a repository at all, and a file
+      // that was already untracked before this turn and got rewritten (measured:
+      // `??` before and `??` after, byte-identical `git status`).
+      const cwd = workspaceFor(session)
+      void Promise.all([gitWatch.finish(agentId, cwd), scanWatch.finish(agentId, cwd)]).then(
+        ([git, scan]) => {
+          const fromGit = Array.isArray(git?.paths) ? git.paths : []
+          const fromScan = Array.isArray(scan?.paths) ? scan.paths : []
+          const paths = fromGit.length > 0 ? fromGit : fromScan
+          // The claim is about what was looked at, not about who answered first,
+          // so it is built from both brackets rather than from the winner of the
+          // one above. `none` dominates: a turn with a half nobody swept cannot
+          // be called fully seen however carefully the other half was read.
+          // Then `partial`, then `complete`.
+          const claim = coverageOf(git?.coverage, scan?.coverage)
+          sessionState.rememberSweep(agentId, endedTurn, claim)
+          if (paths.length === 0) return
+          sessionState.rememberPaths(agentId, paths, endedTurn)
+        },
+        () => {}
+      )
     }
 
     // Remember MCP tool names as they are dispatched. Presence is proved by
@@ -459,6 +581,16 @@ export function apply(ctx, config) {
     // about the map, not about the number — a host that runs for a week and
     // opens a thousand sessions should not hold a thousand empty windows.
     speeds.forget(agentId)
+    // A baseline describes one turn's interval. Carrying it past the session
+    // would make the map grow with host uptime for a session that can never
+    // finish another turn — and if the id were ever reused, the leftover reading
+    // would measure the wrong interval.
+    gitWatch.forget(agentId)
+    // The same reasoning, and the same map shape. A leftover opening time would
+    // make the next turn of a reused id report every file touched since the
+    // previous session's turn began — an unbounded interval attributed to one
+    // turn.
+    scanWatch.forget(agentId)
   }))
 
   // ------------------------------------------------------------- summariser --
@@ -556,6 +688,23 @@ export function apply(ctx, config) {
     if (typeof timer?.unref === 'function') timer.unref()
     return () => clearInterval(timer)
   }, 'ui-evolve: session state pruner')
+
+  // ------------------------------------------------------------- the tool --
+  //
+  // Registered through `inject` rather than declared at the top: a profile that
+  // does not serve `tools` cannot run a tool at all, but it can still show a
+  // panel, and this plugin's job is the panel. Declaring it would turn "no tool
+  // service" into "no cards", which is the wrong trade — the card works from
+  // `session/event`, which every profile has.
+  //
+  // The tool records nothing itself. `transcript.js` reads the same arguments
+  // off the `tool/call` event that feeds every other collection rule, so a turn's
+  // paths all arrive on one path and a missing tool result cannot lose them.
+  ctx.inject(['tools'], (toolCtx) => {
+    const tools = toolCtx.tools
+    if (tools === undefined || tools === null || typeof tools.register !== 'function') return
+    ctx.effect(() => tools.register(createReportTool()), 'ui-evolve: report_output_files tool')
+  })
 
   // ----------------------------------------------------------- panel route --
   //
@@ -697,6 +846,18 @@ export function apply(ctx, config) {
        */
       filesSeen(agentId) {
         return sessionState.pathsSeen(agentId)
+      },
+
+      /**
+       * What the last git sweep could see, so the card can caveat its own list.
+       *
+       * Separate from `filesSeen` on purpose: that one answers "which files", this
+       * one answers "how sure" — and a turn that found no files in a repository
+       * the sweep could only half read is not the same fact as a turn that found
+       * no files at all.
+       */
+      sweepSeen(agentId) {
+        return sessionState.sweepSeen(agentId)
       },
 
       routeFor,

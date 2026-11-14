@@ -199,27 +199,26 @@ Three modules, top to bottom:
    The scrub is case-insensitive and tolerates whitespace inside the tag, because
    `</TRANSCRIPT >` closes a block just as well as `</transcript>`.
 
-   **The language is told, not guessed.** The prompt used to ask the model for
-   "the language the user wrote in", and a reader whose interface is Chinese may
-   well type English — the interface is what they read. So the panel reads
-   `document.documentElement.lang`, passes it as `?lang=`, and the summary
-   instruction names the language outright (`Write it in Simplified Chinese,
-   whatever language the transcript below is in`). `zh` is split by script:
-   `zh-CN`/`zh-SG`/bare `zh` are simplified, `zh-TW`/`zh-HK`/`zh-MO`/`zh-Hant`
-   are traditional, because "Chinese" alone leaves the model free to pick a
-   script half the readers cannot read.
+   **The language comes from what the user wrote.** The instruction asks for the
+   summary in the language of *the user's own words*, not the assistant's prose
+   and not the commands — a Chinese speaker working with an English-speaking
+   model still wants a Chinese summary, and tool output is English regardless of
+   who is reading. The transcript therefore carries the question itself: the
+   prompt body opens with `What the user asked:` (see `renderPromptBody`), which
+   is also the only line in there that says what the turn was *for* rather than
+   what it produced. The block is omitted entirely when the ask is empty — an
+   empty `What the user asked:` reads as "they said nothing", which is an
+   assertion, not an absence.
 
-   The name comes from a closed table of eleven languages rather than from the
-   tag itself: echoing `用 ru 写` to a reader who turns out to read English hands
-   the guess back with a straight face. A well-formed tag outside the table is
-   **not** silently dropped — it gets the old generic sentence, so a change that
-   only helps eleven languages does not quietly take it away from the rest. A
-   tag missing from `<html lang>` produces no sentence at all, which is the one
-   honest answer: no instruction beats a wrong one.
-
-   The summary cache is keyed on the rendered sentence, not on the language
-   name. A tag outside the table has no name, so keying on the name would make
-   `lang=nl` and no `lang` share one entry while their prompts differ.
+   Nothing about the reader's interface language is sent. There used to be a
+   `?lang=` parameter fed from `document.documentElement.lang`, with a
+   closed table of eleven language names, a script split for `zh`, and a cache
+   key built from the rendered sentence. All of it is gone, and it should not be
+   reintroduced: the interface language is what a reader *reads*, while the
+   summary has to match what they *wrote*, and those differ often enough to
+   matter. Keeping the language out of the prompt also means the language never
+   enters the cache key, so a warm-up started at turn end and a later panel
+   request compute the same key without needing to agree on anything.
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question
@@ -349,10 +348,10 @@ transcript. The read is per conversation and happens once — the loaded documen
 is installed into the in-memory store, so a polled panel does not re-read.
 
 The panel can write, but only through the routes that already had a gate behind
-them. It calls `GET /api/ui-evolve/panel?agent=<id>&lang=<tag>` to read the
-three modules — the tag is the interface language, and everything outside
-`^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$` is dropped rather than escaped, because
-the value ends up inside a prompt —
+them. It calls `GET /api/ui-evolve/panel?agent=<id>` to read the
+three modules — that is the whole query string; there is no language parameter
+because the summary's language comes from the user's own words rather than from
+the interface —
 `GET /api/ui-evolve/candidates` to read the queue, `POST /config` for its own
 switches, and `POST /candidates` to approve or discard one candidate. The panel
 itself no longer calls `POST /propose` — the button that did is gone, because a

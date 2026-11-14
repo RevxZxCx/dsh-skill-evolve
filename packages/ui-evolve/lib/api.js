@@ -254,12 +254,98 @@ async function readJsonBody(req) {
  * mean the same thing as the primary source — without it a turn that touched
  * four files would list them backwards the one time the session list is empty.
  *
- * @param {string[]} paths - paths in the order they were written.
+ * String entries and `{ path }` objects both pass through: the fallback comes
+ * from the transcript as bare strings, and the primary source as objects.
+ *
+ * @param {Array<string | { path: string }>} paths - paths in the order they were written.
  * @param {boolean} newestFirst - whether `paths` is already newest-first.
- * @returns {string[]} the list in newest-first order.
+ * @returns {Array<string | { path: string }>} the list in newest-first order.
  */
 function newestFirstOf(paths, newestFirst) {
   return newestFirst === true ? paths : paths.slice().reverse()
+}
+
+// ---------------------------------------------------------------------------
+// What counts as generated, in one place.
+//
+// These tables live at module scope, not inside `isNoisePath`, because the
+// output card is no longer the only reader: the S7 workspace walk has to skip
+// the same directories before it reads them, and a second copy of this list
+// would drift from the first. The drift would be silent and expensive — the
+// walk would collect a thousand rows under `node_modules` that the card then
+// filters out, or skip a directory the card would have shown.
+//
+// `isNoisePath` still owns the decision. Nothing below decides anything on its
+// own; the walker only asks `isGeneratedDirectory` before descending.
+// ---------------------------------------------------------------------------
+// Never classify the file itself by extension alone: `package.json` and
+// `cargo.lock` both live at the root and only the latter is generated.
+const GENERATED_DIRS = new Set(['node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'coverage', '.pytest_cache', '.mypy_cache', '.gradle', '.idea', '.git'])
+const GENERATED_FILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'cargo.lock', 'poetry.lock', 'pipfile.lock', 'composer.lock', 'gemfile.lock', 'uv.lock', 'go.sum'])
+const GENERATED_SUFFIXES = ['.min.js', '.min.css', '.map', '.pyc', '.pyo', '.class', '.o', '.obj']
+
+// Scratch files, which turn out to be most of what a long session leaves
+// behind. Measured before this rule existed: 276 tracked paths across every
+// stored session, zero of them classified as generated — the filter looked
+// broken, and was, because none of the rules above described the data. One
+// 175-file session was 130 rows of `_peek2.py`, `_r062_snapx.py`, `_dump.json`:
+// scripts written to answer a single question, never meant to be read again.
+//
+// The leading underscore is the load-bearing half. It is the oldest convention
+// there is for "scratch, or not part of the interface", and it is what these
+// sessions actually produce.
+const TEMP_DIRS = new Set(['tmp', 'temp', 'scratch', '.tmp', '.temp', '.scratch', '.research', '.probe', '.sandbox', '.playground', '.trash'])
+// Dunder names are the exception that makes the underscore rule safe. Two
+// families live here and both belong to the project: directories such as
+// `__tests__/`, `__mocks__/`, `__fixtures__/`, and Python's dunder modules
+// `__init__.py`, `__main__.py`, `__about__.py`. The first draft required the
+// name to *end* with `__`, which protected the directories and hid
+// `__init__.py` — the one file every Python package has. A leading `__` is
+// the whole test: no scratch convention starts a name that way, and the cost
+// of guessing wrong is a package marker hidden from the card.
+const dunderName = (segment) => segment.startsWith('__')
+const scratchName = (segment) => {
+  if (dunderName(segment)) return false
+  if (TEMP_DIRS.has(segment)) return true
+  return segment.startsWith('_')
+}
+
+// Dot files are the other half of the convention (`.probe-slice.mjs`), but a
+// dot file is far more often part of the project than temporary, and the cost
+// is lopsided: hiding `.gitignore` hides something the reader may have just
+// asked for, while showing `.probe-slice.mjs` costs one row they scroll past.
+// So the config names stay, and everything else dotted is treated as scratch.
+const CONFIG_FILES = new Set(['.gitignore', '.gitattributes', '.gitmodules', '.editorconfig', '.npmrc', '.nvmrc', '.node-version', '.python-version', '.tool-versions', '.dockerignore', '.gitkeep', '.yarnrc'])
+const CONFIG_PREFIXES = ['.env', '.eslintrc', '.prettierrc', '.stylelintrc', '.babelrc', '.swcrc', '.markdownlint', '.commitlintrc', '.lintstagedrc', '.prettierignore', '.eslintignore']
+const configName = (segment) => {
+  if (CONFIG_FILES.has(segment)) return true
+  return CONFIG_PREFIXES.some((prefix) => segment === prefix || segment.startsWith(`${prefix}.`))
+}
+const dotName = (segment) => segment.startsWith('.') && segment.length > 1
+
+/**
+ * Whether a directory may be skipped without reading it.
+
+ * The walker asks this before descending. It is the same test `isNoisePath`
+ * applies to every ancestor segment, lifted so it can be asked one level at a
+ * time during a traversal instead of once per finished path.
+ *
+ * Case-folded here rather than at the call sites: a directory name read from
+ * the filesystem arrives in whatever case the disk uses, while the tables are
+ * written in lower case.
+ *
+ * @param {string} segment - one directory name, not a path.
+ * @returns {boolean} whether its contents cannot be output.
+ */
+function isGeneratedDirectory(segment) {
+  if (typeof segment !== 'string' || segment.length === 0) return false
+  // GENERATED_DIRS only. `scratchName` is deliberately NOT applied here: its
+  // leading-underscore rule was written for scratch FILES, and on directories it
+  // would prune `_posts`/`_layouts`/`_data` in every Jekyll site and `_build` in
+  // Hugo — all source. The card can filter a row after reading it; a traversal
+  // that pruned a subtree can never get it back, so when the two rules disagree
+  // this one must be the narrower of the two.
+  return GENERATED_DIRS.has(segment.toLowerCase())
 }
 
 /**
@@ -311,15 +397,19 @@ function isNoisePath(path, cwd) {
   const foldedRoot = root.toLowerCase()
   const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded
   const segments = scoped.split('/').filter((segment) => segment.length > 0)
-  // Never classify the file itself by extension alone: `package.json` and
-  // `cargo.lock` both live at the root and only the latter is generated.
-  const GENERATED_DIRS = new Set(['node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'coverage', '.pytest_cache', '.mypy_cache', '.gradle', '.idea'])
-  const GENERATED_FILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'cargo.lock', 'poetry.lock', 'pipfile.lock', 'composer.lock', 'gemfile.lock', 'uv.lock', 'go.sum'])
-  const GENERATED_SUFFIXES = ['.min.js', '.min.css', '.map', '.pyc', '.pyo', '.class', '.o', '.obj']
+
+  // Tables and name predicates are at module scope; see the block above
+  // `isNoisePath`. Repeating them here is what let them drift.
   const name = segments[segments.length - 1] ?? ''
-  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment))) return true
-  if (GENERATED_FILES.has(name.toLowerCase())) return true
-  return GENERATED_SUFFIXES.some((suffix) => name.toLowerCase().endsWith(suffix))
+  const lowerName = name.toLowerCase()
+  // Directories first: anything under a scratch directory is scratch, whatever
+  // it is called. Dot directories are deliberately not covered wholesale —
+  // `.github/` and `.vscode/` are project directories — only the named ones.
+  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true
+  if (GENERATED_FILES.has(lowerName)) return true
+  if (GENERATED_SUFFIXES.some((suffix) => lowerName.endsWith(suffix))) return true
+  if (scratchName(lowerName)) return true
+  return dotName(name) && configName(lowerName) === false
 }
 
 /**
@@ -352,52 +442,101 @@ function resourceAddress(sessionId, cwd, path) {
 }
 
 /**
- * Pick the files a turn touched that actually exist and are worth listing.
+ * Resolve the files a session remembers against the disk, keeping what is gone.
  *
  * A path recorded from a tool call is a claim, not a fact: an `edit` may have
  * been rejected, a `write` may have failed, and the recorded string may be
- * relative to a directory that is not the one the panel is looking at. Rather
- * than guess, this resolves each one against the session's cwd and keeps only
- * what is really on disk.
+ * relative to a directory that is not the one the panel is looking at. Each
+ * candidate is therefore resolved against the session's cwd and asks the
+ * filesystem what it is now.
  *
- * Each file also carries two flags the card groups by. `turn` says the turn that
- * just ended wrote it — the card answers "what did this turn do" first and "what
- * has this session done" second, and only the server knows which is which
- * because only it holds both `previous.paths` and the session's list. `noise`
- * says a tool wrote it rather than a person; the client folds those away behind
- * their own control instead of dropping them, so the list stays auditable.
+ * What comes back is a **status**, not a filter. This function used to drop
+ * anything `stat` refused, which made "you edited this and then deleted it"
+ * indistinguishable from "you never touched it": the row simply was not there.
+ * The card is a list of what the session did, and deleting a file does not undo
+ * having written it. So a path that is gone comes back as `missing`, a path that
+ * exists but cannot be read as `invalid`, and only a real file as `available`.
+ *
+ * The distinction between the last two is the one the reader can act on:
+ * `missing` is something they did on purpose and may want to undo, `invalid` is
+ * a permissions or device problem they probably cannot.
+ *
+ * Each file also carries the flags the card groups by. `turn` says the turn that
+ * just ended wrote it — resolved from the number recorded when the file was
+ * remembered, falling back to comparing paths for records written before the
+ * number was kept. `noise` says a tool wrote it rather than a person.
  *
  * @param {object} input - the request.
- * @param {string[]} input.paths - the candidate paths.
+ * @param {Array<{ path: string, turn?: number, at?: number } | string>} input.paths - the candidates, newest first.
  * @param {string} [input.cwd] - the directory relative paths resolve against.
  * @param {string} [input.sessionId] - the session the addresses belong to.
  * @param {Set<string>} [input.turnPaths] - normalised paths the last turn wrote.
- * @returns {Promise<Array<{ path: string, bytes: number, mtimeMs: number, address: string, turn: boolean, noise: boolean }>>} the existing files.
+ * @param {number} [input.turnNow] - the number of the turn that just ended.
+ * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean }>>} one row per candidate.
  */
-async function statTouchedFiles({ paths, cwd, sessionId, turnPaths }) {
+async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat }) {
   const seen = new Set()
   const out = []
   for (const raw of paths) {
-    if (typeof raw !== 'string' || raw.length === 0) continue
-    const absolute = raw.startsWith('/') || /^[A-Za-z]:[\\/]/.test(raw) ? raw : join(cwd ?? process.cwd(), raw)
+    // Two shapes arrive here: the objects `pathsSeen` returns, and the bare
+    // strings `previous.paths` holds. Accepting both keeps the fallback path
+    // working without a second function, and a bare string means exactly what an
+    // object with nothing but a path means.
+    const path = typeof raw === 'string' ? raw : raw?.path
+    if (typeof path !== 'string' || path.length === 0) continue
+    const absolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) ? path : join(cwd ?? process.cwd(), path)
     if (seen.has(absolute)) continue
     seen.add(absolute)
-    try {
-      const { stat } = await import('node:fs/promises')
-      const info = await stat(absolute)
-      if (!info.isFile()) continue
-      out.push({
-        path: absolute,
-        bytes: info.size,
-        mtimeMs: info.mtimeMs,
-        address: resourceAddress(sessionId ?? '', cwd, absolute),
-        turn: turnPaths === undefined ? false : turnPaths.has(absolute),
-        noise: isNoisePath(absolute, cwd),
-      })
-    } catch {
-      // Not there, or not readable. The panel says "edited", not "exists", so a
-      // missing file is a legitimate answer and needs no warning.
+    const recordedTurn = typeof raw === 'object' && raw !== null ? raw.turn : undefined
+    const recordedAt = typeof raw === 'object' && raw !== null ? raw.at : undefined
+    // "This turn" means the turn the card is describing, and the card describes
+    // `previous` — its head counts and its path list both come from there. So the
+    // path comparison answers whenever a snapshot exists.
+    //
+    // The stored number is only a fallback, for a document whose `previous` has no
+    // path list. It deliberately does not outvote the snapshot: it is a counter
+    // from whichever process wrote it, and a restart replays events before the
+    // panel is ever polled, so a live `previous.turn` can be a small number (1)
+    // that collides with stamps written under a much later turn by the process
+    // before it. Trusting the number first promoted old files into "this turn",
+    // and could equally veto a file the snapshot had just listed.
+    const turn =
+      turnPaths !== undefined
+        ? turnPaths.has(absolute)
+        : Number.isFinite(recordedTurn) && Number.isFinite(turnNow)
+          ? recordedTurn === turnNow
+          : false
+    const base = {
+      path: absolute,
+      address: resourceAddress(sessionId ?? '', cwd, absolute),
+      turn,
+      noise: isNoisePath(absolute, cwd),
+      at: Number.isFinite(recordedAt) ? recordedAt : null,
     }
+    let info
+    try {
+      if (typeof readStat === 'function') {
+        info = await readStat(absolute)
+      } else {
+        const { stat } = await import('node:fs/promises')
+        info = await stat(absolute)
+      }
+    } catch (error) {
+      // Not there versus not readable is the one distinction the reader can act
+      // on, so it is kept rather than collapsed into "gone".
+      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'
+      out.push({ ...base, status: gone ? 'missing' : 'invalid', bytes: null, mtimeMs: null })
+      continue
+    }
+    // A directory the tools reported writing into is not a file this card can
+    // describe, and it is not readable content either — the thing that was
+    // claimed to be a file is not there, which is what `missing` says.
+    if (!info.isFile()) {
+      out.push({ ...base, status: 'missing', bytes: null, mtimeMs: null })
+      continue
+    }
+    out.push({ ...base, status: 'available', bytes: info.size, mtimeMs: info.mtimeMs })
   }
   return out
 }
@@ -588,7 +727,7 @@ function createPanelApi(deps) {
 
     try {
       if (path === `${ROUTE_PREFIX}/panel`) {
-        return json(res, 200, { ok: true, data: await readPanel(deps, agentId, langOf(url.searchParams.get('lang'))) }, headOnly)
+        return json(res, 200, { ok: true, data: await readPanel(deps, agentId) }, headOnly)
       }
       if (path === `${ROUTE_PREFIX}/models`) return json(res, 200, { ok: true, data: { providers: deps.modelCatalog() } }, headOnly)
       // A speed is a reading of the last two seconds, not a document. It is a
@@ -812,25 +951,6 @@ async function viewOf(deps, agentId) {
 }
 
 /**
- * A BCP 47 tag from a query string, or `undefined` for anything else.
- *
- * The panel puts the browser's `document.documentElement.lang` here so the
- * summary can be written in the language the reader is already reading. The
- * value ends up inside a prompt, so it is validated here rather than trusted:
- * the shape is checked in `summarise.js` too, but a request carrying
- * `?lang=../..` should not reach a module that then has to be careful with it.
- *
- * @param {string | null} raw - the raw query value.
- * @returns {string | undefined} the tag, if it looked like one.
- */
-function langOf(raw) {
-  if (typeof raw !== 'string') return undefined
-  const trimmed = raw.trim()
-  if (trimmed.length === 0 || trimmed.length > 35) return undefined
-  return /^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(trimmed) ? trimmed : undefined
-}
-
-/**
  * Assemble everything the panel draws.
  *
  * One request rather than three: the three modules share a turn number, and
@@ -839,12 +959,17 @@ function langOf(raw) {
  *
  * @param {object} deps - the API dependencies.
  * @param {string | undefined} agentId - which agent to describe.
- * @param {string} [lang] - a BCP 47 tag for the language the reader sees.
  * @returns {Promise<object>} the payload.
  */
-async function readPanel(deps, agentId, lang) {
+async function readPanel(deps, agentId) {
   const config = valueOf(deps.config)
   const id = agentId ?? ''
+  // Served once, so this session has a reader. The summariser only warms turns
+  // for sessions it has actually been asked about, and this is the only place
+  // that knows the difference between "a session that exists" and "a session
+  // somebody is watching". Recorded before the summary branch below, because
+  // the panel was opened whether or not a summary is configured.
+  if (id.length > 0 && deps.summariser?.markViewed !== undefined) deps.summariser.markViewed(id)
   const view = id.length > 0 ? await viewOf(deps, id) : undefined
   const previous = view?.previous
 
@@ -854,7 +979,7 @@ async function readPanel(deps, agentId, lang) {
     // is proven reachable and authorised against this account, whereas the
     // catalogue only proves that an adapter advertised it.
     const sessionRoute = typeof deps.routeFor === 'function' ? deps.routeFor(id) : undefined
-    summary = await deps.summariser.summarise({ agentId: id, snapshot: previous, sessionRoute, language: lang })
+    summary = await deps.summariser.summarise({ agentId: id, snapshot: previous, sessionRoute })
   } else if (config.panelSummary !== true) {
     summary = { enabled: false, reason: 'turned off in settings' }
   }
@@ -892,7 +1017,15 @@ async function readPanel(deps, agentId, lang) {
     if (typeof raw !== 'string' || raw.length === 0) continue
     turnPaths.add(raw.startsWith('/') || /^[A-Za-z]:[\\/]/.test(raw) ? raw : join(cwd ?? process.cwd(), raw))
   }
-  const files = await statTouchedFiles({ paths: remembered.length > 0 ? remembered : fallback, cwd, sessionId: id, turnPaths })
+  const files = await statTouchedFiles({
+    paths: remembered.length > 0 ? remembered : fallback,
+    cwd,
+    sessionId: id,
+    turnPaths,
+    // The remembered number is preferred inside `statTouchedFiles`; this is what
+    // a record without one is compared against.
+    turnNow: Number.isFinite(previous?.turn) ? previous.turn : undefined,
+  })
 
   return {
     agent: id,
@@ -901,11 +1034,21 @@ async function readPanel(deps, agentId, lang) {
     skills,
     mcp: describeMcp(typeof deps.mcpTools === 'function' ? deps.mcpTools(id) : new Set(), recency),
     files,
+    // The card shows a directory under each name rather than the whole path,
+    // which it can only do by subtracting this. Sending it is cheaper than
+    // sending a pre-relative string per file and keeps the absolute path — the
+    // only thing that can be opened, copied, or compared — on every row.
+    cwd: typeof cwd === 'string' && cwd.length > 0 ? cwd : null,
     // The count beside 调用 and 命令 on the previous-turn card. Those two come
     // from `previous` and describe the turn that just ended; the file count has
     // to describe the same turn or the three numbers read as one set while one
     // of them is about the whole session. The cumulative list is `files`.
     turnFiles: Array.isArray(previous?.paths) ? previous.paths.length : 0,
+    // What the last sweep could see, not how many files it found. The card needs
+    // this to tell "nothing else was produced" apart from "nothing else was
+    // produced that I could see", and only the sweep knows which one it is. Null
+    // when no sweep has reported — an older build, or a turn before this existed.
+    sweep: typeof deps.sweepSeen === 'function' ? (deps.sweepSeen(id) ?? null) : null,
     commands: previous?.commands ?? [],
     tools: previous?.tools ?? [],
     calls: previous?.calls ?? 0,
@@ -1034,4 +1177,5 @@ export {
   clampText,
   MAX_BODY_BYTES,
   isNoisePath,
+  isGeneratedDirectory,
 }
