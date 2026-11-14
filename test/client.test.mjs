@@ -4074,7 +4074,11 @@ async function openPanel(routes, options) {
   // rather than a kill — so the count is asserted, not just the label.
   check('the control that reveals the rest is a badge on the card', badge !== undefined, JSON.stringify(Object.keys(card ?? {})))
   check('and it is not inside the list it reveals', firstByClass(list, 'dsse-expand') === undefined && firstByClass(list, 'dsse-expand-action') === undefined)
-  check('it says how many more there are', String(badge?.props?.['aria-label'] ?? '') === '展开全部 7 个', String(badge?.props?.['aria-label']))
+  // The badge answers the question a folded list raises: how many rows are missing
+  // from what is on screen. It used to repeat the header's total ("展开全部 7 个"),
+  // which answered a question the header had already answered and left the reader
+  // to subtract.
+  check('it says how many rows are missing', String(badge?.props?.['aria-label'] ?? '') === '显示其余 3 个', String(badge?.props?.['aria-label']))
   // The badge is the control here, not a picture of one. In the 上一轮 card the
   // whole card takes the click, so its badge is a `role="img"` div with the
   // pointer switched off. This card cannot copy that — every row in it is already
@@ -4181,10 +4185,14 @@ async function openPanel(routes, options) {
   // Without the flip the only difference between open and closed is the row count,
   // and without the new label a screen reader keeps announcing "expand" over a
   // control that now collapses.
-  check('and the badge now offers the way back', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label'] ?? '') === '收起', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label']))
+  check('and the badge now offers the way back', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label'] ?? '') === '收起文件', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label']))
   check('and it reports itself open', firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-expanded'] === true, String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-expanded']))
   check('and its chevron turned over', pointsUp(openCard) === true, String(pointsUp(openCard)))
-  check('the header stops repeating the total it is showing', textOf(firstByClass(openCard, 'dsse-card-meta')).includes('全部 7 个'), textOf(firstByClass(openCard, 'dsse-card-meta')))
+  // The header keeps saying how much was produced whether the card is folded or
+  // open. It is a statement about the session, not about the viewport, so opening
+  // the list must not change it — that would make the total look like it grew.
+  check('the header keeps meaning the same thing when the card opens', textOf(firstByClass(openCard, 'dsse-card-meta')).includes('7 个文件'), textOf(firstByClass(openCard, 'dsse-card-meta')))
+  check('and the open badge no longer names a remainder', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label'] ?? '').includes('显示其余') === false, String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label']))
 
   press(openCard)
   const closed = await instance.renderer.deepRender(instance.seat('cards'))
@@ -4233,12 +4241,19 @@ async function openPanel(routes, options) {
   // the reading the card is supposed to spare the reader.
   check('the folded card shows this turn before the rest', JSON.stringify(names()) === JSON.stringify(['b.md', 'c.md', 'e.md', 'a.md']), JSON.stringify(names()))
   check('the generated files are not among the folded rows', names().includes('x.js') === false, JSON.stringify(names()))
-  check('the header counts the files a person wrote', meta().includes('5 个文件'), meta())
-  check('and says how many it left out', meta().includes('1 个生成'), meta())
+  // The header counts everything this session produced, generated files included:
+  // they were produced. The old header counted only the files a person wrote and
+  // then named the generated ones beside it, so the card carried two counts of two
+  // different lists next to a badge carrying a third. The generated files are
+  // labelled by their own group now, which is where that distinction belongs.
+  check('the header counts everything the session produced', meta().includes('6 个文件'), meta())
+  check('and it no longer splits the count into two numbers', meta().includes('个生成') === false, meta())
   // A card whose only hidden rows are generated files still needs a way to see
-  // them: filtering without an exit is deletion with extra steps.
+  // them: filtering without an exit is deletion with extra steps. Four of the six
+  // rows are drawn (three this turn, then a.md), so two are missing — one written
+  // file and one generated one.
   const badge = firstByClass(card, 'dsse-expand-action')
-  check('the badge counts every file, including the hidden ones', String(badge?.props?.['aria-label'] ?? '') === '展开全部 6 个', String(badge?.props?.['aria-label']))
+  check('the badge names the rows that are not on screen', String(badge?.props?.['aria-label'] ?? '') === '显示其余 2 个', String(badge?.props?.['aria-label']))
 
   const press = (tree) => {
     const control = byClass(tree, 'dsse-expand-action')[0]
@@ -4306,7 +4321,7 @@ async function openPanel(routes, options) {
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   check('a card with nothing but generated files shows no rows', byClass(card, 'dsse-name').length === 0, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
   check('and still offers the way to them', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
-  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-card-meta')).includes('2 个生成'), textOf(firstByClass(card, 'dsse-card-meta')))
+  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-card-meta')).includes('2 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
 }
 
 {
@@ -4517,15 +4532,20 @@ async function openPanel(routes, options) {
   const meta = textOf(firstByClass(card, 'dsse-card-meta'))
   const badge = firstByClass(card, 'dsse-expand-action')
 
+  // The one arithmetic the card has to get right: what the header claims was
+  // produced must equal what is on screen plus what the badge says is missing.
+  // Two independent counts that never get added up are exactly how a card can say
+  // "7 个文件" over a list of four with no way to see the rest.
   const written = Number((meta.match(/(\d+) 个文件/u) ?? [])[1])
-  const generated = Number((meta.match(/(\d+) 个生成/u) ?? [])[1] ?? 0)
-  const total = Number((String(badge?.props?.['aria-label'] ?? '').match(/(\d+) 个/u) ?? [])[1])
-  check('the header and the badge describe the same list', written + generated === total, `${meta} / ${String(badge?.props?.['aria-label'])}`)
-  check('and the missing and unreadable files are still counted in it', written === 6 && total === 7, `${meta} / ${String(badge?.props?.['aria-label'])}`)
-  // The fold shows four rows; the badge names the whole list, not the hidden
-  // remainder, because the header's own count is what a reader checks against it.
-  check('the folded card draws four rows', byClass(card, 'dsse-name').length === 4, String(byClass(card, 'dsse-name').length))
-  check('and the badge still names the whole list, not the hidden part', total === 7, String(total))
+  const shown = byClass(card, 'dsse-name').length
+  const missing = Number((String(badge?.props?.['aria-label'] ?? '').match(/(\d+) 个/u) ?? [])[1])
+  check('the header, the rows and the badge add up', written === shown + missing, `${meta} / shown ${String(shown)} / badge ${String(badge?.props?.['aria-label'])}`)
+  check('and the missing and unreadable files are still counted in it', written === 7, `${meta} / ${String(badge?.props?.['aria-label'])}`)
+  // The fold shows four rows; the badge names the remainder, not the whole list,
+  // because the header already names the whole list. Two numbers that each name
+  // the total leave the reader to subtract.
+  check('the folded card draws four rows', shown === 4, String(shown))
+  check('and the badge names only what is left over', missing === 3, String(missing))
 }
 
 // ---------------------------------------------------------------------------
@@ -4832,6 +4852,113 @@ async function openPanel(routes, options) {
   check('the name is never told to shrink against a sibling', nameRule.includes('flex:0 1 auto') === false, nameRule)
   const title = String(row?.props?.title ?? '')
   check('the full path is still reachable, on the row tooltip', title.includes('test8') && title.includes('code.py'), title)
+}
+
+
+// ---------------------------------------------------------------------------
+// S8: what the sweep could see, and the fold's arithmetic.
+//
+// The collector can admit that it did not finish looking — `sweep.coverage` is
+// `complete`, `partial` or `none`. Until this block nothing on the card read it,
+// so a turn where the walk gave up on a big workspace looked exactly like a turn
+// that genuinely produced nothing. These assertions are the only thing standing
+// between "nothing was produced" and "nothing was produced that I could see".
+//
+// The fold's numbers are asserted together on purpose: the header says how much
+// was produced, the badge says how many rows are missing, and the rows are what
+// is on screen. Three numbers about one list have to add up, and only an
+// assertion that reads all three at once can catch a card that names two totals.
+// ---------------------------------------------------------------------------
+{
+  const rows = [
+    { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+  ]
+  const withSweep = (sweep) => {
+    const routes = panelRoutes()
+    routes['/api/ui-evolve/panel'] = {
+      ok: true,
+      data: {
+        turn: 1, calls: 2, failed: 0, turnFiles: 2,
+        summary: { text: 'wrote two files' },
+        pendingCandidates: 0,
+        skills: { available: true, skills: [] },
+        mcp: [],
+        files: rows,
+        sweep,
+        commands: [],
+      },
+    }
+    return routes
+  }
+  const cardFor = async (sweep) => {
+    const routes = withSweep(sweep)
+    const instance = boot({ routes })
+    instance.module.apply(instance.ctx)
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    const tree = await instance.renderer.deepRender(instance.seat('cards'))
+    return byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  }
+  const noteOf = (card) => {
+    const note = firstByClass(card, 'dsse-note')
+    return note === undefined ? undefined : textOf(note)
+  }
+
+  const partial = await cardFor({ turn: 1, coverage: 'partial' })
+  check('a sweep that did not finish says so on the card', noteOf(partial)?.includes('没读完') === true, String(noteOf(partial)))
+
+  const unnamed = await cardFor({ turn: 1, coverage: 'none' })
+  check('a sweep that never looked says that instead', noteOf(unnamed)?.includes('没有检查') === true, String(noteOf(unnamed)))
+  // The two caveats have to be different sentences. They are different claims:
+  // one says there may be more, the other says nobody knows.
+  check('and the two caveats are not the same sentence', noteOf(unnamed) !== noteOf(partial), `${String(noteOf(unnamed))} / ${String(noteOf(partial))}`)
+
+  const complete = await cardFor({ turn: 1, coverage: 'complete' })
+  // A caveat on every card is a caveat nobody reads. A complete sweep says
+  // nothing at all — not "checked", not "complete", nothing.
+  check('a sweep that finished says nothing at all', noteOf(complete) === undefined, String(noteOf(complete)))
+  check('and the rows are still drawn', byClass(complete, 'dsse-name').length === 2, String(byClass(complete, 'dsse-name').length))
+
+  // A host that never sent `sweep` (an older build) must not have its card
+  // decorated with a caveat about a sweep that was never described.
+  const noField = await cardFor(undefined)
+  check('a payload with no sweep field says nothing either', noteOf(noField) === undefined, String(noteOf(noField)))
+  // A `sweep` whose word this build does not know is not read as `partial`: the
+  // card can repeat a doubt it was told about, not invent one.
+  const unknown = await cardFor({ turn: 1, coverage: 'mostly' })
+  check('a coverage word this build does not know draws no caveat', noteOf(unknown) === undefined, String(noteOf(unknown)))
+}
+
+{
+  // Three rows, so nothing is hidden and the card fits: no badge, and the header
+  // still names the total. The badge is a control for a remainder, and there is
+  // no remainder — one labelled "显示其余 0 个" would be a control that reveals
+  // nothing.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'wrote three files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [
+        { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+        { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+        { path: '/work/c.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  check('a card that hides nothing offers no remainder', firstByClass(card, 'dsse-expand-action') === undefined, String(textOf(card).slice(0, 80)))
+  check('and its header still names the total', textOf(firstByClass(card, 'dsse-card-meta')).includes('3 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
+  check('and every row is on screen', byClass(card, 'dsse-name').length === 3, String(byClass(card, 'dsse-name').length))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

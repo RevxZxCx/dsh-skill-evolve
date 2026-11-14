@@ -34,6 +34,7 @@
 
 import { Config } from './config.js'
 import { GitWatch, readChanges } from './git-watch.js'
+import { ignoredPaths } from './git-changes.js'
 import { ScanWatch, scanReading } from './scan-watch.js'
 import { createReportTool } from './report-tool.js'
 import { TranscriptStore, readToolCallBlock } from './transcript.js'
@@ -231,6 +232,17 @@ export function apply(ctx, config, options) {
    * test can drive the bracket without a repository on disk.
    */
   const gitWatch = new GitWatch({ changes: options?.changes ?? readChanges })
+
+  /**
+   * Which of the walked paths git is unable to see.
+   *
+   * Substitutable for the same reason as `changes`: the production version spawns
+   * git, and a test that had to build a repository to prove "the diff wins the
+   * overlap, the walk fills the gap" would be testing git's availability. What the
+   * test drives is which of the two lists reaches the store and what each row's
+   * provenance says.
+   */
+  const ignoreCheck = typeof options?.ignored === 'function' ? options.ignored : ignoredPaths
 
   /**
    * What the workspace looked like when each turn opened, per session.
@@ -475,19 +487,58 @@ export function apply(ctx, config, options) {
       // `??` before and `??` after, byte-identical `git status`).
       const cwd = workspaceFor(session)
       void Promise.all([gitWatch.finish(agentId, cwd), scanWatch.finish(agentId, cwd)]).then(
-        ([git, scan]) => {
-          const fromGit = Array.isArray(git?.paths) ? git.paths : []
-          const fromScan = Array.isArray(scan?.paths) ? scan.paths : []
-          const paths = fromGit.length > 0 ? fromGit : fromScan
-          // The claim is about what was looked at, not about who answered first,
-          // so it is built from both brackets rather than from the winner of the
-          // one above. `none` dominates: a turn with a half nobody swept cannot
-          // be called fully seen however carefully the other half was read.
-          // Then `partial`, then `complete`.
-          const claim = coverageOf(git?.coverage, scan?.coverage)
-          sessionState.rememberSweep(agentId, endedTurn, claim)
-          if (paths.length === 0) return
-          sessionState.rememberPaths(agentId, paths, endedTurn)
+        async ([git, scan]) => {
+          try {
+            const fromGit = Array.isArray(git?.paths) ? git.paths : []
+            const fromScan = Array.isArray(scan?.paths) ? scan.paths : []
+            // The claim is about what was looked at, not about who answered
+            // first, so it is built from both brackets rather than from either
+            // list. `none` dominates: a turn with a half nobody swept cannot be
+            // called fully seen however carefully the other half was read. Then
+            // `partial`, then `complete`.
+            const claim = coverageOf(git?.coverage, scan?.coverage)
+            sessionState.rememberSweep(agentId, endedTurn, claim)
+            let blind = fromScan
+            if (fromScan.length > 0) {
+              // Git cannot see what `.gitignore` hides, and that is not a rare
+              // corner: every file under an ignored output directory is
+              // invisible to `git status` by construction. So inside a
+              // repository only the paths git disowned are taken from the walk —
+              // the rest of its list duplicates the diff, or is files this turn
+              // merely touched.
+              //
+              // Whether a repository exists cannot be inferred from `coverage`:
+              // a plain folder reports `complete` too, because "I looked and
+              // found nothing" is an honest answer there. The ignore check has
+              // to say so itself, which is why it reports it.
+              const answer = await ignoreCheck({ paths: fromScan, cwd })
+              if (answer.repository === true) {
+                // A git too old to classify (`known: false`) keeps the whole
+                // list rather than losing real output for no gain: paths the
+                // diff also reported are recorded after this, and the store is
+                // keyed by path, so the diff's record wins the overlap anyway.
+                blind = answer.known === true ? answer.ignored : fromScan
+              } else if (fromGit.length > 0) {
+                // Git named changes but recognised no repository here. The walk's
+                // paths cannot be placed relative to a diff, and the likeliest
+                // explanation is an already-untracked file that merely moved —
+                // not output this turn produced. Dropping them is the
+                // conservative reading.
+                blind = []
+              }
+            }
+            // Scan first, git second. Within one turn the list is ordered by the
+            // write sequence and the card shows the newest first, so the diff —
+            // the primary evidence — gets the later stamps and the top of the
+            // card. A path both brackets named ends up owned by the diff, which
+            // is what `source` then says.
+            if (blind.length > 0) sessionState.rememberPaths(agentId, blind, endedTurn, 'scan')
+            if (fromGit.length > 0) sessionState.rememberPaths(agentId, fromGit, endedTurn, 'git')
+          } catch {
+            // The panel is a backstop over the conversation; failing to record
+            // this turn's files must not reach the host as an unhandled
+            // rejection. Everything above is already best-effort.
+          }
         },
         () => {}
       )

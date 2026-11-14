@@ -109,11 +109,12 @@ export function parsePorcelain(text) {
  *
  * @param {string[]} args - arguments after `git`.
  * @param {string} cwd - where to run it.
+ * @param {string} [input] - text for stdin, when the command reads a list.
  * @returns {Promise<{ code: number, stdout: string }>} never rejects.
  */
-export function runGit(args, cwd) {
+export function runGit(args, cwd, input) {
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       'git',
       args,
       { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
@@ -127,6 +128,12 @@ export function runGit(args, cwd) {
         resolve({ code, stdout: typeof stdout === 'string' ? stdout : '' })
       }
     )
+    // `check-ignore --stdin` reads its list from here. Closed rather than left
+    // open: git waits for end-of-input before answering, so a stream nobody
+    // ends is a two-second timeout instead of an answer.
+    if (typeof input === 'string' && child.stdin !== null && child.stdin !== undefined) {
+      child.stdin.end(input)
+    }
   })
 }
 
@@ -279,6 +286,42 @@ export async function changedFiles(options) {
 }
 
 /**
+ * Decide which repositories answer for this workspace.
+ *
+ * Factored out because two questions need the same answer — "what is changed"
+ * and "which of these paths can git not see" — and a second copy of this would
+ * be a second copy of the multi-root rule. The rules themselves are worth
+ * stating once:
+ *
+ * - A workspace inside a repository is answered by that repository and nothing
+ *   below it: asking both would read the same files twice under different bases.
+ * - A workspace that is not a repository may hold child checkouts. Those are the
+ *   answer, capped, and a full cap is a caveat.
+ * - With an injected runner, no filesystem walk happens: the caller is
+ *   describing repositories that need not exist on this disk.
+ *
+ * @param {object} input
+ * @param {string} input.cwd - the workspace.
+ * @param {boolean} input.injected - whether the caller supplied its own runner.
+ * @param {string[] | undefined} input.listed - explicit roots, over discovery.
+ * @returns {{ roots: string[], capped: boolean } | undefined} undefined when the
+ *   workspace has nothing to read.
+ */
+function discoverRoots({ cwd, injected, listed }) {
+  if (listed !== undefined && listed.length > 0) return { roots: listed, capped: false }
+  if (injected === true) return { roots: [cwd], capped: false }
+  if (existsSync(cwd) === false) return undefined
+  const own = findRepositoryRoot(cwd)
+  if (own !== undefined) return { roots: [own], capped: false }
+  const children = findChildRepositories(cwd)
+  if (children.length === 0) return undefined
+  // Discovery stops at the cap, so a full result means there was at least one
+  // more child directory this sweep will not describe. Decided here, from the
+  // one listing, rather than by asking for a second listing later.
+  return { roots: children, capped: children.length >= MAX_CHILD_ROOTS }
+}
+
+/**
  * The same sweep as {@link changedFiles}, with an account of how complete it is.
  *
  * Two answers the plain list cannot give:
@@ -305,45 +348,14 @@ export async function sweepChanges(options) {
   const injected = typeof options?.run === 'function'
   const run = injected === true ? options.run : runGit
 
-  // A directory walk before any process is spawned. Every panel read happens in
-  // a workspace, most workspaces are not repositories, and the panel is mounted
-  // in a test harness hundreds of times — spawning two `git` processes per
-  // mounted turn to discover "no repository" would be a real cost paid on the
-  // normal path. `.git` is a directory in a normal checkout and a *file* in a
-  // worktree or a submodule, which is why this asks "does it exist" rather than
-  // "is it a directory".
-  //
-  // Skipped when `run` was injected: a caller that supplied its own runner is
-  // describing a repository that need not exist on this disk, and applying the
-  // filesystem check to it would answer a different question than the one asked.
-  let roots = [cwd]
-  let capped = false
-  // An explicit list of roots, used instead of discovery. This is the seam that
-  // makes multi-root testable without putting several real repositories on disk:
-  // the discovery below is a filesystem walk, and a test that had to build four
-  // repositories to check "two roots are each joined to their own base" would be
-  // testing npm's ability to run `git init` more than this file's arithmetic.
+  // Discovery is shared with `ignoredPaths`, so the multi-root rule lives in one
+  // place. An explicit `roots` list is the seam that makes it testable without
+  // putting several real repositories on disk.
   const listed = Array.isArray(options?.roots) ? options.roots.filter((directory) => typeof directory === 'string' && directory.length > 0) : undefined
-  if (listed !== undefined && listed.length > 0) {
-    roots = listed
-  } else if (injected === false) {
-    if (existsSync(cwd) === false) return empty
-    const own = findRepositoryRoot(cwd)
-    if (own !== undefined) {
-      // The workspace sits inside a repository; that one answers for everything
-      // below it, and looking for children as well would read the same files
-      // twice under two different bases.
-      roots = [own]
-    } else {
-      const children = findChildRepositories(cwd)
-      if (children.length === 0) return empty
-      // Discovery stops at the cap, so a full result means there was at least
-      // one more child directory this sweep will not describe. Decided here,
-      // from the one listing, rather than by asking for a second listing later.
-      capped = children.length >= MAX_CHILD_ROOTS
-      roots = children
-    }
-  }
+  const discovery = discoverRoots({ cwd, injected, listed })
+  if (discovery === undefined) return empty
+  const roots = discovery.roots
+  const capped = discovery.capped
 
   const seen = new Set()
   const paths = []
@@ -386,6 +398,121 @@ export async function sweepChanges(options) {
   if (capped === true) coverage = 'partial'
 
   return { paths, roots: read, coverage }
+}
+
+/** How many paths one `check-ignore` call may be asked about. */
+const MAX_IGNORE_BATCH = 500
+
+/**
+ * Which of these paths git cannot see, because `.gitignore` excludes them.
+ *
+ * ## Why this exists
+ *
+ * `git status` and a directory scan do not have the same blind spot, and the
+ * difference is not symmetric. Git is structurally blind to ignored files: a
+ * build script that writes `dist/bundle.js` while `dist/` is ignored leaves no
+ * trace in `git status`, so a sweep that reads "git answered, so git is the
+ * truth" will report an empty turn while the workspace plainly gained a file.
+ * The scan sees that file — it walks the tree — but it also sees every
+ * dependency in `node_modules`, which git prunes with one line.
+ *
+ * So the two are not competitors, they are layers: git answers for what it can
+ * see, and the scan is only asked about the paths git has confirmed it cannot.
+ * That is a semantic test, not a timing one, and `check-ignore` is its exact
+ * implementation — the same rules, evaluated by the same program, in the same
+ * repository. Reimplementing `.gitignore` matching here (nested files, negations,
+ * `**`, `!`, the per-directory inheritance) would be a second, differently
+ * wrong copy of a very well specified format.
+ *
+ * ## What is knowingly not asked
+ *
+ * Paths outside every root are dropped before the call. `check-ignore` answers
+ * `fatal: Invalid path` for a path outside the repository — and it fails the
+ * whole batch, not the one entry — so one stray relative path from the scanner
+ * would take the whole answer down. Dropping them is also correct: a file that
+ * belongs to no repository is not something git was hiding.
+ *
+ * A non-zero exit is not an error. `check-ignore` exits 1 when *nothing* in the
+ * batch is ignored, which is the common case, and both the empty answer and the
+ * failure answer mean the same thing here: no path in this batch is git's
+ * business. The caller adds nothing to the sweep.
+ *
+ * @param {object} options
+ * @param {string} options.cwd - the session workspace.
+ * @param {string[]} options.paths - absolute paths to classify.
+ * @param {(args: string[], cwd: string) => Promise<{ code: number, stdout: string }>} [options.run]
+ *   - how to run git; defaults to {@link runGit}.
+ * @param {string[]} [options.roots] - roots to use instead of discovery.
+ * @returns {Promise<{ ignored: string[], known: boolean, repository: boolean }>} the
+ *   subset of `paths` git ignores, whether git was able to answer the question,
+ *   and whether a repository was found at all. `known: false` is not "nothing is
+ *   ignored" — it is "this build does not know", and the caller must not treat
+ *   those as the same thing. `repository: false` is not "nothing is ignored"
+ *   either: it means the question does not apply here, so the walk's answer is
+ *   not a supplement to a diff but the only evidence there is.
+ */
+export async function ignoredPaths(options) {
+  const cwd = options?.cwd
+  const asked = Array.isArray(options?.paths) ? options.paths.filter((path) => typeof path === 'string' && path.length > 0) : []
+  if (typeof cwd !== 'string' || cwd.length === 0) return { ignored: [], known: true, repository: false }
+  if (asked.length === 0) return { ignored: [], known: true, repository: false }
+  const injected = typeof options?.run === 'function'
+  const run = injected === true ? options.run : runGit
+  const listed = Array.isArray(options?.roots) ? options.roots.filter((directory) => typeof directory === 'string' && directory.length > 0) : undefined
+  const discovery = discoverRoots({ cwd, injected, listed })
+  if (discovery === undefined) return { ignored: [], known: true, repository: false }
+
+  // One comparison prefix per root, longest first, so a path inside a nested
+  // root is attributed to that root rather than to an enclosing one.
+  const prefixes = []
+  for (const directory of discovery.roots) {
+    const described = await describeRepository(run, directory)
+    if (described === undefined) continue
+    prefixes.push(described.root.split('\\').join('/').replace(/\/+$/u, ''))
+  }
+  // No root answered `rev-parse`: there is no repository here, so no path is
+  // hidden by one. That is an answer about the workspace, not about the paths,
+  // and the caller has to hear it as such.
+  if (prefixes.length === 0) return { ignored: [], known: true, repository: false }
+  prefixes.sort((a, b) => b.length - a.length)
+
+  const inRoot = []
+  for (const path of asked) {
+    const normal = path.split('\\').join('/')
+    for (const prefix of prefixes) {
+      if (normal.startsWith(prefix + '/') === true) {
+        inRoot.push(path)
+        break
+      }
+    }
+  }
+  // A repository exists, but nothing asked about was inside it.
+  if (inRoot.length === 0) return { ignored: [], known: true, repository: true }
+
+  // Batched because `check-ignore` reads one path per line from stdin and the
+  // scanner can hand over its whole budget: a single call with five thousand
+  // paths would build a megabyte of stdin for an answer the card renders as a
+  // handful of rows. A batch that fails stops the loop and reports that the
+  // question went unanswered — the batches after it would fail for the same
+  // reason, and claiming the rest are "not ignored" would be inventing an
+  // answer out of a failure.
+  const ignored = []
+  let known = true
+  for (let start = 0; start < inRoot.length; start += MAX_IGNORE_BATCH) {
+    const batch = inRoot.slice(start, start + MAX_IGNORE_BATCH)
+    const answer = await run(['check-ignore', '--stdin', '-z'], discovery.roots[0], batch.join('\u0000') + '\u0000')
+    // Exit code 1 means "nothing in this batch is ignored", which is an answer.
+    // Any other non-zero code is git declining to answer at all.
+    if (answer.code !== 0) {
+      if (answer.code !== 1) known = false
+      if (answer.code === 1) continue
+      break
+    }
+    for (const hit of answer.stdout.split('\u0000')) {
+      if (typeof hit === 'string' && hit.length > 0) ignored.push(hit)
+    }
+  }
+  return { ignored, known, repository: true }
 }
 
 /**

@@ -438,6 +438,32 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
 // ---------------------------------------------------------------------------
 
 {
+  // Where a row came from is recorded by the collector, and this layer's only job
+  // is to pass it through. A bare string is what the legacy `previous.paths`
+  // fallback holds and what documents written before the field existed contain;
+  // both must arrive as `null`, because "nobody wrote it down" and "git found it"
+  // are different sentences on a card, and inventing the second one is a claim
+  // nobody made.
+  const dir = tempDir('skill-evolve-stat-source-')
+  const present = join(dir, 'present.js')
+  writeFileSync(present, 'x')
+
+  const legacy = await statTouchedFiles({ paths: [present] })
+  check('a path with no recorded provenance says null', legacy[0]?.source === null, JSON.stringify(legacy[0]))
+
+  const credited = await statTouchedFiles({ paths: [{ path: present, source: 'git' }] })
+  check('a recorded provenance is passed through', credited[0]?.source === 'git', JSON.stringify(credited[0]))
+
+  const walked = await statTouchedFiles({ paths: [{ path: present, source: 'scan' }] })
+  check('and the walk is its own word', walked[0]?.source === 'scan', JSON.stringify(walked[0]))
+
+  const nonsense = await statTouchedFiles({ paths: [{ path: present, source: 'guess' }] })
+  check('a word this build does not know is not repeated', nonsense[0]?.source === null, JSON.stringify(nonsense[0]))
+}
+
+// ---------------------------------------------------------------------------
+
+{
   const dir = tempDir('skill-evolve-stat-')
   const present = join(dir, 'present.js')
   writeFileSync(present, 'x'.repeat(42))

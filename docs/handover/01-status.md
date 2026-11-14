@@ -48,6 +48,7 @@
 | 2026-11-14 | 重启后第一轮被记成第 1 轮 | `hydrate` 把落盘的 `turns` 加到计数上，却没有动**正在进行中的那一轮**，于是重启后第一条消息开的轮被编号为 1，而文件说这是第 2 轮；`turn/end` 把这个号写进 `previous.turn`、`sweep.turn` 和每条路径的 `turn`，「刚刚做完的事」被归档到上一轮名下。真机样本 A 第二轮暴露：`turns: 2` 旁边躺着 `sweep.turn: 1`。修法：`hydrate` 里若已有打开的轮，按合并后的计数重新编号它。3153 断言全绿；突变 85/45/128 全杀；残留审计 0 |
 | 2026-11-14 | S7：mtime 扫描补上非仓库工作区 | 四路采集齐全；3235 断言全绿，突变 98/45/128 全杀，残留 0。**真机验收未做** |
 | 2026-11-14 | S7 审查与真机验收 | 四个审查者指向同一个 P0（`skipDirectory` 生产零调用）；coverage 扩三态并抽出 `mergeCoverage`；3258 断言全绿，三套突变 101/45/128 全杀；真机对比证明修的是真问题 |
+| 2026-11-14 | 产出卡 S8：git 看不见的文件也有人记 | 合并规则从「谁胜出」改为「git 给可见的、走查只补被忽略的」（D-129），`ignoredPaths` 问 `git check-ignore --stdin -z`，返回值带 `known`/`repository` 两个不确定词；每个路径记下是哪个 bracket 找到的（D-130）；卡片头部改说会话总数、徽标改说剩余、coverage 三态各说各话（D-131）。3312 断言全绿，三套突变 108/45/128 全杀，残留 0。**真机验收未做** |
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 ---
 
@@ -3550,3 +3551,29 @@ worktree        resolve 之后: worktree: true
 没证明：真实宿主的回合里这些路径会被触发——那需要一次带工具调用的真机会话（S7 已做过，见上一节），以及宿主重启后才生效的补丁。也没证明 macOS/Linux 上的行为：`--git-common-dir` 的相对/绝对规则在那里相同，但本节的证据只来自一台 Windows 机器。
 
 清理：两套样本目录与六个探针脚本已全部删除，产品代码零改动。
+
+## 2026-11-14 · 产出卡 S8：git 看不见的文件，也是这一轮发生的
+
+**这一节在说什么。** S1–S7 之后卡片能回答「这一轮产出了什么」，但三条采集通路各有各的盲区，而它们**不重叠**：git 差分结构上看不见被 `.gitignore` 忽略的文件（`dist/`、`*.log` 里写出来的产物，`git status` 一个字都不报），mtime 走查则看不见已提交的改动。之前的合并规则是 `fromGit.length > 0 ? fromGit : fromScan`——「谁有答案就用谁」。这条规则把两个盲区叠成了洞：只要 git 有一个字，走查的整份答案就被丢掉，于是「往 `dist/` 里写产物」这个最常见的动作在卡上是空的。
+
+**改了什么。** 合并规则从「谁胜出」换成「分工」：git 给可见的，走查只补 git 看不见的那一部分。判据是**语义判据**（这个路径对仓库是不是透明的），不是时间判据，`git check-ignore --stdin -z` 就是它的精确实现。
+
+**四个文件的改动。**
+
+- `packages/ui-evolve/lib/git-changes.js`：新增 `ignoredPaths({ paths, cwd })`，返回 `{ ignored, known, repository }`。分批（`MAX_IGNORE_BATCH = 500`）把路径按 NUL 分隔喂给 `check-ignore --stdin -z`；仓库外的路径先剔掉，因为一个就够让整批 `fatal: Invalid path`；退出码 1 是「这一批没有忽略项」而不是失败。多根规则从 `sweepChanges` 里抽成 `discoverRoots`，两条通路共用一份——`check-ignore` 也要知道根在哪。`runGit` 加了第三参 `input`，负责往子进程 stdin 写东西并关掉它（没人关的流会变成两秒超时，而不是一个答案）。
+- `packages/ui-evolve/lib/index.js`：`turn/end` 的合并重写为 `async`，先等 git 与走查两路，再问 `ignoredPaths` 哪些走查到的路径是仓库看不见的，最后分两次落盘：走查补的那部分记 `'scan'`，diff 记 `'git'`。**顺序是走查先写、diff 后写**——列表按写入序号排，最新在前，diff 是主证据，应当拿到更晚的戳和卡顶的位置。`ignored` 作为可注入的接缝（`options.ignored`），理由和 `changes` 一样：生产版要 spawn git，测试不该为了证明合并规则而去建仓库。整个回调包在 `try/catch` 里，记账失败不能变成 unhandled rejection——面板是对话之上的 backstop，它出问题不该有声音。
+- `packages/ui-evolve/lib/session-state.js`：`paths` 的值多一个 `source`（`'git'` / `'scan'` / 缺席），`rememberPaths` 增第四参，`pathsSeen` 把它带出来，`document()` 写进文件。读侧对 v1 文档给 `undefined`——旧文件说不出是哪个 bracket 找到的，编一个 `'git'` 就是替没人做过的判断背书。
+- `packages/ui-evolve/lib/api.js`：`statTouchedFiles` 把 `source` 原样带进 payload，认不出的值归 `null`。这一层不重新推导来源，因为「这个文件被谁看见的」只有采集方知道，从路径猜等于编。
+- `packages/ui-evolve/lib/client.js`：头部 `fileMeta` 从「N 个文件 · M 个生成」变成只说总量 `${ordered.length} 个文件`；徽标从 `展开全部 N 个` 变成 `显示其余 N 个`（展开态 `收起文件`）；新增 `blindNote`，`coverage` 为 `partial` 时说「目录没读完，可能还有文件没列出」，为 `none` 时说「这一轮没有检查目录，列表可能不全」，为 `complete` 时**什么都不说**。
+
+**三条口径（都是决定，不是描述）。**
+
+1. **头部回答「产出了多少」，徽标回答「屏幕上少了几个」。** 旧头部把「人写的」和「机器生成的」分成两个数，可「生成文件」组自己有标签，不需要头部再拆一次；而徽标旧文案把头部总数重复了一遍，控制本该回答余数。
+2. **`complete` 不显示任何 caveat。** 每张卡都挂一句「可能不全」等于没人读这句话。只有真有两个带疑问的词时，它们才各说各话——`partial` 是「我找了，可能还有」，`none` 是「我没找」，合并后面板若看不出来，「没产出」与「没检查」就分不开了，而后者正是要警惕的。
+3. **`source` 留在文件里，不留在内存里。** 合并之后「git 看不见这个文件、只有走查看见了」这个事实就消失了，而它正是日后回答「这行为什么出现」的唯一线索。代价是每个路径多一个字段；收益是这个字段以后不会被重新猜出来。
+
+**这一轮没有新缺陷，但抓到三处「断言看得见、实物看不见」。** 三条突变第一轮 SURVIVED，逐条查下去都是断言太弱，而不是代码错：非仓库分支只断言「没忽略项」（两态同值，`repository` 从没被看过）；合并块里没有「走查看到、又不被忽略」的第三种路径（所以「先问再丢」和「直接丢」长得一样）；`source` 从写入到读回没有任何一条断言（所以它被写成 `undefined` 也没人管）。补完之后 108 条全杀。
+
+**验证。** `node test/run.mjs` = 3312 passed / 0 failed；`mutate-language-and-files` 108 killed、`mutate-persistence` 45 killed、`mutate-checklist-panel` 128 killed，全部 0 survived / 0 not applied / 0 crashed；`audit_leftovers.py` = 0 残留。S8 之前是 3258 断言、101/45/128。
+
+**还没做。** 真机验收没做——这次改动要在宿主里重启才生效，需要开一个仓库、往被 `.gitignore` 忽略的目录里写文件，看卡片上是否同时出现两条来源的行、头部是否只有一个总数、coverage 提示是否按三态显示。这件事与 S7 那次一样，必须重启宿主。

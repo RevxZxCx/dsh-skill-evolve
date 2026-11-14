@@ -1323,6 +1323,8 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-105 | 2026-11-14 | scanReading 零覆盖，其突变 SURVIVED | truncated→partial 的翻译无人观察；第一次修还修错了位置 |
 | DEF-106 | 2026-11-14 | 遍历器的目录过滤在生产路径上从未被传，`isGeneratedDirectory` 零调用点 | 每条测试都注入了 `skipDirectory`，只证明了「钩子会被问到」，没证明「生产传了」 |
 | DEF-107 | 2026-11-14 | coverage 扩成三态后，三处 `=== 'partial'` 单值判断把它打回两态 | 新词 `none` 没有任何断言要求它活到面板；写到面板那条端到端断言是修之前才补的 |
+| DEF-108 | 2026-11-14 | 三条新突变首轮 SURVIVED，因为断言只测了其中一种状态 | 非仓库分支只断言「没有忽略项」、合并块缺第三种路径、`source` 从写入到读回零断言 |
+| DEF-109 | 2026-11-14 | 突变脚本崩溃时变异体留在源码里（第二次） | 脚本用 `text=True` 跑 node，GBK 解码失败抛异常，还原分支没走到 |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -1861,3 +1863,27 @@ FAIL a bracket that never looked is not reported as clean {"turn":1,"coverage":"
 **教训**：给一个枚举加词，等于给**每一处比较**加一次机会。
 加词之前先问：这个值在代码里有几个读者？如果答案是「我数不清」，
 那先把它收敛成一次函数调用，再加词。
+
+## DEF-108 · 三条突变 SURVIVED：断言看得见，实物看不见
+
+**症状。** S8 新增 8 条突变，第一轮结果 `105 killed / 3 survived`。存活的三条不是代码写错，而是断言写得太窄：
+
+1. `a workspace with no repository is answered as if it had one`——`ignoredPaths` 在没有仓库时返回 `repository: false`，测试只断言 `found.length === 0`。`repository: true` 与 `false` 在「没有忽略项」这个结论上**同值**，所以改坏了看不出来。
+2. `the scan is asked even when git already answered`——合并块里走查给出的两个路径，一个会被 `ignored` 过滤掉、一个与 git 重叠，没有第三种「走查看到、又不被忽略」的路径。于是「先问哪些是 ignored 再丢」与「直接整份丢掉」产生同一张卡片。
+3. `the bracket that found a file is not recorded`——`source` 从 `rememberPaths` 写到 `pathsSeen` 读回，中间**没有任何一条断言**。它被写成 `undefined` 也全绿。
+
+**修法。** 三条都是补观察点，不是改代码：非仓库块改成断言 `answer.repository === false` 与 `answer.known === true`；合并块给走查加第三条路径 `C:/work/src/touched.ts`，并断言它**不在**卡上；`session-state.test.mjs` 新增一个块，写入 `'git'`/`'scan'`/一个不认识的词，断言前两个存活、第三个变 `undefined`，再 `flush` 后重新 `load`，断言存活的那个仍然在。
+
+**为什么测试没抓到。** 因为断言的形状是「结果里没有这个」，而缺陷的形状是「两个不同的原因指向同一个结果」。`length === 0` 对「没有忽略项」和「问题不适用」都成立；`rows.length === 2` 对「正确分工」和「整份丢掉再补两条」都成立；`source` 根本没进任何断言，所以它是什么都行。这三条都是**同一个失败模式的不同实例**：观察点在结论上，不在原因上。
+
+---
+
+## DEF-109 · 突变脚本崩溃，变异体留在源码里（第二次）
+
+**症状。** 给 S8 加突变时，`F:\dsh-plugin\_edit\add_s8_mutations.py` 跑完第一轮突变后崩了，`client.js` 里的 `blindNote` 渲染行消失（`grep -c "blindNote === '' ? null"` 得 0）。表现是后续测试全绿——因为那一行本来就只在有 caveat 时才画东西。
+
+**根因。** 脚本用 `subprocess.run(..., capture_output=True, text=True)` 跑 node，node 输出里有非 UTF-8（其实是 GBK 能读到的）字节，`text=True` 让 `decode` 在 Python 侧抛 `UnicodeDecodeError: 'gbk' codec can't decode byte 0x94`，`proc.stdout` 变成 `None`，脚本在还原之前就退出了。变异体因此留在盘上。
+
+**修法。** `capture_output=True` 保留，去掉 `text=True`，改成手动 `.decode('utf-8', 'replace')`；从 `_edit/client.s8.bak.js` 恢复源码；恢复后先 `grep` 确认那一行回来了再继续。
+
+**为什么测试没抓到。** 因为测试根本不该抓这个——它测的是源码，而源码在那一刻真的坏了。抓到它的是**人眼**：`grep -c` 是我在脚本崩后主动跑的。这说明一件事：**任何「备份→改→测→还原」的脚本，都不能假设正常路径一定走得到还原那一步**。DEF-90 已经记过一次同样的机制爆炸（Windows 文件被占用导致还原写盘失败），这次是解码异常，下次可能是 Ctrl-C、可能是 OOM。正确的做法是让还原在 `finally` 里、并且让脚本在任何退出路径上都先做还原再做别的。本轮没有改脚本结构（时间不够且这是 `_edit/` 下的一次性脚本），但把「跑完突变必须先 `grep` 关键行 + 跑 `audit_leftovers.py`」写进了流程。

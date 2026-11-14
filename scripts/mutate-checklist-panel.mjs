@@ -400,14 +400,14 @@ const mutations = [
     // says how many there are, the list shows four, and nothing says the rest exist.
     label: 'the way out is never drawn at all',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen`,
+    from: `                badgeAction: hiddenFiles > 0 || filesOpen`,
     to: `                badgeAction: false`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'a card that already fits still offers to expand',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen',
+    from: '                badgeAction: hiddenFiles > 0 || filesOpen',
     to: '                badgeAction: ordered.length > 0 || filesOpen',
     suites: ['test/client.test.mjs'],
   },
@@ -581,7 +581,7 @@ const mutations = [
   {
     label: 'a card holding only generated files offers no way in',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen`,
+    from: `                badgeAction: hiddenFiles > 0 || filesOpen`,
     to: `                badgeAction: ordered.length > FOLDED_FILES || filesOpen`,
     suites: ['test/client.test.mjs'],
   },

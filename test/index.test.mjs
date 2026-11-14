@@ -2994,6 +2994,270 @@ try {
   check('and it still names the turn', payload.data?.sweep?.turn === 1, JSON.stringify(payload.data?.sweep))
 }
 
+// ------------------------------------------------------------ S8: merge --
+//
+// The git bracket and the walk bracket do not overlap in what they can SEE: git
+// reports changed tracked and untracked files, and by construction cannot report
+// anything a `.gitignore` rule hides. The walk sees every file whose mtime moved,
+// including the ignored ones and including files that merely got rewritten. So
+// the merge is not "who wins" — it is "git's list, plus whatever the walk found
+// that git is unable to name". These blocks drive that split through the real
+// collector with the ignore check substituted, because what has to be proved is
+// which list reaches the store and what each row says about where it came from.
+{
+  const root = await makeTempRoot('skill-evolve-merge-split-')
+  process.env.DSH_HOME = root
+
+  const gitAnswers = [
+    { paths: [], coverage: 'complete' },
+    { paths: ['C:/work/src/real.ts'], coverage: 'complete' },
+  ]
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
+    // `touched.ts` is the case the ignore filter exists for: the walk saw its mtime
+    // move (a checkout, a formatter, an editor rewriting the same bytes) but the
+    // diff reports no change. It is not ignored -- it is a tracked file -- so only
+    // keeping the walk to its ignored list keeps it off the card.
+    scan: async () => ({ paths: ['C:/work/dist/bundle.js', 'C:/work/src/real.ts', 'C:/work/src/touched.ts'], coverage: 'complete' }),
+    ignored: async ({ paths }) => ({ ignored: paths.filter((path) => path.includes('/dist/')), known: true, repository: true }),
+  })
+
+  const agent = fakeAgent('merge-split-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '打包一下' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+  const byPath = new Map(rows.map((file) => [file.path, file]))
+
+  check('the diff reaches the card', byPath.has('C:/work/src/real.ts'), JSON.stringify([...byPath.keys()]))
+  check('and so does the file git cannot see', byPath.has('C:/work/dist/bundle.js'), JSON.stringify([...byPath.keys()]))
+  check('the overlap is one row, not two', rows.length === 2, JSON.stringify(rows.map((file) => file.path)))
+  check('the row the diff named says git found it', byPath.get('C:/work/src/real.ts')?.source === 'git', JSON.stringify(byPath.get('C:/work/src/real.ts')))
+  check('the row only the walk saw says so', byPath.get('C:/work/dist/bundle.js')?.source === 'scan', JSON.stringify(byPath.get('C:/work/dist/bundle.js')))
+  // A file whose mtime moved but whose content did not is not output of this
+  // turn. It is neither ignored nor changed, so it must fall through both
+  // brackets rather than ride in on the walk's list.
+  check('a file only touched, not changed, is not on the card', byPath.has('C:/work/src/touched.ts') === false, JSON.stringify([...byPath.keys()]))
+}
+
+// A walk that duplicates the diff must not add rows. This is the failure mode of
+// a naive union: the same file reported twice, once by each bracket, on a card
+// whose head counts rows.
+{
+  const root = await makeTempRoot('skill-evolve-merge-dup-')
+  process.env.DSH_HOME = root
+
+  const gitAnswers = [
+    { paths: [], coverage: 'complete' },
+    { paths: ['C:/work/src/only.ts'], coverage: 'complete' },
+  ]
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
+    scan: async () => ({ paths: ['C:/work/src/only.ts'], coverage: 'complete' }),
+    // Nothing is ignored, so the walk contributes nothing at all here.
+    ignored: async () => ({ ignored: [], known: true, repository: true }),
+  })
+
+  const agent = fakeAgent('merge-dup-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '改个名字' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+
+  check('a file both brackets saw is one row', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
+  check('and the diff is credited, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
+}
+
+// Outside a repository the ignore check has nothing to classify against, so the
+// walk is not filling a gap in a diff — it is the only witness. Reporting
+// `repository: false` is what keeps the two cases apart; without it the caller
+// cannot tell "git hid this" from "there is no git here".
+{
+  const root = await makeTempRoot('skill-evolve-merge-norepo-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => ({ paths: [], coverage: 'none' }),
+    scan: async () => ({ paths: ['C:/plain/out/report.docx'], coverage: 'complete' }),
+    ignored: async () => ({ ignored: [], known: true, repository: false }),
+  })
+
+  const agent = fakeAgent('merge-norepo-agent', 'C:/plain')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '生成报告' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+
+  check('with no repository the walk is the only witness', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
+  check('and its row is still marked as the walk', rows[0]?.source === 'scan', JSON.stringify(rows[0]))
+}
+
+// A git too old to know `check-ignore --stdin` cannot answer the question, and
+// "no answer" must not be read as "nothing is hidden". The walk keeps its whole
+// list: dropping it would turn a missing capability into a silently empty card.
+{
+  const root = await makeTempRoot('skill-evolve-merge-noanswer-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => ({ paths: [], coverage: 'complete' }),
+    scan: async () => ({ paths: ['C:/work/dist/a.js', 'C:/work/dist/b.js'], coverage: 'complete' }),
+    ignored: async () => ({ ignored: [], known: false, repository: true }),
+  })
+
+  const agent = fakeAgent('merge-noanswer-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '构建一下' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+
+  check('an unanswered question keeps the whole walk', rows.length === 2, JSON.stringify(rows.map((file) => file.path)))
+  check('and neither row claims to be a diff', rows.every((file) => file.source === 'scan'), JSON.stringify(rows.map((file) => file.source)))
+}
+
+// The mirror case: a diff that exists while no repository does. The walk then has
+// nothing to classify against, and its list is most likely files that are merely
+// untracked in a repository git was told nothing about — so it is dropped rather
+// than piled on. Two rows for one file is the failure this prevents.
+{
+  const root = await makeTempRoot('skill-evolve-merge-diffnorepo-')
+  process.env.DSH_HOME = root
+
+  const gitAnswers = [
+    { paths: [], coverage: 'complete' },
+    { paths: ['C:/work/src/main.ts'], coverage: 'complete' },
+  ]
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
+    scan: async () => ({ paths: ['C:/work/src/main.ts', 'C:/work/dist/x.js'], coverage: 'complete' }),
+    ignored: async () => ({ ignored: [], known: true, repository: false }),
+  })
+
+  const agent = fakeAgent('merge-diffnorepo-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '改一下主文件' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+
+  check('a diff with no repository to explain it stands alone', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
+  check('and the row is the diff, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
 

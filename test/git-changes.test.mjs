@@ -15,11 +15,15 @@
  *      produce them without a filesystem.
  */
 
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   GIT_TIMEOUT_MS,
   MAX_CHANGED_FILES,
   changedFiles,
+  ignoredPaths,
   sweepChanges,
   newestChanges,
   parsePorcelain,
@@ -315,6 +319,134 @@ function runner(answers) {
   const swept = await sweepChanges({ cwd: plain, run: fake.run })
   check('a plain folder produces no files', swept.paths.length === 0, String(swept.paths.length))
   check('and no caveat either', swept.coverage === 'complete', swept.coverage)
+}
+
+// -------------------------------------------------------- the ignore test --
+
+{
+  // No paths, no question. Spawning git to be told "nothing" is the cost this
+  // whole module is careful about, and the scanner can legitimately hand over
+  // an empty list.
+  const fake = runner([])
+  const { ignored: quiet } = await ignoredPaths({ cwd: join('F:', 'repo'), paths: [], run: fake.run })
+  check('no paths asks git nothing', quiet.length === 0, String(quiet.length))
+  check('and spawns nothing either', fake.calls.length === 0, String(fake.calls.length))
+}
+
+{
+  // The whole point: git status cannot see this file, check-ignore can.
+  const root = join('F:', 'repo')
+  const bundle = join(root, 'dist', 'bundle.js')
+  const fake = runner([
+    [0, `${root}\n${join(root, '.git')}\n${join(root, '.git')}\n`],
+    [0, `${bundle}\u0000`],
+  ])
+  const { ignored: found } = await ignoredPaths({ cwd: root, paths: [bundle], run: fake.run })
+  check('one ignored path is reported', found.length === 1, String(found.length))
+  check('and it is the path it was given', found[0] === bundle, String(found[0]))
+}
+
+{
+  // `check-ignore` exits 1 when nothing in the batch is ignored. That is the
+  // common answer and it is not an error: the sweep simply gains nothing.
+  const root = join('F:', 'repo')
+  const fake = runner([
+    [0, `${root}\n${join(root, '.git')}\n${join(root, '.git')}\n`],
+    [1, ''],
+  ])
+  const { ignored: found, known } = await ignoredPaths({ cwd: root, paths: [join(root, 'src', 'new.js')], run: fake.run })
+  check('a batch nothing ignores answers nothing', found.length === 0, String(found.length))
+  // Exit 1 is an answer: git looked, and nothing matched.
+  check('and exit 1 still counts as an answer', known === true, String(known))
+}
+
+{
+  // `check-ignore` fails the *whole batch* on one path outside the repository,
+  // so the caller must never pass one. Dropping it here is also the honest
+  // answer: a file belonging to no repository is not something git was hiding.
+  const root = join('F:', 'repo')
+  const outside = join('F:', 'elsewhere', 'stray.txt')
+  const fake = runner([
+    [0, `${root}\n${join(root, '.git')}\n${join(root, '.git')}\n`],
+  ])
+  const { ignored: found } = await ignoredPaths({ cwd: root, paths: [outside], run: fake.run })
+  check('a path outside the repository is not asked about', found.length === 0, String(found.length))
+  check('so only the description ran', fake.calls.length === 1, String(fake.calls.length))
+}
+
+{
+  // The list goes in on stdin, NUL separated and NUL terminated: `-z` is refused
+  // as an argument (`fatal: -z only makes sense with --stdin`), and git waits
+  // for end-of-input before answering.
+  const root = join('F:', 'repo')
+  const seen = []
+  const run = async (args, cwd, input) => {
+    seen.push({ args, cwd, input })
+    if (args[0] === 'rev-parse') return { code: 0, stdout: `${root}\n${join(root, '.git')}\n${join(root, '.git')}\n` }
+    return { code: 1, stdout: '' }
+  }
+  const one = join(root, 'dist', 'a.js')
+  const two = join(root, 'debug.log')
+  const { ignored: _unused } = await ignoredPaths({ cwd: root, paths: [one, two], run })
+  const asked = seen[1]
+  check('the ignore call asks stdin for its list', asked?.args.includes('--stdin') === true, String(asked?.args))
+  check('and separates the paths with NUL', asked?.input === `${one}\u0000${two}\u0000`, String(asked?.input))
+}
+
+{
+  // A workspace that is not a repository: nothing to ask, no process spent.
+  const plain = join('F:', 'plain')
+  const fake = runner([[128, '']])
+  const answer = await ignoredPaths({ cwd: plain, paths: [join(plain, 'x.js')], run: fake.run })
+  check('outside a repository nothing is ignored', answer.ignored.length === 0, String(answer.ignored.length))
+  // Nothing ignored and "no repository to ignore in" are different answers, and
+  // the merge reads this one to decide whether the walk's list is redundant. A
+  // plain folder reporting `repository: true` would make the merge discard the
+  // walk's whole list -- in exactly the workspace where the walk is the only
+  // witness. The empty list alone cannot tell the two cases apart.
+  check('and it says the question did not apply here', answer.repository === false, String(answer.repository))
+  check('and it still counts as asked', answer.known === true, String(answer.known))
+}
+
+{
+  // The fake runner above proves the arithmetic; it cannot prove that the real
+  // command accepts its list on stdin, and that is exactly where the last
+  // version of this idea would have failed: `-z` is refused as an argument, and
+  // a child process that never closes stdin waits for a timeout instead of
+  // answering. So this one builds a real repository and uses the real runner.
+  const root = await mkdtemp(join(tmpdir(), 'dsse-ignore-'))
+  try {
+    const git = (args) =>
+      new Promise((done) => {
+        execFile('git', args, { cwd: root, windowsHide: true }, (error) => done(error === null))
+      })
+    const ready = await git(['init', '-q', '.'])
+    if (ready === true) {
+      await writeFile(join(root, '.gitignore'), 'dist/\n*.log\n')
+      await mkdir(join(root, 'dist'), { recursive: true })
+      await mkdir(join(root, 'src'), { recursive: true })
+      const ignored = join(root, 'dist', 'bundle.js')
+      const visible = join(root, 'src', 'new.js')
+      const trailing = join(root, 'debug.log')
+      await writeFile(ignored, 'x')
+      await writeFile(visible, 'x')
+      await writeFile(trailing, 'x')
+      // `dist/` holds an ignored file and `src/` a visible one; the third is
+      // ignored by a pattern that matches any directory.
+      const { ignored: found, known } = await ignoredPaths({ cwd: root, paths: [ignored, visible, trailing] })
+      check('a real repository is answered, not guessed', known === true, String(known))
+      check('the real git names the ignored files', found.includes(ignored) === true, JSON.stringify(found))
+      check('and it does not name the visible one', found.includes(visible) === false, JSON.stringify(found))
+      check('a pattern matching any directory also counts', found.includes(trailing) === true, JSON.stringify(found))
+      // The premise of the whole merge: the same file is invisible to status.
+      const swept = await sweepChanges({ cwd: root })
+      check('git status cannot see the ignored file', swept.paths.includes(ignored) === false, JSON.stringify(swept.paths))
+      check('but it does see the visible one', swept.paths.includes(visible) === true, JSON.stringify(swept.paths))
+    }
+    check('the repository was built', ready === true, String(ready))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

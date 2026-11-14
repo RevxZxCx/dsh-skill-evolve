@@ -221,8 +221,8 @@ const mutations = [
     file: state,
     label: 're-editing a file leaves it where it was',
     suites: ['test/session-state.test.mjs'],
-    from: '      entry.paths.delete(file)\n      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at })',
-    to: '      if (entry.paths.has(file) === false) entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at })',
+    from: '      entry.paths.delete(file)\n      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: origin })',
+    to: '      if (entry.paths.has(file) === false) entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: origin })',
     why: 'a Map keeps insertion order, so without the delete the list is "first edited first" and the card claims a file nobody touched lately was the last thing done',
   },
   {
@@ -344,8 +344,8 @@ const mutations = [
     file: state,
     label: 'the turn a file was written in is not recorded',
     suites: ['test/session-state.test.mjs'],
-    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at })',
-    to: '      entry.paths.set(file, { seq: ++entry.sequence, turn: undefined, at })',
+    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: origin })',
+    to: '      entry.paths.set(file, { seq: ++entry.sequence, turn: undefined, at, source: origin })',
     why: 'without the number the card can only compare against the previous turn snapshot, which is empty after a restart — every file silently becomes "earlier"',
   },
   {
@@ -813,8 +813,8 @@ const mutations = [
     file: index,
     label: 'the bracket opens and nothing is recorded from it',
     suites: ['test/index.test.mjs'],
-    from: "          if (paths.length === 0) return\n          sessionState.rememberPaths(agentId, paths, endedTurn)",
-    to: "          if (paths.length === 0) return",
+    from: "            if (blind.length > 0) sessionState.rememberPaths(agentId, blind, endedTurn, 'scan')",
+    to: "",
     why: 'measuring the turn and dropping the answer reads exactly like a workspace with no repository: the card simply never grows, and the collector is dead code that still costs two git calls per turn',
   },
   {
@@ -925,8 +925,8 @@ const mutations = [
   {
     label: 'the scan is asked even when git already answered',
     file: index,
-    from: '          const paths = fromGit.length > 0 ? fromGit : fromScan',
-    to: '          const paths = fromScan.length > 0 ? fromScan : fromGit',
+    from: '                blind = answer.known === true ? answer.ignored : fromScan',
+    to: '                blind = fromScan',
     why: 'A modification time cannot tell a file this turn wrote from one a checkout rewrote, so the card fills with rows the turn did not produce.',
     suites: ['test/index.test.mjs'],
   },
@@ -970,7 +970,64 @@ const mutations = [
     to: "  if (left === 'partial' || right === 'partial') return 'complete'",
     why: 'The merge is the only place both brackets are visible at once, so it is the only place the weaker claim can be lost. Returning `complete` here tells the reader nothing else was produced when half the workspace was never read.',
   },
+  {
+    file: client,
+    label: 'the caveat about a half-read sweep is never drawn',
+    suites: ['test/client.test.mjs'],
+    from: "                  blindNote === '' ? null : jsx('p', { className: 'dsse-note', children: blindNote }),",
+    to: "",
+    why: 'The only place the collector\'s doubt reaches the reader. Without it "nothing was produced" and "nothing was produced that I could see" render identically, and the second one is the sentence that should worry somebody.',
+  },
+  {
+    file: client,
+    label: 'the card never reads what the sweep could see',
+    suites: ['test/client.test.mjs'],
+    from: "      const coverage = typeof sweep?.coverage === 'string' ? sweep.coverage : ''",
+    to: "      const coverage = ''",
+    why: 'The payload carries the caveat and the card must repeat it; reading the field and ignoring it is indistinguishable from never sending it, except that the serving side looks finished.',
+  },
+  {
+    file: client,
+    label: 'the header goes back to counting only the files a person wrote',
+    suites: ['test/client.test.mjs'],
+    from: "      const fileMeta = `${ordered.length} 个文件`",
+    to: "      const fileMeta = `${people.length} 个文件`",
+    why: 'The old header counted people\'s files and named the generated ones beside it, which left two counts of two lists next to a badge naming a third. The header is supposed to answer one question: how much did this session produce.',
+  },
+  {
+    file: client,
+    label: 'the badge repeats the total instead of naming the remainder',
+    suites: ['test/client.test.mjs'],
+    from: "              label: filesOpen ? '收起文件' : `显示其余 ${hiddenFiles} 个`,",
+    to: "              label: filesOpen ? '收起文件' : `显示其余 ${ordered.length} 个`,",
+    why: 'The badge exists to say how many rows are missing. Naming the total again makes it agree with the header and leave the reader to subtract, which is exactly the arithmetic a folded card is supposed to spare them.',
+  },
+  {
+    file: client,
+    label: 'the folded row count is assumed to be a full fold',
+    suites: ['test/client.test.mjs'],
+    from: "      const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length",
+    to: "      const foldedRows = FOLDED_FILES",
+    why: 'A session with two written files draws two rows, not four. Assuming a full fold makes the badge claim four rows are hidden on a card that hides none, which is the "展开全部 1 个" bug wearing new words.',
+  },
+  {
+    file: gitChanges,
+    label: 'a workspace with no repository is answered as if it had one',
+    suites: ['test/git-changes.test.mjs', 'test/index.test.mjs'],
+    from: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: false }",
+    to: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: true }",
+    why: 'With `repository: true` and no ignored paths the merge treats the walk as fully redundant and drops it, so a session in a plain folder loses every file it wrote -- the exact turn where the walk is the only witness.',
+  },
+  {
+    file: state,
+    label: 'the bracket that found a file is not recorded',
+    suites: ['test/session-state.test.mjs'],
+    from: "    const origin = source === 'git' || source === 'scan' ? source : undefined",
+    to: "    const origin = undefined",
+    why: 'After the merge nothing else can say which bracket saw a file, and that is the only clue left when a row is surprising later. Dropping it at the write makes the field permanently null and the card cannot tell the two apart.',
+  },
 ]
+
 
 // Baseline first: a workspace that already fails turns every mutation into a
 // false KILLED, because "the suite has failures after the mutation" is then true

@@ -2029,6 +2029,30 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
+
+{
+  // Which bracket found a file survives the round trip. After the merge this is
+  // the only record of it: the diff's list and the walk's list are folded into one
+  // map keyed by path, so a row that surprises somebody later cannot be traced
+  // back to the collector that produced it unless the write kept the name.
+  const { state, store, root } = await fixture()
+  state.rememberPaths('sourced', ['/work/a.ts'], 3, 'git')
+  state.rememberPaths('sourced', ['/work/dist/c.js'], 3, 'scan')
+  check('the bracket that found a file is kept', state.pathsSeen('sourced').find((one) => one.path === '/work/a.ts')?.source === 'git', JSON.stringify(state.pathsSeen('sourced')))
+  check('and the other bracket is kept too', state.pathsSeen('sourced').find((one) => one.path === '/work/dist/c.js')?.source === 'scan', JSON.stringify(state.pathsSeen('sourced')))
+  // A name this build does not know is not a third provenance, and it is not
+  // guessed into one either.
+  state.rememberPaths('sourced', ['/work/d.ts'], 4, 'screenshot')
+  check('a bracket name this build does not know is not stored', state.pathsSeen('sourced').find((one) => one.path === '/work/d.ts')?.source === undefined, JSON.stringify(state.pathsSeen('sourced')))
+  await state.flush('sourced')
+
+  const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  await second.load('sourced')
+  check('and the bracket survives a reload', second.pathsSeen('sourced').find((one) => one.path === '/work/dist/c.js')?.source === 'scan', JSON.stringify(second.pathsSeen('sourced')))
+  check('the unknown one is still unknown after a reload', second.pathsSeen('sourced').find((one) => one.path === '/work/d.ts')?.source === undefined, JSON.stringify(second.pathsSeen('sourced')))
+  await done(root)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

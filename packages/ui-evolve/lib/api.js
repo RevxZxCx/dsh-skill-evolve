@@ -490,6 +490,13 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
     seen.add(absolute)
     const recordedTurn = typeof raw === 'object' && raw !== null ? raw.turn : undefined
     const recordedAt = typeof raw === 'object' && raw !== null ? raw.at : undefined
+    // Which bracket found this file: `git` for the diff, `scan` for the directory
+    // walk that fills in what git cannot see. Passed through untouched — this
+    // layer has no opinion about provenance, and re-deriving it here would mean
+    // guessing from a path what only the collector knows. Absent for a bare
+    // string (the `previous.paths` fallback) and for documents written before
+    // the field existed, so the card must treat `undefined` as "unknown".
+    const recordedSource = typeof raw === 'object' && raw !== null ? raw.source : undefined
     // "This turn" means the turn the card is describing, and the card describes
     // `previous` — its head counts and its path list both come from there. So the
     // path comparison answers whenever a snapshot exists.
@@ -513,6 +520,7 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       turn,
       noise: isNoisePath(absolute, cwd),
       at: Number.isFinite(recordedAt) ? recordedAt : null,
+      source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,
     }
     let info
     try {

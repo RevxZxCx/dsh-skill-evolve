@@ -172,12 +172,15 @@ function readState(stored) {
 /**
  * One remembered file, in whichever shape the file on disk used.
  *
- * @param {any} raw - a `{ seq, turn, at }` object (v2) or a bare position (v1).
- * @returns {{ seq: number, turn: number | undefined, at: number | undefined } | undefined} the entry, or undefined when the value says nothing usable.
+ * @param {any} raw - a `{ seq, turn, at, source? }` object (v2) or a bare position (v1).
+ * @returns {{ seq: number, turn: number | undefined, at: number | undefined, source: string | undefined } | undefined} the entry, or undefined when the value says nothing usable.
  */
 function readPathEntry(raw) {
   const finite = value => typeof value === 'number' && Number.isFinite(value)
-  if (finite(raw)) return { seq: raw, turn: undefined, at: undefined }
+  // `source` is deliberately absent from the v1 shape: a document written before
+  // it existed cannot say which bracket found a file, and inventing `'git'` for
+  // it would put a provenance claim on the card that no build ever made.
+  if (finite(raw)) return { seq: raw, turn: undefined, at: undefined, source: undefined }
   if (isRecord(raw) === false) return undefined
   if (finite(raw.seq) === false) return undefined
   // A wrong-typed `turn` or `at` is dropped to undefined rather than clamped: a
@@ -187,6 +190,11 @@ function readPathEntry(raw) {
     seq: raw.seq,
     turn: finite(raw.turn) ? raw.turn : undefined,
     at: finite(raw.at) ? raw.at : undefined,
+    // Only the two words this build knows survive; anything else is dropped
+    // rather than carried, because the field exists to answer "why is this row
+    // here" and an unrecognised answer is not an answer. `undefined` is the
+    // honest value for "no bracket claimed it".
+    source: raw.source === 'git' || raw.source === 'scan' ? raw.source : undefined,
   }
 }
 
@@ -699,13 +707,20 @@ class SessionState {
    * @param {string} sessionId - the session.
    * @param {string[]} paths - the paths the finished turn wrote.
    * @param {number | undefined} [turn] - the turn that wrote them, when known.
+   * @param {'git' | 'scan' | undefined} [source] - which bracket found them.
    * @returns {void}
    */
-  rememberPaths(sessionId, paths, turn) {
+  rememberPaths(sessionId, paths, turn, source) {
     if (!Array.isArray(paths) || paths.length === 0) return
     const entry = this.entry(sessionId)
     if (entry === undefined) return
     const stamp = Number.isFinite(turn) ? turn : undefined
+    // Provenance is recorded, not inferred later: once the paths are merged into
+    // one list the fact that git could not see a file — and that only the
+    // directory walk did — is gone, and it is the one thing needed to answer
+    // "why did this appear" months later. A value outside the vocabulary is
+    // dropped so the field never carries a claim no reader can interpret.
+    const origin = source === 'git' || source === 'scan' ? source : undefined
     // Through the injected clock, like every other timestamp this module writes.
     // Reading `Date.now()` directly let one document carry two contradictory
     // times — the paths' `at` in real wall-clock time while `updated` followed the
@@ -718,7 +733,7 @@ class SessionState {
       // insertion order and a re-set keeps the old slot, and this list's whole
       // order is "most recently edited first".
       entry.paths.delete(file)
-      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at })
+      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: origin })
       touched = true
     }
     if (touched === true) {
@@ -770,7 +785,7 @@ class SessionState {
     if (entry === undefined || entry.paths.size === 0) return []
     return [...entry.paths.entries()]
       .sort((a, b) => b[1].seq - a[1].seq)
-      .map(([file, at]) => ({ path: file, turn: at.turn, at: at.at }))
+      .map(([file, at]) => ({ path: file, turn: at.turn, at: at.at, source: at.source }))
   }
 
   /**
@@ -912,7 +927,7 @@ class SessionState {
     const servers = {}
     for (const [server, at] of entry.servers) servers[server] = at
     const paths = {}
-    for (const [file, remembered] of entry.paths) paths[file] = { seq: remembered.seq, turn: remembered.turn, at: remembered.at }
+    for (const [file, remembered] of entry.paths) paths[file] = { seq: remembered.seq, turn: remembered.turn, at: remembered.at, source: remembered.source }
     return {
       state: STATE_VERSION,
       turns: snapshot?.turns,

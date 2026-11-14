@@ -2336,14 +2336,31 @@ window.__ModuleLoader__.load({
             { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },
           ]
         : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]
-      // What the header promises. The folded count is people's files, because
-      // that is what the rows are; the generated ones are named separately so the
-      // badge's total never contradicts the count beside it.
-      const fileMeta = filesOpen === true
-        ? `全部 ${ordered.length} 个`
-        : noisy.length === 0
-          ? `${people.length} 个文件`
-          : `${people.length} 个文件 · ${noisy.length} 个生成`
+      // What the header promises, and it promises one thing: how much this
+      // session produced. It counts the generated files too, because they were
+      // produced. The old header counted people's files and then named the
+      // generated ones beside it — two numbers about two lists, sitting next to a
+      // badge naming a third, so a reader had to work out which pair agreed. The
+      // generated files are now labelled by their own group (visible on opening),
+      // and the badge says how many rows are not on screen, which is the other
+      // question a folded card raises.
+      const fileMeta = `${ordered.length} 个文件`
+      // How many rows the folded card actually draws. Equality with
+      // `FOLDED_FILES` is not assumed: a session with two written files shows two.
+      const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length
+      const hiddenFiles = ordered.length - (filesOpen === true ? ordered.length : foldedRows)
+      // What the sweep could see, said out loud. `paths` empty reads as "this turn
+      // produced nothing", and that is a different sentence from "nothing I could
+      // see" — only the collector knows which one happened, so it sends `sweep`
+      // and the card repeats it rather than guessing. `complete` says nothing:
+      // a caveat on every card is a caveat nobody reads.
+      const sweep = typeof data?.sweep === 'object' && data.sweep !== null ? data.sweep : undefined
+      const coverage = typeof sweep?.coverage === 'string' ? sweep.coverage : ''
+      const blindNote = coverage === 'partial'
+        ? '目录没读完，可能还有文件没列出'
+        : coverage === 'none'
+          ? '这一轮没有检查目录，列表可能不全'
+          : ''
       // How many files the turn that just ended wrote. `files` is the whole
       // session's work now, so it cannot answer that question, and the two other
       // numbers on the same row are turn-scoped.
@@ -2697,9 +2714,16 @@ window.__ModuleLoader__.load({
                 // people's files fit in four rows. A filter with no route to the
                 // filtered thing is indistinguishable from deletion, and the header
                 // would be naming a number the reader cannot reach.
-                badgeAction: ordered.length > FOLDED_FILES || ordered.length > people.length || filesOpen
+                //
+                // Its label answers a different question from the header now: the
+                // header says how much was produced, the badge says how many rows
+                // are missing from what is on screen. Those are the two things a
+                // reader of a folded list wants, and "展开全部 7 个" answered
+                // neither — it repeated the header's total in a control whose job
+                // was the remainder.
+                badgeAction: hiddenFiles > 0 || filesOpen
                   ? {
-                      label: filesOpen ? '收起' : `展开全部 ${ordered.length} 个`,
+                      label: filesOpen ? '收起文件' : `显示其余 ${hiddenFiles} 个`,
                       open: filesOpen === true,
                       onClick: () => setFilesOpen((open) => open === false),
                     }
@@ -2767,6 +2791,12 @@ window.__ModuleLoader__.load({
                       ],
                     }, group.key)),
                   }),
+                  // The caveat sits under the rows, where it explains them. It is
+                  // the collector's doubt, repeated verbatim rather than softened:
+                  // "nothing was produced" and "nothing was produced that I could
+                  // see" look identical in a list, and only this line tells them
+                  // apart. Nothing is drawn for a complete sweep.
+                  blindNote === '' ? null : jsx('p', { className: 'dsse-note', children: blindNote }),
                 ],
               }),
           settings,
