@@ -610,22 +610,61 @@ window.__ModuleLoader__.load({
    difference between the two is whether the block is clickable, not where the
    name and the size sit. */
 .dsse-row-body{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
-/* Copy lives on top of the size, not beside it. Reserving room for a control
-   that is invisible until hover would shorten every name in the list to pay for
-   something the reader cannot see; overlaying it means the name keeps its width
-   and nothing moves when the pointer arrives. The size hides by visibility, not
-   by display, for the other half of that promise — it keeps its slot,
-   so the name does not grow back either. */
+/* One control, on top of the size, and the menu it opens. Reserving room for a
+   button that is invisible until hover would shorten every name in the list to
+   pay for something the reader cannot see; overlaying it means the name keeps
+   its width and nothing moves when the pointer arrives. The size hides by
+   visibility, not by display, for the other half of that promise — it keeps
+   its slot, so the name does not grow back either. */
 .dsse-row-actions{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:flex;gap:2px;opacity:0;pointer-events:none;transition:opacity 120ms ease}
 /* Both the reveal and the size it covers are scoped to rows that have
    actions. On a Host without a clipboard the actions never render, and a row
    that hid its size on hover to make room for nothing would be strictly worse
-   than the row it replaced. */
-.dsse-row[data-actions="true"]:hover .dsse-row-actions,.dsse-row[data-actions="true"]:focus-within .dsse-row-actions{opacity:1;pointer-events:auto}
-.dsse-row[data-actions="true"]:hover .dsse-size{visibility:hidden}
-.dsse-row-copy{padding:1px 4px;border:1px solid var(--dsw-alias-border-l2,#e3e6ec);border-radius:5px;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:max(.8em,10px);line-height:16px;cursor:pointer}
+   than the row it replaced.
+   The data-menu flag keeps both rules on while the menu is open: the pointer
+   has to travel from the button down to the menu, and that trip leaves the row.
+   Without it the control that was just clicked would fade out under the
+   pointer that clicked it. */
+.dsse-row[data-actions="true"]:hover .dsse-row-actions,.dsse-row[data-actions="true"]:focus-within .dsse-row-actions,.dsse-row[data-menu="true"] .dsse-row-actions{opacity:1;pointer-events:auto}
+.dsse-row[data-actions="true"]:hover .dsse-size,.dsse-row[data-menu="true"] .dsse-size{visibility:hidden}
+.dsse-row-copy{width:22px;height:22px;display:inline-grid;place-items:center;flex:0 0 auto;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);cursor:pointer}
+/* A keyboard reader gets the button and the size at the same time, and the two
+   occupy the same twenty pixels: the size is right-aligned to six pixels from the
+   row edge and the button starts twenty-six from it. On hover the size steps out
+   of the way; on focus it must not, because hiding it would drop it out of the
+   accessibility tree and a keyboard reader has no other way to learn the file's
+   size. So the button stays and covers its own footprint instead of sharing it,
+   and the size keeps whatever is left of the line. The lighter stroke is the same
+   correction at one pixel of scale: at 14px the shared 1.7 reads about 18 percent
+   thinner than the 17px icons beside it. */
+.dsse-row[data-actions="true"]:focus-within .dsse-row-copy:not([aria-expanded="true"]){background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
+.dsse-row-copy .dsse-icon{width:14px;height:14px;stroke-width:2}
 .dsse-row-copy:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
-.dsse-row-copy:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:1px}
+/* Open is a state of the button, not a second button: the border is what tells
+   a reader the menu below belongs to this row rather than to the one under it. */
+.dsse-row-copy[aria-expanded="true"]{border-color:var(--dsw-alias-border-l2,#e3e6ec);background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#0f1115)}
+.dsse-row-copy:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
+/* The answer lives on the same control, as a colour rather than a word: the
+   button is 22px and any text that fits there is too short to read. */
+.dsse-row-copy[data-ok="true"]{color:var(--dsw-alias-state-success-primary,#1f7a4d)}
+.dsse-row-copy[data-ok="false"]{color:var(--dsw-alias-state-error-primary,#b4232c)}
+/* The menu is a block in the list, not a popup floating over it. The card is
+   overflow:hidden and the list is overflow-y:auto, so anything positioned
+   outside this box would be cut off exactly where the list is long enough to
+   need it — which is the case where a reader is most likely to be looking.
+   Staying in flow also means no measurement, no resize listener, and Tab
+   reaches the items because they follow the button in document order. The shadow
+   is a step lighter than the card's: this panel is drawn inside that card, and a
+   surface nested in another does not cast the same shadow as the one holding it. */
+.dsse-row-menu{display:grid;gap:1px;margin:0 0 2px 22px;padding:3px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:9px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 1px 3px rgba(15,17,21,.06)}
+.dsse-row-menuitem{display:flex;align-items:baseline;gap:8px;width:100%;padding:4px 7px;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.dsse-row-menuitem:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
+.dsse-row-menuitem:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
+.dsse-row-menuitem-label{flex:0 0 auto;font-size:max(.85em,11px)}
+/* The path itself, so the choice is made against the thing being copied: two
+   labels that only say 绝对 / 相对 leave the reader guessing what lands on the
+   clipboard, and the absolute path is the one they cannot reconstruct. */
+.dsse-row-menuitem-value{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-tertiary,#8b92a1);font-family:var(--dsse-font-mono,var(--dsse-font-family,inherit));font-size:max(.8em,10px)}
 .dsse-group{display:grid;gap:3px}
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
@@ -1456,6 +1495,11 @@ window.__ModuleLoader__.load({
       // rotated shape reads as a spinner caught mid-animation. The direction is the
       // promise about what the click does — down means there is more below, up means
       // the card is already open and the click puts it back.
+      // Two offset rectangles, the back one clipped at the top-left so the pair
+      // reads as a copy rather than as a grid or a window. Drawn at the same
+      // stroke weight as the rest of the set so a 14px button does not look
+      // heavier than the 17px icons beside it.
+      if (props.name === 'copy') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('rect', { x: '9', y: '9', width: '11', height: '11', rx: '2.5' }), jsx('path', { d: 'M15 5.5A2.5 2.5 0 0012.5 3H6.5A2.5 2.5 0 004 5.5v6A2.5 2.5 0 006.5 14' })] })
       if (props.name === 'chevron') return jsx('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: jsx('path', { d: props.up === true ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6' }) })
       return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3z' }), jsx('path', { d: 'M18.5 15l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3z' })] })
     }
@@ -2521,6 +2565,73 @@ window.__ModuleLoader__.load({
           copyTimer.current = null
         }
       }, [])
+      // Which row has its menu open, as a row key. One at a time: two menus open
+      // at once would mean two overlapping lists of paths in a column that is
+      // already narrow, and the reader has to look at each one to tell them apart.
+      const [menuFor, setMenuFor] = React.useState(undefined)
+      const menuRef = React.useRef(null)
+      // The list scrolls: eight rows fit, the rest are behind a scrollbar, and a
+      // menu opened on the last visible row starts below the fold — the button
+      // changes state and nothing appears. Bringing it into view is the only part
+      // of this that has to ask the browser anything, so it is also the only part
+      // that can be absent (a test double has no layout); `nearest` keeps the list
+      // from jumping when the menu already fits.
+      React.useEffect(() => {
+        if (menuFor === undefined) return
+        const node = menuRef.current
+        if (node === null || typeof node.scrollIntoView !== 'function') return
+        node.scrollIntoView({ block: 'nearest' })
+      }, [menuFor])
+      // The control of the row whose menu is open, so choosing an entry can put
+      // focus back where the reader was. Without it the chosen entry is removed
+      // from under the cursor, focus falls to the document body, and the answer
+      // written into `aria-label` is announced to nobody.
+      const copyRef = React.useRef(null)
+      // Closing on Escape and on a click outside is the difference between a menu
+      // and a mode the reader cannot leave without choosing something. Both are
+      // listened for on `window`: the panel is a root-scope overlay, so there is no
+      // ancestor to delegate to, and `mousedown` (not `click`) is what matches the
+      // moment a pointer press lands elsewhere — waiting for the release would let
+      // a drag that starts outside still count as being inside.
+      //
+      // The listener only exists while a menu is open. A permanently mounted one
+      // would be a global handler on every Host surface for a control that is
+      // usually closed.
+      React.useEffect(() => {
+        if (menuFor === undefined) return undefined
+        const onDown = (event) => {
+          const target = event?.target
+          const node = menuRef.current
+          const inside = node !== null && typeof node.contains === 'function' && node.contains(event?.target) === true
+          // The button itself is outside the menu on purpose: pressing it again
+          // has to be able to close what it opened, and treating that press as
+          // "outside" would close and immediately reopen on the same gesture.
+          // Which element the press lands on is not the control. The control is a
+          // 22px box whose visible 14px is an <svg>, so the hit node is a <path>
+          // inside it and carries no marker of its own. Reading the marker off the
+          // hit node made a press on the icon look like a press in the list: the
+          // menu closed on mousedown and the click behind it reopened it, so the
+          // control could not close what it opened. Measured in Chrome, not
+          // reasoned about. `closest` walks up the way the DOM does; the `dataset`
+          // branch stays for a hit node that is itself the control, which is the
+          // only shape a test double can express.
+          const onButton = target != null && (
+            typeof target.closest === 'function'
+              ? target.closest('[data-dsse-copy="true"]') !== null
+              : target?.dataset?.dsseCopy === 'true'
+          )
+          if (inside === false && onButton === false) setMenuFor(undefined)
+        }
+        const onKey = (event) => {
+          if (event?.key === 'Escape') setMenuFor(undefined)
+        }
+        window.addEventListener('mousedown', onDown)
+        window.addEventListener('keydown', onKey)
+        return () => {
+          window.removeEventListener('mousedown', onDown)
+          window.removeEventListener('keydown', onKey)
+        }
+      }, [menuFor])
 
       // Three cases, and the third is why this is not a one-line ternary.
       //
@@ -2927,36 +3038,86 @@ window.__ModuleLoader__.load({
                               children: status === 'missing' ? '已删除' : status === 'invalid' ? '无法读取' : formatBytes(file.bytes),
                             }),
                           ]
-                          // Copying answers on the control that was pressed, because
-                          // there is no toast in this panel and a silent success is
-                          // indistinguishable from a key that did nothing.
-                          // The visible text is 绝对 / 相对 / 已复制 / 失败 — too terse to be a
-                          // name on its own, and none of it says *what* gets copied. The label
-                          // carries both the action and, once answered, its outcome: a screen
-                          // reader announces the change on the button the user is already on,
-                          // which is the only feedback this feature has.
-                          const copyButton = (which, label, target) => {
-                            if (clipboard === undefined || target === undefined) return null
-                            const slot = `${key}:${which}`
-                            const answered = copied !== undefined && copied.key === slot
-                            const wording = answered === false ? (which === 'abs' ? '绝对' : '相对') : copied.ok === true ? '已复制' : '失败'
-                            return jsx('button', {
-                              className: 'dsse-row-copy',
+                          // One control, and the choice behind it. Two buttons could only
+                          // say 绝对 / 相对, which is the one thing the reader already knows;
+                          // the menu can also show the two paths, which is the thing they
+                          // cannot reconstruct — and the difference between them is the whole
+                          // decision.
+                          //
+                          // The answer is a colour on the icon, not a word: the button is
+                          // 22px wide, and any text that fits there is too short to read. The
+                          // label still carries it, because colour is not available to a
+                          // screen reader and this is the only feedback the feature has.
+                          const open = menuFor === key
+                          const copiedHere = copied !== undefined && copied.key === key
+                          const copyTitle = copiedHere === false
+                            ? '复制路径'
+                            : copied.ok === true ? '已复制' : '复制失败，剪贴板不可写'
+                          const copyButton = clipboard === undefined ? null : jsx('button', {
+                            ref: open === true ? copyRef : undefined,
+                            className: 'dsse-row-copy',
+                            type: 'button',
+                            'data-dsse-copy': 'true',
+                            'data-ok': copiedHere === false ? undefined : (copied.ok === true ? 'true' : 'false'),
+                            'aria-expanded': open === true ? 'true' : 'false',
+                            'aria-label': copiedHere === false
+                              ? '复制路径'
+                              : copied.ok === true ? '已复制路径' : '复制路径失败',
+                            title: copyTitle,
+                            onClick: () => setMenuFor(open === true ? undefined : key),
+                            children: jsx(Icon, { name: 'copy' }),
+                          }, `${key}:copy`)
+                          const menuItem = (which, label, target) => {
+                            if (target === undefined) return null
+                            return jsxs('button', {
+                              className: 'dsse-row-menuitem',
                               type: 'button',
-                              title: answered === true && copied.ok === false ? '复制失败，剪贴板不可写' : `复制${label}`,
-                              'aria-label': answered === false
-                                ? `复制${label}`
-                                : copied.ok === true ? `已复制${label}` : `复制${label}失败`,
-                              onClick: () => copyPath(slot, target),
-                              children: wording,
-                            }, slot)
+                              onClick: () => {
+                                copyPath(key, target)
+                                setMenuFor(undefined)
+                                // The list is about to vanish from under the
+                                // pointer; the control stays put, so the answer
+                                // lands where the reader already is.
+                                if (copyRef.current !== null) copyRef.current.focus()
+                              },
+                              children: [
+                                jsx('span', { className: 'dsse-row-menuitem-label', children: label }),
+                                jsx('span', { className: 'dsse-row-menuitem-value', children: target }),
+                              ],
+                            }, `${key}:${which}`)
                           }
-                          const actions = [copyButton('abs', '绝对路径', absolute), copyButton('rel', '相对路径', relative)]
-                          return jsxs('div', {
+                          // Both items are derived from the same row, so the row can be
+                          // missing neither: an unreadable file still has a path to copy,
+                          // and the relative one is the only entry that can be absent.
+                          const menuItems = [menuItem('abs', '绝对路径', absolute), menuItem('rel', '相对路径', relative)]
+                          // The menu is a block in the list rather than a popup over it, and
+                          // a sibling of the row rather than a child: inside the row it would
+                          // be a flex item on a second line, which moves the row's middle and
+                          // takes the copy button with it. The card is overflow:hidden and the
+                          // list is overflow-y:auto, so anything positioned outside this box
+                          // is cut off exactly when the list is long enough to need it. In
+                          // flow it follows the row in document order, which is what lets Tab
+                          // reach the items. That is a disclosure, and it is declared as
+                          // one: `role="menu"` would promise arrow-key navigation, a
+                          // focused entry on open, and Escape returning to the control
+                          // -- none of which is here, and a promise the reader cannot
+                          // keep is worse than a plainer role that is simply true.
+                          const menu = open === false ? null : jsx('div', {
+                            ref: menuRef,
+                            className: 'dsse-row-menu',
+                            role: 'group',
+                            'aria-label': `复制 ${parts.name} 的路径`,
+                            children: menuItems,
+                          }, `${key}:menu`)
+                          // A pair, not a single element: the menu has to sit under the
+                          // row but outside it, so the row keeps its own height and the
+                          // copy button keeps its place on the line.
+                          return [jsxs('div', {
                             className: 'dsse-row',
                             'data-noise': file.noise === true ? 'true' : 'false',
                             'data-status': status,
-                            'data-actions': actions[0] === null ? 'false' : 'true',
+                            'data-actions': copyButton === null ? 'false' : 'true',
+                            'data-menu': open === true ? 'true' : 'false',
                             // The whole row carries the path, not just the opener:
                             // hovering the size or the gap between parts is still
                             // hovering this file, and the tooltip should not flicker
@@ -2972,9 +3133,9 @@ window.__ModuleLoader__.load({
                                     children: body,
                                   })
                                 : jsx('div', { className: 'dsse-row-body', children: body }),
-                              jsx('div', { className: 'dsse-row-actions', children: actions }),
+                              jsx('div', { className: 'dsse-row-actions', children: copyButton }),
                             ],
-                          }, key)
+                          }, key), menu]
                         }),
                       ],
                     }, group.key)),

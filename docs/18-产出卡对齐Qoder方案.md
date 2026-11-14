@@ -294,7 +294,7 @@ Qoder 的溢出菜单有六项：四种打开方式、在文件管理器中显�
 
 **验收**：168px 最窄卡片下文件名不被目录名挤没；图标按扩展名正确分类；`node --check` 通过。
 
-### S3 · 行内复制（✅ 已完工）
+### S3 · 行内复制（✅ 已完工，2026-11-14 改为图标 + 菜单）
 
 `client.js` 行结构重构 + 复制动作；`api.js` 返回体加 `cwd`（S1 已加，无需再补）。
 
@@ -312,6 +312,36 @@ Qoder 的溢出菜单有六项：四种打开方式、在文件管理器中显�
 
 **最终**：`3413 passed / 0 failed`，语言突变 **129** 条全杀（锚点下限从 21 抬到 129 并自证），
 persistence 45、checklist-panel 128 全杀，残留审计 0。
+
+#### S3 改版：两个按钮 → 一个图标 + 一层菜单（2026-11-14）
+
+用户在真机上看过之后要求改成 Qoder 那样的形态：悬停出一个复制图标，点开菜单再选绝对/相对，菜单样式与卡片统一。
+
+结构从「两个并排的中文小按钮」变成一个 22px 图标按钮 + 一层展开区域：
+
+```
+div.dsse-row            (position:relative)
+  button.dsse-row-open  (整行可点)
+  div.dsse-row-actions  (绝对定位叠在 .dsse-size 上)
+    button.dsse-row-copy  (22px，只在悬停/聚焦/菜单开着时显形)
+div.dsse-row-menu       ← 行的兄弟，不是子节点
+  button.dsse-row-menuitem  (标签 + 将要复制的那串字符)
+```
+
+三个决定值得记：
+
+1. **菜单在文档流里，不做浮层**。`.dsse-card{overflow:hidden}` 与 `.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}` 都会裁掉浮到行外的东西，而长列表正是最需要它的场合；手写 bundle 也没有 `ReactDOM.createPortal` 的入口（D-146）。代价是打开时把下面的行往下推——接受，推一下比被裁掉好。
+2. **菜单必须是行的兄弟**。做子节点会成为 flex 的第二行，把行的中点连同复制按钮一起挪走。
+3. **成功/失败改成颜色而不是文字**。22px 放不下可读的中文，`data-ok` 上红绿，`aria-label` 上带文字给读屏（D-144 不变）。
+
+**八个单元、六个审查者，修 14 处**（R-85）。最重的两条都是「测试看不见」的类型：
+图标上再按一次关不掉菜单（真机 `renders` 2→4 证实，只有按 4px 边缘才行）、
+键盘聚焦时 22px 透明按钮压在文件大小上读作 `1.2 ⊗B`（审查者用无头 Chrome 抓的）。
+
+**最终**：`3459 passed / 0 failed`，语言突变 **143** 条全杀、persistence 45、checklist-panel 128，残留审计 0。
+真机 CDP 四个读数 + 四张图：悬停出图标、菜单在行下方且右缘与卡片贴齐、选中后图标变绿、聚焦时按钮盖住自己占的那 20px。
+
+**一处如实记录**：聚焦后 0ms 读到 `opacity:0` 不是没显形，是 120ms 过渡在播——必须隔 400ms 再读一次。
 
 **一处被实测推翻的判断**：原注释与 D-141 都写着「面板走 loopback 明文 http，所以 `navigator.clipboard` 缺失，
 大多数用户看不到复制按钮」。实测 `{"isSecureContext":true,"hasClipboard":true}` —— loopback 算 secure context，

@@ -88,6 +88,10 @@ function fakeNode(frame) {
     querySelector: () => focusable[0] ?? null,
     querySelectorAll: () => focusable,
     focus: () => frame.onFocus?.(),
+    // A real node has this; a double only has it when the test says so, which is
+    // what separates "the panel asked to be scrolled into view" from "the panel
+    // called a method on layout that does not exist here".
+    scrollIntoView: (options) => frame.onScrollIntoView?.(options),
   }
 }
 
@@ -5010,180 +5014,297 @@ async function openPanel(routes, options) {
     return { instance, tree, card, rowOf }
   }
 
-  // The Host that has no clipboard is the common one, not the edge case: this
-  // panel is served over plain http on the loopback, and `navigator.clipboard`
-  // only exists in a secure context. Nothing is drawn, and — the half that is easy
-  // to forget — the row must not have made room for the control it did not draw.
+  // Getting at a node that may not be there.
+  //
+  // Reading `byClass(...)[0].props.onClick` throws when the node is absent, and a
+  // throw exits the suite before its tally line -- which the mutation runner
+  // reports as CRASHED, a different verdict from the KILLED these assertions exist
+  // to produce. A missing node has to read as one red assertion, so every press
+  // below goes through these two. They live out here, at the level the fixtures
+  // share, because the blocks that use them are siblings rather than nested.
+  const nodeOf = (tree, className, index = 0) => {
+    if (tree === undefined || tree === null) return undefined
+    return byClass(tree, className)[index]
+  }
+
+  const press = (tree, className, index = 0) => {
+    const found = nodeOf(tree, className, index)
+    if (found === undefined || typeof found.props?.onClick !== 'function') {
+      check(`a ${className} to press`, false, `no ${className} at ${index}`)
+      return false
+    }
+    found.props.onClick()
+    return true
+  }
+
+  // The Host that has no clipboard: nothing is drawn, and the row must not have
+  // made room for a control it did not draw. `data-actions="false"` is what keeps
+  // the hover rule from hiding the size to make room for nothing at all.
   {
     const { card, rowOf } = await open({ routes: routesFor() })
     check('a host without a clipboard draws no copy button', byClass(card, 'dsse-row-copy').length === 0, String(byClass(card, 'dsse-row-copy').length))
     check('and the row does not claim to have actions', rowOf('inside.ts')?.props?.['data-actions'] === 'false', String(rowOf('inside.ts')?.props?.['data-actions']))
-    // The size is the thing the control would have covered. On a row with no
-    // actions it has to stay visible, or the hover rule is trading the size for
-    // nothing at all — asserted on the sheet in the layout block below.
+    check('and there is no menu to open', byClass(card, 'dsse-row-menu').length === 0, String(byClass(card, 'dsse-row-menu').length))
   }
 
-  // A Host that does have one: two buttons on the row that is inside the
-  // workspace, one on the row that is not.
+  // A Host that does have one: a single control per row, and the menu behind it.
   {
     const written = []
     const navigator = { clipboard: { writeText: (value) => { written.push(value); return Promise.resolve() } } }
     const { card, rowOf, instance } = await open({ routes: routesFor(), navigator })
-    const inside = rowOf('inside.ts')
+    // Every assertion below reads the tree it was rendered with. The renderer keeps
+    // hook state, so a menu opens on one render and is closed on the next; reaching
+    // into the tree from before a click is how these tests go quietly stale.
+    const redraw = () => instance.renderer.deepRender(instance.seat('cards'))
+    const cardOf = (tree) => byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowIn = (tree, name) => byClass(cardOf(tree), 'dsse-row').find((node) => textOf(node).includes(name))
+    const menuIn = (tree, name) => byClass(cardOf(tree), 'dsse-row-menu').find((node) => String(node.props?.['aria-label'] ?? '').includes(name))
+    const listenersNow = () => instance.listeners.filter((row) => row.type === 'mousedown' || row.type === 'keydown')
+
+    const inside = rowIn(await redraw(), 'inside.ts')
     const buttons = byClass(inside, 'dsse-row-copy')
-    check('a host with a clipboard draws both copy buttons', buttons.length === 2, String(buttons.length))
+    check('a host with a clipboard draws one control per row', buttons.length === 1, String(buttons.length))
     check('and the row says it has actions', inside?.props?.['data-actions'] === 'true', String(inside?.props?.['data-actions']))
-    // The buttons are siblings of the opener, not children: nesting one button in
+    // The control is a sibling of the opener, not a child: nesting one button in
     // another is invalid HTML, and the inner one becomes unreachable by keyboard.
     check('the opener and the actions are siblings', byClass(inside, 'dsse-row-actions').length === 1 && byClass(inside, 'dsse-row-open').length === 1, JSON.stringify([byClass(inside, 'dsse-row-actions').length, byClass(inside, 'dsse-row-open').length]))
-    // The row is not itself a click target any more. If it carried a handler
-    // again, the actions inside it would fire both -- but the reason to say it
-    // out loud is the opposite bug: a row that looks clickable and is not.
     check('and the row itself is not a click target', inside?.props?.onClick === undefined && inside?.props?.type === undefined, JSON.stringify([typeof inside?.props?.onClick, String(inside?.props?.type)]))
-    check('and the buttons live in the actions block', byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length === 2, String(byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length))
-    check('and the opener does not contain them', byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length === 0, String(byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length))
+    check('and the control lives in the actions block', byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length === 1, String(byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length))
+    check('and the opener does not contain it', byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length === 0, String(byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length))
+    check('the menu starts closed', byClass(cardOf(await redraw()), 'dsse-row-menu').length === 0, String(byClass(cardOf(await redraw()), 'dsse-row-menu').length))
+    check('and the control says so', buttons[0]?.props?.['aria-expanded'] === 'false', String(buttons[0]?.props?.['aria-expanded']))
+    check('and the control names what it does', String(buttons[0]?.props?.['aria-label'] ?? '') === '复制路径', String(buttons[0]?.props?.['aria-label']))
+    // Nothing is listening until something is open. A permanent global handler for
+    // a control that is usually closed is a cost every Host surface would pay.
+    check('nothing listens while the menu is closed', listenersNow().length === 0, JSON.stringify(listenersNow().map((row) => row.type)))
+
+    // Opening it.
+    buttons[0].props.onClick()
+    const opened = await redraw()
+    const openedRow = rowIn(opened, 'inside.ts')
+    const openedMenu = menuIn(opened, 'inside.ts')
+    check('pressing the control opens its menu', openedMenu !== undefined, 'no menu')
+    check('and the control says it is open', nodeOf(openedRow, 'dsse-row-copy', 0)?.props?.['aria-expanded'] === 'true', String(nodeOf(openedRow, 'dsse-row-copy', 0)?.props?.['aria-expanded']))
+    // The row carries the open state so the reveal rules can keep the control on
+    // screen while the pointer travels down to the menu it just opened.
+    check('and the row knows its menu is open', openedRow?.props?.['data-menu'] === 'true', String(openedRow?.props?.['data-menu']))
+    check('the menu declares what it is', openedMenu?.props?.role === 'group', String(openedMenu?.props?.role))
+    // A child of the row would be a second flex line, which moves the row's middle
+    // and takes the control with it. It has to be a sibling.
+    check('and the menu is not inside the row', byClass(openedRow, 'dsse-row-menu').length === 0, String(byClass(openedRow, 'dsse-row-menu').length))
+    const items = byClass(openedMenu, 'dsse-row-menuitem')
+    check('the menu offers both paths', items.length === 2, String(items.length))
+    // The labels alone are the thing the reader already knows. The paths are the
+    // thing they cannot reconstruct, so both are on screen before the choice.
+    check('and the first names the absolute route', textOf(items[0]).includes('绝对路径'), textOf(items[0]))
+    check('and shows the absolute path', textOf(items[0]).includes('F:\\work\\src\\inside.ts'), textOf(items[0]))
+    check('and the second names the relative route', textOf(items[1]).includes('相对路径'), textOf(items[1]))
+    check('and shows the workspace-relative path', textOf(items[1]).includes('src/inside.ts'), textOf(items[1]))
+    check('opening a menu adds both listeners', listenersNow().length === 2, JSON.stringify(listenersNow().map((row) => row.type)))
+
+    // Escape closes it, and takes the listeners with it.
+    const escape = listenersNow().find((row) => row.type === 'keydown')
+    if (escape === undefined) {
+      check('escape closes the menu', false, 'no keydown listener')
+    } else {
+      escape.handler({ key: 'Escape' })
+      const escaped = await redraw()
+      check('escape closes the menu', menuIn(escaped, 'inside.ts') === undefined, 'menu still open')
+      check('and the row stops claiming to be open', rowIn(escaped, 'inside.ts')?.props?.['data-menu'] === 'false', String(rowIn(escaped, 'inside.ts')?.props?.['data-menu']))
+      check('and nothing is left listening', listenersNow().length === 0, JSON.stringify(listenersNow().map((row) => row.type)))
+    }
+
+    // A press anywhere else closes it. `mousedown` rather than `click`: a drag
+    // that starts outside must not count as having been inside.
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    await redraw()
+    const outside = listenersNow().find((row) => row.type === 'mousedown')
+    if (outside === undefined) {
+      check('a press outside closes the menu', false, 'no mousedown listener')
+    } else {
+      outside.handler({ target: { dataset: {} } })
+      const closed = await redraw()
+      check('a press outside closes the menu', menuIn(closed, 'inside.ts') === undefined, 'menu still open')
+    }
+
+    // Pressing the control itself is not "outside": that gesture has to be able to
+    // close what it opened, and treating it as outside would close and reopen on
+    // the same press.
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    await redraw()
+    const pressOnButton = listenersNow().find((row) => row.type === 'mousedown')
+    if (pressOnButton === undefined) {
+      check('a press on the control does not close the menu twice', false, 'no mousedown listener')
+    } else {
+      pressOnButton.handler({ target: { dataset: { dsseCopy: 'true' } } })
+      check('a press on the control does not close the menu twice', menuIn(await redraw(), 'inside.ts') !== undefined, 'menu closed')
+    }
+    // Pressing it again is the second way to close, and the one a pointer user
+    // reaches for first.
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    check('pressing the control again closes it', menuIn(await redraw(), 'inside.ts') === undefined, 'menu still open')
 
     // A file outside the workspace has no workspace-relative name. Copying one
-    // would be copying a path with `..` segments that no build ever wrote, so the
-    // button is absent instead of being wrong.
-    const outside = rowOf('outside.ts')
-    check('a file outside the workspace offers only the absolute path', byClass(outside, 'dsse-row-copy').length === 1, String(byClass(outside, 'dsse-row-copy').length))
-    // One button still counts as "has actions": deriving the flag from the
-    // relative button instead would mark this row action-less, and the CSS
-    // reveal rule would then keep its one button invisible forever.
-    check('and the row still says it has an action', outside?.props?.['data-actions'] === 'true', String(outside?.props?.['data-actions']))
-    const outsideButton = byClass(outside, 'dsse-row-copy')[0]
-    if (outsideButton === undefined) {
-      check('and copying it writes the absolute path', false, 'no copy button on the outside row')
-    } else {
-      outsideButton.props.onClick()
-      await instance.renderer.deepRender(instance.seat('cards'))
-      check('and copying it writes the absolute path', written[written.length - 1] === 'F:\\elsewhere\\outside.ts', JSON.stringify(written[written.length - 1]))
-    }
+    // would be copying `..` segments no build ever wrote, so that entry is absent
+    // instead of being wrong -- and the row still counts as having an action.
+    const outsideRow = rowIn(await redraw(), 'outside.ts')
+    check('a file outside the workspace still has one control', byClass(outsideRow, 'dsse-row-copy').length === 1, String(byClass(outsideRow, 'dsse-row-copy').length))
+    check('and the row still says it has an action', outsideRow?.props?.['data-actions'] === 'true', String(outsideRow?.props?.['data-actions']))
+    press(outsideRow, 'dsse-row-copy', 0)
+    const outsideMenu = menuIn(await redraw(), 'outside.ts')
+    check('and its menu offers only the absolute path', byClass(outsideMenu, 'dsse-row-menuitem').length === 1, String(byClass(outsideMenu, 'dsse-row-menuitem')?.length))
+    press(outsideMenu, 'dsse-row-menuitem', 0)
+    await redraw()
+    check('and copying it writes the absolute path', written[written.length - 1] === 'F:\\elsewhere\\outside.ts', JSON.stringify(written[written.length - 1]))
 
-    // The workspace is `F:\\work` and this file is recorded as `f:\\WORK\\src\\cased.ts`.
-    // Windows resolves both to the same directory, and the two spellings come from
-    // different parts of the Host, so the comparison cannot care about case.
-    const cased = rowOf('Cased.ts')
-    const casedButtons = byClass(cased, 'dsse-row-copy')
-    check('a file spelled in another case is still inside the workspace', casedButtons.length === 2, String(casedButtons.length))
-    // Indexed defensively: when the button is missing this has to be a failed
-    // check, not a throw. A throw takes the whole suite down with no tally line,
-    // and the mutation runner then reports CRASHED — a different verdict from the
-    // KILLED this assertion is here to produce.
-    if (casedButtons.length === 2) {
-      casedButtons[1].props.onClick()
+    // The workspace is `F:\work` and this file is recorded as `f:\WORK\Src\Cased.ts`.
+    // Windows resolves both to the same directory and the two spellings come from
+    // different parts of the Host, so the comparison cannot care about case. Only
+    // the middle segment differs here, so a fixture that only exercised the drive
+    // letter would pass even if the whole relative path came back lowercased.
+    const casedRow = rowIn(await redraw(), 'Cased.ts')
+    press(casedRow, 'dsse-row-copy', 0)
+    const casedMenu = menuIn(await redraw(), 'Cased.ts')
+    const casedItems = byClass(casedMenu, 'dsse-row-menuitem')
+    if (casedItems.length === 2) {
+      check('a file spelled in another case is still inside the workspace', textOf(casedItems[1]).includes('Src/Cased.ts'), textOf(casedItems[1]))
+      casedItems[1].props.onClick()
+      await redraw()
       check('and its relative path is cut at the workspace root', written[written.length - 1] === 'Src/Cased.ts', JSON.stringify(written[written.length - 1]))
     } else {
-      check('and its relative path is cut at the workspace root', false, 'no relative button to press')
+      // A failed check, not a throw: a throw leaves no tally line and the mutation
+      // runner reports CRASHED, which is a different verdict from the KILLED this
+      // assertion exists to produce.
+      check('a file spelled in another case is still inside the workspace', false, String(casedItems.length))
+      check('and its relative path is cut at the workspace root', false, 'no relative entry to press')
     }
 
-    // Clicking copies, and says so on the button that was pressed.
-    const [absolute, relative] = buttons
-    check('the first button names the absolute path', String(absolute?.props?.['aria-label'] ?? '') === '复制绝对路径', String(absolute?.props?.['aria-label']))
-    check('the second names the relative one', String(relative?.props?.['aria-label'] ?? '') === '复制相对路径', String(relative?.props?.['aria-label']))
-    absolute.props.onClick()
-    await instance.renderer.deepRender(instance.seat('cards'))
-    check('pressing it writes the absolute path', written[written.length - 1] === 'F:\\work\\src\\inside.ts', JSON.stringify(written))
-    const answered = await instance.renderer.deepRender(instance.seat('cards'))
-    const answeredCard = byClass(answered, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-    const answeredRow = byClass(answeredCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
-    const answeredButtons = byClass(answeredRow, 'dsse-row-copy')
-    check('and the button says it worked', textOf(answeredButtons[0]) === '已复制', textOf(answeredButtons[0]))
-    check('while its neighbour is unchanged', textOf(answeredButtons[1]) === '相对', textOf(answeredButtons[1]))
-    // What a screen reader hears. The visible text alone is not the answer: the
-    // name is what gets announced, and a fixed name means a blind user never
-    // learns whether the copy worked.
-    check('and the button name says it worked', String(answeredButtons[0]?.props?.['aria-label'] ?? '') === '已复制绝对路径', String(answeredButtons[0]?.props?.['aria-label']))
-    check('and the untouched neighbour keeps its name', String(answeredButtons[1]?.props?.['aria-label'] ?? '') === '复制相对路径', String(answeredButtons[1]?.props?.['aria-label']))
+    // Copying answers on the control that was pressed: it is the only surface in
+    // this panel a confirmation can appear on.
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    const chosen = menuIn(await redraw(), 'inside.ts')
+    press(chosen, 'dsse-row-menuitem', 0)
+    const answered = await redraw()
+    check('pressing a menu entry writes its path', written[written.length - 1] === 'F:\\work\\src\\inside.ts', JSON.stringify(written[written.length - 1]))
+    check('and the menu closes behind the choice', menuIn(answered, 'inside.ts') === undefined, 'menu still open')
+    const answeredButton = nodeOf(rowIn(answered, 'inside.ts'), 'dsse-row-copy', 0)
+    // Colour is the visible answer and the name is the announced one; neither
+    // alone reaches both kinds of reader.
+    check('and the control reports success', answeredButton?.props?.['data-ok'] === 'true', String(answeredButton?.props?.['data-ok']))
+    check('and a screen reader hears it', String(answeredButton?.props?.['aria-label'] ?? '') === '已复制路径', String(answeredButton?.props?.['aria-label']))
+    // The tooltip is the second surface the answer appears on, and it carries the
+    // reason when there is one -- a reader who hovers to ask "did that work?" gets
+    // told without having to move to the menu again. Nothing checked either string
+    // before, so both could have been swapped or blanked in silence.
+    check('and the tooltip says what happened', answeredButton?.props?.title === '已复制', String(answeredButton?.props?.title))
+    const neighbour = nodeOf(rowIn(answered, 'Cased.ts'), 'dsse-row-copy', 0)
+    check('while an untouched row keeps its name', String(neighbour?.props?.['aria-label'] ?? '') === '复制路径', String(neighbour?.props?.['aria-label']))
+    check('and an untouched row keeps the instruction', neighbour?.props?.title === '复制路径', String(neighbour?.props?.title))
 
+    // The relative entry writes a forward-slash path: backslashes are a Windows
+    // path, not a path in source code.
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    const relativeMenu = menuIn(await redraw(), 'inside.ts')
+    const relativeItems = relativeMenu === undefined ? [] : byClass(relativeMenu, 'dsse-row-menuitem')
+    // Length first. Reaching into `[1]` of a menu that never opened throws, and a
+    // throw exits the suite before the tally line -- which the mutation runner
+    // reports as CRASHED, a different verdict from the KILLED this is meant to give.
+    if (relativeItems.length === 2) {
+      relativeItems[1].props.onClick()
+      await redraw()
+      check('the relative entry writes the workspace-relative path', written[written.length - 1] === 'src/inside.ts', JSON.stringify(written[written.length - 1]))
+    } else {
+      check('the relative entry writes the workspace-relative path', false, `${relativeItems.length} entries in the menu`)
+    }
 
-    // The relative button writes a forward-slash path relative to the workspace:
-    // backslashes are a Windows path, not a path in source code.
-    answeredButtons[1].props.onClick()
-    await instance.renderer.deepRender(instance.seat('cards'))
-    check('the relative button writes the workspace-relative path', written[written.length - 1] === 'src/inside.ts', JSON.stringify(written))
+    // The confirmation is a flash, not a state: 1.5 seconds later the control is
+    // back to its resting name. Asserting the delay is what separates a flash from
+    // a control that permanently claims to have copied something.
+    const pending = instance.timers.filter((entry) => entry.ms === 1500 && entry.cleared === false)
+    // Exactly one. Two presses must leave one timer, and `> 0` cannot tell that
+    // apart from the leak this is here to catch.
+    check('the confirmation is scheduled to clear', pending.length === 1, String(pending.length))
+    for (const entry of pending) entry.fn()
+    const cleared = await redraw()
+    const clearedButton = nodeOf(rowIn(cleared, 'inside.ts'), 'dsse-row-copy', 0)
+    check('and it does clear, back to the resting name', String(clearedButton?.props?.['aria-label'] ?? '') === '复制路径', String(clearedButton?.props?.['aria-label']))
+    check('and drops the outcome colour', clearedButton?.props?.['data-ok'] === undefined, String(clearedButton?.props?.['data-ok']))
+  }
 
   // A timer scheduled on a ref is invisible: it is not in the rendered tree, and
-  // no cleanup the panel already has would notice it. Unmounting while the flash
-  // is pending has to cancel it, or the callback writes state into a component
-  // that is gone and the host keeps a timer for a panel nobody is looking at.
+  // no cleanup the panel already has would notice it. Unmounting while the flash is
+  // pending has to cancel it, or the callback writes state into a component that is
+  // gone and the Host keeps a timer for a panel nobody is looking at.
   //
-  // This needs its own instance: unmounting is terminal for the renderer, so it
-  // cannot share a fixture with the assertions above that still want to render.
+  // Its own instance: unmounting is terminal for the renderer, so it cannot share a
+  // fixture with assertions that still want to render.
   {
-    // `writeText` returning nothing settles synchronously, which is the only way
-    // to see the timer before the microtask that a resolved promise would need.
+    // `writeText` returning nothing settles synchronously, which is the only way to
+    // see the timer before the microtask a resolved promise would need.
     const kept = { clipboard: { writeText: () => undefined } }
     const own = await open({ routes: routesFor(), navigator: kept })
-    byClass(own.rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    press(own.rowOf('inside.ts'), 'dsse-row-copy', 0)
+    // Redrawn, not reused: `card` is the tree from before the click, and the menu
+    // only exists in the tree after it.
+    const openedForTimer = await own.instance.renderer.deepRender(own.instance.seat('cards'))
+    const timerCard = byClass(openedForTimer, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    press(nodeOf(timerCard, 'dsse-row-menu', 0), 'dsse-row-menuitem', 0)
     const scheduled = own.instance.timers.filter((entry) => entry.ms === 1500 && entry.cleared === false)
     check('the flash leaves one timer pending', scheduled.length === 1, String(scheduled.length))
     own.instance.renderer.unmount()
     check('and closing the panel cancels the flash timer', scheduled.every((entry) => entry.cleared === true), JSON.stringify(scheduled.map((entry) => entry.cleared)))
   }
 
-    // The confirmation is a flash, not a state: 1.5 seconds later the button is a
-    // label again. Asserting the delay is the difference between a flash and a
-    // button that permanently reads "已复制" after one click.
-    const pending = instance.timers.filter((entry) => entry.ms === 1500 && entry.cleared === false)
-    // Exactly one: two clicks in a row must cancel the first timer, and `> 0`
-    // cannot tell that apart from the leak it is here to catch.
-    check('the confirmation is scheduled to clear', pending.length === 1, String(pending.length))
-    for (const entry of pending) entry.fn()
-    const cleared = await instance.renderer.deepRender(instance.seat('cards'))
-    const clearedCard = byClass(cleared, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-    const clearedRow = byClass(clearedCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
-    // Both buttons, and index 1 first: that is the one whose timer is pending.
-    // Reading index 0 here would pass either way, because the absolute button's
-    // timer was cancelled by the second press and its resting label is already
-    // "绝对" -- the check would be green with the callback deleted outright.
-    const clearedButtons = byClass(clearedRow, 'dsse-row-copy')
-    check('and it does clear, back to the label', textOf(clearedButtons[1]) === '相对' && textOf(clearedButtons[0]) === '绝对', JSON.stringify(clearedButtons.map((node) => textOf(node))))
-  }
-
   // A write that throws, and a write that rejects. Both mean the same thing to the
-  // person who pressed the button, and neither may be reported as success.
+  // person who pressed the entry, and neither may be reported as success.
   {
     const throwing = { clipboard: { writeText: () => { throw new Error('denied') } } }
     const first = await open({ routes: routesFor(), navigator: throwing })
-    byClass(first.rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    press(first.rowOf('inside.ts'), 'dsse-row-copy', 0)
+    const openTree = await first.instance.renderer.deepRender(first.instance.seat('cards'))
+    const openCard = byClass(openTree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    press(nodeOf(openCard, 'dsse-row-menu', 0), 'dsse-row-menuitem', 0)
     const afterThrow = await first.instance.renderer.deepRender(first.instance.seat('cards'))
     const throwCard = byClass(afterThrow, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
     const throwRow = byClass(throwCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
-    check('a clipboard that throws is not reported as success', textOf(byClass(throwRow, 'dsse-row-copy')[0]) === '失败', textOf(byClass(throwRow, 'dsse-row-copy')[0]))
-    check('and the tooltip says why', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.title ?? '').includes('复制失败'), String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.title))
-    check('and a screen reader hears the failure', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.['aria-label'] ?? '') === '复制绝对路径失败', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.['aria-label']))
+    const throwButton = nodeOf(throwRow, 'dsse-row-copy', 0)
+    check('a clipboard that throws is not reported as success', throwButton?.props?.['data-ok'] === 'false', String(throwButton?.props?.['data-ok']))
+    check('and the tooltip says why', String(throwButton?.props?.title ?? '').includes('复制失败'), String(throwButton?.props?.title))
+    check('and a screen reader hears the failure', String(throwButton?.props?.['aria-label'] ?? '') === '复制路径失败', String(throwButton?.props?.['aria-label']))
 
     const rejecting = { clipboard: { writeText: () => Promise.reject(new Error('denied')) } }
     const second = await open({ routes: routesFor(), navigator: rejecting })
-    const secondButtons = byClass(second.rowOf('inside.ts'), 'dsse-row-copy')
-    secondButtons[0].props.onClick()
+    press(second.rowOf('inside.ts'), 'dsse-row-copy', 0)
+    const rejectOpen = await second.instance.renderer.deepRender(second.instance.seat('cards'))
+    const rejectOpenCard = byClass(rejectOpen, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    press(nodeOf(rejectOpenCard, 'dsse-row-menu', 0), 'dsse-row-menuitem', 0)
     // A rejected promise settles on a microtask, and the renderer drains those
-    // between rounds — so the failure is on screen by the next deep render.
+    // between rounds -- so the failure is on screen by the next deep render.
     const afterReject = await second.instance.renderer.deepRender(second.instance.seat('cards'))
     const rejectCard = byClass(afterReject, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
     const rejectRow = byClass(rejectCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
-    check('a rejected write is not reported as success either', textOf(byClass(rejectRow, 'dsse-row-copy')[0]) === '失败', textOf(byClass(rejectRow, 'dsse-row-copy')[0]))
+    check('a rejected write is not reported as success either', nodeOf(rejectRow, 'dsse-row-copy', 0)?.props?.['data-ok'] === 'false', String(nodeOf(rejectRow, 'dsse-row-copy', 0)?.props?.['data-ok']))
   }
 
-  // A stub is allowed to return nothing at all, and that has to mean the same as
-  // a resolved promise. The harness's own clipboard double is written by hand, so
-  // this is the shape a future fixture is most likely to have — treating it as a
+  // A stub is allowed to return nothing at all, and that has to mean the same as a
+  // resolved promise. The harness's own clipboard double is written by hand, so
+  // this is the shape a future fixture is most likely to have -- treating it as a
   // failure would make a working clipboard look broken in exactly the tests that
   // fake it.
   {
     const silent = { clipboard: { writeText: () => undefined } }
     const { instance, rowOf } = await open({ routes: routesFor(), navigator: silent })
-    byClass(rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    press(rowOf('inside.ts'), 'dsse-row-copy', 0)
+    const silentCard = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    press(nodeOf(silentCard, 'dsse-row-menu', 0), 'dsse-row-menuitem', 0)
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
-    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-    const row = byClass(card, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
-    check('a clipboard that returns nothing counts as success', textOf(byClass(row, 'dsse-row-copy')[0]) === '已复制', textOf(byClass(row, 'dsse-row-copy')[0]))
+    const card2 = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const row = byClass(card2, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    check('a clipboard that returns nothing counts as success', nodeOf(row, 'dsse-row-copy', 0)?.props?.['data-ok'] === 'true', String(nodeOf(row, 'dsse-row-copy', 0)?.props?.['data-ok']))
   }
 
   // Copying on a file that is gone: the row still names the file, and the path it
-  // would copy is still the path it used to have, so the button stays. What must
+  // would copy is still the path it used to have, so the control stays. What must
   // not happen is an opener appearing beside it.
   {
     const goneRows = [{ path: 'F:\\work\\gone.ts', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.ts' }]
@@ -5208,22 +5329,26 @@ async function openPanel(routes, options) {
     firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
     const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-    check('a gone file still offers its path', byClass(card, 'dsse-row-copy').length === 2, String(byClass(card, 'dsse-row-copy').length))
+    check('a gone file still offers its path', byClass(card, 'dsse-row-copy').length === 1, String(byClass(card, 'dsse-row-copy').length))
     check('and still offers no way to open it', firstByClass(card, 'dsse-row-open') === undefined, 'opener present')
-    byClass(card, 'dsse-row-copy')[0].props.onClick()
+    press(card, 'dsse-row-copy', 0)
+    const goneMenu = await instance.renderer.deepRender(instance.seat('cards'))
+    const goneCard = byClass(goneMenu, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    check('and its menu still offers both routes', byClass(nodeOf(goneCard, 'dsse-row-menu', 0), 'dsse-row-menuitem').length === 2, String(byClass(nodeOf(goneCard, 'dsse-row-menu', 0), 'dsse-row-menuitem').length))
+    press(nodeOf(goneCard, 'dsse-row-menu', 0), 'dsse-row-menuitem', 0)
     await instance.renderer.deepRender(instance.seat('cards'))
     check('copying a gone path writes the path it had', written[written.length - 1] === 'F:\\work\\gone.ts', JSON.stringify(written))
   }
 
-  // The layout promise. The action block is absolutely positioned over the size
-  // rather than laid out beside it, and the size keeps its slot when hidden, so a
-  // name does not change width when the pointer arrives. The mock renderer lays
-  // nothing out, so the sheet is the only place this can be asserted.
+  // The layout promise. The control is absolutely positioned over the size rather
+  // than laid out beside it, and the size keeps its slot when hidden, so a name
+  // does not change width when the pointer arrives. The mock renderer lays nothing
+  // out, so the sheet is the only place this can be asserted.
   {
     const instance = boot({ routes: routesFor() })
-    // The sheet is written when the panel renders, not when the bundle is
-    // evaluated or the plugin is applied: a boot with no render has an empty
-    // style list, and every rule below would then be a regex against nothing.
+    // The sheet is written when the panel renders, not when the bundle is evaluated
+    // or the plugin is applied: a boot with no render has an empty style list, and
+    // every rule below would then be a regex against nothing.
     instance.module.apply(instance.ctx)
     firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
     await instance.renderer.deepRender(instance.seat('cards'))
@@ -5236,28 +5361,203 @@ async function openPanel(routes, options) {
     // Scoped to rows that have actions. On a Host without a clipboard the rule
     // would otherwise hide the size to make room for nothing.
     check('the reveal only applies where there is something to reveal', /\.dsse-row\[data-actions="true"\]:hover \.dsse-row-actions/.test(sheet), '')
-    // The selector is half of it: a rule that matches and then sets opacity:0
-    // would never show a button, and every check above would still pass.
+    // The selector is half of it: a rule that matches and then sets opacity:0 would
+    // never show a control, and every check above would still pass.
     check('and the reveal sets the actions visible', /\.dsse-row\[data-actions="true"\]:hover \.dsse-row-actions[^{]*\{[^}]*opacity:1/.test(sheet), '')
     check('and makes them take clicks', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-row-actions[^{]*\{[^}]*pointer-events:auto/.test(sheet), '')
+    // An open menu has to keep the control on screen: the pointer travels from the
+    // control down to the menu, and that trip leaves the row.
+    check('and an open menu keeps the control visible', /\[data-menu="true"\] \.dsse-row-actions[^{]*\{[^}]*opacity:1/.test(sheet), '')
     check('and the size it covers hides by slot, not by layout', /\.dsse-row\[data-actions="true"\]:hover \.dsse-size[^{]*\{visibility:hidden\}/.test(sheet), '')
+    check('and an open menu hides the size too', /\.dsse-row\[data-menu="true"\] \.dsse-size[^{]*\{visibility:hidden\}/.test(sheet), '')
     // Focus must NOT hide the size. `visibility:hidden` also leaves the
     // accessibility tree, so a keyboard or screen-reader user would lose the file
     // size the moment they focused the row -- and they never hover, so the size
-    // they "save" by not covering is a number they would never have seen. The
-    // actions cover it visually; the value stays in the name.
+    // they "save" by not covering is a number they would never have seen.
     check('and focus does not hide the size from the accessibility tree', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-size[^{]*\{visibility:hidden\}/.test(sheet) === false, '')
+    // ...because the control covers its own footprint instead. Measured in Chrome:
+    // the size is right-aligned sixteen pixels from the button's left edge and the
+    // button is transparent, so without an opaque background of its own the two
+    // draw on top of each other and "1.2 KB" reads as "1.2 ⊗B". Hiding the size
+    // was the wrong fix -- the accessibility tree is exactly why it stays -- so the
+    // button has to stop sharing the pixels it sits on.
+    check('and a focused control covers what it sits on', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-row-copy[^{]*\{[^}]*background:var\(--dsw-alias-bg-layer-2/.test(sheet), '')
     check('the hiding rule never uses display', /\.dsse-row\[data-actions="true"\][^{]*\.dsse-size[^{]*\{[^}]*display:none/.test(sheet) === false, '')
-    // Keyboard reachability: hiding the actions from the pointer must not hide
-    // them from the tab order, or the feature only exists for mouse users.
+    // Keyboard reachability: hiding the actions from the pointer must not hide them
+    // from the tab order, or the feature only exists for mouse users.
     check('a focused row reveals them too', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-row-actions/.test(sheet), '')
-    check('and the copy button has its own focus ring', /\.dsse-row-copy:focus-visible\{[^}]*outline/.test(sheet), '')
-    check('the button looks like a button', /\.dsse-row-copy\{[^}]*cursor:pointer/.test(sheet), '')
-    // The opener has to fill the row, or the row's padding becomes dead space:
-    // the highlight says "click here" over pixels that do nothing. The mock
-    // renderer lays nothing out, so this is the only place the fix can be pinned.
+    check('and the control has its own focus ring', /\.dsse-row-copy:focus-visible\{[^}]*outline/.test(sheet), '')
+    check('the control looks like a control', /\.dsse-row-copy\{[^}]*cursor:pointer/.test(sheet), '')
+    // The menu is a block in the card, wearing the card's own surfaces. A popup
+    // floating outside the list would be cut off by the card's overflow exactly
+    // when the list is long enough to need it.
+    check('the menu is laid out in the list, not floated over it', /\.dsse-row-menu\{[^}]*display:grid/.test(sheet) && /\.dsse-row-menu\{[^}]*position:absolute/.test(sheet) === false, '')
+    check('and wears the card radius', /\.dsse-row-menu\{[^}]*border-radius:9px/.test(sheet), '')
+    check('and the card surface', /\.dsse-row-menu\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet), '')
+    check('and a menu item is a full-width row', /\.dsse-row-menuitem\{[^}]*width:100%/.test(sheet), '')
+    check('and shows its path in the mono face', /\.dsse-row-menuitem-value\{[^}]*text-overflow:ellipsis/.test(sheet), '')
+    // The outcome is a colour on the icon, because the control is 22px and no word
+    // that fits there is long enough to read.
+    check('success and failure are distinguishable without text', /\.dsse-row-copy\[data-ok="true"\]\{[^}]*color:/.test(sheet) && /\.dsse-row-copy\[data-ok="false"\]\{[^}]*color:/.test(sheet), '')
+    check('and the open state is a border, not a second control', /\.dsse-row-copy\[aria-expanded="true"\]\{[^}]*border-color/.test(sheet), '')
+    // The opener has to fill the row, or the row's padding becomes dead space: the
+    // highlight says "click here" over pixels that do nothing.
     check('the opener stretches over the row\'s padding', /\.dsse-row-open\{[^}]*align-self:stretch/.test(sheet) && /\.dsse-row-open\{[^}]*margin:-2px -6px/.test(sheet), '')
   }
+
+  // A press *inside* the menu is not outside either, and this needs its own
+  // instance rather than a node swapped in later: `attachRefs` only fills a ref
+  // that is still null (`test/client.test.mjs:347`), so by the time the menu is
+  // open `menuRef.current` is already the default node and handing the renderer a
+  // new one changes nothing. The two failures this guards against point in
+  // opposite directions -- treat the menu as outside and its own entries stop
+  // working; treat everything as inside and it never closes -- so the check has to
+  // exist on both sides. It did not: the fixtures never gave the node a `contains`
+  // list, the call was always false, and deleting the term entirely stayed green.
+  {
+    const navigator = { clipboard: { writeText: () => undefined } }
+    const insideTarget = { id: 'pressed-inside-the-menu' }
+    const seeded = await open({
+      routes: routesFor(),
+      navigator,
+      frame: { left: 0, top: 0, width: 1920, height: 1000, contains: [insideTarget] },
+    })
+    const redraw = () => seeded.instance.renderer.deepRender(seeded.instance.seat('cards'))
+    const cardOf = (tree) => byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowIn = (tree, name) => byClass(cardOf(tree), 'dsse-row').find((node) => textOf(node).includes(name))
+    const menuIn = (tree, name) => byClass(cardOf(tree), 'dsse-row-menu').find((node) => String(node.props?.['aria-label'] ?? '').includes(name))
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    check('the menu is open before the press inside it', menuIn(await redraw(), 'inside.ts') !== undefined, 'menu never opened')
+    const inner = seeded.instance.listeners.find((row) => row.type === 'mousedown')
+    if (inner === undefined) {
+      check('a press inside the menu leaves it open', false, 'no mousedown listener')
+    } else {
+      inner.handler({ target: insideTarget })
+      check('a press inside the menu leaves it open', menuIn(await redraw(), 'inside.ts') !== undefined, 'menu closed on a press inside it')
+      // And the same listener still closes it for a press that is genuinely
+      // elsewhere, so "stays open" is not the only thing it can say.
+      const stillOpen = seeded.instance.listeners.find((row) => row.type === 'mousedown')
+      if (stillOpen === undefined) {
+        check('and still closes on a press elsewhere', false, 'no mousedown listener left')
+      } else {
+        // The hit node as a browser hands it over: a <path> inside the control,
+        // with no marker of its own but able to say who its ancestors are.
+        // Everything above this point feeds the panel a node that *is* the
+        // control, which is the one shape a real press never has -- so the
+        // `closest` branch was never entered, and dropping it entirely left the
+        // suite green. This is the case the icon press actually produces, and the
+        // one that made the control unable to close its own menu.
+        const realHit = {
+          tagName: 'path',
+          closest: (selector) => (selector === '[data-dsse-copy="true"]' ? { tagName: 'button' } : null),
+        }
+        const afterIcon = seeded.instance.listeners.find((row) => row.type === 'mousedown')
+        if (afterIcon === undefined) {
+          check('and the control is found by walking up', false, 'no mousedown listener left')
+          check('and a press elsewhere still closes it', false, 'no mousedown listener left')
+        } else {
+          afterIcon.handler({ target: realHit })
+          check('and the control is found by walking up', menuIn(await redraw(), 'inside.ts') !== undefined, 'menu closed although the press was on its own control')
+          const afterWalk = seeded.instance.listeners.find((row) => row.type === 'mousedown')
+          if (afterWalk === undefined) {
+            check('and a press elsewhere still closes it', false, 'no mousedown listener left')
+          } else {
+            afterWalk.handler({ target: { closest: () => null, dataset: {} } })
+            check('and a press elsewhere still closes it', menuIn(await redraw(), 'inside.ts') === undefined, 'menu survived a press elsewhere')
+          }
+        }
+      }
+    }
+  }
+
+  // The focus comes back to the control that opened the menu.
+  //
+  // Choosing an entry removes the entry -- the menu closes -- so without an
+  // explicit hand-back the focus falls to the document body: the next Tab starts
+  // from the top of the page again, and the outcome written into `aria-label`
+  // (`已复制路径`) is announced to nobody, because the button no longer holds
+  // focus by the time it changes. The mutation `choosing an entry drops focus on
+  // the floor` survived the entire suite before this block existed, which is
+  // exactly what running the mutations is for: the line was there, the reason was
+  // written next to it, and nothing checked that it ran.
+  {
+    let focused = 0
+    const navigator = { clipboard: { writeText: () => undefined } }
+    const seeded = await open({
+      routes: routesFor(),
+      navigator,
+      frame: { left: 0, top: 0, width: 1920, height: 1000, onFocus: () => { focused += 1 } },
+    })
+    const redraw = () => seeded.instance.renderer.deepRender(seeded.instance.seat('cards'))
+    const cardOf = (tree) => byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowIn = (tree, name) => byClass(cardOf(tree), 'dsse-row').find((node) => textOf(node).includes(name))
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    const opened = await redraw()
+    const menu = byClass(cardOf(opened), 'dsse-row-menu')[0]
+    if (menu === undefined) {
+      check('choosing an entry hands focus back to the control', false, 'the menu never opened')
+      check('and the menu is gone after the choice', false, 'the menu never opened')
+    } else {
+      const before = focused
+      press(menu, 'dsse-row-menuitem', 0)
+      check('choosing an entry hands focus back to the control', focused === before + 1, `${focused - before} focus calls`)
+      check('and the menu is gone after the choice', byClass(cardOf(await redraw()), 'dsse-row-menu').length === 0, 'the menu outlived the choice')
+    }
+  }
+
+  // Every menu says which file it belongs to.
+  // Two menus can be open in two different sessions of the same panel, and a
+  // screen reader announces the container by its name; a nameless one is just
+  // "group" with two buttons in it. Nothing checked this string before, so
+  // deleting it left the suite green.
+  {
+    const navigator = { clipboard: { writeText: () => undefined } }
+    const seeded = await open({ routes: routesFor(), navigator })
+    const redraw = () => seeded.instance.renderer.deepRender(seeded.instance.seat('cards'))
+    const cardOf = (tree) => byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowIn = (tree, name) => byClass(cardOf(tree), 'dsse-row').find((node) => textOf(node).includes(name))
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    const opened = await redraw()
+    const menu = byClass(cardOf(opened), 'dsse-row-menu')[0]
+    if (menu === undefined) {
+      check('the menu names the file it belongs to', false, 'no menu to read')
+      check('and it declares itself a group, not a menu widget', false, 'no menu to read')
+    } else {
+      check('the menu names the file it belongs to', menu.props?.['aria-label'] === '复制 inside.ts 的路径', String(menu.props?.['aria-label']))
+      check('and it declares itself a group, not a menu widget', menu.props?.role === 'group', String(menu.props?.role))
+    }
+  }
+
+  // A menu opened on the last visible row has to be brought into view.
+  //
+  // The list fits eight rows and scrolls; a menu is a block under its row, so on
+  // the eighth row it starts below the fold. Nothing else in this file can notice
+  // that: the assertions read a tree, and a tree has no scroll position. This is
+  // the one place where the panel asks the browser a question about layout, so it
+  // is also the one place a test double can watch it ask.
+  {
+    const scrolled = []
+    const navigator = { clipboard: { writeText: () => undefined } }
+    const seeded = await open({
+      routes: routesFor(),
+      navigator,
+      frame: { left: 0, top: 0, width: 1920, height: 1000, onScrollIntoView: (options) => { scrolled.push(options) } },
+    })
+    const redraw = () => seeded.instance.renderer.deepRender(seeded.instance.seat('cards'))
+    const cardOf = (tree) => byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowIn = (tree, name) => byClass(cardOf(tree), 'dsse-row').find((node) => textOf(node).includes(name))
+    const before = scrolled.length
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    await redraw()
+    check('opening a menu asks the list to make room for it', scrolled.length === before + 1, `${scrolled.length - before} calls`)
+    // `nearest` and not `center`: a menu that already fits must not drag the list.
+    check('and asks for the smallest scroll that shows it', scrolled[scrolled.length - 1]?.block === 'nearest', JSON.stringify(scrolled[scrolled.length - 1]))
+    const openCount = scrolled.length
+    press(rowIn(await redraw(), 'inside.ts'), 'dsse-row-copy', 0)
+    await redraw()
+    check('and closing it asks for nothing', scrolled.length === openCount, `${scrolled.length - openCount} calls on close`)
+  }
+
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

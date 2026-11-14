@@ -1342,6 +1342,12 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-124 | 2026-11-14 | 「复制反馈已清零」的断言读的是另一颗按钮，删掉清零逻辑也全绿 | pending 的定时器属于「相对」槽位，断言读 `[0]`（绝对）；绝对按钮的定时器在那次 settle 里已被清掉，静息文案恒为 `绝对` |
 | DEF-125 | 2026-11-14 | 十二条 CSS 断言只校验选择器存在，不校验声明体 | 用的是 `sheet.includes('.dsse-row[data-actions="true"]:hover .dsse-row-actions{')` 这类前缀匹配；规则体被改空时前缀仍在 |
 | DEF-126 | 2026-11-14 | 变异条目的 `to` 少了 `return` 与收尾 `}`，套件在打印 tally 前崩溃，被记成 CRASHED | 我按「改一行」的直觉拼 `to`，没意识到它是整块语法结构的一部分；CRASHED 与 KILLED 是不同判定，前者看起来像工具问题 |
+| DEF-127 | 2026-11-14 | 再按一次复制按钮关不掉菜单，只闪一下就回来 | 测试替身给的 `target` 是 `{dataset:{dsseCopy:"true"}}`，而真实浏览器给的是 `<path>`；没有人把 mousedown 与随后的 click 串起来观察 |
+| DEF-128 | 2026-11-14 | 键盘聚焦时 22px 透明按钮压在文件大小上，读作 `1.2 ⊗B` | mock renderer 不做布局，没有一条断言检查两个盒子是否重叠；CSS 断言只看规则文本在不在 |
+| DEF-129 | 2026-11-14 | 「点在菜单内部」这条分支零覆盖，把判断换成常量也全绿 | 默认 fixture 的 `frame` 没有 `contains` 键，`fakeNode.contains` 恒为 false，那条路径从未被走到 |
+| DEF-130 | 2026-11-14 | 选完菜单项后焦点落到 body，没有任何断言 | 断言只检查「菜单消失了」，没人问过焦点去了哪里；`frame.onFocus` 这条唯一通道从未被使用 |
+| DEF-131 | 2026-11-14 | 突变表里有一条完全重复的条目，有效变异体比计数少一 | 计数只数条数不查内容；两处 label/from/to/why 一字不差也能各自成立 |
+| DEF-132 | 2026-11-14 | 改一行 CSS 后突变锚点变成 NOT APPLIED，看起来像通过 | 突变锚点引用整行样式，样式一改锚点就落空；NOT APPLIED 与 KILLED 在汇总里都只是「不是 survived」 |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -2138,3 +2144,69 @@ runner 报 **CRASHED**，与「测试抓到了」的 KILLED 是不同判定。
 一次 CRASHED 看着像环境问题或工具问题，很容易被当成噪声跳过；DEF-122 是同一天里第二次
 因为同一类原因看到它。判断标准很简单：**变异体的 `from` 与 `to` 必须是同样形状的可运行代码**，
 改的应该是语义而不是语法结构。修法是把四行整体复制、只替换其中一个调用。
+
+## DEF-127 · 再按一次复制按钮关不掉菜单
+
+现象：菜单打开后，再点一次复制图标，菜单闪一下又回来。只有点在 22px 盒子的 4px 边缘、让 `target` 正好是那个 `<button>` 时才能正常关闭。
+
+链路：按钮唯一的子节点是图标（`svg > rect/path`），真实点击的 `target` 是 `<path>`，`target.dataset.dsseCopy` 是 `undefined` → 窗口的 `mousedown` 判定「点在菜单外」并 `setMenuFor(undefined)` → 同一轮里 `click` 读到旧闭包里 `open === true` → `setMenuFor(key)` 又设回打开。
+
+无头 Chrome 真按下两次的读数（`_edit/r1_toggle_probe.py`）：
+
+```
+press 1 (open)           {"open": true, "renders": 2, "hitAtCenter": "path"}
+press 2 on the icon      {"open": true, "renders": 4, "hitAtCenter": "path"}
+press 3 on the border    {"open": false, "renders": 5}
+```
+
+`renders` 从 2 跳到 4 是「真的关了一次又开了一次」的指纹——如果它只是没响应，`renders` 会是 3。
+
+修法：`onButton` 改成沿祖先链找 `target.closest('[data-dsse-copy="true"]')`，只有在没有 `closest` 时才退回读自身 `dataset`。
+
+**为什么测试没抓到**：所有 fixture 给的事件都是 `{ target: { dataset: { dsseCopy: 'true' } } }`——一个真实浏览器永远不会产生的形状（`<path>` 没有 `dataset`）。更关键的是没有人把 `mousedown` 与随后的 `click` 串起来看结果，而缺陷恰好只在两件事**依次**发生时才出现。两个审查者对此判断相反（一个说会闪回来，一个说最终仍是关闭），只有真机能把这件事定下来。
+
+## DEF-128 · 聚焦时 22px 透明按钮压在文件大小上
+
+现象：键盘 Tab 到打开按钮，动作层显形，右侧读作 `1.2 ⊗B`——图标正压在 `KB` 上，两个语义都只剩一半。
+
+成因是三件事的交点：显形规则含 `:focus-within`、隐藏尺寸的规则**故意**不含它（D-143）、而按钮本身 `background:transparent`。
+
+修法：聚焦时给按钮不透明底色（D-149）。真机读数 `{"buttonBackground":"rgb(246, 247, 249)","sizeVisible":"visible","overlap":20}`。
+
+**为什么测试没抓到**：mock renderer 不做布局，没有任何几何断言；CSS 断言只检查「某条规则里有 `visibility:hidden` 或 `opacity:0`」这类文本特征，而「两个盒子重叠 20px 且一个透明」根本不是一个能被文本断言描述的事实。这个缺陷是审查者用无头 Chrome 实测抓到的，我复现用的是同一手段。
+
+## DEF-129 · 「点在菜单内部」这条分支零覆盖
+
+`onDown` 里的 `const inside = node !== null && typeof node.contains === 'function' && node.contains(event?.target) === true` 三条件与，在默认 fixture 下 `node.contains` 恒为 false——因为 `settings.frame` 默认是 `{ left: 0, top: 0, width, height }`，**没有 `contains` 键**，`fakeNode` 于是把 `frame.contains ?? []` 当空列表。
+
+所以把整段判断换成 `const inside = false` 也全绿。
+
+修法：新开一个独立 fixture，`frame: { ..., contains: [insideTarget] }`，断言两条——`a press inside the menu leaves it open` 与 `and still closes on a press elsewhere`。
+
+**为什么测试没抓到**：替身支持一件事（`frame.contains` 可传）不等于测试用了它。断言写的是「外部点击会关闭」，从没写过「内部点击不会关闭」——只测一半的布尔条件，另一半永远为真。
+
+## DEF-130 · 选完菜单项后焦点落到 body
+
+点菜单项后 `setMenuFor(undefined)` 让菜单消失，焦点随之落到 `document.body`。读屏用户按下去之后不知道自己在哪；`aria-label` 上的「已复制路径」也不会被播报（因为焦点不在那儿）。
+
+修法：`copyRef`，菜单项 `onClick` 在关闭之后 `if (copyRef.current !== null) copyRef.current.focus()`。
+
+**为什么测试没抓到**：突变 `choosing an entry drops focus on the floor`（把 `focus()` 换成自赋值）第一次跑就是 **SURVIVED**。补断言要用的通道一直存在——`test/client.test.mjs:90` 的 `focus: () => frame.onFocus?.()`——但从未被使用。补上之后同一条突变立刻被 KILLED。
+
+## DEF-131 · 突变表里有完全重复的条目
+
+`scripts/mutate-language-and-files.mjs` 里 `the panel asks for interface language again` 出现两次，label、`from`、`to`、`why` 一字不差。跑出来「143 killed」里有一对是同一个变异体跑了两遍。
+
+修法：脚本按 `
+  {
+    file: client,` 切块、比对整块文本，删掉第二份。
+
+**为什么测试没抓到**：突变测试检查的是「每条声明的锚点是否存在」，不检查「两条是否相同」。计数只会变多，不会报警。
+
+## DEF-132 · 改一行 CSS 后突变锚点变成 NOT APPLIED
+
+我把菜单的 `box-shadow` 从 `0 2px 8px rgba(15,17,21,.04)` 改成 `0 1px 3px rgba(15,17,21,.06)`，于是 `the menu opens as a popup over the list` 这条突变的 `from` 整行不再存在，runner 报 **NOT APPLIED**。
+
+这不是通过，是「这条测试根本没跑」。汇总行里 NOT APPLIED 与 KILLED 都是「不是 survived」，很容易被当成绿。
+
+**为什么测试没抓到**：锚点引用的是整行样式文本，任何一次样式微调都会让它落空。规则记进缺陷库：**改 CSS 整行之前，grep 突变表里是否有引用该行的 `from`；NOT APPLIED 必须当作红的处理**。

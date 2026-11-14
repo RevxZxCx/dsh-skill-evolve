@@ -200,7 +200,7 @@ for (const [label, source, want] of [
 // checks silent, so a floor that is too low is the one gap a list like this
 // cannot see.
 for (const [name, expected] of [
-  ['mutate-language-and-files.mjs', 129],
+  ['mutate-language-and-files.mjs', 143],
   ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 45],
 ]) {

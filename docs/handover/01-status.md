@@ -53,6 +53,7 @@
 | 2026-11-14 | S8 独立审查：八个单元、十三条意见 | 把 S8 提交按 200 行门槛切成八份派独立审查者，抓出 3 个 P0（stdin EPIPE 会杀死整个进程、跨仓库批次整批失效、provenance 被下一回合抹掉）。修 13 条，3365 断言全绿，突变 114/45/128 全杀。**新增 DEF-111 至 DEF-120、D-133 至 D-137** |
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 | 2026-11-14 | 产出卡 S3：行内复制 | 一行从 `<button>` 改成 `div` 里两个兄弟按钮（打开 / 复制），动作层绝对定位叠在尺寸上——因为展开态的行容器有 `overflow-y:auto`，浮到行外的菜单会被裁掉。复制绝对路径与工作区相对路径（`relativePath` 单独一个函数：工作区外没有相对路径这个答案，编一个就是把 `../` 写进剪贴板）。没有 `navigator.clipboard` 就整层不渲染——这条我先写成「明文 http 所以是常态」，**被真机实测推翻**：loopback 算 secure context，按钮本来就画得出来。八单元独立审查后修 9 处（`İ` 折叠变长切错位、两条永远为真的断言、行高亮≠可点区、焦点下尺寸退出无障碍树、`aria-label` 不播报结果）。3413 断言全绿，三套突变 129/45/128 全杀，残留 0。**新增 DEF-121~126、D-138~145** |
+| 2026-11-14 | 复制改成悬停图标 + 展开菜单 | 用户 m14496 要求把两个中文小按钮换成一个复制图标，点开菜单再选绝对/相对。菜单做成**行的兄弟、在文档流内**——两个祖先（`.dsse-card{overflow:hidden}`、`.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`）都会裁掉浮层，而长列表正是最需要它的场合。八单元六个审查者 + 两轮后台审查：修 14 处，最重的是「图标上再按关不掉菜单」（真机 `renders` 2→4 证实）与「聚焦时透明按钮压住文件大小」。3459 断言全绿，突变 143/45/128 全杀，残留 0。**新增 DEF-127~132、D-146~150、R-85** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -3813,3 +3814,62 @@ audit_leftovers.py       leftovers: 0 / unresolved: 0
 - 窄卡（168px）里两个 CJK 按钮合计约 66px，比 `.dsse-size` 宽一倍，悬停时会盖住文件名的省略号（P3，未修）。
   `.json` 用网格图标看起来像电子表格，属按扩展名分桶的固有代价，不修。
 - 几何类问题（可点区、重叠宽度、gone 行布局）没有断言，只能靠人眼 —— 测试框架不做布局。
+
+## 2026-11-14 · 复制改成图标加菜单，以及它掀开的三层
+
+### 一、改的是什么
+
+S3 交付的是两个中文小按钮（「绝对」「相对」）并排躺在行的右端。用户看完真机说：
+
+> 当在文件上悬停的时候，会显示一个复制的图标按钮，点击复制之后会展开下拉菜单，让用户选择绝对路径还是相对路径。菜单的样式要与实际的卡片统一。
+
+所以这一轮把「两个常驻按钮」换成了「一个图标 + 一层展开的菜单」。一行只有 22px 的控制，菜单里每项同时显示**标签与将要复制的那串字符**——只写「绝对路径」「相对路径」两个词，用户无法确认自己按下去会得到什么。
+
+### 二、菜单为什么必须在文档流里
+
+这不是口味问题，是两个祖先都会裁：
+
+- `.dsse-card{...overflow:hidden}`
+- `.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`
+
+任何浮到行外的浮层在长列表里必然被剪掉，而长列表恰好是最需要这个功能的地方。手写 bundle 没有 `ReactDOM.createPortal` 的入口，做不了 portal。于是菜单是**行的兄弟节点**、在文档流内：`div.dsse-row` 之后紧跟 `div.dsse-row-menu`。它不被裁、不需要测量、不需要 resize 监听，Tab 也按文档顺序自然到达。
+
+菜单**不能是行的子节点**——那样它会成为 flex 的第二行，把行的中点连同复制按钮一起挪下去。
+
+行本身因此变成数组返回（`return [row, menu]`），父层用 `flat()` 展平；`null` 在那儿会被安全跳过。
+
+### 三、四个真缺陷
+
+1. **再按一次关不掉菜单**（DEF-127）。按钮唯一的子节点是图标（`svg > rect/path`），真实点击的 `target` 是 `<path>`，`dataset.dsseCopy` 不存在 → 窗口的 `mousedown` 判为「点在菜单外」并关闭 → 随后的 `click` 读到旧闭包里的 `open === true`，又设回打开。用无头 Chrome 真按下两次读回：`renders` 从 2 跳到 4，`open` 仍是 `true`——用户看到的是闪一下又回来。只有点在 22px 盒子的 4px 边缘（`target` 是真 button）才能关。修法是沿祖先链找：`target.closest('[data-dsse-copy="true"]')`。
+2. **焦点下 22px 透明按钮压在文件大小上**（DEF-128）。键盘 Tab 到打开按钮时动作层显形（`:focus-within`），但隐藏尺寸的那条规则故意不含 `:focus-within`（D-143：`visibility:hidden` 会把元素从无障碍树摘掉），而按钮背景透明，于是 `1.2 KB` 被读成 `1.2 ⊗B`。修法不是把 `:focus-within` 加进隐藏规则，而是**让按钮在聚焦时盖住自己占的像素**：`:focus-within .dsse-row-copy:not([aria-expanded="true"]){background:var(--dsw-alias-bg-layer-2)}`。
+3. **`inside === true` 分支零覆盖**（DEF-129）。默认 fixture 的 `frame` 没有 `contains` 键，`fakeNode.contains` 恒为 false，于是「点在菜单里」这条路径在测试里从未被走到——把整段判断换成 `const inside = false` 也全绿。
+4. **焦点归还没有断言**（DEF-130）。突变 `choosing an entry drops focus on the floor` 第一次跑就是 SURVIVED：点完菜单项之后焦点落到 `body` 这件事没有任何断言。harness 有 `frame.onFocus` 这条唯一通道，从没被用过。
+
+### 四、真机读数（这一轮的验收不是靠推理）
+
+同一套 CSS 从 `client.js` 里切出来、字形按 `FILE_MARKS` 生成、行结构照 bundle 的 `jsxs`，用 CDP 让浏览器自己解析 `:hover` 与 `:focus-within`：
+
+```
+悬停        {"opacity":"1","pointer":"auto","position":"absolute","sizeVisibility":"hidden","w":22,"h":22}
+开菜单      {"menu":true,"y":78.1,"w":386,"h":55,"menuPosition":"static","inCard":true,"inFiles":true,"afterRow":true,"items":2,"menuRight":423,"cardRight":424}
+选中        {"menus":0,"ok":"true","colour":"rgb(31, 122, 77)","label":"已复制路径"}
+聚焦（0ms） {"actionsOpacity":"0","buttonBackground":"rgb(246, 247, 249)","sizeVisible":"visible","overlap":20,"sizeWidth":33}
+聚焦（400ms）{"actionsOpacity":"1","buttonBackground":"rgb(246, 247, 249)","sizeVisible":"visible","overlap":20,"sizeWidth":33}
+```
+
+两个读数值得记下来：**聚焦后 0ms 读到 `opacity:0` 不是没显形，是 120ms 过渡在播**——必须隔 400ms 再读一次，两次数值不同才是真的；`overlap:20` 说明按钮确实压在尺寸上 20px（所以底色不是装饰，是必需品），而尺寸仍 `visible`，仍在无障碍树里。
+
+四张图在 `_shots/`：`card-menu-hover.png`（悬停出图标）、`card-menu-open.png`（菜单在行下方、右缘与卡片贴齐）、`card-menu-flash.png`（绿色 = 成功态）、`card-focus.png`（聚焦时按钮盖住自己那块）。
+
+### 五、验证
+
+`node test/run.mjs` **3459 passed / 0 failed**；语言突变 **143 killed**（新增十一条菜单专属变异，锚点下限同步抬到 143）、persistence **45**、checklist-panel **128**，`audit_leftovers.py` **leftovers: 0 / unresolved: 0**。
+
+注入验证做了两次：把 `navigator.clipboard` 那条守卫删掉、把焦点归还换成自赋值、把 `inside` 换成常量、把 `closest` 分支删回读 dataset——每一处都只让预期的那几条变红，跑完按 sha256 复原。
+
+### 六、还没做
+
+- 菜单没有方向键导航，也没有打开即把焦点移进菜单（`role="group"` 是诚实的声明，见 D-148）。
+- 按住 Shift 点复制按钮不会复制相对路径；菜单是这个功能唯一的入口。
+- 窄卡（168px）里按钮仍会盖住文件名的最后约 20px，这是 D-143 的既定代价。
+- 没有一条结论来自真实用户操作：全部是真机浏览器 + 程序化输入。
