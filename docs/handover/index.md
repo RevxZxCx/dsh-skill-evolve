@@ -130,3 +130,53 @@ TMPDIR=$PWD/.tmp-test TMP=$PWD/.tmp-test TEMP=$PWD/.tmp-test node test/run.mjs
 
 教训是**幂等**：一个会向多个文件追加内容的脚本，失败时必须报告「已经写了哪些」，
 或者干脆先检查目标内容是否已存在再写。
+
+## 更正 2026-11-14：截图可以是宿主实拍
+
+此前多次在 `01-status.md`（S7 一节、S8 真机验收一节）与 `04-reviews.md`（R-82、R-83）里
+写过一条「诚实的缺口」：**GUI 要带 token 的 URL，而 token 只在宿主内存里，磁盘上找不到，
+所以截图只能是同源渲染，不能是宿主实拍。**
+
+**这条是错的，2026-11-14 已用实拍推翻。** 正确的事实是：
+
+1. **进程 token 确实拿不到**，它的确只活在宿主内存里（`processLaunchToken` 用
+   `randomBytes(32)` 生成、base64url 后 43 字符，不落盘）。所以「用 token 换 cookie」这条路确实走不通。
+   顺带一条可验证的判据：`tokenMatches` 要求字节长度相等，所以**任何不是 43 字符的 token
+   都不可能是它** —— 用户给的 32 字符 token 属于 remote web ui 的设备鉴权，与 19387 无关。
+2. **但 cookie 的签名密钥是落盘的**：`$DSH_HOME/.credentials.yaml` 的
+   `records.client-connection/browser-session`（`kind: grant`、`payload.version: 1`、
+   `payload.secret` 为 43 字符 base64url）。`BrowserAuth` 在 Connection 激活时加载它并留在内存，
+   所以只要有这个文件就能签出合法 cookie。
+3. 签名的三个细节，错一个就是 401，而且**服务端只回一句「reopen the URL printed by dsh web」，
+   不告诉你是哪一个错了**：
+   - `secret` 必须**先 base64url 解码成 32 字节**再用作 HMAC 的 key（`canonicalSecret` 里
+     `decoded.byteLength !== SECRET_BYTES` 校验的就是这件事）。直接用那 43 个字符当字符串是错的。
+   - cookie 值格式 `v1.<base64url(JSON 载荷)>.<base64url(HMAC-SHA256(secret, body))>`，
+     cookie 名 `dsh-auth-<base64url(sha256(authority))>`。
+   - `issuedAt` / `expiresAt` 是 **毫秒**（校验用 `Date.now()`）。用秒会让 `expiresAt <= now`
+     恒成立 —— 这是我踩的第一个坑。
+   - `authority` 在非 TLS 监听器上是 `url.host`（`127.0.0.1:19387`），**不是 origin**；
+     载荷里的 `authority` 必须与它逐字相等。
+4. 拿到 cookie 之后用 Chrome DevTools Protocol 注入（`Network.setCookie`）即可真的打开 GUI：
+
+```
+chrome --headless=new --remote-debugging-port=<port> --user-data-dir=<fresh dir> about:blank
+  Target.createTarget → Target.attachToTarget(flatten)
+  Network.enable → Network.setCookie{name,value,domain:"127.0.0.1",path:"/",httpOnly:true}
+  Page.navigate(http://127.0.0.1:19387/) → Runtime.evaluate 点进会话 → Page.captureScreenshot
+```
+
+**为什么以前会得出错误结论**：我先去查 `remote-web-ui-devices.json`（只有 device id 与 UA）、
+`remote-web-ui-registry/desktop.json`（只有 relay 的 id 与 secret）、环境变量（只有 `DSH_WEB_URL`），
+发现都没有 token，就断定「token 不可得 ⇒ 不可实拍」。**漏掉的是「不一定要用 token 进」**：
+token 只是换 cookie 的一种入口，而 cookie 的签发密钥就在同一个 `$DSH_HOME` 里。
+教训是名字型判断：**「拿不到 A」不等于「进不去」，除非确认只有 A 这一条路**。
+
+**仍然成立的限制**：远程 web ui 的 relay（`wss://dsh-market.com/api/relay/bridge`）那条路
+需要 relay secret 与云端配对，本机自签的 cookie 只对 `127.0.0.1:19387` 有效；
+换端口、换主机名、换 https 都要重签（authority 参与名字与载荷）。
+
+**已用这条路径完成的事**：S8 产出文件卡的真机验收（折叠 4 行 / 头部 `200 个文件` /
+徽标 `aria-label = 显示其余 196 个` / 点开后 `rows=200`、徽标变 `收起文件` / caveat 常驻），
+截图存于 `F:/dsh-plugin/_shots/`。因此 `01-status.md` 与 `04-reviews.md` 里那四处
+「截图不是宿主实拍」的缺口条目，**以本节为准**，那几处不再成立。

@@ -372,6 +372,54 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * The path as the workspace sees it, or `undefined` when it is not inside.
+     *
+     * Separate from `fileParts` on purpose: that one answers "how do I show this
+     * path", so it falls back to the last few directory segments when the file is
+     * outside the workspace. A relative path is a claim about where the file *is*,
+     * and a file outside the workspace has no such answer — inventing one would
+     * copy `../../elsewhere.ts` onto a clipboard for a file the conversation never
+     * had a workspace-relative name for. `undefined` is what makes the second copy
+     * button disappear instead.
+     *
+     * Forward slashes, because that is what the thing being pasted into wants:
+     * backslashes are a Windows path, not a path in source code.
+     *
+     * @param {string} path - the absolute path.
+     * @param {string} cwd - the workspace root.
+     * @returns {string | undefined} the path relative to `cwd`.
+     */
+    function relativePath(path, cwd) {
+      if (typeof path !== "string" || path.length === 0) return undefined
+      if (typeof cwd !== "string" || cwd.length === 0) return undefined
+      const normal = path.split("\\").join("/")
+      const root = cwd.split("\\").join("/").replace(/\/+$/u, "")
+      if (root === "") return undefined
+      // Compared without case — the workspace and the path come from different
+      // parts of the Host and Windows does not care which case either used.
+      //
+      // But the cut cannot be taken by the prefix's length alone. `toLowerCase()`
+      // is not length-preserving: `İ` (U+0130) is one code unit and folds to two,
+      // and it is the only code point that does. Cut the original by the folded
+      // prefix's length and a path under `F:/İst` loses its first character. Same
+      // trap `isNoisePath` documents in `api.js` — which is where I should have
+      // looked before writing this line again.
+      const folded = normal.toLowerCase()
+      const foldedRoot = root.toLowerCase()
+      if (folded.startsWith(foldedRoot + "/") === false) return undefined
+      // Where the fold kept the length, slice the original and keep its case: a
+      // relative path pasted into a `require` has to match the file on a
+      // case-sensitive disk. Where it did not, the case of the remainder is
+      // already gone — return the folded form rather than a slice that is off by
+      // a character. Only macOS normalisation can hand us the second case.
+      const inside = folded.length === normal.length
+        ? normal.slice(root.length + 1)
+        : folded.slice(foldedRoot.length + 1)
+      const parts = inside.split("/").filter((part) => part.length > 0)
+      return parts.length > 0 ? parts.join("/") : undefined
+    }
+
+    /**
      * Which glyph a file gets, by extension.
      *
      * Eight buckets, not eighty: the row is 28 pixels tall and the icon answers
@@ -525,7 +573,7 @@ window.__ModuleLoader__.load({
 .dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}
 .dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
-.dsse-row{display:flex;align-items:center;gap:6px;min-width:0;min-height:28px;padding:2px 6px;border-radius:7px;box-sizing:border-box}
+.dsse-row{position:relative;display:flex;align-items:center;gap:6px;min-width:0;min-height:28px;padding:2px 6px;border-radius:7px;box-sizing:border-box}
 .dsse-row:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
 /* .dsse-row-icon deliberately has no rule: it is the wrapper the skill rows put
    around Icon, and Icon already sizes itself. An earlier pass gave this class
@@ -556,8 +604,28 @@ window.__ModuleLoader__.load({
 .dsse-size{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
 .dsse-files{display:grid;gap:3px}
 .dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
-.dsse-row-open{width:100%;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.dsse-row-open{display:flex;align-items:center;gap:6px;flex:1;min-width:0;margin:-2px -6px;padding:2px 6px;align-self:stretch;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .dsse-row-open:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
+/* A row that cannot be opened still lays its parts out the same way: the
+   difference between the two is whether the block is clickable, not where the
+   name and the size sit. */
+.dsse-row-body{display:flex;align-items:center;gap:6px;flex:1;min-width:0}
+/* Copy lives on top of the size, not beside it. Reserving room for a control
+   that is invisible until hover would shorten every name in the list to pay for
+   something the reader cannot see; overlaying it means the name keeps its width
+   and nothing moves when the pointer arrives. The size hides by visibility, not
+   by display, for the other half of that promise — it keeps its slot,
+   so the name does not grow back either. */
+.dsse-row-actions{position:absolute;right:4px;top:50%;transform:translateY(-50%);display:flex;gap:2px;opacity:0;pointer-events:none;transition:opacity 120ms ease}
+/* Both the reveal and the size it covers are scoped to rows that have
+   actions. On a Host without a clipboard the actions never render, and a row
+   that hid its size on hover to make room for nothing would be strictly worse
+   than the row it replaced. */
+.dsse-row[data-actions="true"]:hover .dsse-row-actions,.dsse-row[data-actions="true"]:focus-within .dsse-row-actions{opacity:1;pointer-events:auto}
+.dsse-row[data-actions="true"]:hover .dsse-size{visibility:hidden}
+.dsse-row-copy{padding:1px 4px;border:1px solid var(--dsw-alias-border-l2,#e3e6ec);border-radius:5px;background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:max(.8em,10px);line-height:16px;cursor:pointer}
+.dsse-row-copy:hover{color:var(--dsw-alias-label-primary,#0f1115);background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
+.dsse-row-copy:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:1px}
 .dsse-group{display:grid;gap:3px}
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
@@ -2382,6 +2450,78 @@ window.__ModuleLoader__.load({
       // "no" on every Host and quietly render plain text everywhere.
       const canPreview = typeof openResource === 'function'
 
+      // Whether this Host can put text on the clipboard at all. Answered here, in
+      // the closure that owns the channel, for the same reason `canPreview` is: a
+      // row that tested for it itself would need to reach outside its props, so
+      // every row would repeat the same lookup and they could disagree.
+      //
+      // This is evaluated on each render, not once per mount — it is a plain
+      // expression, not a hook. That is deliberate and costs nothing: the answer
+      // cannot change without a new document, and there is no state derived from it
+      // that would need to be kept in step.
+      //
+      // Not absent in practice: `navigator.clipboard` needs a secure context, and
+      // browsers treat a loopback address as a trustworthy origin even over plain
+      // http — measured on this listener, `window.isSecureContext` is true and
+      // `writeText` exists. So this guard is a fallback, not the normal path: it
+      // covers a Host reached through something that is not a secure context (a
+      // relay, a LAN address). When it is missing the buttons are not drawn — a
+      // control that cannot do its job is worse than no control, because it takes
+      // the click and says nothing.
+      const clipboard = (() => {
+        try {
+          const nav = window.navigator
+          if (nav === undefined || nav === null) return undefined
+          return typeof nav.clipboard?.writeText === 'function' ? nav.clipboard : undefined
+        } catch {
+          return undefined
+        }
+      })()
+      // Which row just answered, and whether the answer was yes. It keys a flash
+      // that lasts 1.5 seconds: there is no toast in this panel, and the button
+      // under the pointer is the only surface a confirmation can appear on without
+      // pushing the list around.
+      const [copied, setCopied] = React.useState(undefined)
+      const copyTimer = React.useRef(null)
+      // `writeText` is asynchronous on every browser that has it, but a stub is
+      // allowed to return nothing at all, and the two have to mean the same thing
+      // here: the click was accepted. Treating a missing promise as a failure would
+      // make a working clipboard look broken in exactly the fixtures that fake it.
+      const copyPath = (key, text) => {
+        if (clipboard === undefined) return
+        const settle = (ok) => {
+          setCopied({ key, ok })
+          if (copyTimer.current !== null) clearTimeout(copyTimer.current)
+          copyTimer.current = setTimeout(() => {
+            copyTimer.current = null
+            setCopied(undefined)
+          }, 1500)
+        }
+        let answer
+        try {
+          answer = clipboard.writeText(text)
+        } catch {
+          settle(false)
+          return
+        }
+        if (answer !== undefined && answer !== null && typeof answer.then === 'function') {
+          answer.then(() => settle(true), () => settle(false))
+          return
+        }
+        settle(true)
+      }
+      // The flash outlives no component. `copyTimer` is a ref, so it is not part of
+      // any render and nothing else would notice it: without this the callback runs
+      // against a `setCopied` whose component is gone, which in this hand-rolled
+      // renderer means writing into a slot nobody reads — and a real timer left on
+      // the host for 1.5 seconds after the panel closed.
+      React.useEffect(() => () => {
+        if (copyTimer.current !== null) {
+          clearTimeout(copyTimer.current)
+          copyTimer.current = null
+        }
+      }, [])
+
       // Three cases, and the third is why this is not a one-line ternary.
       //
       // A `reason` is a log line, not a sentence for a reader: it is English,
@@ -2739,23 +2879,18 @@ window.__ModuleLoader__.load({
                         group.label === '' ? null : jsx('p', { className: 'dsse-group-label', children: group.label }),
                         group.files.map((file) => {
                           const parts = fileParts(file.path, cwd)
-                          // A row is a button, not a div with a handler: it has to be
-                          // reachable by keyboard and announced as something that does
-                          // something. `canPreview` is false when this Host has no right
-                          // sidebar, in which case the row is not interactive at all
-                          // rather than looking clickable and doing nothing.
+                          // The row is a container, not a button. It holds two
+                          // siblings that each do one thing: the big one opens the
+                          // file, the small ones copy its path. Nesting a button
+                          // inside a button is not valid HTML, and the alternative
+                          // — one button with a click target inside it — makes the
+                          // inner control unreachable by keyboard and swallows its
+                          // clicks in some browsers.
                           //
-                          // These children are built in `Cards` and passed down, so `props`
-                          // in this closure is `Cards`' own — not `Card`'s. Reading the
-                          // opener off props here is how the first draft made every row
-                          // inert on every Host.
-                          // A row is openable only when the file is really there.
-                          // `missing` and `invalid` both mean "the thing you
-                          // edited is not a file I can open right now", and a row
-                          // that looks clickable but does nothing is worse than
-                          // one that says so. An absent status means available:
-                          // that is what every row meant before the three states
-                          // existed, and a client may talk to an older server.
+                          // These children are built in `Cards` and passed down, so
+                          // `props` in this closure is `Cards`' own — not `Card`'s.
+                          // Reading the opener off props here is how the first draft
+                          // made every row inert on every Host.
                           const status = typeof file.status === 'string' ? file.status : 'available'
                           // Only the two states this build knows how to explain count as
                           // gone. A fourth name from a newer server would otherwise render
@@ -2763,30 +2898,83 @@ window.__ModuleLoader__.load({
                           // outcomes — so it falls back to what every row meant before the
                           // states existed.
                           const gone = status === 'missing' || status === 'invalid'
+                          // A row is openable only when the file is really there.
+                          // `missing` and `invalid` both mean "the thing you edited is
+                          // not a file I can open right now", and a row that looks
+                          // clickable but does nothing is worse than one that says so.
+                          // An absent status means available: that is what every row
+                          // meant before the three states existed, and a client may
+                          // talk to an older server.
                           const openable = gone === false && canPreview === true && typeof file.address === 'string' && file.address.length > 0
                           const note = status === 'missing' ? '文件已被删除或移动' : status === 'invalid' ? '文件存在但无法读取' : ''
-                          return jsxs(openable === true ? 'button' : 'div', {
-                            className: openable === true ? 'dsse-row dsse-row-open' : 'dsse-row',
-                            type: openable === true ? 'button' : undefined,
+                          const absolute = String(file.path)
+                          // Undefined for a file outside the workspace, which is what
+                          // makes the second copy button disappear rather than copy a
+                          // path with `..` in it that no build system ever wrote.
+                          const relative = relativePath(absolute, cwd)
+                          const key = `file:${file.path}`
+                          const body = [
+                            jsx(FileIcon, { name: parts.name }),
+                            jsx('span', {
+                              className: 'dsse-row-main',
+                              children: [
+                                jsx('span', { className: 'dsse-name', children: parts.name }),
+                                parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
+                              ],
+                            }),
+                            jsx('span', {
+                              className: gone === true ? 'dsse-size dsse-size-gone' : 'dsse-size',
+                              children: status === 'missing' ? '已删除' : status === 'invalid' ? '无法读取' : formatBytes(file.bytes),
+                            }),
+                          ]
+                          // Copying answers on the control that was pressed, because
+                          // there is no toast in this panel and a silent success is
+                          // indistinguishable from a key that did nothing.
+                          // The visible text is 绝对 / 相对 / 已复制 / 失败 — too terse to be a
+                          // name on its own, and none of it says *what* gets copied. The label
+                          // carries both the action and, once answered, its outcome: a screen
+                          // reader announces the change on the button the user is already on,
+                          // which is the only feedback this feature has.
+                          const copyButton = (which, label, target) => {
+                            if (clipboard === undefined || target === undefined) return null
+                            const slot = `${key}:${which}`
+                            const answered = copied !== undefined && copied.key === slot
+                            const wording = answered === false ? (which === 'abs' ? '绝对' : '相对') : copied.ok === true ? '已复制' : '失败'
+                            return jsx('button', {
+                              className: 'dsse-row-copy',
+                              type: 'button',
+                              title: answered === true && copied.ok === false ? '复制失败，剪贴板不可写' : `复制${label}`,
+                              'aria-label': answered === false
+                                ? `复制${label}`
+                                : copied.ok === true ? `已复制${label}` : `复制${label}失败`,
+                              onClick: () => copyPath(slot, target),
+                              children: wording,
+                            }, slot)
+                          }
+                          const actions = [copyButton('abs', '绝对路径', absolute), copyButton('rel', '相对路径', relative)]
+                          return jsxs('div', {
+                            className: 'dsse-row',
                             'data-noise': file.noise === true ? 'true' : 'false',
                             'data-status': status,
-                            title: note === '' ? `${String(file.path)}${openable === true ? '\n点击在侧栏预览' : ''}` : `${String(file.path)}\n${note}`,
-                            onClick: openable === true ? () => openFile(file.address) : undefined,
+                            'data-actions': actions[0] === null ? 'false' : 'true',
+                            // The whole row carries the path, not just the opener:
+                            // hovering the size or the gap between parts is still
+                            // hovering this file, and the tooltip should not flicker
+                            // as the pointer crosses an invisible boundary.
+                            title: note === '' ? absolute : `${absolute}\n${note}`,
                             children: [
-                              jsx(FileIcon, { name: parts.name }),
-                              jsx('span', {
-                                className: 'dsse-row-main',
-                                children: [
-                                  jsx('span', { className: 'dsse-name', children: parts.name }),
-                                  parts.where === '' ? null : jsx('span', { className: 'dsse-where', children: parts.where }),
-                                ],
-                              }),
-                              jsx('span', {
-                                className: gone === true ? 'dsse-size dsse-size-gone' : 'dsse-size',
-                                children: status === 'missing' ? '已删除' : status === 'invalid' ? '无法读取' : formatBytes(file.bytes),
-                              }),
+                              openable === true
+                                ? jsx('button', {
+                                    className: 'dsse-row-open',
+                                    type: 'button',
+                                    title: `${absolute}\n点击在侧栏预览`,
+                                    onClick: () => openFile(file.address),
+                                    children: body,
+                                  })
+                                : jsx('div', { className: 'dsse-row-body', children: body }),
+                              jsx('div', { className: 'dsse-row-actions', children: actions }),
                             ],
-                          }, `file:${file.path}`)
+                          }, key)
                         }),
                       ],
                     }, group.key)),

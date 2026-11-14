@@ -606,6 +606,11 @@ function boot(options) {
       )
       if (at >= 0) listeners.splice(at, 1)
     },
+    // Absent unless a fixture supplies one, which is the state of a Host served
+    // over plain http: navigator.clipboard lives in secure contexts only, so
+    // the copy buttons must not be drawn at all. Tests that describe a clipboard
+    // set this explicitly.
+    navigator: settings.navigator,
   }
 
   const timers = []
@@ -4456,11 +4461,11 @@ async function openPanel(routes, options) {
   // would pass on a card that dropped missing files entirely — the very defect
   // the three states exist to prevent.
   check('the deleted row is drawn at all', rowOf('gone.md') !== undefined, String(rowOf('gone.md')))
-  check('the deleted row offers no preview', rowOf('gone.md') !== undefined && rowOf('gone.md')?.props?.onClick === undefined, String(typeof rowOf('gone.md')?.props?.onClick))
+  check('the deleted row offers no preview', rowOf('gone.md') !== undefined && firstByClass(rowOf('gone.md'), 'dsse-row-open') === undefined, String(firstByClass(rowOf('gone.md'), 'dsse-row-open') !== undefined))
   check('and it is not dressed as a button', rowOf('gone.md') !== undefined && rowOf('gone.md')?.type !== 'button', String(rowOf('gone.md')?.type))
   check('its title carries the reason instead of the invitation', String(rowOf('gone.md')?.props?.title ?? '').includes('已被删除或移动') && String(rowOf('gone.md')?.props?.title ?? '').includes('点击在侧栏预览') === false, String(rowOf('gone.md')?.props?.title))
   check('the unreadable row gives its own reason', String(rowOf('locked.md')?.props?.title ?? '').includes('文件存在但无法读取'), String(rowOf('locked.md')?.props?.title))
-  check('a present row still invites the click', String(rowOf('there.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(rowOf('there.md')?.props?.title))
+  check('a present row still invites the click', String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title ?? '').includes('点击在侧栏预览'), String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title))
 
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
   check('a row that is gone is struck through', /\.dsse-row\[data-status="missing"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
@@ -4492,7 +4497,7 @@ async function openPanel(routes, options) {
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const row = firstByClass(tree, 'dsse-row')
   check('a row with no status is treated as present', row?.props?.['data-status'] === 'available', String(row?.props?.['data-status']))
-  check('and it is still openable', typeof row?.props?.onClick === 'function', String(typeof row?.props?.onClick))
+  check('and it is still openable', typeof firstByClass(row, 'dsse-row-open')?.props?.onClick === 'function', String(typeof firstByClass(row, 'dsse-row-open')?.props?.onClick))
   check('and it still reports its size rather than a reason', textOf(row).includes('9 B'), textOf(row))
 }
 
@@ -4959,6 +4964,300 @@ async function openPanel(routes, options) {
   check('a card that hides nothing offers no remainder', firstByClass(card, 'dsse-expand-action') === undefined, String(textOf(card).slice(0, 80)))
   check('and its header still names the total', textOf(firstByClass(card, 'dsse-card-meta')).includes('3 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
   check('and every row is on screen', byClass(card, 'dsse-name').length === 3, String(byClass(card, 'dsse-name').length))
+}
+
+{
+  // Copying a path is the one row action this panel can offer without asking the
+  // Host for a capability it does not expose: `navigator.clipboard.writeText` is
+  // the whole requirement. Everything here is about the two ways that turns out
+  // to be wrong — a clipboard this Host does not have, and a write that fails.
+  //
+  // The fixture writes into a workspace so both copy targets exist, and puts one
+  // file outside it so the second button has to disappear rather than invent a
+  // relative path with `..` in it.
+  const rows = [
+    { path: 'F:\\work\\src\\inside.ts', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/src/inside.ts' },
+    { path: 'F:\\elsewhere\\outside.ts', bytes: 20, mtimeMs: 200, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/elsewhere/outside.ts' },
+    // Spelled by a different part of the Host than the workspace was, in the
+    // other case. On Windows this is the same directory, so the row is inside
+    // and both buttons must exist.
+    { path: 'f:\\WORK\\Src\\Cased.ts', bytes: 30, mtimeMs: 300, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/Src/Cased.ts' },
+  ]
+  const routesFor = () => {
+    const routes = panelRoutes()
+    routes['/api/ui-evolve/panel'] = {
+      ok: true,
+      data: {
+        turn: 2, calls: 4, failed: 0, turnFiles: 2,
+        summary: { text: 'wrote two files' },
+        pendingCandidates: 0,
+        skills: { available: true, skills: [] },
+        mcp: [],
+        cwd: 'F:\\work',
+        files: rows,
+        commands: [],
+      },
+    }
+    return routes
+  }
+  const open = async (settings) => {
+    const instance = boot(settings)
+    instance.module.apply(instance.ctx)
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    const tree = await instance.renderer.deepRender(instance.seat('cards'))
+    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
+    return { instance, tree, card, rowOf }
+  }
+
+  // The Host that has no clipboard is the common one, not the edge case: this
+  // panel is served over plain http on the loopback, and `navigator.clipboard`
+  // only exists in a secure context. Nothing is drawn, and — the half that is easy
+  // to forget — the row must not have made room for the control it did not draw.
+  {
+    const { card, rowOf } = await open({ routes: routesFor() })
+    check('a host without a clipboard draws no copy button', byClass(card, 'dsse-row-copy').length === 0, String(byClass(card, 'dsse-row-copy').length))
+    check('and the row does not claim to have actions', rowOf('inside.ts')?.props?.['data-actions'] === 'false', String(rowOf('inside.ts')?.props?.['data-actions']))
+    // The size is the thing the control would have covered. On a row with no
+    // actions it has to stay visible, or the hover rule is trading the size for
+    // nothing at all — asserted on the sheet in the layout block below.
+  }
+
+  // A Host that does have one: two buttons on the row that is inside the
+  // workspace, one on the row that is not.
+  {
+    const written = []
+    const navigator = { clipboard: { writeText: (value) => { written.push(value); return Promise.resolve() } } }
+    const { card, rowOf, instance } = await open({ routes: routesFor(), navigator })
+    const inside = rowOf('inside.ts')
+    const buttons = byClass(inside, 'dsse-row-copy')
+    check('a host with a clipboard draws both copy buttons', buttons.length === 2, String(buttons.length))
+    check('and the row says it has actions', inside?.props?.['data-actions'] === 'true', String(inside?.props?.['data-actions']))
+    // The buttons are siblings of the opener, not children: nesting one button in
+    // another is invalid HTML, and the inner one becomes unreachable by keyboard.
+    check('the opener and the actions are siblings', byClass(inside, 'dsse-row-actions').length === 1 && byClass(inside, 'dsse-row-open').length === 1, JSON.stringify([byClass(inside, 'dsse-row-actions').length, byClass(inside, 'dsse-row-open').length]))
+    // The row is not itself a click target any more. If it carried a handler
+    // again, the actions inside it would fire both -- but the reason to say it
+    // out loud is the opposite bug: a row that looks clickable and is not.
+    check('and the row itself is not a click target', inside?.props?.onClick === undefined && inside?.props?.type === undefined, JSON.stringify([typeof inside?.props?.onClick, String(inside?.props?.type)]))
+    check('and the buttons live in the actions block', byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length === 2, String(byClass(firstByClass(inside, 'dsse-row-actions'), 'dsse-row-copy').length))
+    check('and the opener does not contain them', byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length === 0, String(byClass(firstByClass(inside, 'dsse-row-open'), 'dsse-row-copy').length))
+
+    // A file outside the workspace has no workspace-relative name. Copying one
+    // would be copying a path with `..` segments that no build ever wrote, so the
+    // button is absent instead of being wrong.
+    const outside = rowOf('outside.ts')
+    check('a file outside the workspace offers only the absolute path', byClass(outside, 'dsse-row-copy').length === 1, String(byClass(outside, 'dsse-row-copy').length))
+    // One button still counts as "has actions": deriving the flag from the
+    // relative button instead would mark this row action-less, and the CSS
+    // reveal rule would then keep its one button invisible forever.
+    check('and the row still says it has an action', outside?.props?.['data-actions'] === 'true', String(outside?.props?.['data-actions']))
+    const outsideButton = byClass(outside, 'dsse-row-copy')[0]
+    if (outsideButton === undefined) {
+      check('and copying it writes the absolute path', false, 'no copy button on the outside row')
+    } else {
+      outsideButton.props.onClick()
+      await instance.renderer.deepRender(instance.seat('cards'))
+      check('and copying it writes the absolute path', written[written.length - 1] === 'F:\\elsewhere\\outside.ts', JSON.stringify(written[written.length - 1]))
+    }
+
+    // The workspace is `F:\\work` and this file is recorded as `f:\\WORK\\src\\cased.ts`.
+    // Windows resolves both to the same directory, and the two spellings come from
+    // different parts of the Host, so the comparison cannot care about case.
+    const cased = rowOf('Cased.ts')
+    const casedButtons = byClass(cased, 'dsse-row-copy')
+    check('a file spelled in another case is still inside the workspace', casedButtons.length === 2, String(casedButtons.length))
+    // Indexed defensively: when the button is missing this has to be a failed
+    // check, not a throw. A throw takes the whole suite down with no tally line,
+    // and the mutation runner then reports CRASHED — a different verdict from the
+    // KILLED this assertion is here to produce.
+    if (casedButtons.length === 2) {
+      casedButtons[1].props.onClick()
+      check('and its relative path is cut at the workspace root', written[written.length - 1] === 'Src/Cased.ts', JSON.stringify(written[written.length - 1]))
+    } else {
+      check('and its relative path is cut at the workspace root', false, 'no relative button to press')
+    }
+
+    // Clicking copies, and says so on the button that was pressed.
+    const [absolute, relative] = buttons
+    check('the first button names the absolute path', String(absolute?.props?.['aria-label'] ?? '') === '复制绝对路径', String(absolute?.props?.['aria-label']))
+    check('the second names the relative one', String(relative?.props?.['aria-label'] ?? '') === '复制相对路径', String(relative?.props?.['aria-label']))
+    absolute.props.onClick()
+    await instance.renderer.deepRender(instance.seat('cards'))
+    check('pressing it writes the absolute path', written[written.length - 1] === 'F:\\work\\src\\inside.ts', JSON.stringify(written))
+    const answered = await instance.renderer.deepRender(instance.seat('cards'))
+    const answeredCard = byClass(answered, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const answeredRow = byClass(answeredCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    const answeredButtons = byClass(answeredRow, 'dsse-row-copy')
+    check('and the button says it worked', textOf(answeredButtons[0]) === '已复制', textOf(answeredButtons[0]))
+    check('while its neighbour is unchanged', textOf(answeredButtons[1]) === '相对', textOf(answeredButtons[1]))
+    // What a screen reader hears. The visible text alone is not the answer: the
+    // name is what gets announced, and a fixed name means a blind user never
+    // learns whether the copy worked.
+    check('and the button name says it worked', String(answeredButtons[0]?.props?.['aria-label'] ?? '') === '已复制绝对路径', String(answeredButtons[0]?.props?.['aria-label']))
+    check('and the untouched neighbour keeps its name', String(answeredButtons[1]?.props?.['aria-label'] ?? '') === '复制相对路径', String(answeredButtons[1]?.props?.['aria-label']))
+
+
+    // The relative button writes a forward-slash path relative to the workspace:
+    // backslashes are a Windows path, not a path in source code.
+    answeredButtons[1].props.onClick()
+    await instance.renderer.deepRender(instance.seat('cards'))
+    check('the relative button writes the workspace-relative path', written[written.length - 1] === 'src/inside.ts', JSON.stringify(written))
+
+  // A timer scheduled on a ref is invisible: it is not in the rendered tree, and
+  // no cleanup the panel already has would notice it. Unmounting while the flash
+  // is pending has to cancel it, or the callback writes state into a component
+  // that is gone and the host keeps a timer for a panel nobody is looking at.
+  //
+  // This needs its own instance: unmounting is terminal for the renderer, so it
+  // cannot share a fixture with the assertions above that still want to render.
+  {
+    // `writeText` returning nothing settles synchronously, which is the only way
+    // to see the timer before the microtask that a resolved promise would need.
+    const kept = { clipboard: { writeText: () => undefined } }
+    const own = await open({ routes: routesFor(), navigator: kept })
+    byClass(own.rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    const scheduled = own.instance.timers.filter((entry) => entry.ms === 1500 && entry.cleared === false)
+    check('the flash leaves one timer pending', scheduled.length === 1, String(scheduled.length))
+    own.instance.renderer.unmount()
+    check('and closing the panel cancels the flash timer', scheduled.every((entry) => entry.cleared === true), JSON.stringify(scheduled.map((entry) => entry.cleared)))
+  }
+
+    // The confirmation is a flash, not a state: 1.5 seconds later the button is a
+    // label again. Asserting the delay is the difference between a flash and a
+    // button that permanently reads "已复制" after one click.
+    const pending = instance.timers.filter((entry) => entry.ms === 1500 && entry.cleared === false)
+    // Exactly one: two clicks in a row must cancel the first timer, and `> 0`
+    // cannot tell that apart from the leak it is here to catch.
+    check('the confirmation is scheduled to clear', pending.length === 1, String(pending.length))
+    for (const entry of pending) entry.fn()
+    const cleared = await instance.renderer.deepRender(instance.seat('cards'))
+    const clearedCard = byClass(cleared, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const clearedRow = byClass(clearedCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    // Both buttons, and index 1 first: that is the one whose timer is pending.
+    // Reading index 0 here would pass either way, because the absolute button's
+    // timer was cancelled by the second press and its resting label is already
+    // "绝对" -- the check would be green with the callback deleted outright.
+    const clearedButtons = byClass(clearedRow, 'dsse-row-copy')
+    check('and it does clear, back to the label', textOf(clearedButtons[1]) === '相对' && textOf(clearedButtons[0]) === '绝对', JSON.stringify(clearedButtons.map((node) => textOf(node))))
+  }
+
+  // A write that throws, and a write that rejects. Both mean the same thing to the
+  // person who pressed the button, and neither may be reported as success.
+  {
+    const throwing = { clipboard: { writeText: () => { throw new Error('denied') } } }
+    const first = await open({ routes: routesFor(), navigator: throwing })
+    byClass(first.rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    const afterThrow = await first.instance.renderer.deepRender(first.instance.seat('cards'))
+    const throwCard = byClass(afterThrow, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const throwRow = byClass(throwCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    check('a clipboard that throws is not reported as success', textOf(byClass(throwRow, 'dsse-row-copy')[0]) === '失败', textOf(byClass(throwRow, 'dsse-row-copy')[0]))
+    check('and the tooltip says why', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.title ?? '').includes('复制失败'), String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.title))
+    check('and a screen reader hears the failure', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.['aria-label'] ?? '') === '复制绝对路径失败', String(byClass(throwRow, 'dsse-row-copy')[0]?.props?.['aria-label']))
+
+    const rejecting = { clipboard: { writeText: () => Promise.reject(new Error('denied')) } }
+    const second = await open({ routes: routesFor(), navigator: rejecting })
+    const secondButtons = byClass(second.rowOf('inside.ts'), 'dsse-row-copy')
+    secondButtons[0].props.onClick()
+    // A rejected promise settles on a microtask, and the renderer drains those
+    // between rounds — so the failure is on screen by the next deep render.
+    const afterReject = await second.instance.renderer.deepRender(second.instance.seat('cards'))
+    const rejectCard = byClass(afterReject, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const rejectRow = byClass(rejectCard, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    check('a rejected write is not reported as success either', textOf(byClass(rejectRow, 'dsse-row-copy')[0]) === '失败', textOf(byClass(rejectRow, 'dsse-row-copy')[0]))
+  }
+
+  // A stub is allowed to return nothing at all, and that has to mean the same as
+  // a resolved promise. The harness's own clipboard double is written by hand, so
+  // this is the shape a future fixture is most likely to have — treating it as a
+  // failure would make a working clipboard look broken in exactly the tests that
+  // fake it.
+  {
+    const silent = { clipboard: { writeText: () => undefined } }
+    const { instance, rowOf } = await open({ routes: routesFor(), navigator: silent })
+    byClass(rowOf('inside.ts'), 'dsse-row-copy')[0].props.onClick()
+    const tree = await instance.renderer.deepRender(instance.seat('cards'))
+    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const row = byClass(card, 'dsse-row').find((node) => textOf(node).includes('inside.ts'))
+    check('a clipboard that returns nothing counts as success', textOf(byClass(row, 'dsse-row-copy')[0]) === '已复制', textOf(byClass(row, 'dsse-row-copy')[0]))
+  }
+
+  // Copying on a file that is gone: the row still names the file, and the path it
+  // would copy is still the path it used to have, so the button stays. What must
+  // not happen is an opener appearing beside it.
+  {
+    const goneRows = [{ path: 'F:\\work\\gone.ts', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.ts' }]
+    const routes = panelRoutes()
+    routes['/api/ui-evolve/panel'] = {
+      ok: true,
+      data: {
+        turn: 1, calls: 2, failed: 0, turnFiles: 1,
+        summary: { text: 'wrote one file' },
+        pendingCandidates: 0,
+        skills: { available: true, skills: [] },
+        mcp: [],
+        cwd: 'F:\\work',
+        files: goneRows,
+        commands: [],
+      },
+    }
+    const written = []
+    const navigator = { clipboard: { writeText: (value) => { written.push(value); return Promise.resolve() } } }
+    const instance = boot({ routes, navigator })
+    instance.module.apply(instance.ctx)
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    const tree = await instance.renderer.deepRender(instance.seat('cards'))
+    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    check('a gone file still offers its path', byClass(card, 'dsse-row-copy').length === 2, String(byClass(card, 'dsse-row-copy').length))
+    check('and still offers no way to open it', firstByClass(card, 'dsse-row-open') === undefined, 'opener present')
+    byClass(card, 'dsse-row-copy')[0].props.onClick()
+    await instance.renderer.deepRender(instance.seat('cards'))
+    check('copying a gone path writes the path it had', written[written.length - 1] === 'F:\\work\\gone.ts', JSON.stringify(written))
+  }
+
+  // The layout promise. The action block is absolutely positioned over the size
+  // rather than laid out beside it, and the size keeps its slot when hidden, so a
+  // name does not change width when the pointer arrives. The mock renderer lays
+  // nothing out, so the sheet is the only place this can be asserted.
+  {
+    const instance = boot({ routes: routesFor() })
+    // The sheet is written when the panel renders, not when the bundle is
+    // evaluated or the plugin is applied: a boot with no render has an empty
+    // style list, and every rule below would then be a regex against nothing.
+    instance.module.apply(instance.ctx)
+    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    await instance.renderer.deepRender(instance.seat('cards'))
+    const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+    check('the sheet this block asserts against is not empty', sheet.includes('dsse-row-copy'), `${instance.styles.length} sheets`)
+    check('the actions are taken out of the row flow', /\.dsse-row-actions\{[^}]*position:absolute/.test(sheet), '')
+    check('and the row is their positioning context', /\.dsse-row\{[^}]*position:relative/.test(sheet), '')
+    check('they are invisible until the row is pointed at', /\.dsse-row-actions\{[^}]*opacity:0/.test(sheet), '')
+    check('and they do not take clicks while invisible', /\.dsse-row-actions\{[^}]*pointer-events:none/.test(sheet), '')
+    // Scoped to rows that have actions. On a Host without a clipboard the rule
+    // would otherwise hide the size to make room for nothing.
+    check('the reveal only applies where there is something to reveal', /\.dsse-row\[data-actions="true"\]:hover \.dsse-row-actions/.test(sheet), '')
+    // The selector is half of it: a rule that matches and then sets opacity:0
+    // would never show a button, and every check above would still pass.
+    check('and the reveal sets the actions visible', /\.dsse-row\[data-actions="true"\]:hover \.dsse-row-actions[^{]*\{[^}]*opacity:1/.test(sheet), '')
+    check('and makes them take clicks', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-row-actions[^{]*\{[^}]*pointer-events:auto/.test(sheet), '')
+    check('and the size it covers hides by slot, not by layout', /\.dsse-row\[data-actions="true"\]:hover \.dsse-size[^{]*\{visibility:hidden\}/.test(sheet), '')
+    // Focus must NOT hide the size. `visibility:hidden` also leaves the
+    // accessibility tree, so a keyboard or screen-reader user would lose the file
+    // size the moment they focused the row -- and they never hover, so the size
+    // they "save" by not covering is a number they would never have seen. The
+    // actions cover it visually; the value stays in the name.
+    check('and focus does not hide the size from the accessibility tree', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-size[^{]*\{visibility:hidden\}/.test(sheet) === false, '')
+    check('the hiding rule never uses display', /\.dsse-row\[data-actions="true"\][^{]*\.dsse-size[^{]*\{[^}]*display:none/.test(sheet) === false, '')
+    // Keyboard reachability: hiding the actions from the pointer must not hide
+    // them from the tab order, or the feature only exists for mouse users.
+    check('a focused row reveals them too', /\.dsse-row\[data-actions="true"\]:focus-within \.dsse-row-actions/.test(sheet), '')
+    check('and the copy button has its own focus ring', /\.dsse-row-copy:focus-visible\{[^}]*outline/.test(sheet), '')
+    check('the button looks like a button', /\.dsse-row-copy\{[^}]*cursor:pointer/.test(sheet), '')
+    // The opener has to fill the row, or the row's padding becomes dead space:
+    // the highlight says "click here" over pixels that do nothing. The mock
+    // renderer lays nothing out, so this is the only place the fix can be pinned.
+    check('the opener stretches over the row\'s padding', /\.dsse-row-open\{[^}]*align-self:stretch/.test(sheet) && /\.dsse-row-open\{[^}]*margin:-2px -6px/.test(sheet), '')
+  }
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

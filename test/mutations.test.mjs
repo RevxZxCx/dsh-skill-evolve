@@ -200,9 +200,9 @@ for (const [label, source, want] of [
 // checks silent, so a floor that is too low is the one gap a list like this
 // cannot see.
 for (const [name, expected] of [
-  ['mutate-language-and-files.mjs', 21],
+  ['mutate-language-and-files.mjs', 129],
   ['mutate-speed.mjs', 69],
-  ['mutate-persistence.mjs', 44],
+  ['mutate-persistence.mjs', 45],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')
   const anchors = parseAnchors(script)

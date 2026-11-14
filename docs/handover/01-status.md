@@ -52,6 +52,7 @@
 | 2026-11-14 | S8 真机验收：走查剪掉了它要补的那个目录 | 真仓库里 `dist/` 同时被 `.gitignore` 忽略（git 看不见）和被走查的目录过滤剪掉（`isGeneratedDirectory` 算它生成），所以 S8 的「走查补盲区」在构建产物目录里完全失效。拆出 `isUnwalkableDirectory` 作为更窄的遍历谓词，3319 断言全绿、突变 110/45/128 全杀、残留 0；卡片五场景同源渲染核对通过。**新增 DEF-110、D-132** |
 | 2026-11-14 | S8 独立审查：八个单元、十三条意见 | 把 S8 提交按 200 行门槛切成八份派独立审查者，抓出 3 个 P0（stdin EPIPE 会杀死整个进程、跨仓库批次整批失效、provenance 被下一回合抹掉）。修 13 条，3365 断言全绿，突变 114/45/128 全杀。**新增 DEF-111 至 DEF-120、D-133 至 D-137** |
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
+| 2026-11-14 | 产出卡 S3：行内复制 | 一行从 `<button>` 改成 `div` 里两个兄弟按钮（打开 / 复制），动作层绝对定位叠在尺寸上——因为展开态的行容器有 `overflow-y:auto`，浮到行外的菜单会被裁掉。复制绝对路径与工作区相对路径（`relativePath` 单独一个函数：工作区外没有相对路径这个答案，编一个就是把 `../` 写进剪贴板）。没有 `navigator.clipboard` 就整层不渲染——这条我先写成「明文 http 所以是常态」，**被真机实测推翻**：loopback 算 secure context，按钮本来就画得出来。八单元独立审查后修 9 处（`İ` 折叠变长切错位、两条永远为真的断言、行高亮≠可点区、焦点下尺寸退出无障碍树、`aria-label` 不播报结果）。3413 断言全绿，三套突变 129/45/128 全杀，残留 0。**新增 DEF-121~126、D-138~145** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -3708,3 +3709,107 @@ rows 6 | sources scan,git
 - **s8d（卡片文案）没有结论。** 那个审查者耗尽了上下文，只留下一句未查证的怀疑。我自己查了：非仓库工作区里 git 那一路报 `none`（不是 `complete`），`mergeCoverage` 最弱胜出，所以卡片会带 caveat 而不是沉默——**这个怀疑不成立**。但顺着它发现一个观感事实：非仓库工作区里卡片会一直带 caveat，因为 git 那半永远是 `none`。未改代码，理由记在 R-83。
 - **`repository === false && fromGit.length > 0` 这条分支不可达**，是死代码。审查者查证过：`discoverRoots` 会向下找子仓库，父目录里有仓库时仍返回 `repository: true`；cwd 为空或不存在时走查也是空的。保留未删，因为它是「有 diff 但没有仓库」这个真实边界上的保守读法，只是今天没有输入能走到；已记录在 DEF-120。
 - 三个上限（`MAX_SCANNED_ENTRIES` / `MAX_IGNORE_BATCH` / `GIT_TIMEOUT_MS`）仍然是我估的数，没有标定过。
+
+## 2026-11-14 · S3 行内复制：一个 `<button>` 拆成两个，和它牵出的六条
+
+S3 是 `docs/18` 里排在最后的一段。它看起来只是加两个小按钮，实际做的第一件事是把行拆开：
+原来一行就是一个 `<button>`，而按钮里不能放按钮。文件本来就写着「先重构，再加动作」。
+
+### 拆成什么样
+
+```
+div.dsse-row                     ← 原来的 button，现在是容器；title 从按钮移到整行
+  button.dsse-row-open           ← 点开预览（只有可预览且未删除的行才有）
+  div.dsse-row-body              ← 没有预览时，行内容落在普通 div 上
+  div.dsse-row-actions           ← 绝对定位，叠在 .dsse-size 的位置上
+    button.dsse-row-copy × N     ← 「绝对」「相对」，工作区外只有「绝对」
+```
+
+三点与 `docs/18` 的计划不同，都记在 D-138 里：动作层是两个按钮而不是一个 `dsse-row-more`
+菜单入口；绝对定位不是 flex 并排；尺寸用 `visibility` 隐藏而不是 `display`。
+
+### 两个不是「实现细节」的决定
+
+**相对路径算不出来就不画按钮**（D-139）。`fileParts` 已经能回答「显示成什么」，工作区外的文件
+退回显示最后几段。但「相对路径」问的是文件在哪，工作区外没有这个答案。复用它就等于把
+`../../elsewhere.ts` 写进剪贴板。
+
+**`writeText` 不返回 promise 算成功**（D-140）。按 thenable 判断的话，测试替身里一个什么都不返回的
+`writeText` 会显示「失败」，那样要么断言写错，要么得给替身补一个假 promise——而真实失败路径就没人测了。
+判据是「这次点击被接受没有」，不是返回值的形状。
+
+### 真机验证推翻了我自己写下的理由
+
+`client.js` 的注释和 D-141 都写着：`navigator.clipboard` 只在 secure context 存在，面板走 loopback
+明文 http，所以**大多数用户看不到复制按钮**。听起来像常识，我就没验。
+
+实测（无头 Chrome 打开真实监听器 `http://127.0.0.1:19387/`，`Runtime.evaluate` 读回）：
+
+```
+{"isSecureContext":true,"hasClipboard":true,"hasWriteText":true}
+```
+
+浏览器把 loopback 当 trustworthy origin，明文也算 secure context。**按钮本来就画得出来**，
+`clipboard === undefined` 那条分支覆盖的是 relay / 局域网之类真正非 loopback 的访问。
+决策不变（没有剪贴板仍然整层不渲染），但「绝大多数用户看不到」这句成本陈述是错的，已在该决策下补更正。
+
+同一轮还实测了真实剪贴板：无手势调用 `writeText` → `rejected: NotAllowedError`；用
+`Input.dispatchMouseEvent` 真点一下 → `resolved`；`readText()` 仍要单独授权（本功能不读）。
+生产路径成立，代价是「成功」依赖用户手势。
+
+### 五个审查单元，两条永远为真的断言
+
+按 200 行门槛把改动切成五份（s3a CSS+relativePath、s3b clipboard、s3c 行结构、s3d 测试有效性、
+s3e 突变），各派一个只读审查者。s3d 的两条 P0 最值钱：
+
+1. **读错了按钮**。pending 的 1500ms 定时器属于「相对」那个槽位（点的是 `answeredButtons[1]`），
+   断言却读 `[0]`（绝对）。而绝对按钮的定时器在那次 settle 里已经被清掉，静息文案恒为 `绝对` ——
+   **把 `setCopied(undefined)` 整个删掉，套件依然全绿**。
+2. **只校验选择器，不校验声明体**。12 条 CSS 断言检查的是 `.dsse-row[data-actions="true"]:hover .dsse-row-actions`
+   这个选择器在不在，规则体 `{opacity:1;pointer-events:auto}` 改成 `{opacity:0}` 时全部通过。
+   我担心的「整条规则被删」反而能被覆盖。
+
+这两条与 DEF-121（十条断言对着空字符串跑了一整轮）是同一族：**断言在错误的对象上成立**。
+
+### 修了什么
+
+- `relativePath` 重写：`U+0130`（`İ`）经 `toLowerCase()` 由 1 个码元变 2 个，原实现用折叠后的前缀长度去切原串，
+  `F:/İst/a.ts` + `F:/İst` 会切出 `.ts`。现在长度一致时按原串切、不一致时退回折叠形，并过滤空段
+  （`F:/work//a.ts` → `a.ts` 而不是 `/a.ts`）。`api.js:424-431` 早有逐字注释警告过这个坑，我在新函数里又犯了一次。
+- 可点区域：`.dsse-row-open` 加 `align-self:stretch` + `margin:-2px -6px;padding:2px 6px`，
+  让它撑满行的 padding box。拆分前整个 28px 盒子就是按钮，拆分后只剩中间约 19px，上下左右都是死区。
+  mock renderer 不做布局，所以这类问题测试**看不见**，只能靠真机。
+- 可及性：`:focus-within` 不再隐藏 `.dsse-size`（`visibility:hidden` 会把尺寸从无障碍树里摘掉，
+  键盘用户一聚焦就丢文件大小）；`aria-label` 三态改成 `复制绝对路径` / `已复制绝对路径` / `复制绝对路径失败`，
+  否则「已复制」只有视力用户看得见。
+- 突变表：新增 9 条，并把 `test/mutations.test.mjs` 的锚点下限从 21 抬到 **129**（等于实际条数）。
+
+### 锚点下限自证
+
+s3e 指出下限 21 是「列表唯一看不见的缺口」：成对删掉一条 `from:` 和它的 `file:` 行时，
+`owners.length === anchors.length` 与逐锚点存在性检查都不会响。抬到实际条数后，删一条完整条目：
+
+```
+FAIL mutate-language-and-files.mjs declares the anchors it is supposed to — found 128, expected at least 129
+```
+
+恢复后哈希一致。第一次抬到 128 时条目正好 128（下限等于实际数才有效），
+补上 throw 分支那条后必须同步抬到 129 —— 这个耦合本身很容易忘，记在 D-145。
+
+### 验证
+
+```
+test/client.test.mjs      688 passed, 0 failed
+node test/run.mjs        3413 passed, 0 failed
+mutate-language-and-files  129 killed, 0 survived, 0 not applied, 0 crashed (of 129)
+mutate-persistence          45 killed, 0 survived
+mutate-checklist-panel     128 killed, 0 survived
+audit_leftovers.py       leftovers: 0 / unresolved: 0
+```
+
+### 还没做
+
+- `：focus-within` 下 size 仍被不透明按钮压住，只从 `gap:2px` 的缝里漏出一道数字（s3a 的 P3，未修）。
+- 窄卡（168px）里两个 CJK 按钮合计约 66px，比 `.dsse-size` 宽一倍，悬停时会盖住文件名的省略号（P3，未修）。
+  `.json` 用网格图标看起来像电子表格，属按扩展名分桶的固有代价，不修。
+- 几何类问题（可点区、重叠宽度、gone 行布局）没有断言，只能靠人眼 —— 测试框架不做布局。

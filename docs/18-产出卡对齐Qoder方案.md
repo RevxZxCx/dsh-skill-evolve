@@ -10,7 +10,7 @@
 | 文件消失 | 静默丢弃 | 三态 `available`/`missing`/`invalid`，行保留 | **是**，这是最重要的一条 |
 | 行结构 | 36px 两行，无图标 | 28px 单行，带类型图标 | 是 |
 | 折叠与总数 | 头部数人与徽标总数互相矛盾 | 头部说总数，按钮说「还剩几个」 | 是 |
-| 行内动作 | 无 | 悬停出「复制路径」 | 部分（Qoder 有溢出菜单六项，我们只能做复制） |
+| 行内动作 | 无 | 悬停出「复制绝对/相对路径」 | 部分（Qoder 有溢出菜单六项，我们只能做复制） |
 | 空态 | 整卡不出现 | 仅在「写过但全被删」时出现 | 部分（Qoder 是永远出现） |
 | 打开方式 | 一种 | 一种 | **否**（宿主只有一个入口） |
 | 预览 | 无 | 无 | **否**（无宿主能力） |
@@ -225,19 +225,27 @@ data-missing="true"
 
 ## 五、行内动作
 
-### 5.1 结构问题
+### 5.1 结构问题（已实施）
 
-现在一行是一个 `<button>`（`client.js:2548`）。按钮里放按钮是非法 HTML，这也是 Qoder 的 `origin === 'manual'` 移除按钮要绝对定位的原因。
+原先一行是一个 `<button>`（`client.js:2548`，后来漂移到 `:2768`）。按钮里放按钮是非法 HTML，这也是 Qoder 的 `origin === 'manual'` 移除按钮要绝对定位的原因。
 
-先重构，再加动作：
+已改成：
 
 ```
-div.dsse-row
-  button.dsse-row-open    (flex:1，整块可点，含图标+名称+目录+大小)
-  button.dsse-row-more    (0 0 auto，opacity:0，hover/focus-within 显形)
+div.dsse-row                       (position:relative，定位上下文)
+  button.dsse-row-open             (flex:1，整块可点，含图标+名称+目录+大小)
+  div.dsse-row-actions             (position:absolute;right:4px，叠在尺寸上)
+    button.dsse-row-copy           (复制绝对路径)
+    button.dsse-row-copy           (复制相对路径，工作区外不渲染)
 ```
 
-两个兄弟按钮，都键盘可达，都不会吞掉对方。**这是加任何一个行内动作的前提**，所以排在图标之前做。
+与计划的两点差异，都是实施时才发现的约束：
+
+1. **动作层不是一个按钮，是一层两个按钮。** 最后做的是两项动作而不是一项，`dsse-row-more` 这个名字会误导后来的人以为它是个菜单入口。
+2. **动作层绝对定位，不参与 flex 布局。** 起因是 `.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}` —— 浮到行外的菜单会被这个滚动容器裁掉。同一手法把按钮叠在尺寸上，因此不需要为看不见的控件预留宽度，每个文件名也不会因为多了两个动作而变短。
+3. **悬停时尺寸用 `visibility:hidden` 隐藏，不用 `display:none`。** 后者会让尺寸失去槽位，名字在指针移到行上的一瞬间变宽，看起来像在跳。
+
+两个兄弟按钮都键盘可达，`data-actions="false"` 的行（无剪贴板）根本不渲染动作层，`:hover` 也就无从触发。**这是加任何一个行内动作的前提**，所以排在图标之前做。
 
 ### 5.2 只做「复制路径」
 
@@ -248,6 +256,12 @@ Qoder 的溢出菜单有六项：四种打开方式、在文件管理器中显�
 不抄「四种打开方式」——`client.js:2875` 只有一个 `openResource`，做菜单就是做假按钮。
 
 复制分两项：绝对路径、相对路径（相对会话 `cwd`，`api.js` 已有 `cwd`，需要在返回体里带上）。失败时不弹 toast（没有 toast 设施），用按钮的 `title` 临时改成「复制失败」并 1.5 秒后复原。
+
+实施补充三条：
+
+1. **`navigator.clipboard` 不存在就不画按钮。** 它只在 secure context 里存在，而这个面板正是走 loopback 明文 http，所以「没有剪贴板」是常态而不是边界。一个做不到自己工作的控件比没有更糟。
+2. **相对路径与 `fileParts` 是两个函数，不是一个。** `fileParts` 回答「怎么显示」，工作区外会退回最后几段；相对路径回答「文件在哪」，工作区外没有答案 —— 编一个就会把 `../../elsewhere.ts` 写进剪贴板，所以返回 `undefined` 让第二个按钮消失。大小写按 Windows 的规矩折叠，切片用原串。
+3. **`writeText` 返回 `undefined` 视为成功。** 它有返回值的形态是 Promise，但替身可以不返回；把「没有 promise」当失败会让一个能用的剪贴板在测试里看起来是坏的。
 
 ## 六、空态
 
@@ -280,11 +294,28 @@ Qoder 的溢出菜单有六项：四种打开方式、在文件管理器中显�
 
 **验收**：168px 最窄卡片下文件名不被目录名挤没；图标按扩展名正确分类；`node --check` 通过。
 
-### S3 · 行内复制（半天）
+### S3 · 行内复制（✅ 已完工）
 
-`client.js` 行结构重构 + 复制动作；`api.js` 返回体加 `cwd`（S1 已加，若 S1 未带则此处补）。
+`client.js` 行结构重构 + 复制动作；`api.js` 返回体加 `cwd`（S1 已加，无需再补）。
+
+`client.js` 新增 `relativePath(path, cwd)`、`Cards` 内 `clipboard`/`copied`/`copyTimer`/`copyPath`、行渲染整体替换；`test/client.test.mjs` 新增七组断言（无剪贴板、两项按钮都是兄弟、工作区外只剩一个、大小写不一致仍在工作区内、复制内容、抛异常与 reject 都显示失败、1.5 秒复原、CSS 十条）；`scripts/mutate-language-and-files.mjs` 新增六条突变。
 
 **验收**：悬停出现复制按钮；键盘 Tab 可达；复制成功/失败的反馈可区分。
+
+已经不止是断言覆盖，还用 CDP 在真实浏览器里验过（`_edit/s3_render.py`、`s3_tab_probe.py`、`s3_secure_probe.py`）：
+真实指针悬停后读回 `{"actionsOpacity":"1","actionsPointer":"auto","sizeVisibility":"hidden","rowHeight":28}`；
+键盘从 opener 按一次 Tab 落到复制按钮且动作层显形；焦点后 120ms 内 opacity 从 0 过渡到 1，不是焦点没生效。
+
+**五个单元独立审查后修了 9 处**（R-84），其中两条是永远为真的断言：读错了按钮槽位（删掉整个清零逻辑也全绿）、
+十二条 CSS 断言只校验选择器存在（规则体改空也全过）。另外修了 `İ` 折叠变长导致的切错位、行高亮≠可点区、
+焦点下尺寸退出无障碍树、`aria-label` 不播报结果。
+
+**最终**：`3413 passed / 0 failed`，语言突变 **129** 条全杀（锚点下限从 21 抬到 129 并自证），
+persistence 45、checklist-panel 128 全杀，残留审计 0。
+
+**一处被实测推翻的判断**：原注释与 D-141 都写着「面板走 loopback 明文 http，所以 `navigator.clipboard` 缺失，
+大多数用户看不到复制按钮」。实测 `{"isSecureContext":true,"hasClipboard":true}` —— loopback 算 secure context，
+按钮本来就画得出来。决策（没有剪贴板就整层不渲染）不变，被推翻的只是那条成本陈述。
 
 ### S4 · 折叠文案（十分钟）
 

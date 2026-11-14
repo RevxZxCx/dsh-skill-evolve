@@ -1336,6 +1336,12 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-118 | 2026-11-14 | 晚到的旧回合声称覆盖了新回合的声称 | 所有 sweep 断言都在同一回合号内写入，没有一条构造「回合 2 之后再来一次回合 1」 |
 | DEF-119 | 2026-11-14 | 两条断言恒为真，`known` 与 `repository` 的存在侧零覆盖 | 断言写的是「默认值是多少」而不是「什么情况下会变」；非默认值只活在测试自己的手写字面量里 |
 | DEF-120 | 2026-11-14 | 审查单元的 diff 头部认错文件，`git apply --check` 直接失败 | 重组 diff 时复用了前一单元的头部；审查者靠读内容认出来，没有任何检查过「能否 apply」 |
+| DEF-121 | 2026-11-14 | 十条 CSS 断言对着空字符串跑了整整一轮，全绿 | 断言读 `instance.styles`，而该字段要等模块 `apply` 并渲染过一次才有内容；没人先断言「表里确实有内容」 |
+| DEF-122 | 2026-11-14 | 断言里按下标取按钮，按钮缺失时抛异常，整个套件没有 tally 行 | 只想到「断言失败」这一种红，没想到「断言崩了」在突变 runner 里是另一个判定（CRASHED），于是缺陷伪装成工具问题 |
+| DEF-123 | 2026-11-14 | 1.5 秒的复制反馈定时器在面板关闭后仍在跑 | 它挂在 ref 上，不出现在渲染树里，也不经过任何已有的 cleanup；写的时候只想着「1.5 秒后复原」这一件事 |
+| DEF-124 | 2026-11-14 | 「复制反馈已清零」的断言读的是另一颗按钮，删掉清零逻辑也全绿 | pending 的定时器属于「相对」槽位，断言读 `[0]`（绝对）；绝对按钮的定时器在那次 settle 里已被清掉，静息文案恒为 `绝对` |
+| DEF-125 | 2026-11-14 | 十二条 CSS 断言只校验选择器存在，不校验声明体 | 用的是 `sheet.includes('.dsse-row[data-actions="true"]:hover .dsse-row-actions{')` 这类前缀匹配；规则体被改空时前缀仍在 |
+| DEF-126 | 2026-11-14 | 变异条目的 `to` 少了 `return` 与收尾 `}`，套件在打印 tally 前崩溃，被记成 CRASHED | 我按「改一行」的直觉拼 `to`，没意识到它是整块语法结构的一部分；CRASHED 与 KILLED 是不同判定，前者看起来像工具问题 |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -2035,3 +2041,100 @@ after fallback: [{"path":"/w/a.ts","turn":6}]
 **为什么没抓到。** 审查者靠读内容自己认出了目标文件，所以结论仍然有效；但没有一个自动化检查过「这份 diff 能否 apply」。
 
 **修法。** 记录规则：按 hunk 重组 diff 时，每个单元的头部必须按自己那份的目标文件重写；重组后立刻 `git apply --check`，不要等人读。
+
+## DEF-121 · 十条 CSS 断言对着空字符串跑，全绿
+
+`test/client.test.mjs` 里那组新断言检查样式表：`opacity:0` 在不在、`pointer-events:none` 配没配、`visibility:hidden` 用的是不是它、`:focus-within` 有没有、`display:none` 有没有被误加。
+
+它们全部通过。而实际上 `instance.styles` 当时是**空的**：
+
+```
+styles=0 chars=0 hasAlpha=false
+```
+
+这个 bundle 的样式表是模块 `apply()` 时才注入的。断言块只做了 `instance.module.apply(instance.ctx)` 就往下读，但没渲染过任何东西，注入还没发生。
+
+**为什么测试没抓到。** 十条断言里有六条是「字符串里有没有某个片段」。**对空字符串，`includes` 全部返回 false** —— 于是「不该有 `display:none`」这条**永远为真**，「该有 `opacity:0`」那条才该红却也没红，因为它们的写法把不存在当成了通过。一组只覆盖「没有什么」的断言，在空输入上是满分的。
+
+`toLowerCase().includes()` 这类检查没有前置条件，它不会问「我看的是不是东西」。
+
+**修法。** 先 `apply` → 渲染一次 `dsse-toggle` 并触发 `onClick` → `deepRender(seat('cards'))`，此时表里才有几万字符；再加一条守卫断言 `sheet.includes('dsse-row-copy')`，**用同一个函数证明这个字符串确实包含我关心的内容**。守卫红了，说明位置错了，而不是断言对了。
+
+这条和 DEF-93（检查脚本对新文件静默跳过、打印假的 `leftovers: 0`）是同一个形状：**一个不能区分「干净」与「没跑」的检查器会签发通行证。**
+
+## DEF-122 · 断言里按下标取元素，缺东西时崩掉整个套件
+
+大小写那条断言写成：
+
+```js
+byClass(cased, 'dsse-row-copy')[1].props.onClick()
+```
+
+当相对路径按钮不该存在时（正是这条突变要制造的状态），`[1]` 是 `undefined`，`.props` 抛 `TypeError`，套件在打印 tally 行之前就退出。突变 runner 看到「没有 tally 行」，报的是 **CRASHED**，不是 KILLED。
+
+**为什么测试没抓到。** 因为这不是「测试没抓到缺陷」，**这是测试自己是缺陷**。我写的时候只想到两种结局：断言绿、断言红。第三种是「断言没能跑完」，而它在工具侧有自己的名字和一个看起来像环境问题的样子 —— 我第一次看到 `CRASHED` 时先怀疑的是突变脚本。
+
+**修法。** 先取数组，判长度，再决定是点它还是直接判失败：
+
+```js
+const casedButtons = byClass(cased, 'dsse-row-copy')
+if (casedButtons.length === 2) { ...点击与断言... } else { check(..., false, 'no relative button to press') }
+```
+
+教训：**断言里读数组元素之前必须判长度**。缺了东西必须表现为「一条红的断言」，而不是「一个崩掉的进程」—— 前者说明产品坏了，后者看起来像工具坏了，而人会更愿意相信后者。
+
+## DEF-123 · 复制反馈的定时器活过了面板
+
+`copyPath` 成功后挂一个 `setTimeout(..., 1500)` 把按钮文案复原。定时器存在 `copyTimer` 这个 ref 里。
+
+面板关闭时它不会被清掉：ref 不属于渲染树，没有任何 cleanup 会经过它。后果一个是 `setCopied` 写进一个已经不在的组件（在这个手写渲染器里是写进一个没人读的槽位），另一个是宿主真的要等 1.5 秒才释放那个定时器 —— 每次开合面板就多一个。
+
+**为什么测试没抓到。** 因为断言只问了「1.5 秒后文案复原没有」，那是我唯一想过的行为。**同一个文件里 `closeTimer` 是有卸载清理的**（`:1490`，`useEffect` 的返回函数里 `clearTimeout`），我照着它写了 `copyTimer` 的创建却漏了它的销毁 —— 现成的范式就在上面几十行，而我要么没看见，要么看见了以为不适用。
+
+这类缺陷的共性是：**它的证据不在功能路径上，在生命周期边界上**。测功能的人写功能测试，边界要单独想一次。
+
+**修法。** 加 `React.useEffect(() => () => { if (copyTimer.current !== null) { clearTimeout(copyTimer.current); copyTimer.current = null } }, [])`，并补断言：点击后 `timers` 里恰有一条 1500ms 未清除的；`renderer.unmount()` 后它 `cleared === true`。
+
+这条断言用**注入**验证过真的会红：把 cleanup 删掉后 `FAIL and closing the panel cancels the flash timer — [false]`。不注入就不知道它是不是又一条永远为真的断言（见 DEF-121）。
+
+## DEF-124 · 断言读的是另一颗按钮
+
+复制反馈的读取逻辑：`settle(true)` 设 `copied = {key, ok}`，立即 `setTimeout(..., 1500)` 在 1.5 秒后
+把它清回 `undefined`。断言要证明「1.5 秒后复原」，于是先点一下、找到 pending 的定时器、
+手动调它的 `fn()`、再读文案。
+
+问题在「先点一下」那一行：点的是 `answeredButtons[1]`（「相对」槽位），
+而断言读的是 `clearedButtons = byClass(row, 'dsse-row-copy')` 的 `[0]`（「绝对」）。
+绝对按钮在那个回合里**从没被点过**，它的静息文案本来就是 `绝对`。于是这条断言在
+「清零逻辑被整个删掉」的情况下依然通过。
+
+修法是读同一个槽位，并输出整个数组以便失败时一眼看出是哪个：`clearedButtons[1] === '相对'
+&& clearedButtons[0] === '绝对'`。
+
+## DEF-125 · 十二条 CSS 断言只校验选择器存在
+
+我把这类断言写成 `sheet.includes('\n    .dsse-row[data-actions="true"]:hover .dsse-row-actions{')`
+—— 检查选择器后面紧跟一个左花括号。真实规则体是 `{opacity:1;pointer-events:auto}`。
+
+把规则体改成 `{opacity:0}`，十二条断言**全部通过**：选择器还在，花括号还在，它们要检查的
+是这个选择器**存在**，而不是它说了什么。讽刺的是我最担心的「整条规则被删掉」恰恰能被覆盖
+（前缀没了），真正覆盖不到的是「规则还在但内容被改坏」——也就是更可能发生的那种破坏。
+
+修法是让正则跨进花括号：`\{[^}]*opacity:1`、`\{[^}]*pointer-events:auto`。
+
+## DEF-126 · CRASHED 不是 KILLED
+
+给 `copyPath` 的同步 throw 分支补变异时，我把 `to` 拼成：
+
+```
+        } catch {
+          settle(true)
+```
+
+只改了一行，看着没问题 —— 但 `from` 是四行（`} catch {` / `settle(false)` / `return` / `}`），
+`to` 少了 `return` 和收尾的 `}`。变异体本身就是语法错误，套件在打印 tally 行之前就退出了，
+runner 报 **CRASHED**，与「测试抓到了」的 KILLED 是不同判定。
+
+一次 CRASHED 看着像环境问题或工具问题，很容易被当成噪声跳过；DEF-122 是同一天里第二次
+因为同一类原因看到它。判断标准很简单：**变异体的 `from` 与 `to` 必须是同样形状的可运行代码**，
+改的应该是语义而不是语法结构。修法是把四行整体复制、只替换其中一个调用。

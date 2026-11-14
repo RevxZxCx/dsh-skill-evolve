@@ -429,8 +429,8 @@ const mutations = [
   {
     label: 'a row opens the first file instead of its own',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                        onClick: openable === true ? () => openFile(file.address) : undefined,',
-    to: '                        onClick: openable === true ? () => openFile(ordered[0].address) : undefined,',
+    from: '                                    onClick: () => openFile(file.address),',
+    to: '                                    onClick: () => openFile(ordered[0].address),',
     suites: ['test/client.test.mjs'],
   },
   {
