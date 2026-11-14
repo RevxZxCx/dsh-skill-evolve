@@ -497,6 +497,10 @@ export function apply(ctx, config, options) {
             // called fully seen however carefully the other half was read. Then
             // `partial`, then `complete`.
             const claim = coverageOf(git?.coverage, scan?.coverage)
+            // `rememberSweep` keeps the newest claim, so this block landing after
+            // the next turn's cannot roll the card back to an older answer. That
+            // ordering is the store's job, not this call site's: the call site
+            // only knows what it measured.
             sessionState.rememberSweep(agentId, endedTurn, claim)
             let blind = fromScan
             if (fromScan.length > 0) {
@@ -511,14 +515,24 @@ export function apply(ctx, config, options) {
               // a plain folder reports `complete` too, because "I looked and
               // found nothing" is an honest answer there. The ignore check has
               // to say so itself, which is why it reports it.
-              const answer = await ignoreCheck({ paths: fromScan, cwd })
-              if (answer.repository === true) {
+              // A throwing or malformed answer must not cost the diff its rows.
+              // The walk is a supplement: when it cannot say which of its paths
+              // git hid, the conservative reading is "none of them", which keeps
+              // the card showing what git did see. Letting the throw escape would
+              // empty the whole turn, including the half that already arrived.
+              let answer
+              try {
+                answer = await ignoreCheck({ paths: fromScan, cwd })
+              } catch {
+                answer = undefined
+              }
+              if (answer?.repository === true) {
                 // A git too old to classify (`known: false`) keeps the whole
                 // list rather than losing real output for no gain: paths the
                 // diff also reported are recorded after this, and the store is
                 // keyed by path, so the diff's record wins the overlap anyway.
                 blind = answer.known === true ? answer.ignored : fromScan
-              } else if (fromGit.length > 0) {
+              } else if (fromGit.length > 0 || answer === undefined) {
                 // Git named changes but recognised no repository here. The walk's
                 // paths cannot be placed relative to a diff, and the likeliest
                 // explanation is an already-untracked file that merely moved —

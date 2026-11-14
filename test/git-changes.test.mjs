@@ -24,6 +24,7 @@ import {
   MAX_CHANGED_FILES,
   changedFiles,
   ignoredPaths,
+  runGit,
   sweepChanges,
   newestChanges,
   parsePorcelain,
@@ -444,6 +445,220 @@ function runner(answers) {
       check('but it does see the visible one', swept.paths.includes(visible) === true, JSON.stringify(swept.paths))
     }
     check('the repository was built', ready === true, String(ready))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // The review found that every one of these behaviours was reachable only
+  // through an injected runner, so a real one could regress without a red test:
+  // a batch that mixes roots, a path whose case differs from disk, a batch large
+  // enough to fill stdin, and the `capped` doubt. Each gets its own real
+  // repository here, because the runner is what was wrong.
+  const root = await mkdtemp(join(tmpdir(), 'dsse-ignore-multi-'))
+  const git = (args, cwd) =>
+    new Promise((done) => {
+      execFile('git', args, { cwd, windowsHide: true }, (error) => done(error === null))
+    })
+  const seed = async (dir, rules, files) => {
+    await mkdir(dir, { recursive: true })
+    const made = await git(['init', '-q', '.'], dir)
+    if (made === false) return false
+    await writeFile(join(dir, '.gitignore'), rules)
+    for (const file of files) {
+      await mkdir(join(dir, file, '..'), { recursive: true })
+      await writeFile(join(dir, file), 'x')
+    }
+    await git(['add', '-A'], dir)
+    const committed = await git(['-c', 'user.email=p@p', '-c', 'user.name=p', 'commit', '-qm', 'seed'], dir)
+    return committed === true
+  }
+  try {
+    const ws = join(root, 'ws')
+    await mkdir(ws, { recursive: true })
+    const readyA = await seed(join(ws, 'repoA'), 'dist/\n', ['src/a.ts'])
+    const readyB = await seed(join(ws, 'repoB'), 'build/\n', ['src/b.ts'])
+    const built = readyA === true && readyB === true
+    if (built === true) {
+      const inA = join(ws, 'repoA', 'dist', 'out.js')
+      const inB = join(ws, 'repoB', 'build', 'out.js')
+      await mkdir(join(ws, 'repoA', 'dist'), { recursive: true })
+      await mkdir(join(ws, 'repoB', 'build'), { recursive: true })
+      await writeFile(inA, 'x')
+      await writeFile(inB, 'x')
+
+      // One batch spanning two repositories. Both are ignored, and the second is
+      // outside the first repository, so a single-cwd call would fail the whole
+      // batch and lose the first answer with it.
+      const both = await ignoredPaths({ cwd: ws, paths: [inA, inB] })
+      check('a batch spanning two repositories is split by root', both.ignored.length === 2, JSON.stringify(both))
+      check('and the first root is still answered', both.ignored.includes(inA) === true, JSON.stringify(both.ignored))
+      check('and the second root is answered too', both.ignored.includes(inB) === true, JSON.stringify(both.ignored))
+      check('and the answer is not reported as doubtful', both.known === true, String(both.known))
+
+      // A path spelled in another case. Windows treats these as one file, so
+      // the answer must not depend on how the caller happened to spell it.
+      const shouted = inA.toUpperCase()
+      const cased = await ignoredPaths({ cwd: join(ws, 'repoA'), paths: [shouted] })
+      check('a path in another case is still recognised', cased.ignored.length === 1, JSON.stringify(cased))
+      check('and it is not reported as unanswered', cased.known === true, String(cased.known))
+
+      // A batch big enough to fill stdin. The list is 500 paths of realistic
+      // length; the write that used to kill the process arrives here.
+      const many = []
+      for (let index = 0; index < 500; index += 1) many.push(join(ws, 'repoA', 'src', 'file' + index + '.ts'))
+      const bulk = await ignoredPaths({ cwd: join(ws, 'repoA'), paths: many })
+      check('a batch that fills stdin is answered, not fatal', bulk.known === true, String(bulk.known))
+      check('and it claims a repository it found', bulk.repository === true, String(bulk.repository))
+    }
+    check('the two repositories were built', built === true, String(built))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // The producer side of `known` and `repository` had no assertions at all: both
+  // were only ever asserted as literals in the test doubles. These use the fake
+  // runner to drive the two non-default productions directly.
+  const repo = 'C:/work'
+  const file = 'C:/work/dist/out.js'
+  const describing = (extra) => ({
+    calls: [],
+    run: async (args) => {
+      if (args.includes('--show-toplevel') === true) return { code: 0, stdout: repo + '\n' + repo + '/.git\n' + repo + '/.git\n' }
+      if (args.includes('check-ignore') === true) return extra
+      return { code: 0, stdout: '' }
+    },
+  })
+
+  const unrunnable = describing({ code: -1, stdout: '' })
+  const doubt = await ignoredPaths({ cwd: repo, paths: [file], run: unrunnable.run })
+  check('a check that never ran is not a clean answer', doubt.known === false, JSON.stringify(doubt))
+  check('but it still claims the repository it described', doubt.repository === true, JSON.stringify(doubt))
+
+  const timedOut = describing({ code: 137, stdout: '' })
+  const killed = await ignoredPaths({ cwd: repo, paths: [file], run: timedOut.run })
+  check('a batch git refused is also doubt, not an answer', killed.known === false, JSON.stringify(killed))
+
+  const empty = describing({ code: 1, stdout: '' })
+  const nothing = await ignoredPaths({ cwd: repo, paths: [file], run: empty.run })
+  check('exit 1 is an answer, not a failure', nothing.known === true, JSON.stringify(nothing))
+  check('and that answer is a repository', nothing.repository === true, JSON.stringify(nothing))
+}
+
+{
+  // Three behaviours the review found unobserved. Each one is asserted at the
+  // layer that actually implements it, because the previous round proved that a
+  // test written against the friendly case can confirm an implementation that is
+  // not there.
+  const root = await mkdtemp(join(tmpdir(), 'dsse-ignore-unknown-'))
+  const git = (args, cwd) =>
+    new Promise((done) => {
+      execFile('git', args, { cwd, windowsHide: true }, (error) => done(error === null))
+    })
+  try {
+    const repo = join(root, 'repo')
+    await mkdir(join(repo, 'dist'), { recursive: true })
+    const ready = await git(['init', '-q', '.'], repo)
+    if (ready === true) {
+      await writeFile(join(repo, '.gitignore'), 'dist/\n')
+      await writeFile(join(repo, 'dist', 'real.js'), 'x')
+
+      // A path that does not exist on disk, spelled in another case. The
+      // filesystem cannot resolve it, so only the textual comparison can match
+      // it -- which is exactly the layer the case-insensitive compare lives in.
+      // A path that DOES exist would be rescued by the realpath fallback and
+      // would prove nothing about this line.
+      const absent = join(repo, 'dist', 'GONE.JS')
+      const guessed = await ignoredPaths({ cwd: repo, paths: [absent] })
+      check('a path that is not on disk is still classified', guessed.ignored.length === 1, JSON.stringify(guessed))
+      check('and its case does not change the answer', guessed.known === true, String(guessed.known))
+    }
+
+    // `runGit` itself, with no runner injected: a command that cannot start must
+    // come back as `-1`, not as `1`. Reporting it as exit 1 made "git could not
+    // run" identical to "git answered no", and the ignore check is built on that
+    // difference.
+    const missing = await runGit(['status'], join(root, 'no-such-directory'))
+    check('a command that never ran is not exit 1', missing.code !== 1, String(missing.code))
+    check('and it is reported as unrunnable instead', missing.code === -1, String(missing.code))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // Past the child-repository cap some roots are never described, so a path
+  // inside one of them is "not ignored" only because nobody looked. That doubt
+  // has to reach the caller: a clean answer here is what discards the walk's
+  // whole list a few lines later.
+  const root = await mkdtemp(join(tmpdir(), 'dsse-ignore-capped-'))
+  const git = (args, cwd) =>
+    new Promise((done) => {
+      execFile('git', args, { cwd, windowsHide: true }, (error) => done(error === null))
+    })
+  try {
+    const ws = join(root, 'ws')
+    await mkdir(ws, { recursive: true })
+    let built = 0
+    for (let index = 0; index < 21; index += 1) {
+      const repo = join(ws, 'repo' + index)
+      await mkdir(repo, { recursive: true })
+      const ok = await git(['init', '-q', '.'], repo)
+      if (ok === true) {
+        await writeFile(join(repo, '.gitignore'), 'dist/\n')
+        await mkdir(join(repo, 'dist'), { recursive: true })
+        await writeFile(join(repo, 'dist', 'out.js'), 'x')
+        built += 1
+      }
+    }
+    if (built > 20) {
+      const inside = join(ws, 'repo0', 'dist', 'out.js')
+      const capped = await ignoredPaths({ cwd: ws, paths: [inside] })
+      check('a capped sweep does not claim a clean answer', capped.known === false, JSON.stringify(capped))
+      check('but it still says a repository was involved', capped.repository === true, String(capped.repository))
+    }
+    check('twenty-one repositories were built', built === 21, String(built))
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
+}
+
+{
+  // A workspace opened through a junction spells the tree differently from what
+  // `rev-parse` reports, and the textual comparison then matches nothing — in
+  // the confident direction, reporting "nothing here is ignored". Only the
+  // filesystem can bridge that, so this is the one case that proves the fallback
+  // is load-bearing rather than redundant with the case-insensitive compare.
+  const root = await mkdtemp(join(tmpdir(), 'dsse-ignore-junction-'))
+  const git = (args, cwd) =>
+    new Promise((done) => {
+      execFile('git', args, { cwd, windowsHide: true }, (error) => done(error === null))
+    })
+  try {
+    const real = join(root, 'real-repo')
+    await mkdir(join(real, 'dist'), { recursive: true })
+    const ready = await git(['init', '-q', '.'], real)
+    if (ready === true) {
+      await writeFile(join(real, '.gitignore'), 'dist/\n')
+      await writeFile(join(real, 'dist', 'out.js'), 'x')
+      const link = join(root, 'linked-repo')
+      const linked = await new Promise((done) => {
+        execFile('cmd', ['/c', 'mklink', '/J', link, real], { windowsHide: true }, (error) => done(error === null))
+      })
+      if (linked === true) {
+        // Asked through the link, which is where the scanner stands when the
+        // session workspace was opened that way.
+        const viaLink = join(link, 'dist', 'out.js')
+        const answer = await ignoredPaths({ cwd: link, paths: [viaLink] })
+        check('a path under a junction is still classified', answer.ignored.length === 1, JSON.stringify(answer))
+        check('and the junction does not silence the answer', answer.known === true, String(answer.known))
+      }
+      check('a junction could be created for the probe', linked === true, String(linked))
+    }
+    check('the junction probe repository was built', ready === true, String(ready))
   } finally {
     await rm(root, { recursive: true, force: true })
   }

@@ -2053,6 +2053,125 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
+{
+  // The card lists the files a turn produced; `turn/end` re-records that whole
+  // list every turn, with no bracket named. If that re-record overwrote the
+  // stored value, the provenance would survive exactly until the next turn --
+  // which is the only moment anybody looks at it.
+  const { state, store, root } = await fixture()
+  try {
+    state.rememberPaths('kept', ['/work/a.ts'], 5, 'git')
+    state.rememberPaths('kept', ['/work/a.ts'], 6)
+    const after = state.pathsSeen('kept')
+    check('a later re-record keeps the bracket it already knew', after[0]?.source === 'git', JSON.stringify(after))
+    check('and it does move the row to the newer turn', after[0]?.turn === 6, String(after[0]?.turn))
+
+    // A named bracket does replace it: the newer find is the better answer.
+    state.rememberPaths('kept', ['/work/a.ts'], 7, 'scan')
+    check('a named bracket replaces the old one', state.pathsSeen('kept')[0]?.source === 'scan', JSON.stringify(state.pathsSeen('kept')))
+
+    // A path that was never attributed stays unattributed; silence about one
+    // file must not invent a bracket for it out of some other file's history.
+    state.rememberPaths('kept', ['/work/b.ts'], 8)
+    const both = state.pathsSeen('kept')
+    const b = both.find((row) => row.path === '/work/b.ts')
+    check('a file no bracket ever named stays unknown', b?.source === undefined, JSON.stringify(b))
+
+    await state.flush('kept')
+    const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+    await second.load('kept')
+    const reloaded = second.pathsSeen('kept')
+    check('and the kept bracket is still there after a reload', reloaded.find((row) => row.path === '/work/a.ts')?.source === 'scan', JSON.stringify(reloaded))
+  } finally {
+    await done(root)
+  }
+}
+
+{
+  // The writer already refuses words it does not know, so this guard can only be
+  // exercised by a document this build did not write: an older build, a hand
+  // edit, or a future build that added a third bracket. That is precisely the
+  // case a round trip through `rememberPaths` cannot reach.
+  const { state, store, root } = await fixture()
+  try {
+    await writeFile(
+      join(root, 'foreign.json'),
+      JSON.stringify({
+        version: 1,
+        session: 'foreign',
+        state: 2,
+        turns: 1,
+        paths: {
+          '/work/a.ts': { seq: 3, turn: 1, at: 111, source: 'git' },
+          '/work/b.ts': { seq: 2, turn: 1, at: 111, source: 'screenshot' },
+          '/work/c.ts': { seq: 1, turn: 1, at: 111 },
+        },
+        sequence: 3,
+      }),
+      'utf8',
+    )
+    await state.load('foreign')
+    const rows = state.pathsSeen('foreign')
+    const byPath = new Map(rows.map((row) => [row.path, row]))
+    check('a bracket word this build does not know is dropped on read', byPath.get('/work/b.ts')?.source === undefined, JSON.stringify(byPath.get('/work/b.ts')))
+    check('but the row itself survives', byPath.has('/work/b.ts') === true, JSON.stringify(rows))
+    check('a known bracket is read back as itself', byPath.get('/work/a.ts')?.source === 'git', JSON.stringify(byPath.get('/work/a.ts')))
+    check('a row with no bracket says so', byPath.get('/work/c.ts')?.source === undefined, JSON.stringify(byPath.get('/work/c.ts')))
+  } finally {
+    await done(root)
+  }
+}
+
+{
+  // A Map keeps an existing key's slot when it is set again, so the
+  // delete-before-set pair is what makes "most recently produced first" true.
+  // Without it the list is still unique and still complete -- only the order is
+  // wrong, which is why a uniqueness assertion cannot see the difference.
+  const { state, root } = await fixture()
+  try {
+    state.rememberPaths('order', ['/work/old.ts'], 1, 'git')
+    state.rememberPaths('order', ['/work/mid.ts'], 2, 'git')
+    check('two files are listed newest first', state.pathsSeen('order').map((row) => row.path).join(',') === '/work/mid.ts,/work/old.ts', JSON.stringify(state.pathsSeen('order').map((row) => row.path)))
+
+    // Editing the older one again must put it back on top.
+    state.rememberPaths('order', ['/work/old.ts'], 3, 'git')
+    check('a re-edited file moves back to the top', state.pathsSeen('order')[0]?.path === '/work/old.ts', JSON.stringify(state.pathsSeen('order').map((row) => row.path)))
+    check('and the list is still just those two', state.pathsSeen('order').length === 2, String(state.pathsSeen('order').length))
+  } finally {
+    await done(root)
+  }
+}
+
+{
+  // The merge reports after awaiting a git subprocess, so a slow turn can land
+  // after the next one has already spoken. The claim describes the newest turn;
+  // letting the late one replace it would point the card's caveat at work the
+  // reader is no longer looking at.
+  const { state, root } = await fixture()
+  try {
+    state.rememberSweep('swept', 2, 'complete')
+    state.rememberSweep('swept', 1, 'none')
+    check('an older turn cannot replace a newer claim', state.sweepSeen('swept')?.turn === 2, JSON.stringify(state.sweepSeen('swept')))
+    check('and the newer coverage is what stands', state.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(state.sweepSeen('swept')))
+
+    // The same turn reporting twice does replace: a second measurement of the
+    // same interval is a correction, not a stale arrival.
+    state.rememberSweep('swept', 2, 'partial')
+    check('the same turn may correct itself', state.sweepSeen('swept')?.coverage === 'partial', JSON.stringify(state.sweepSeen('swept')))
+
+    // A claim with no turn number cannot prove it is newer, so any numbered
+    // claim wins over it.
+    state.rememberSweep('swept', undefined, 'none')
+    check('a claim with no turn number yields to a numbered one', state.sweepSeen('swept')?.turn === 2, JSON.stringify(state.sweepSeen('swept')))
+
+    // And when nothing numbered is on record, the unnumbered one is all there is.
+    state.rememberSweep('bare', undefined, 'partial')
+    check('an unnumbered claim still records itself', state.sweepSeen('bare')?.coverage === 'partial', JSON.stringify(state.sweepSeen('bare')))
+  } finally {
+    await done(root)
+  }
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

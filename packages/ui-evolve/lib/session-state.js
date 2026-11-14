@@ -729,11 +729,21 @@ class SessionState {
     let touched = false
     for (const file of paths) {
       if (typeof file !== 'string' || file.length === 0) continue
-      // Delete before set, the same way `rememberSkill` does: a Map keeps
-      // insertion order and a re-set keeps the old slot, and this list's whole
-      // order is "most recently edited first".
-      entry.paths.delete(file)
-      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: origin })
+      // A re-record that names no bracket is not evidence that the previous one
+      // was wrong: `turn/end` re-records the turn's whole path list, and that
+      // list is mostly transcript paths which never had a bracket at all. Writing
+      // `undefined` here would erase, on the very next turn, the provenance the
+      // bracket had just established for the files the card cares about most.
+      // A named bracket does replace the old one — the most recent find is the
+      // true answer to "where did this come from".
+      //
+      // No delete-before-set here, unlike `rememberSkill`: order in this list
+      // comes from `seq` (`pathsSeen` sorts by it), not from the Map's insertion
+      // order, so dropping the old entry would change nothing. A mutation that
+      // removed it changed no assertion, which is how this was noticed.
+      const previous = entry.paths.get(file)
+      const kept = origin === undefined && previous !== undefined ? previous.source : origin
+      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: kept })
       touched = true
     }
     if (touched === true) {
@@ -840,8 +850,23 @@ class SessionState {
     const next = { turn: stamp, coverage: claim }
     // Replacing rather than accumulating: this describes the newest sweep, and a
     // list of historical coverage claims is not something any reader wants.
-    entry.sweep = next
-    this.schedule(sessionId)
+    //
+    // "Newest" has to be decided rather than assumed. The caller runs after an
+    // `await` on a git subprocess, so a slow turn can report after the following
+    // turn has already done so; replacing blindly would let the older turn's
+    // caveat — or its all-clear — become the one the card shows about the newer
+    // one. A claim with no turn number is kept when nothing newer is on record,
+    // and yields to any numbered claim, since a number is evidence of when it was
+    // measured and the absence of one is not.
+    const previous = entry.sweep
+    const stale =
+      previous !== undefined &&
+      previous.turn !== undefined &&
+      (stamp === undefined || previous.turn > stamp)
+    if (stale === false) {
+      entry.sweep = next
+      this.schedule(sessionId)
+    }
   }
 
   /**

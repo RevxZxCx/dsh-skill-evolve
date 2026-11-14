@@ -1326,6 +1326,16 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-108 | 2026-11-14 | 三条新突变首轮 SURVIVED，因为断言只测了其中一种状态 | 非仓库分支只断言「没有忽略项」、合并块缺第三种路径、`source` 从写入到读回零断言 |
 | DEF-109 | 2026-11-14 | 突变脚本崩溃时变异体留在源码里（第二次） | 脚本用 `text=True` 跑 node，GBK 解码失败抛异常，还原分支没走到 |
 | DEF-110 | 2026-11-14 | S8 的走查剪掉了 `dist/`，而 `dist/` 正是它要补的盲区 | 所有断言都注入 `ignored`/`changes`/`scan`，没有一个让真 git 与真文件系统同时回答；注入的 `ignored` 直接返回「被忽略的路径」，从不问走查是否看得见它们 |
+| DEF-111 | 2026-11-14 | 记下的来源活不过一个回合，被下一次重记抹成未知 | 写侧只在「有具名来源」时写值，读侧守卫因此永不触发；「没有具名来源的重记」这个最常见的路径没有任何断言 |
+| DEF-112 | 2026-11-14 | 多根工作区里 `check-ignore` 整批失效，连答对的那些也一起丢 | 假 `run` 永远单根，测试从未构造「两个仓库同批」，也从未构造「退出码非 0 但 stdout 有内容」 |
+| DEF-113 | 2026-11-14 | 一次 EPIPE 让整个宿主进程退出 | 假 `run` 的 `stdin` 是桩对象，结构上产生不了 `error` 事件；真实用例喂的输入都远小于 71KB 阈值 |
+| DEF-114 | 2026-11-14 | 删除隔离副本时顺着 junction 删掉 29 个真实源文件 | 不是代码缺陷而是清理手法缺陷；没有任何自动化会在删除前检查 junction |
+| DEF-115 | 2026-11-14 | 测试临时目录建在仓库里，多仓库测试其实从未发生 | 断言只看返回值形状，没有一条观察「发现了几个根」；单根与多根在返回值上可以完全一样 |
+| DEF-116 | 2026-11-14 | 手写 PATH 让 node 启动即崩，四个变异被误报 KILLED | 变异判据只看「失败数非零」，不区分断言失败与进程没起来 |
+| DEF-117 | 2026-11-14 | 先 `delete` 再 `set` 是死代码，而注释描述了一个不存在的机制 | 顺序由 `seq` 排序决定，删掉那行没有任何可观察变化；「没有变化」被当成了「这行无害」 |
+| DEF-118 | 2026-11-14 | 晚到的旧回合声称覆盖了新回合的声称 | 所有 sweep 断言都在同一回合号内写入，没有一条构造「回合 2 之后再来一次回合 1」 |
+| DEF-119 | 2026-11-14 | 两条断言恒为真，`known` 与 `repository` 的存在侧零覆盖 | 断言写的是「默认值是多少」而不是「什么情况下会变」；非默认值只活在测试自己的手写字面量里 |
+| DEF-120 | 2026-11-14 | 审查单元的 diff 头部认错文件，`git apply --check` 直接失败 | 重组 diff 时复用了前一单元的头部；审查者靠读内容认出来，没有任何检查过「能否 apply」 |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -1916,3 +1926,112 @@ ignored      : []
 事后问了一个此前没问过的问题：**「S8 的默认值有没有被任何一条断言观察过？」** 答案是没有任何一条。S7 那次的 `skipDirectory` P0（DEF-106）是完全同形的第二次发作。两次都是「钩子存在、测试注入过、生产从不使用」，两次都是真机验收才发现。
 
 **这次补的窟窿。** `scan-changes.test.mjs` 新增一个**不注入** `skipDirectory` 的块，断言 `dist`/`build`/`coverage` 都被走进去，另加一条「两个谓词对这几个目录必须给出不同答案」——防止有人日后以「去重」的名义把两张表合并。两条新突变：`the walk is handed the card filter instead of its own`、`the walk may enter a dependency tree`。第一条的第一版写成改 `scan-changes.js` 的默认值，结果 CRASHED（变异体引用了没导入的 `isGeneratedDirectory`），改成在 `api.js` 内部委托才成为有效的 KILLED。
+
+## DEF-111 · 记下的来源活不过一个回合
+
+**现象。** 第 N 轮由 git 分支记下的 `source: 'git'`，在第 N+1 轮变成 `undefined`，重启后仍然没有。实测：
+
+```
+after bracket: [{"path":"/w/a.ts","turn":5,"source":"git"}]
+after fallback: [{"path":"/w/a.ts","turn":6}]
+```
+
+**原因。** `rememberPaths` 的第四参数 `source` 在 `origin === undefined` 时把整条记录写成 `source: undefined`，而 `turn/end` 每回合都会拿 `ended.paths` 重记整份表——那份表来自 transcript 的 report/present 声明，天然没有 bracket。
+
+**为什么测试没抓到。** 三处同时失明：① 所有 `source` 断言都在**一次** `rememberPaths` 之后立刻读，从未写两次；② 读侧白名单（`source === 'git' || source === 'scan' ? ... : undefined`）零覆盖——因为写侧已经剥离非法值，经公共 API 永远走不到那个分支，而它唯一生效的场景是手改文档，恰恰没人测；③ `turn/end` 那条链路的断言看的是「行在不在」，不看 `source` 是不是还在。
+
+**修法。** `const kept = origin === undefined && previous !== undefined ? previous.source : origin`。注入验证：改成 `const kept = origin` → `FAIL a later re-record keeps the bracket it already knew [{...turn:6...}]`。
+
+## DEF-112 · 多根工作区里 `check-ignore` 整批失效
+
+**现象。** 工作区里有 `repoA` 与 `repoB` 时，只问 `repoB` 的路径得到 `{ignored: [], known: false, repository: true}`；两个仓库各问一条也是空的。而 `repoA` 单独问是对的。
+
+**原因。** 多根路径被拼成一批，`check-ignore` 固定跑在 `discovery.roots[0]`。别的根下的路径对 git 是「仓库外」，整批 `fatal: Invalid path` 退出 128。
+
+**为什么测试没抓到。** 假 `run` 的 roots 来自 `injected` 分支，**永远单根**；同时没有任何用例构造「退出码 128 且 stdout 有内容」。真实 git 的形状（探针实测）是退出 128 但 stdout 里带着本仓库的命中——所以原实现 `code !== 0` 就 `break`，把已经答对的也一起丢了。
+
+**修法。** 按 owner 分组、每组用自己那个根当 cwd（D-134）。注入验证：把 `run([...], root, ...)` 改成 `run([...], prefixes[0].root, ...)` → KILLED 3 failed。
+
+**附带教训。** 这条最初 SURVIVED，原因不是代码对而是测试环境错：`TMPDIR` 指到 `dsh-skill-evolve/.tmp-test`，那个目录**在仓库里面**，`findRepositoryRoot` 向上找到外层仓库，`discoverRoots` 只返回一个根——多仓库测试根本没发生。见 DEF-115。
+
+## DEF-113 · 一次 EPIPE 让整个宿主进程退出
+
+**现象。** `await runGit(['check-ignore','--stdin','-z'], process.env.TEMP, 'p'.repeat(131072))` → 进程退出 1，`UNCAUGHT: EOF write EOF`。
+
+**原因。** `child.stdin.end(input)` 没有 `child.stdin.on('error', () => {})`。git 提前退出时排队的写变成 EPIPE，而 EPIPE 在 Node 里是 `'error'` **事件**，没有监听器就是未捕获事件——整个进程退出，`execFile` 回调永不执行，`index.js` 里的 `try/catch` 完全看不到。
+
+**为什么测试没抓到。** 假 `run` 的 `stdin` 是手写桩对象（`{ end() {} }`），结构上不可能产生 `'error'`；而真实 git 的测试用例喂的路径列表都远小于阈值（审查者测得约 71KB）。**`MAX_IGNORE_BATCH = 500` 条普通长度路径正好一个批次就够。**
+
+**修法。** 一行 `child.stdin.on('error', () => {})`。已用一次性变异验证：删掉它 → 对应断言红。这是本轮唯一一条「会让用户正在用的会话消失」的缺陷，优先级高于其余全部。
+
+## DEF-114 · 删除隔离副本时顺着 junction 删掉 29 个真实源文件
+
+**现象。** `rm -rf .rvb` 之后 `git status` 显示 29 个 `D`（全部未暂存），`packages/ui-evolve/lib` 与 `packages/core/lib` 的源文件消失。
+
+**原因。** 审查者建立的隔离副本 `.rvb` 里，`node_modules/@revxz/*` 是指回真实目录的 Windows junction。`rm -rf` 跟随 junction，删的是链接目标。
+
+**为什么测试没抓到。** 这不是代码缺陷，是清理手法缺陷——没有任何自动化会在删除之前检查 junction。`.gitignore` 里的 `.review/` 拦不住 `.rvb`（它当时还没被忽略）。
+
+**修法。** `git checkout -- .` 完整恢复（29 个文件，git 记得内容）；之后统一改用 `cmd /c "rmdir /s /q"`，cmd 的 `rmdir` 不跟随 junction。**规则写在这里：Windows 上删除任何可能含 junction 的目录，不能用 `rm -rf`。**
+
+## DEF-115 · 测试临时目录建在仓库里，多仓库测试其实从未发生
+
+**现象。** `fixed-root` 变异（把「每组用自己的根」改成「都用第一个根」）在正确的修复下本该被杀，实际 SURVIVED。
+
+**原因。** `TMPDIR` 设在 `F:/dsh-plugin/dsh-skill-evolve/.tmp-test`。测试把仓库建在那里，`findRepositoryRoot` 向上走先遇到外层 `dsh-skill-evolve` 仓库，于是 `discoverRoots` 按「有上级仓库就不再找子仓库」返回单根——两个仓库从来没有被同时读过。
+
+**为什么测试没抓到。** 断言只看 `ignoredPaths` 的返回值，而单根与多根在返回值形状上可以完全一样（如果被测路径都在同一个根下）。**没有任何断言观察「发现了几个根」**。
+
+**修法。** `TMPDIR=F:/dsh-plugin/_tmp-test`（`F:/dsh-plugin` 实测不是仓库）。改后同一个变异立刻 KILLED（3 failed）。系统默认 temp 不可用：`EPERM: operation not permitted, mkdtemp ... errno -4048`。
+
+## DEF-116 · 手写 PATH 让 node 启动即崩，四个变异被误报 KILLED
+
+**现象。** 四个变异全部报 KILLED，但 stderr 里有 `InitializeOncePerProcessInternal`，测试一条都没有跑起来。
+
+**原因。** 变异脚本自行拼了 `PATH`（含 `C:/Program Files/nodejs`），而这台机器真实的 node 在 `D:\Node_Js\`。node 启动即失败，失败数 > 0，脚本判定「变异被杀」。
+
+**为什么测试没抓到。** 变异脚本的判据是「失败数 > 0」，不区分「断言失败」与「进程没起来」。**一个只数失败数的判据会把环境故障读成代码质量。**
+
+**修法。** `ENV = dict(os.environ)` 继承再叠加 `TMPDIR/TMP/TEMP`，不重写 `PATH`。另外：KILLED 的判据应该看有没有 `passed, ` 这样的一行，而不是只看非零。
+
+## DEF-117 · `delete` 之后再 `set` 是死代码，而注释描述了一个不存在的机制
+
+**现象。** 删掉 `session-state.js` 的 `entry.paths.delete(file)` 这一行，`index` 303 条、`session-state` 290 条断言全绿。
+
+**原因。** 那行注释说「Map 重复 set 保留原位置，所以必须先删再 set」。但 `pathsSeen` 是 `.sort((a, b) => b[1].seq - a[1].seq)` **显式按 `seq` 降序**，根本不依赖 Map 插入顺序。
+
+**为什么测试没抓到。** 顺序由 `seq` 保证，删掉那行没有任何可观察变化；而「没有变化」被当成了「这行无害」，没人去问「那这行在做什么」。
+
+**修法。** 删掉该行，注释改写为事实。同时补三条顺序断言（`two files are listed newest first` / `a re-edited file moves back to the top` / `and the list is still just those two`），让顺序这件事第一次被显式钉住。
+
+## DEF-118 · 晚到的旧回合声称覆盖了新回合的声称
+
+**现象。** 回合 2 记录 `complete` 之后，回合 1 的迟到 `none` 覆盖了它，卡片对新回合说了一句关于旧回合的话。
+
+**原因。** `rememberSweep` 无条件 `entry.sweep = next`，而它在一次 `git check-ignore` 子进程 `await`（上限 2 秒）之后才被调用。这个窗口在 S8 之前是微秒级，新增的 `await` 把它放大到秒级。
+
+**为什么测试没抓到。** 所有 sweep 断言都在同一个回合号内写入，没有一条构造「回合 2 之后再来一次回合 1」。
+
+**修法。** 按 `previous.turn` 与 `stamp` 比较（D-137）。**第一版修错了**：写成 `stamp !== undefined && previous.turn > stamp`，让无号请求能覆盖有号，被新断言抓出 `FAIL a claim with no turn number yields to a numbered one — {"coverage":"none"}`。
+
+## DEF-119 · 两条断言恒为真，`known` 与 `repository` 的生产侧零覆盖
+
+**现象。** 删掉 `if (answer.code !== 1) known = false` 整行 → 78 条断言 **0 failed**。把成功路径的 `return { ..., repository: true }` 改成 `false` → 78 条仍全绿。全文件唯一一条 `repository === true` 断言来自早退分支。
+
+**原因。** `known` 只在初始化时是 true、只在批次出错时置 false，而全文件没有能让批次出错的用例——断言测的其实是默认值。`repository` 的成功路径根本没有断言，三个早退分支各自翻转也没人发现。
+
+**为什么测试没抓到。** 这是「假绿」的典型形状：断言名（`answered, not guessed`）描述的是意图，代码测的是默认值。**非默认值只活在测试自己的手写字面量里，产出侧零覆盖。**
+
+**修法。** 补四类：批次出错（超时/ENOENT → `code === -1` → `known: false`）、21 个仓库撞 cap → `known === false` 且 `repository === true`、成功路径 `repository === true`、junction 经链接仍能分类。注入验证三条全红。
+
+**这一条最值钱的判断来自审查者原话**：「没有重蹈『钩子存在、注入过、生产从不使用』的覆辙——消费端确实有测试。问题恰恰相反：**消费端有测试，生产端这三个字段的正确性几乎没有断言**。」
+
+## DEF-120 · 审查单元的 diff 头部认错文件
+
+**现象。** `.review/s8e2a-tests-merge.diff` 第一行是 `--- a/test/git-changes.test.mjs`，而内容来自 `test/index.test.mjs`；`git apply --check` 报 `corrupt patch at line 151`。同类问题也出现在 `s8e2b-tests-norepo.diff`。
+
+**原因。** 我用脚本按 `@@` hunk 序号重组 diff，头部沿用了前一单元的 `--- a/` `+++ b/` 行。hunk 头声称 `+270` 行而实际只有 115 个 `+`，split 块的起始 `{` 整个缺失。
+
+**为什么没抓到。** 审查者靠读内容自己认出了目标文件，所以结论仍然有效；但没有一个自动化检查过「这份 diff 能否 apply」。
+
+**修法。** 记录规则：按 hunk 重组 diff 时，每个单元的头部必须按自己那份的目标文件重写；重组后立刻 `git apply --check`，不要等人读。

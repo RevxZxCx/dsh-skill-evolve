@@ -3076,11 +3076,20 @@ try {
   ]
   const host = fakeHost()
   apply(host.ctx, Config({ mode: 'suggest' }))
+  // The overlap has to reach the store twice for "credited to the diff" to mean
+  // anything: with an empty answer the walk wrote nothing, so the row would say
+  // `git` no matter which way the merge leaned. Returning the path makes the
+  // walk a real claimant, and the credit then depends on write order.
+  let askedFor = []
+  let askedFrom = ''
   applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
     changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
     scan: async () => ({ paths: ['C:/work/src/only.ts'], coverage: 'complete' }),
-    // Nothing is ignored, so the walk contributes nothing at all here.
-    ignored: async () => ({ ignored: [], known: true, repository: true }),
+    ignored: async ({ paths, cwd }) => {
+      askedFor = paths.slice()
+      askedFrom = cwd
+      return { ignored: paths.slice(), known: true, repository: true }
+    },
   })
 
   const agent = fakeAgent('merge-dup-agent', 'C:/work')
@@ -3112,6 +3121,12 @@ try {
 
   check('a file both brackets saw is one row', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
   check('and the diff is credited, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
+  // The walk really did claim this path, so the row above is a verdict rather
+  // than an absence.
+  check('the walk did offer the same file', askedFor.includes('C:/work/src/only.ts') === true, JSON.stringify(askedFor))
+  // And it was asked about this workspace, not some default. Without the cwd the
+  // real check returns `repository: false`, which silently empties the list.
+  check('and it was asked about the right workspace', askedFrom === 'C:/work', String(askedFrom))
 }
 
 // Outside a repository the ignore check has nothing to classify against, so the
@@ -3256,6 +3271,57 @@ try {
 
   check('a diff with no repository to explain it stands alone', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
   check('and the row is the diff, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
+}
+
+{
+  // The ignore check is a supplement, so its failure must cost only the walk's
+  // rows. Letting the throw escape would empty the turn entirely -- including the
+  // diff, which had already arrived and needs nothing from git's ignore rules.
+  const root = await makeTempRoot('skill-evolve-merge-throw-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    // Baseline first, then the post-turn reading: the fake has to differ across
+    // the two calls or the difference is empty and nothing is recorded.
+    changes: (() => {
+      const answers = [{ paths: [], coverage: 'complete' }, { paths: ['C:/work/src/tracked.ts'], coverage: 'complete' }]
+      return async () => answers.shift() ?? { paths: [], coverage: 'complete' }
+    })(),
+    scan: async () => ({ paths: ['C:/work/dist/bundle.js'], coverage: 'complete' }),
+    ignored: async () => { throw new Error('git went away') },
+  })
+
+  const agent = fakeAgent('merge-throw-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { message: { role: 'user', content: [{ type: 'text', text: '构建' }] }, source: { kind: 'user' } },
+  })
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+
+  await new Promise((done) => { setTimeout(done, 10) })
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) { this.headers[name] = value; return this },
+    once() { return this },
+    writeHead(code) { this.statusCode = code; return this },
+    end(body) { this.writableEnded = true; this.body = body; return this },
+  }
+  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
+  const payload = JSON.parse(res.body)
+  const rows = payload.data?.files ?? []
+  const byPath = new Map(rows.map((file) => [file.path, file]))
+  check('a failing ignore check keeps the diff rows', byPath.has('C:/work/src/tracked.ts') === true, JSON.stringify(rows.map((file) => file.path)))
+  check('and it does not smuggle the walk in either', byPath.has('C:/work/dist/bundle.js') === false, JSON.stringify(rows.map((file) => file.path)))
 }
 
 console.log(`\n${pass} passed, ${fail} failed`)

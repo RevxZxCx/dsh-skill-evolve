@@ -29,7 +29,7 @@
  */
 
 import { execFile } from 'node:child_process'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 /** How long `git status` may take before the A path gives up for this turn. */
@@ -119,12 +119,14 @@ export function runGit(args, cwd, input) {
       args,
       { cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
       (error, stdout) => {
-        // Three different failures land here and all of them mean the same
-        // thing to this caller: git could not answer. A directory that is not a
-        // repository exits non-zero; a missing binary leaves `error` set with no
-        // status at all. Neither is worth a log line, because "not a repository"
-        // is the normal case for most workspaces.
-        const code = error === null || error === undefined ? 0 : typeof error.code === 'number' ? error.code : 1
+        // Three different failures land here. A directory that is not a
+        // repository exits non-zero, and so does a batch git refuses — those are
+        // answers, and the number says which. A missing binary, a timeout or a
+        // permission failure has no exit status at all, and reporting those as
+        // `1` made "git could not run" indistinguishable from "git said no",
+        // which is exactly the distinction the ignore check is built on. They
+        // are reported as `-1` so a caller can tell them apart.
+        const code = error === null || error === undefined ? 0 : typeof error.code === 'number' ? error.code : -1
         resolve({ code, stdout: typeof stdout === 'string' ? stdout : '' })
       }
     )
@@ -132,6 +134,12 @@ export function runGit(args, cwd, input) {
     // open: git waits for end-of-input before answering, so a stream nobody
     // ends is a two-second timeout instead of an answer.
     if (typeof input === 'string' && child.stdin !== null && child.stdin !== undefined) {
+      // An unhandled 'error' on this stream takes the whole process down. Git
+      // may exit before draining stdin — it refuses a batch it considers invalid,
+      // or the timeout kills it mid-write — and the EPIPE arrives as an event,
+      // not as a throw, so nothing around this call can catch it. Measured at
+      // roughly 71KB of stdin, which one ordinary batch of 500 paths reaches.
+      child.stdin.on('error', () => {})
       child.stdin.end(input)
     }
   })
@@ -404,6 +412,66 @@ export async function sweepChanges(options) {
 const MAX_IGNORE_BATCH = 500
 
 /**
+ * A path as it should be compared, not as it was spelled.
+ *
+ * `\\` and `/` are the same separator to Win32; keeping both spellings in a
+ * comparison means the two sides disagree about paths that are the same file.
+ *
+ * @param {string} path - a path in either spelling.
+ * @returns {string} the comparable form.
+ */
+function comparable(path) {
+  return path.split('\\').join('/').replace(/\/+$/u, '')
+}
+
+/**
+ * The same path after the filesystem has resolved links and substitutions.
+ *
+ * A workspace opened through a junction, a `subst` drive or a mapped network
+ * share spells the same tree differently from what `rev-parse` reports, and the
+ * textual comparison then matches nothing — silently, and in the confident
+ * direction ("nothing here is ignored").
+ *
+ * @param {string} path - a path in either spelling.
+ * @returns {string} the resolved comparable form, or the textual one when the
+ *   filesystem cannot resolve it.
+ */
+function realPath(path) {
+  try {
+    return comparable(realpathSync.native(path))
+  } catch {
+    return comparable(path)
+  }
+}
+
+/**
+ * Which root a path belongs to, if any.
+ *
+ * Compared case-insensitively because Windows and git both do: `rev-parse`
+ * reports the canonical spelling of a directory while the scanner keeps whatever
+ * case the session workspace was opened with, so an exact comparison misses
+ * every file under a workspace whose case differs from disk.
+ *
+ * @param {string} path - an absolute path.
+ * @param {{ root: string, key: string }[]} prefixes - roots, longest first.
+ * @returns {{ root: string, key: string } | undefined} the owning root.
+ */
+function ownerOf(path, prefixes) {
+  const key = comparable(path).toLowerCase()
+  for (const prefix of prefixes) {
+    if (key === prefix.key || key.startsWith(prefix.key + '/') === true) return prefix
+  }
+  // Only now pay for the filesystem: the textual comparison failed, which is
+  // what a junction or a substituted drive looks like from here.
+  const actual = realPath(path).toLowerCase()
+  if (actual === key) return undefined
+  for (const prefix of prefixes) {
+    if (actual === prefix.key || actual.startsWith(prefix.key + '/') === true) return prefix
+  }
+  return undefined
+}
+
+/**
  * Which of these paths git cannot see, because `.gitignore` excludes them.
  *
  * ## Why this exists
@@ -462,55 +530,68 @@ export async function ignoredPaths(options) {
   const discovery = discoverRoots({ cwd, injected, listed })
   if (discovery === undefined) return { ignored: [], known: true, repository: false }
 
+  // Discovery stops at the cap, so a capped result means some child repository
+  // was never described. A path inside it comes back "not ignored" when nobody
+  // looked at it — so the cap has to travel as doubt, not as a clean answer.
+  const capped = discovery.capped === true
+
   // One comparison prefix per root, longest first, so a path inside a nested
   // root is attributed to that root rather than to an enclosing one.
   const prefixes = []
   for (const directory of discovery.roots) {
     const described = await describeRepository(run, directory)
     if (described === undefined) continue
-    prefixes.push(described.root.split('\\').join('/').replace(/\/+$/u, ''))
+    const root = realPath(described.root)
+    prefixes.push({ root, key: root.toLowerCase() })
   }
   // No root answered `rev-parse`: there is no repository here, so no path is
   // hidden by one. That is an answer about the workspace, not about the paths,
   // and the caller has to hear it as such.
   if (prefixes.length === 0) return { ignored: [], known: true, repository: false }
-  prefixes.sort((a, b) => b.length - a.length)
+  prefixes.sort((a, b) => b.root.length - a.root.length)
 
-  const inRoot = []
+  // Paths are grouped by the root they belong to, because `check-ignore` reads
+  // its list relative to one repository. A path from another root is outside
+  // that repository, and one foreign path fails the whole batch — which threw
+  // away the correct answers that travelled with it.
+  const groups = new Map()
   for (const path of asked) {
-    const normal = path.split('\\').join('/')
-    for (const prefix of prefixes) {
-      if (normal.startsWith(prefix + '/') === true) {
-        inRoot.push(path)
-        break
-      }
-    }
+    const owner = ownerOf(path, prefixes)
+    if (owner === undefined) continue
+    const open = groups.get(owner.root)
+    if (open === undefined) groups.set(owner.root, [path])
+    else open.push(path)
   }
   // A repository exists, but nothing asked about was inside it.
-  if (inRoot.length === 0) return { ignored: [], known: true, repository: true }
+  if (groups.size === 0) return { ignored: [], known: capped === false, repository: true }
 
-  // Batched because `check-ignore` reads one path per line from stdin and the
-  // scanner can hand over its whole budget: a single call with five thousand
-  // paths would build a megabyte of stdin for an answer the card renders as a
-  // handful of rows. A batch that fails stops the loop and reports that the
-  // question went unanswered — the batches after it would fail for the same
-  // reason, and claiming the rest are "not ignored" would be inventing an
-  // answer out of a failure.
+  // Batched because `check-ignore` reads its list from stdin and the scanner can
+  // hand over its whole budget: one call with five thousand paths would build a
+  // megabyte of stdin for an answer the card renders as a handful of rows. A
+  // batch that fails stops the loop and reports the question unanswered — the
+  // batches after it would fail for the same reason, and calling the rest "not
+  // ignored" would be inventing an answer out of a failure.
   const ignored = []
-  let known = true
-  for (let start = 0; start < inRoot.length; start += MAX_IGNORE_BATCH) {
-    const batch = inRoot.slice(start, start + MAX_IGNORE_BATCH)
-    const answer = await run(['check-ignore', '--stdin', '-z'], discovery.roots[0], batch.join('\u0000') + '\u0000')
-    // Exit code 1 means "nothing in this batch is ignored", which is an answer.
-    // Any other non-zero code is git declining to answer at all.
-    if (answer.code !== 0) {
-      if (answer.code !== 1) known = false
+  let known = capped === false
+  let failed = false
+  for (const [root, paths] of groups) {
+    for (let start = 0; start < paths.length; start += MAX_IGNORE_BATCH) {
+      const batch = paths.slice(start, start + MAX_IGNORE_BATCH)
+      const answer = await run(['check-ignore', '--stdin', '-z'], root, batch.join('\u0000') + '\u0000')
+      // Exit code 1 means "nothing in this batch is ignored", which is an
+      // answer. Any other non-zero code is git declining to answer at all —
+      // including the -1 this module uses for a process that never ran.
       if (answer.code === 1) continue
-      break
+      if (answer.code !== 0) {
+        known = false
+        failed = true
+        break
+      }
+      for (const hit of answer.stdout.split('\u0000')) {
+        if (typeof hit === 'string' && hit.length > 0) ignored.push(hit)
+      }
     }
-    for (const hit of answer.stdout.split('\u0000')) {
-      if (typeof hit === 'string' && hit.length > 0) ignored.push(hit)
-    }
+    if (failed === true) break
   }
   return { ignored, known, repository: true }
 }

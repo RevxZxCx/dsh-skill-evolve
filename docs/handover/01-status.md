@@ -50,6 +50,7 @@
 | 2026-11-14 | S7 审查与真机验收 | 四个审查者指向同一个 P0（`skipDirectory` 生产零调用）；coverage 扩三态并抽出 `mergeCoverage`；3258 断言全绿，三套突变 101/45/128 全杀；真机对比证明修的是真问题 |
 | 2026-11-14 | 产出卡 S8：git 看不见的文件也有人记 | 合并规则从「谁胜出」改为「git 给可见的、走查只补被忽略的」（D-129），`ignoredPaths` 问 `git check-ignore --stdin -z`，返回值带 `known`/`repository` 两个不确定词；每个路径记下是哪个 bracket 找到的（D-130）；卡片头部改说会话总数、徽标改说剩余、coverage 三态各说各话（D-131）。3312 断言全绿，三套突变 108/45/128 全杀，残留 0。**真机验收未做** |
 | 2026-11-14 | S8 真机验收：走查剪掉了它要补的那个目录 | 真仓库里 `dist/` 同时被 `.gitignore` 忽略（git 看不见）和被走查的目录过滤剪掉（`isGeneratedDirectory` 算它生成），所以 S8 的「走查补盲区」在构建产物目录里完全失效。拆出 `isUnwalkableDirectory` 作为更窄的遍历谓词，3319 断言全绿、突变 110/45/128 全杀、残留 0；卡片五场景同源渲染核对通过。**新增 DEF-110、D-132** |
+| 2026-11-14 | S8 独立审查：八个单元、十三条意见 | 把 S8 提交按 200 行门槛切成八份派独立审查者，抓出 3 个 P0（stdin EPIPE 会杀死整个进程、跨仓库批次整批失效、provenance 被下一回合抹掉）。修 13 条，3365 断言全绿，突变 114/45/128 全杀。**新增 DEF-111 至 DEF-120、D-133 至 D-137** |
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 ---
 
@@ -3645,3 +3646,65 @@ rows 6 | sources scan,git
 - **截图不是宿主实拍。** GUI 要带 token 的 URL，而 token 只在宿主内存里，磁盘上没有（`remote-web-ui-devices.json` 只有 device id 与 UA，环境变量里只有 `DSH_WEB_URL`）。这条限制在 S7 那节已记过，没有变化。
 - **主机工作区的走查仍然截断。** `F:/dsh-plugin` 有 15,778 个目录，`MAX_SCANNED_ENTRIES = 5000` 被别处吃光，所以本会话自己的卡片里走查那一路基本恒为 `partial`。这次的真机证据来自子仓库 `s9repo`（一个 4 文件的仓库，`truncated=false`）。
 - **`source` 只落盘、不进界面。** 卡片今天不显示哪一行是走查找到的。这是 S8 的既有取舍（docs/19 §7.3 已记），本轮没有改变。
+
+## 2026-11-14 · S8 独立审查：八个单元，十三条意见，一个会杀死进程的错误
+
+### 为什么这一轮才叫审查
+
+前两轮不是。R-81 是我改完代码之后看哪几条突变没被杀掉，反推「断言可能漏了什么」；R-82 是拿真机跑一遍，看真实行为对不对。两者都有价值，但都有一件共同的事做不到：**它们只能发现我已经想到要怀疑的东西**。突变存活说明「我写的断言没有区分两种行为」，它不会告诉我「两个字段合流会让一个错误伪装成另一个」；真机验收说明「这一次跑通了」，它不会告诉我「这条分支在另一种输入下会静默丢失整份数据」。
+
+所以这一轮把 `387f827` 那次提交（1116 insertions / 100 deletions）按 bounded-diff-code-review 的 200 行门槛切成八份，各派一个独立审查者，只给 diff 与仓库读权限，不给我自己的结论。
+
+### 八个单元
+
+| 单元 | 内容 | 行数 | 审查者结论 |
+| --- | --- | --- | --- |
+| s8a1 | `git-changes.js` 的 `discoverRoots` 抽取 + `runGit` 的 stdin 参数 | 127 | 1 P0 / 2 P1 / 1 P3 |
+| s8a2 | `ignoredPaths` 本体 | 126 | 2 P0 / 2 P1 / 4 P2 / 3 P3 |
+| s8b | `index.js` 的 `turn/end` 合并 | 102 | 2 P1 / 4 P2 / 1 P3 |
+| s8c | `source` 从存储到 payload | 110 | 2 P1 / 2 P2 / 1 P3 |
+| s8d | 卡片文案与折叠计数 | 76 | 耗尽上下文未交付 |
+| s8e1 | `test/git-changes.test.mjs` | 158 | 3 P0 / 3 P1 / 2 P2 / 1 P3 |
+| s8e2a | `test/index.test.mjs` 的 split 与 dup 块 | 121 | 2 P0 / 1 P1 / 2 P2 |
+| s8e2b | `test/index.test.mjs` 的 norepo 三块 | 150 | 无假绿 / 2 个 P1 存活 |
+
+八份 diff 由 `git diff 387f827~1 387f827` 按 `@@` hunk 重组，脚本按 hunk 序号挑选后拼回。**这一步本身出了缺陷**：两份测试单元的 diff 头部沿用了前一单元的 `--- a/test/git-changes.test.mjs`，而内容其实来自 `test/index.test.mjs`，`git apply --check` 报 `corrupt patch at line 151`。审查者靠读内容自己认出了目标文件，但这份 diff 是坏的。教训记在这里：按 hunk 重组 diff 时，每个单元的 `--- a/` 与 `+++ b/` 必须按自己那份的目标文件重写，不能复用。
+
+### 三个最严重的
+
+**一、一次 EPIPE 杀死整个宿主进程。** `runGit` 为了给 `check-ignore --stdin` 喂路径列表，新增了 `child.stdin.end(input)`，但没有 `child.stdin.on('error')`。git 在读完输入之前退出（超时、被杀、几何上不可能再读），排队的写就变成 EPIPE；EPIPE 在 Node 里不是抛错而是 **`'error'` 事件**，没有监听器时是未捕获事件，整个进程退出。`execFile` 的回调永远不会执行，所以 `index.js` 里任何 `try/catch` 都拦不住它。审查者测得阈值约 71KB（52KB 存活、71KB 死），而 `MAX_IGNORE_BATCH = 500` 条普通长度路径正好一个批次就够。**这不是「功能坏了一部分」，是用户正在用的会话直接消失。**
+
+**二、跨仓库批次整批失效。** `ignoredPaths` 把多个根下的路径拼成一批，但 `check-ignore` 固定跑在 `discovery.roots[0]` 上。别的根下的路径对 git 来说是「仓库外」，整批 `fatal: Invalid path` 退出 128。真机探针确认跨仓库批次的真实形状是「退出码 128，但 stdout 里仍带着本仓库的命中」——原实现在 `code !== 0` 时 `break`，于是连本来已经答对的那部分也一起丢掉。后果和上一轮 DEF-110 一模一样：`.gitignore` 藏起来的产物整批消失，而这正是这个插件存在的理由。
+
+**三、provenance 活不过一个回合。** `rememberPaths` 新增了第四参数 `source`，但 `turn/end` 每回合都会拿 `ended.paths` 重记整份路径表，而那份表大多来自 transcript 的 report/present 声明，**本来就没有 bracket**。于是第 N 轮由 git 记下的 `source:'git'`，在第 N+1 轮被重记成 `undefined`。实测：`after bracket: [{"path":"/w/a.ts","turn":5,"source":"git"}]` → `after fallback: [{"path":"/w/a.ts","turn":6}]`，重启后仍然没有。这个字段存在的全部目的就是「几个月后还能知道这行为什么是这样来的」，而它恰好在卡片最关心的那些文件上失效。
+
+### 测试侧的假绿
+
+审查者在这一侧花的力气不比源码侧少，因为**这一次的问题不是「没测」，而是「测的东西恒为真」**：
+
+- `test/git-changes.test.mjs` 里 `known === true` 恒真：`known` 只在初始化时是 true、只在「批次出错」时置 false，而全文件没有一个能让批次出错的用例。删掉那行 `known = false` 整条判断，78 条断言 **0 failed**。断言名写着 "answered, not guessed"，实际只测了默认值。
+- 成功路径 `return { ignored, known, repository: true }` 的 `repository` 字段零断言。把它改成 `false`，78 条仍全绿。而 `index.js` 只靠这个字段区分「有仓库」与「纯文件夹」，翻错了就会让纯文件夹场景套用「相信 diff、丢掉走查」的逻辑——那正是那段代码自己的注释在警告的事故。
+- dup 块的假 `ignored` 恒返回 `{ignored: []}`，于是注释声称的「走查也报了同一个文件」这个场景**从未发生**。「这一行归 git」之所以通过，是因为只有 git 写过，不是因为裁决正确。把合并改成朴素并集 `blind = fromScan`，这一块照样全绿。
+- `session-state.js` 的 `entry.paths.delete(file)` 是死代码：`pathsSeen` 显式按 `seq` 排序，Map 插入顺序根本不影响结果。删掉它，303 条断言全绿。而旁边注释信誓旦旦说「Map 重复 set 保留原位置，所以必须先删」——**注释描述的实现并不存在**。已删除该行并把注释改成事实。
+
+### 一个我自己的事故
+
+审查者在仓库里建了隔离副本 `.rvb`，它的 `node_modules/@revxz/*` 是 Windows junction，指回真实目录。我清理时用 `rm -rf .rvb`，**顺着 junction 删掉了 29 个真实源文件**。`git status` 显示 29 个 `D`，全部未暂存；`git checkout -- .` 完整恢复。之后改用 `cmd /c "rmdir /s /q"`（cmd 的 rmdir 不跟随 junction）。
+
+同一个机制还有第二个表现：审查者反复要求「允许改坏源码但必须先备份当场恢复」，而多个审查者同时在同一个工作区做这件事。有一个审查者回来报告说它看到 `index.js` 里出现了 `// MUTATION M4` 的注释——**别人的变异体**。这已经不是第一次（DEF-103 记过三套突变并行互相污染）。结论写在这里：**改动共享工作区的事情不能并行做**，审查者要改源码就必须在自己的隔离副本里改，我的变异脚本也必须串行。
+
+### 验证
+
+- `node test/run.mjs` = **3365 passed / 0 failed**
+- `mutate-language-and-files` = **114 killed / 0 survived / 0 not applied / 0 crashed**（新增 4 条，全部 KILLED）
+- `mutate-persistence` = **45 killed / 0 survived**
+- `mutate-checklist-panel` = **128 killed / 0 survived / 0 not applied**
+- `_edit/audit_leftovers.py` = **leftovers: 0 / unresolved: 0**
+- `test/mutations.test.mjs` = **39 passed / 0 failed**
+- 每一条修复都做过注入验证：把修复改回去，对应断言立刻变红（见各 DEF 的正文）。
+
+### 没做的
+
+- **s8d（卡片文案）没有结论。** 那个审查者耗尽了上下文，只留下一句未查证的怀疑。我自己查了：非仓库工作区里 git 那一路报 `none`（不是 `complete`），`mergeCoverage` 最弱胜出，所以卡片会带 caveat 而不是沉默——**这个怀疑不成立**。但顺着它发现一个观感事实：非仓库工作区里卡片会一直带 caveat，因为 git 那半永远是 `none`。未改代码，理由记在 R-83。
+- **`repository === false && fromGit.length > 0` 这条分支不可达**，是死代码。审查者查证过：`discoverRoots` 会向下找子仓库，父目录里有仓库时仍返回 `repository: true`；cwd 为空或不存在时走查也是空的。保留未删，因为它是「有 diff 但没有仓库」这个真实边界上的保守读法，只是今天没有输入能走到；已记录在 DEF-120。
+- 三个上限（`MAX_SCANNED_ENTRIES` / `MAX_IGNORE_BATCH` / `GIT_TIMEOUT_MS`）仍然是我估的数，没有标定过。
