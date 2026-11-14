@@ -348,6 +348,41 @@ function isGeneratedDirectory(segment) {
   return GENERATED_DIRS.has(segment.toLowerCase())
 }
 
+// Directories a traversal may refuse to enter, which is a STRICTER question than
+// whether the card hides a row, and the two lists therefore differ on purpose.
+//
+// `isGeneratedDirectory` above answers "would a reader rather not see this row".
+// It counts `dist` as generated, and it is right: a bundle is not something
+// anyone wrote. But the S8 walk exists precisely because git cannot see ignored
+// files, and a build output directory is the one place where those two facts
+// coincide — `dist/` is in `.gitignore` in every JavaScript project, and it is
+// where a script's output lands. Measured on a real repository: with
+// `dist`/`build`/`out`/`target`/`coverage` pruned, the walk returned four files
+// and `check-ignore` was asked about none of the two that mattered, so the
+// bracket added to cover git's blind spot was blind in the same spot.
+//
+// What stays pruned is everything that cannot hold a turn's output at all:
+// dependency trees, version-control internals, tool caches, virtualenvs, IDE
+// indexes. `node_modules` is the only one that matters for the entry budget —
+// the same reason the walk does not descend into everything.
+const UNWALKABLE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'venv', '.cache', '.pytest_cache', '.mypy_cache', '.gradle', '.turbo', '.idea', '.next', '.nuxt'])
+
+/**
+ * Whether a traversal should refuse to enter a directory.
+ *
+ * A strict subset of `isGeneratedDirectory`: see the table above for why the
+ * build-output directories are walked even though the card calls them generated.
+ * The walk still classifies what it finds through `isNoisePath`, so a bundle in
+ * `dist/` lands in the card's "generated" group rather than among the sources.
+ *
+ * @param {string} segment - one directory name, not a path.
+ * @returns {boolean} whether its contents are unreachable for this purpose.
+ */
+function isUnwalkableDirectory(segment) {
+  if (typeof segment !== 'string' || segment.length === 0) return false
+  return UNWALKABLE_DIRS.has(segment.toLowerCase())
+}
+
 /**
  * Paths that a person did not write.
  *
@@ -1186,4 +1221,5 @@ export {
   MAX_BODY_BYTES,
   isNoisePath,
   isGeneratedDirectory,
+  isUnwalkableDirectory,
 }

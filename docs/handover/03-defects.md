@@ -1325,6 +1325,7 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-107 | 2026-11-14 | coverage 扩成三态后，三处 `=== 'partial'` 单值判断把它打回两态 | 新词 `none` 没有任何断言要求它活到面板；写到面板那条端到端断言是修之前才补的 |
 | DEF-108 | 2026-11-14 | 三条新突变首轮 SURVIVED，因为断言只测了其中一种状态 | 非仓库分支只断言「没有忽略项」、合并块缺第三种路径、`source` 从写入到读回零断言 |
 | DEF-109 | 2026-11-14 | 突变脚本崩溃时变异体留在源码里（第二次） | 脚本用 `text=True` 跑 node，GBK 解码失败抛异常，还原分支没走到 |
+| DEF-110 | 2026-11-14 | S8 的走查剪掉了 `dist/`，而 `dist/` 正是它要补的盲区 | 所有断言都注入 `ignored`/`changes`/`scan`，没有一个让真 git 与真文件系统同时回答；注入的 `ignored` 直接返回「被忽略的路径」，从不问走查是否看得见它们 |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -1887,3 +1888,31 @@ FAIL a bracket that never looked is not reported as clean {"turn":1,"coverage":"
 **修法。** `capture_output=True` 保留，去掉 `text=True`，改成手动 `.decode('utf-8', 'replace')`；从 `_edit/client.s8.bak.js` 恢复源码；恢复后先 `grep` 确认那一行回来了再继续。
 
 **为什么测试没抓到。** 因为测试根本不该抓这个——它测的是源码，而源码在那一刻真的坏了。抓到它的是**人眼**：`grep -c` 是我在脚本崩后主动跑的。这说明一件事：**任何「备份→改→测→还原」的脚本，都不能假设正常路径一定走得到还原那一步**。DEF-90 已经记过一次同样的机制爆炸（Windows 文件被占用导致还原写盘失败），这次是解码异常，下次可能是 Ctrl-C、可能是 OOM。正确的做法是让还原在 `finally` 里、并且让脚本在任何退出路径上都先做还原再做别的。本轮没有改脚本结构（时间不够且这是 `_edit/` 下的一次性脚本），但把「跑完突变必须先 `grep` 关键行 + 跑 `audit_leftovers.py`」写进了流程。
+
+## DEF-110 · S8 的走查剪掉了 `dist/`，而 `dist/` 正是它要补的盲区
+
+**症状。** S8 上线后，一个往 `.gitignore` 忽略目录里写产物的一轮，卡片上看不到那些产物——而 S8 的全部意义就是让它们出现。
+
+**真机现场。** 真仓库 `s9repo`（`.gitignore` 含 `dist/` 与 `*.log`），脚本写 `dist/bundle.js`、`dist/app.log`、`src/extra.ts`，`git status --porcelain` 只报 `?? src/extra.ts`（`dist/` 两个文件 git 结构上看不见，符合预期）。直接跑三路生产函数：
+
+```
+git  paths   : ['F:/dsh-plugin/s9repo/src/extra.ts']
+scan paths   : ['.gitignore', 'README.md', 'src/app.ts', 'src/extra.ts']
+ignored      : []
+```
+
+走查连 `dist/` 都没进去。因为 `scanChanges` 的默认 `skipDirectory` 是 `isGeneratedDirectory`，而它的表里有 `dist`。
+
+**为什么这是「沉默失败」而不是「少列几行」。** 两个盲区不重叠是 S8 的前提：git 看不见被忽略的，走查补那一块。当走查也剪掉 `dist/`，两个盲区变成同一个，而 `coverage` 仍然报 `complete`——没有任何东西会说「这一块我也没看」。S8 之前 git 至少还会说 `coverage: partial`（`node_modules` 之类），现在连那句都没有，因为走查自认为走完了。
+
+**修法。** 见 D-132：拆出 `UNWALKABLE_DIRS` / `isUnwalkableDirectory`，只保留「不可能装着这一轮产出」的目录，`dist`/`build`/`out`/`target`/`coverage` 全部放行。修后同一套代码、同一个仓库输出六行、两个来源、重叠路径只出现一次。
+
+**为什么测试没抓到。** 三层，每层都以「注入得太好」的方式失效：
+
+1. **`ignored` 被注入。** `test/index.test.mjs` 的合并块里，`ignored` 是一个直接 `paths.filter(p => p.includes('/dist/'))` 的假函数。它假设「走查会报出 `dist/` 里的文件」，而这正是被证伪的那件事。断言于是观察到了正确的合并，却建立在一个不可能成立的前提上。
+2. **`scan` 被注入。** 同一个块里 `scan` 是一串手写字面量，天然包含 `dist/bundle.js`。走查的过滤根本没参与。
+3. **`scanChanges` 自己的测试注入了 `skipDirectory`。** `test/scan-changes.test.mjs` 里那条 `build output is skipped` 是显式传谓词的，它证明「传进去会被问」，同时**把 `dist` 被剪掉写成了规范**。改动默认值它不会变红——它测的是实现的一个用法，不是生产默认。
+
+事后问了一个此前没问过的问题：**「S8 的默认值有没有被任何一条断言观察过？」** 答案是没有任何一条。S7 那次的 `skipDirectory` P0（DEF-106）是完全同形的第二次发作。两次都是「钩子存在、测试注入过、生产从不使用」，两次都是真机验收才发现。
+
+**这次补的窟窿。** `scan-changes.test.mjs` 新增一个**不注入** `skipDirectory` 的块，断言 `dist`/`build`/`coverage` 都被走进去，另加一条「两个谓词对这几个目录必须给出不同答案」——防止有人日后以「去重」的名义把两张表合并。两条新突变：`the walk is handed the card filter instead of its own`、`the walk may enter a dependency tree`。第一条的第一版写成改 `scan-changes.js` 的默认值，结果 CRASHED（变异体引用了没导入的 `isGeneratedDirectory`），改成在 `api.js` 内部委托才成为有效的 KILLED。

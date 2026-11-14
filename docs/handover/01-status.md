@@ -49,6 +49,7 @@
 | 2026-11-14 | S7：mtime 扫描补上非仓库工作区 | 四路采集齐全；3235 断言全绿，突变 98/45/128 全杀，残留 0。**真机验收未做** |
 | 2026-11-14 | S7 审查与真机验收 | 四个审查者指向同一个 P0（`skipDirectory` 生产零调用）；coverage 扩三态并抽出 `mergeCoverage`；3258 断言全绿，三套突变 101/45/128 全杀；真机对比证明修的是真问题 |
 | 2026-11-14 | 产出卡 S8：git 看不见的文件也有人记 | 合并规则从「谁胜出」改为「git 给可见的、走查只补被忽略的」（D-129），`ignoredPaths` 问 `git check-ignore --stdin -z`，返回值带 `known`/`repository` 两个不确定词；每个路径记下是哪个 bracket 找到的（D-130）；卡片头部改说会话总数、徽标改说剩余、coverage 三态各说各话（D-131）。3312 断言全绿，三套突变 108/45/128 全杀，残留 0。**真机验收未做** |
+| 2026-11-14 | S8 真机验收：走查剪掉了它要补的那个目录 | 真仓库里 `dist/` 同时被 `.gitignore` 忽略（git 看不见）和被走查的目录过滤剪掉（`isGeneratedDirectory` 算它生成），所以 S8 的「走查补盲区」在构建产物目录里完全失效。拆出 `isUnwalkableDirectory` 作为更窄的遍历谓词，3319 断言全绿、突变 110/45/128 全杀、残留 0；卡片五场景同源渲染核对通过。**新增 DEF-110、D-132** |
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 ---
 
@@ -3577,3 +3578,70 @@ worktree        resolve 之后: worktree: true
 **验证。** `node test/run.mjs` = 3312 passed / 0 failed；`mutate-language-and-files` 108 killed、`mutate-persistence` 45 killed、`mutate-checklist-panel` 128 killed，全部 0 survived / 0 not applied / 0 crashed；`audit_leftovers.py` = 0 残留。S8 之前是 3258 断言、101/45/128。
 
 **还没做。** 真机验收没做——这次改动要在宿主里重启才生效，需要开一个仓库、往被 `.gitignore` 忽略的目录里写文件，看卡片上是否同时出现两条来源的行、头部是否只有一个总数、coverage 提示是否按三态显示。这件事与 S7 那次一样，必须重启宿主。
+
+## 2026-11-14 · S8 真机验收：走查剪掉了它自己要补的那个目录
+
+**为什么要真机验收。** S8 的全部断言都在进程内跑，`ignored` 接缝被注入，`changes` 被注入，`scan` 被注入。三条通路各自看起来都对，而 S8 的整个论点是「两条通路看见的东西不重叠」——这个论点只有让真的 git 和真的文件系统同时回答才算验证过。S7 那次真机验收抓出了一个 P0（`skipDirectory` 生产零调用），S8 这次也抓出了一个。
+
+**怎么做的。** 造真仓库 `F:/dsh-plugin/s9repo`（`.gitignore` 含 `dist/` 与 `*.log`，有一个 seed 提交），派一个 subagent 在里跑脚本写三个文件：`dist/bundle.js`、`dist/app.log`、`src/extra.ts`。它不能用 `subagent` 的 `cwd` 参数改工作区——那个参数只改 shell 默认目录，不改 session header 的 cwd，而 `workspaceFor(session)` 读的是 header。第一次就是这么错的：探针写在 `_probe/s8-live` 里，两个 bracket 都在查 `F:/dsh-plugin`，状态文件只留下 transcript 从 shell 重定向解析出的相对路径。改成主工作区的**直接子仓库**才走通，因为 `findChildRepositories` 只下一层。
+
+**真机读到的状态（`1ca085fd-....json`）。**
+
+```
+state 2  turns 1  sweep {'turn': 1, 'coverage': 'partial'}
+prev.paths ['dist/bundle.js', 'dist/app.log', 'src/extra.ts']
+seq1 src=None  dist/bundle.js
+seq2 src=None  dist/app.log
+seq3 src=None  src/extra.ts
+seq4 src=git   F:/dsh-plugin/s9repo/src/extra.ts
+```
+
+git 那一半是对的：多根发现了 `s9repo`，`source: 'git'` 真的落了盘。但被忽略的两个文件是从 transcript 的相对路径进来的，`source` 缺席，**不是走查补进来的**。
+
+**根因（DEF-110）。** 直接跑三路生产函数：
+
+```
+git  paths   : ['F:/dsh-plugin/s9repo/src/extra.ts']
+scan paths   : ['.gitignore', 'README.md', 'src/app.ts', 'src/extra.ts']
+ignored      : []
+```
+
+`dist/` 里的两个文件走查根本没走到。`scanChanges` 的默认 `skipDirectory` 是 `isGeneratedDirectory`，而它的表里有 `dist`、`build`、`out`、`target`、`coverage`。这两个盲区因此**重叠**：`.gitignore` 让 git 看不见 `dist/`，目录过滤让走查也看不见 `dist/`，于是 S8 新加的那条通路在它最该起作用的地方是瞎的。
+
+把过滤换成窄表之后，同一套代码、同一个仓库：
+
+```
+default skip : ['.env.local', '.gitignore', 'debug.log', 'dist/app.log', 'dist/bundle.js',
+                'README.md', 'secrets.local.log', 'src/app.ts', 'src/extra.ts']
+ignored only : ['debug.log', 'dist/app.log', 'dist/bundle.js', 'secrets.local.log']
+--- merged ---
+scan  debug.log            scan  dist/app.log
+scan  dist/bundle.js       scan  secrets.local.log
+git   .env.local           git   src/extra.ts
+rows 6 | sources scan,git
+```
+
+六行、两个来源、重叠的 `src/extra.ts` 只出现一次并归给 git。
+
+**改了什么。**
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/api.js` | 新增 `UNWALKABLE_DIRS`（`node_modules`、`.git`、`__pycache__`、`.venv`、`.cache`、`.next` 等）与 `isUnwalkableDirectory`，并导出 |
+| `packages/ui-evolve/lib/scan-changes.js` | 默认过滤从 `isGeneratedDirectory` 改为 `isUnwalkableDirectory`，注释写明两个问题的区别 |
+| `test/scan-changes.test.mjs` | +7 条：`dist`/`build`/`coverage` 都被走进；两个谓词确实不同（折叠回一起会红） |
+| `scripts/mutate-language-and-files.mjs` | +2 条突变、重定向 1 条（下划线那条原本指 `isGeneratedDirectory`，走查已不用它，是 UNCOVERED） |
+
+**为什么不是「再加一条并集规则」。** 因为问题不在合并，在采集。走查看到的东西少了，合并再聪明也只能从看到的里挑。
+
+**为什么两个谓词要分开而不是把 `dist` 从卡片表里删掉。** 卡片把 `dist/bundle.js` 归成「生成文件」是对的——那不是人写的。走查想进去也是对的——那是脚本写出来的，正是这一轮发生过的事。两个问题的答案本来就不同，硬凑成一个表必然在一边出错。`isUnwalkableDirectory` 的注释把这段理由写在了表旁边。
+
+**验证。** `node test/run.mjs` = **3319 passed / 0 failed**；`mutate-language-and-files` **110 killed**、`mutate-persistence` **45 killed**、`mutate-checklist-panel` **128 killed**，全部 0 survived / 0 not applied / 0 crashed；`audit_leftovers.py` = **0 残留**。新断言用注入验证过：把默认值改回 `isGeneratedDirectory`，`scan-changes.test.mjs` 立刻 4 条红。
+
+**卡片核对（同源渲染）。** 从 `client.js` 里原样切出整段样式表与 `FILE_MARKS`，五个场景：折叠态/展开态 × `partial`/`none`/`complete`，以及只有三行时的无余数态。核对结果：折叠态头部「6 个文件」、徽标「显示其余 2 个」、下方一行 caveat；展开态徽标变「收起文件」、caveat 仍在；`complete` 不画 caveat；三行时整个徽标不出现。**头部总数 = 屏幕上的行数 + 徽标余数**，这条算术在三个场景里都成立。
+
+**仍然没做到的。**
+
+- **截图不是宿主实拍。** GUI 要带 token 的 URL，而 token 只在宿主内存里，磁盘上没有（`remote-web-ui-devices.json` 只有 device id 与 UA，环境变量里只有 `DSH_WEB_URL`）。这条限制在 S7 那节已记过，没有变化。
+- **主机工作区的走查仍然截断。** `F:/dsh-plugin` 有 15,778 个目录，`MAX_SCANNED_ENTRIES = 5000` 被别处吃光，所以本会话自己的卡片里走查那一路基本恒为 `partial`。这次的真机证据来自子仓库 `s9repo`（一个 4 文件的仓库，`truncated=false`）。
+- **`source` 只落盘、不进界面。** 卡片今天不显示哪一行是走查找到的。这是 S8 的既有取舍（docs/19 §7.3 已记），本轮没有改变。

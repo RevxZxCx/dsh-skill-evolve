@@ -7,6 +7,7 @@ import {
   MAX_SCANNED_ENTRIES,
   scanChanges,
 } from '../packages/ui-evolve/lib/scan-changes.js'
+import { isGeneratedDirectory, isUnwalkableDirectory } from '../packages/ui-evolve/lib/api.js'
 
 let passed = 0
 let failed = 0
@@ -236,6 +237,38 @@ check('the entry budget is far more than the card can show', MAX_SCANNED_ENTRIES
   check('and so is another one', found.paths.includes(join(root, '_build/out.js')), found.paths.join('|'))
   check('so all three are rows', found.paths.length === 3, found.paths.join('|'))
   await rm(root, { recursive: true, force: true })
+}
+
+// ---- build output is walked, though the card calls it generated ------------
+//
+// The walker asks "could a turn's output be inside", not "would a reader rather
+// not see this row". `dist`, `build`, `out`, `target` and `coverage` answer yes
+// to the first: they are where scripts write, and they are in `.gitignore` in
+// every project that has them, which makes them the exact overlap between the
+// card's filter and git's blind spot. Pruning them made the S8 bracket blind
+// exactly where it was added to help -- measured on a real repository: four
+// rows came back and neither ignored file that mattered was asked about.
+{
+  const root = await makeTree(['dist/bundle.js', 'build/out.js', 'coverage/lcov.info', 'src/app.ts'])
+  for (const file of ['dist/bundle.js', 'build/out.js', 'coverage/lcov.info', 'src/app.ts']) {
+    await stamp(join(root, file), 5000)
+  }
+  const found = await scanChanges({ cwd: root, since: 4000 })
+  check('a bundle directory is walked', found.paths.includes(join(root, 'dist/bundle.js')), found.paths.join('|'))
+  check('and so is the build directory', found.paths.includes(join(root, 'build/out.js')), found.paths.join('|'))
+  check('and a coverage report', found.paths.includes(join(root, 'coverage/lcov.info')), found.paths.join('|'))
+  check('so all four are rows', found.paths.length === 4, found.paths.join('|'))
+  await rm(root, { recursive: true, force: true })
+}
+
+// The two predicates differ, and the difference is the point. If someone later
+// folds them back together "to avoid duplication", this fails and says why.
+{
+  const cardHides = ['dist', 'build', 'out', 'target', 'coverage']
+  const walkSkips = ['node_modules', '.git', '__pycache__']
+  check('the card still calls build output generated', cardHides.every((name) => isGeneratedDirectory(name)), String(cardHides))
+  check('the walk no longer agrees with it about that', cardHides.every((name) => isUnwalkableDirectory(name) === false), String(cardHides))
+  check('but the walk still refuses a dependency tree', walkSkips.every((name) => isUnwalkableDirectory(name)), String(walkSkips))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

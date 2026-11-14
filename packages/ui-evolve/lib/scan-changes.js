@@ -1,6 +1,6 @@
 import { readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
-import { isGeneratedDirectory } from './api.js'
+import { isUnwalkableDirectory } from './api.js'
 
 /**
  * Finds files under a workspace that changed since a turn began.
@@ -75,8 +75,12 @@ export const MAX_SCAN_MS = 1500
  *   host's own install directory.
  * @param {number} options.since - milliseconds; files at or after this are kept.
  * @param {(segment: string) => boolean} [options.skipDirectory] - consulted
- *   before descending. The production value is `isGeneratedDirectory`; the
- *   substitution point exists so a test can prove the walk asks at all.
+ *   before descending. The production value is `isUnwalkableDirectory`, which
+ *   is narrower than the card's filter on purpose: `dist` and `build` are
+ *   generated rows, but they are also where scripts write, and git cannot see
+ *   them, so a walk that skipped them would be blind exactly where it was added
+ *   to help. The substitution point exists so a test can prove the walk asks at
+ *   all.
  * @param {number} [options.maxEntries] - replaces `MAX_SCANNED_ENTRIES`.
  * @param {number} [options.maxDepth] - replaces `MAX_SCAN_DEPTH`.
  * @param {number} [options.maxMs] - replaces `MAX_SCAN_MS`.
@@ -94,13 +98,17 @@ export async function scanChanges(options) {
   const since = options?.since
   if (typeof since !== 'number' || Number.isFinite(since) === false) return empty
 
-  // Defaults to the same predicate the card filters with, not to "descend into
-  // everything". A walker that agrees with the card only when a test passes the
-  // predicate is a walker that disagrees with it in production: `node_modules`
-  // alone can hold more files than the entire budget, so the walk would spend
-  // its 5000 entries inside one dependency tree and report those files as the
-  // turn's output while the real file was never reached.
-  const skipDirectory = typeof options?.skipDirectory === 'function' ? options.skipDirectory : isGeneratedDirectory
+  // Defaults to a predicate narrower than the card's, never to "descend into
+  // everything". Two different questions are being answered: the card asks "is
+  // this row worth showing", the walk asks "could a turn's output be inside".
+  // `node_modules` answers no to the second — it alone can hold more files than
+  // the entire budget, so descending would spend the 5000 entries inside one
+  // dependency tree and report those files as the turn's output while the real
+  // file was never reached. `dist` and `build` answer yes to the second: they are
+  // where scripts write, and they are in `.gitignore` in every project of the
+  // kind that has them, which makes them the exact overlap between the card's
+  // filter and git's blind spot. Skipping them made this bracket useless there.
+  const skipDirectory = typeof options?.skipDirectory === 'function' ? options.skipDirectory : isUnwalkableDirectory
   const maxEntries = Number.isFinite(options?.maxEntries) === true ? options.maxEntries : MAX_SCANNED_ENTRIES
   const maxDepth = Number.isFinite(options?.maxDepth) === true ? options.maxDepth : MAX_SCAN_DEPTH
   const maxMs = Number.isFinite(options?.maxMs) === true ? options.maxMs : MAX_SCAN_MS
