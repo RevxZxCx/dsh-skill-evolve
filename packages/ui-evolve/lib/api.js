@@ -294,6 +294,18 @@ const GENERATED_SUFFIXES = ['.min.js', '.min.css', '.map', '.pyc', '.pyo', '.cla
 // The leading underscore is the load-bearing half. It is the oldest convention
 // there is for "scratch, or not part of the interface", and it is what these
 // sessions actually produce.
+/**
+ * How long a remembered path stays in the reader's view before it is demoted.
+ *
+ * Seven days is a judgement, not a measurement. The two ends are: a session that
+ * ran this morning must not shuffle its rows under the reader, and a session from
+ * last month should not greet them with a hundred rows of scratch files. Nothing
+ * is deleted at this boundary — the rows move one group down and the header says
+ * how many there are — so the cost of being wrong is a group label, and the cost
+ * of being too eager is a file the reader wanted to click parked one group lower.
+ */
+const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
+
 const TEMP_DIRS = new Set(['tmp', 'temp', 'scratch', '.tmp', '.temp', '.scratch', '.research', '.probe', '.sandbox', '.playground', '.trash'])
 // Dunder names are the exception that makes the underscore rule safe. Two
 // families live here and both belong to the project: directories such as
@@ -367,6 +379,24 @@ function isGeneratedDirectory(segment) {
 // the same reason the walk does not descend into everything.
 const UNWALKABLE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'venv', '.cache', '.pytest_cache', '.mypy_cache', '.gradle', '.turbo', '.idea', '.next', '.nuxt'])
 
+// Working copies and scratch trees, which are dot-prefixed rather than named.
+//
+// Measured on the largest stored session: 200 remembered paths, 114 under
+// `.rv-head/`, 62 under `.tmp-test/`, 21 under `.review/` — 197 of them review
+// copies, test scratch and probe files. `isUnwalkableDirectory` refused none of
+// them, because the table above matches whole names and these are prefixed.
+//
+// This list is the walker's, not the card's. A row under `.rv-head/` is still
+// worth showing if a turn somehow produced one; what is not worth doing is
+// reading a thousand files of a copy to find out. The same walk therefore both
+// prunes these and keeps classifying what it does read through `isNoisePath`.
+//
+// Prefixes rather than a name list because the suffix is the part that varies:
+// `.rv-head`, `.rv-prev`, `.rv-sbx`, `.audit-s8e2b` are all the same thing a
+// different reviewer made, and a table of exact names would miss the next one.
+const UNPRODUCTIVE_DIRS = new Set(['.tmp-test', '.review', '.nyc_output', '.parcel-cache', '.rollup.cache', '.vitest', '.jest'])
+const UNPRODUCTIVE_PREFIXES = ['.rv-', '.audit-', '.tmp-', '.probe-', '.scratch-', '.sandbox-', '.playground-']
+
 /**
  * Whether a traversal should refuse to enter a directory.
  *
@@ -375,12 +405,20 @@ const UNWALKABLE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycac
  * The walk still classifies what it finds through `isNoisePath`, so a bundle in
  * `dist/` lands in the card's "generated" group rather than among the sources.
  *
+ * Three tests, narrowest first. The name table is kept apart from the prefix
+ * table because they fail differently: a name is either in the set or not, while
+ * a prefix can collide with real source (`.probing/` would match `.probe-` only
+ * if the dash were dropped, so the dash is load-bearing).
+ *
  * @param {string} segment - one directory name, not a path.
  * @returns {boolean} whether its contents are unreachable for this purpose.
  */
 function isUnwalkableDirectory(segment) {
   if (typeof segment !== 'string' || segment.length === 0) return false
-  return UNWALKABLE_DIRS.has(segment.toLowerCase())
+  const folded = segment.toLowerCase()
+  if (UNWALKABLE_DIRS.has(folded)) return true
+  if (UNPRODUCTIVE_DIRS.has(folded)) return true
+  return UNPRODUCTIVE_PREFIXES.some((prefix) => folded.startsWith(prefix))
 }
 
 /**
@@ -437,7 +475,14 @@ function isNoisePath(path, cwd) {
   // `isNoisePath`. Repeating them here is what let them drift.
   const name = segments[segments.length - 1] ?? ''
   const lowerName = name.toLowerCase()
-  // Directories first: anything under a scratch directory is scratch, whatever
+  // Working copies first, and by the same two tables the walker uses. A row under
+  // `.rv-head/` or `.tmp-test/` is a copy a review made or a scratch file a test
+  // wrote — nobody typed it, and the largest stored session was 197 such rows out
+  // of 200. The card's test is the WIDER of the two on purpose (it also counts
+  // `out`/`dist`/`build`, which the walk still enters), so sharing the tables here
+  // is what keeps the two from answering differently about the same directory.
+  if (segments.slice(0, -1).some((segment) => UNPRODUCTIVE_DIRS.has(segment) || UNPRODUCTIVE_PREFIXES.some((prefix) => segment.startsWith(prefix)))) return true
+  // Directories next: anything under a scratch directory is scratch, whatever
   // it is called. Dot directories are deliberately not covered wholesale —
   // `.github/` and `.vscode/` are project directories — only the named ones.
   if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true
@@ -507,10 +552,20 @@ function resourceAddress(sessionId, cwd, path) {
  * @param {string} [input.sessionId] - the session the addresses belong to.
  * @param {Set<string>} [input.turnPaths] - normalised paths the last turn wrote.
  * @param {number} [input.turnNow] - the number of the turn that just ended.
+ * `stale` answers a third question about the same rows: a person wrote it, but
+ * the session has not touched it in a long time. It is derived from `at` — the
+ * moment this session last recorded the path — rather than from the file's own
+ * mtime. A file's mtime says when some program last wrote it, which on a shared
+ * checkout can be a teammate's commit, a `git checkout`, or a build; the question
+ * the card asks is "is this still part of what I am doing", and only the session
+ * can answer that.
+ *
  * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests.
- * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean }>>} one row per candidate.
+ * @param {number} [input.now] - the clock `stale` is measured against, for tests.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean }>>} one row per candidate.
  */
-async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat }) {
+async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
+  const clock = Number.isFinite(now) ? now : Date.now()
   const seen = new Set()
   const out = []
   for (const raw of paths) {
@@ -555,6 +610,10 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       turn,
       noise: isNoisePath(absolute, cwd),
       at: Number.isFinite(recordedAt) ? recordedAt : null,
+      // Three states, like the file's own status: recent, old, unknown. "Unknown"
+      // is not "old" — a record written before `at` was kept cannot be aged, and
+      // demoting it would be sorting on a number that was never recorded.
+      stale: Number.isFinite(recordedAt) && Number.isFinite(clock) ? clock - recordedAt >= STALE_AFTER_MS : false,
       source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,
     }
     let info

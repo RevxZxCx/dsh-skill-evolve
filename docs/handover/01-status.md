@@ -54,6 +54,7 @@
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 | 2026-11-14 | 产出卡 S3：行内复制 | 一行从 `<button>` 改成 `div` 里两个兄弟按钮（打开 / 复制），动作层绝对定位叠在尺寸上——因为展开态的行容器有 `overflow-y:auto`，浮到行外的菜单会被裁掉。复制绝对路径与工作区相对路径（`relativePath` 单独一个函数：工作区外没有相对路径这个答案，编一个就是把 `../` 写进剪贴板）。没有 `navigator.clipboard` 就整层不渲染——这条我先写成「明文 http 所以是常态」，**被真机实测推翻**：loopback 算 secure context，按钮本来就画得出来。八单元独立审查后修 9 处（`İ` 折叠变长切错位、两条永远为真的断言、行高亮≠可点区、焦点下尺寸退出无障碍树、`aria-label` 不播报结果）。3413 断言全绿，三套突变 129/45/128 全杀，残留 0。**新增 DEF-121~126、D-138~145** |
 | 2026-11-14 | 复制改成悬停图标 + 展开菜单 | 用户 m14496 要求把两个中文小按钮换成一个复制图标，点开菜单再选绝对/相对。菜单做成**行的兄弟、在文档流内**——两个祖先（`.dsse-card{overflow:hidden}`、`.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`）都会裁掉浮层，而长列表正是最需要它的场合。八单元六个审查者 + 两轮后台审查：修 14 处，最重的是「图标上再按关不掉菜单」（真机 `renders` 2→4 证实）与「聚焦时透明按钮压住文件大小」。3459 断言全绿，突变 143/45/128 全杀，残留 0。**新增 DEF-127~132、D-146~150、R-85** |
+| 2026-11-15 | 产出卡 A/B/C：谁算噪声、数字怎么说、旧文件怎么办 | 200 条真实会话里 197 条是审查副本，卡片却说「200 个文件」（A）。拆出 `UNPRODUCTIVE_DIRS`/`UNPRODUCTIVE_PREFIXES` 只喂遍历，`out`/`dist`/`build` 仍然进得去；卡片侧比遍历侧宽、共用同一张表。头部主数字只数「现在还算数」的行，其余进灰字，两者相加等于徽标倒数（B）。`stale` 用会话记录的 `at` 而不是文件 mtime，七天，只褪色不删除（C）。3506 断言全绿，突变 152/45/128 全杀，残留 0。**新增 DEF-133~136、D-152~156** |
 | 2026-11-14 | 复制菜单去掉路径，只留两个文案 | 用户 m15439 说长路径会把布局撑大。**撑大这件事不成立**——菜单项由卡片定宽（实测两项各 378px，去掉路径后宽度一个像素没变），真正的问题是长路径只能显示成 `F:\dsh-plugin\dsh-ski…`，那比两个词更少地说明剪贴板里会是什么。删掉 `dsse-row-menuitem-value` 与它的样式规则，`menuItem` 的 `children` 从两层变成一层；标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis`，长文案照样不会把菜单推宽。断言从「显示路径」改成「不显示路径」并加一条 CSS 反向断言（`sheet.includes('dsse-row-menuitem-value') === false`），防这条规则以死代码的形式回来。3458 断言全绿，突变 143/45/128 全杀，残留 0。**新增 D-151** |
 ---
 
@@ -3902,3 +3903,83 @@ div.dsse-row-menu
 一段值得记住的自省：用户给的理由不成立，**结论却成立**。如果我只按字面去「防止撑大」，我会加上 `max-width` 然后什么都没改变；如果我只反驳理由，菜单里的截断路径会继续留着。正确的是把两件事分开回报——理由纠正，改动照做。
 
 验证：client 套件 733 passed / 0 failed；全量 **3458 passed / 0 failed**；`mutate-language-and-files` **143 killed / 0 survived / 0 not applied / 0 crashed**；`mutate-persistence` 45 killed；`mutate-checklist-panel` 128 killed；`audit_leftovers.py` leftovers 0 / unresolved 0。真机读数：`{"items":2,"itemWidths":[378,378],"itemTexts":["绝对路径","相对路径"],"w":386,"h":55,"menuPosition":"static","inCard":true,"inFiles":true,"menuRight":423,"cardRight":424}`。
+## 2026-11-15 · 产出卡 A/B/C：一个 200 行的会话，和它不是人写的这件事
+
+### 起点是一份真的状态文件
+
+不是构造的样本。`C:/Users/26903/.dsh/plugin-data/skill-evolve/sessions` 下 193 个会话状态，
+最大的那个 33,233 字节、`paths` 里躺着 **200 条**（正好是 `MAX_PATHS` 上限），`sweep.coverage`
+是 `partial`。用生产谓词逐条判：**200 条全部算噪声，人写 0 条**。最高频的五个目录是
+`.rv-head/test`（48）、`.rv-head/packages/skill-evolve/lib`（11）、`.rv-head/packages/core/lib`（10）、
+`.rv-head`（9）、`.tmp-test`（8）——全是审查时建的隔离副本和测试临时目录。
+
+而卡片当时的写法是 `200 个文件`。
+
+### A：谁算噪声
+
+三张表各管一件事，不能合并：
+
+| 表 | 回答的问题 | `out` |
+| --- | --- | --- |
+| `UNWALKABLE_DIRS` | 走进去是否一定白跑 | 否 |
+| `UNPRODUCTIVE_DIRS` / `UNPRODUCTIVE_PREFIXES` | 里面装的是不是只有过程文件 | 否 |
+| `GENERATED_DIRS` | 这一行该不该让人先看到 | 是 |
+
+`.rv-*`/`.audit-*`/`.tmp-*`/`.probe-*` 与前缀表只喂遍历（200 条里 197 条来自这些目录，
+把它们读进来会吃满 5000 条预算），`out`/`dist`/`build` 三个继续可遍历——S8 已经为把
+`out` 加进遍历黑名单付过一次学费：那轮构建产物在面板里彻底消失。
+
+一开始我在方案里写的是「卡片侧不动，历史数据交给 B 和 C」。真机一跑就否掉了：改之前
+`.rv-head` 的 `card-noise` 是 `false`，那 197 条在卡片侧**仍算人写的**，B 的计数对它们
+完全无效，数字还是 200。**卡片侧必须比遍历侧宽，而且必须共用同一张表。**
+
+### B：数字怎么说
+
+头部拆成「主数字 + 灰字」：
+
+- 主数字：`current.length`，也就是**现在还算数**的行（非噪声、非较早）。
+- 灰字：`另有 N 个生成文件` / `M 个较早`，两声，同一行。
+- **算术必须闭合**：屏幕上的行 + 徽标余数 = 主数字 + 灰字里的两个数 = `ordered.length`。
+
+真机跑出来第一件事就推翻了我一个想当然：那份 200 条会话 `current.length` 是 0，头部渲染成
+`另有 200 个生成文件`——「另有」是说给一个并不存在的主数字听的。改成主数字为空时写
+`200 个生成文件`，并加了两条断言把这个零态钉住（`and it does not say "besides" to a number
+that is not there`、`and no main number is drawn when every row was generated`）。
+
+### C：旧文件怎么办
+
+`stale` 由 `at`（这个会话最后一次记下这条路径的时刻）算，**不是文件 mtime**：一个共享
+checkout 上的 mtime 可能是队友的提交、`git checkout` 或一次构建，而卡片要问的是「这还是
+我正在做的事吗」。阈值七天，是判断不是测量，写清了两端约束。三态：`at` 缺失时不算旧
+（未知不等于旧）。
+
+**不删、不只藏**：这些行挪进「较早」组、名字褪到次级色，仍然是活链接。删除线留给
+`missing`——那是「文件没了」的意思，而较早的行文件还在。清理只发生在 `MAX_PATHS` 淘汰
+（按 `seq` 删最旧）。
+
+### 真机验收
+
+四张图，两套样例，用的是**生产模块分类**（`_edit/_real_classify.mjs` 直接 `import
+statTouchedFiles`）：真实 200 条那份渲染成头部只有 `200 个生成文件`、无主数字、徽标
+`显示其余 200 个`；手造的 9 行混合样例渲染成 `4 个文件` + `另有 3 个生成文件 · 2 个较早`，
+展开后组序 `fresh / earlier / stale / noise`，`较早` 组里 `classify_real.py` 褪色可点、
+`_r_all_strings.txt` 删除线且右侧写「已删除」。
+
+第一版渲染页我图省事在 Python 里**重写了一遍** `isNoisePath`，结果把 `_head.js`、`_probe_tail.js`
+判成人写（复刻件只按目录段判，漏了 `_scratch` 文件名那条规则），得出「197 噪声 / 3 人写」
+的错误画面。**渲染页必须调真模块，复刻谓词证明的只是复刻件。**
+
+### 验证
+
+- `node test/run.mjs`：**3506 passed / 0 failed**（`api` 295、`client` 754）。
+- 三套突变串行：`mutate-language-and-files` **152 killed / 0 survived / 0 not applied / 0 crashed**；
+  `mutate-persistence` **45**；`mutate-checklist-panel` **128**。
+- 残留审计：`leftovers: 0 / unresolved: 0`。
+- 锚点下限 143 → 152，并用「删一条看元测试变红」自证过一次。
+
+### 还没做
+
+- `MAX_SCANNED_ENTRIES = 5000` 没动。A 修好后这份工作区仍然恒 `partial`（15,778 个目录），
+  但先看真实数字再决定调不调。
+- 「较早」的七天是估的，没有真实用户会话用来标定。
+- 这一轮仍然是同源渲染 + 无头 Chrome，不是宿主侧栏实拍（宿主那条路要签 cookie，本轮没做）。

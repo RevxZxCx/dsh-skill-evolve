@@ -1233,10 +1233,14 @@ check(
     check('the header carries no action button', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') === undefined && firstByClass(firstHead, 'dsse-head-btn') === undefined, textOf(tree).slice(0, 160))
     // Cards without a `head` still get their metadata from `meta`. Both paths have
     // to be pinned: removing the fallback would silently empty two headers. The
-    // count here is the cumulative one, not `turnFiles` — this card lists the
-    // session's work, and the fixture deliberately makes the two numbers differ.
+    // skills card is the one that still takes the `meta` route; the output card
+    // now builds its own head, so it is not in this list any more.
     const metas = byClass(tree, 'dsse-card-meta').map((node) => textOf(node))
-    check('a card without a custom head still shows its meta', metas.includes('2 技能 · 1 服务') && metas.includes('2 个文件'), JSON.stringify(metas))
+    check('a card without a custom head still shows its meta', metas.includes('2 技能 · 1 服务'), JSON.stringify(metas))
+    check('and the output card no longer takes that route', metas.some((row) => row.includes('个文件')) === false, JSON.stringify(metas))
+    // Its own head is two numbers: what a person wrote, then the remainder.
+    const heads = byClass(tree, 'dsse-head-stats').map((node) => textOf(node))
+    check('a card with a custom head builds it', heads.some((row) => row.includes('2 个文件')), JSON.stringify(heads))
   }
   check('the candidate badge is shown', textOf(firstByClass(tree, 'dsse-queue')).includes('2'), textOf(firstByClass(tree, 'dsse-queue')).slice(0, 80))
   check('skills are listed', textOf(tree).includes('pdf-tools'), textOf(tree).slice(0, 200))
@@ -4047,7 +4051,7 @@ async function openPanel(routes, options) {
   check('the output card lists four rows before anybody opens it', names().length === 4, JSON.stringify(names()))
   // The four shown are the first four edited, not the four newest on disk.
   check('the rows are the ones edited last, in that order', JSON.stringify(names()) === JSON.stringify(['f1.md', 'f2.md', 'f3.md', 'f4.md']), JSON.stringify(names()))
-  check('the header says how many there are', textOf(firstByClass(card, 'dsse-card-meta')).includes('7 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
+  check('the header says how many there are', textOf(firstByClass(card, 'dsse-head-stats')).includes('7 个文件'), textOf(firstByClass(card, 'dsse-head-stats')))
   // The attribute is what switches the scroll box on, so a folded card has to say
   // so. Asserting only the open state let a list that always claimed to be open
   // pass — and that would give a four-row card a scrollbar it does not need.
@@ -4200,7 +4204,7 @@ async function openPanel(routes, options) {
   // The header keeps saying how much was produced whether the card is folded or
   // open. It is a statement about the session, not about the viewport, so opening
   // the list must not change it — that would make the total look like it grew.
-  check('the header keeps meaning the same thing when the card opens', textOf(firstByClass(openCard, 'dsse-card-meta')).includes('7 个文件'), textOf(firstByClass(openCard, 'dsse-card-meta')))
+  check('the header keeps meaning the same thing when the card opens', textOf(firstByClass(openCard, 'dsse-head-stats')).includes('7 个文件'), textOf(firstByClass(openCard, 'dsse-head-stats')))
   check('and the open badge no longer names a remainder', String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label'] ?? '').includes('显示其余') === false, String(firstByClass(openCard, 'dsse-expand-action')?.props?.['aria-label']))
 
   press(openCard)
@@ -4243,20 +4247,31 @@ async function openPanel(routes, options) {
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   const names = () => byClass(card, 'dsse-name').map((node) => textOf(node))
-  const meta = () => textOf(firstByClass(card, 'dsse-card-meta'))
+  const meta = () => textOf(firstByClass(card, 'dsse-head-stats'))
+  // The two halves of the header, read separately: the bold count and the quiet
+  // remainder. Adding them back together is the arithmetic the header promises.
+  const countHead = (text) => Number((String(text).match(/(\d+) 个文件/u) ?? [])[1])
+  const countNote = (node) => {
+    const text = textOf(firstByClass(node, 'dsse-head-note'))
+    const generated = Number((text.match(/另有 (\d+) 个生成文件/u) ?? [])[1])
+    const older = Number((text.match(/(\d+) 个较早/u) ?? [])[1])
+    return (Number.isFinite(generated) ? generated : 0) + (Number.isFinite(older) ? older : 0)
+  }
 
   // Folded, the four rows are this turn's files first, then the session's older
   // ones. Keeping the handed order would give a.md first, and that is precisely
   // the reading the card is supposed to spare the reader.
   check('the folded card shows this turn before the rest', JSON.stringify(names()) === JSON.stringify(['b.md', 'c.md', 'e.md', 'a.md']), JSON.stringify(names()))
   check('the generated files are not among the folded rows', names().includes('x.js') === false, JSON.stringify(names()))
-  // The header counts everything this session produced, generated files included:
-  // they were produced. The old header counted only the files a person wrote and
-  // then named the generated ones beside it, so the card carried two counts of two
-  // different lists next to a badge carrying a third. The generated files are
-  // labelled by their own group now, which is where that distinction belongs.
-  check('the header counts everything the session produced', meta().includes('6 个文件'), meta())
-  check('and it no longer splits the count into two numbers', meta().includes('个生成') === false, meta())
+  // The header counts people's files and names the generated remainder in a
+  // quieter voice. The reverse was tried and reversed: counting everything was
+  // truthful about the collector and a lie to the reader — one real session said
+  // `200 个文件` over four rows, and 197 of the rows behind it were a reviewer's
+  // copy of the repository. Both numbers are still said, because a reader who adds
+  // the header up must land on the total the badge counts down from.
+  check('the header counts the files a person wrote', meta().includes('5 个文件'), meta())
+  check('and names the generated remainder quietly', textOf(firstByClass(card, 'dsse-head-note')) === '另有 1 个生成文件', textOf(firstByClass(card, 'dsse-head-note')))
+  check('and the two halves are the whole list', countHead(meta()) + countNote(card) === 6, `${meta()} / ${textOf(firstByClass(card, 'dsse-head-note'))}`)
   // A card whose only hidden rows are generated files still needs a way to see
   // them: filtering without an exit is deletion with extra steps. Four of the six
   // rows are drawn (three this turn, then a.md), so two are missing — one written
@@ -4330,7 +4345,13 @@ async function openPanel(routes, options) {
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   check('a card with nothing but generated files shows no rows', byClass(card, 'dsse-name').length === 0, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
   check('and still offers the way to them', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
-  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-card-meta')).includes('2 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
+  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-head-note')).includes('2 个生成文件'), textOf(firstByClass(card, 'dsse-head-stats')))
+  // `另有` is a word about a number that came before it. With every row generated
+  // there is no such number, and the grey line has to read as the whole story: a
+  // real session reached this state and the header said `另有 200 个生成文件`
+  // above nothing at all.
+  check('and it does not say "besides" to a number that is not there', textOf(firstByClass(card, 'dsse-head-note')) === '2 个生成文件', textOf(firstByClass(card, 'dsse-head-note')))
+  check('and no main number is drawn when every row was generated', firstByClass(card, 'dsse-head-stat') === undefined, String(firstByClass(card, 'dsse-head-stat') === undefined))
 }
 
 {
@@ -4538,18 +4559,22 @@ async function openPanel(routes, options) {
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  const meta = textOf(firstByClass(card, 'dsse-card-meta'))
+  const meta = textOf(firstByClass(card, 'dsse-head-stats'))
+  const note = textOf(firstByClass(card, 'dsse-head-note'))
   const badge = firstByClass(card, 'dsse-expand-action')
 
   // The one arithmetic the card has to get right: what the header claims was
   // produced must equal what is on screen plus what the badge says is missing.
   // Two independent counts that never get added up are exactly how a card can say
   // "7 个文件" over a list of four with no way to see the rest.
-  const written = Number((meta.match(/(\d+) 个文件/u) ?? [])[1])
+  // The header states itself in two parts now — the bold count and the quiet
+  // remainder — so this adds both before comparing. That is the reader's own
+  // arithmetic, and stating the remainder is only worth doing if it closes.
+  const written = Number((meta.match(/(\d+) 个文件/u) ?? [])[1]) + Number((note.match(/另有 (\d+) 个生成文件/u) ?? [])[1] ?? 0)
   const shown = byClass(card, 'dsse-name').length
   const missing = Number((String(badge?.props?.['aria-label'] ?? '').match(/(\d+) 个/u) ?? [])[1])
-  check('the header, the rows and the badge add up', written === shown + missing, `${meta} / shown ${String(shown)} / badge ${String(badge?.props?.['aria-label'])}`)
-  check('and the missing and unreadable files are still counted in it', written === 7, `${meta} / ${String(badge?.props?.['aria-label'])}`)
+  check('the header, the rows and the badge add up', written === shown + missing, `${meta} ${note} / shown ${String(shown)} / badge ${String(badge?.props?.['aria-label'])}`)
+  check('and the missing and unreadable files are still counted in it', written === 7, `${meta} ${note} / ${String(badge?.props?.['aria-label'])}`)
   // The fold shows four rows; the badge names the remainder, not the whole list,
   // because the header already names the whole list. Two numbers that each name
   // the total leave the reader to subtract.
@@ -4966,7 +4991,7 @@ async function openPanel(routes, options) {
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   check('a card that hides nothing offers no remainder', firstByClass(card, 'dsse-expand-action') === undefined, String(textOf(card).slice(0, 80)))
-  check('and its header still names the total', textOf(firstByClass(card, 'dsse-card-meta')).includes('3 个文件'), textOf(firstByClass(card, 'dsse-card-meta')))
+  check('and its header still names the total', textOf(firstByClass(card, 'dsse-head-stats')).includes('3 个文件'), textOf(firstByClass(card, 'dsse-head-stats')))
   check('and every row is on screen', byClass(card, 'dsse-name').length === 3, String(byClass(card, 'dsse-name').length))
 }
 
@@ -5562,6 +5587,86 @@ async function openPanel(routes, options) {
     check('and closing it asks for nothing', scrolled.length === openCount, `${scrolled.length - openCount} calls on close`)
   }
 
+}
+
+{
+  // A session open for weeks accumulates paths nobody touched since. They are
+  // listed — production is a record, not a cache, and a row that vanished could
+  // not be clicked or discarded — but they are demoted: their own group, a
+  // quieter colour, and no say in the header's main number.
+  //
+  // The fixture runs the four kinds through one card: two of this turn, one more
+  // from today, one old, one generated. Every number has to agree at once.
+  const rows = [
+    { path: '/work/a.md', bytes: 10, mtimeMs: 100, turn: false, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/old.md', bytes: 20, mtimeMs: 200, turn: false, noise: false, stale: true, address: 'dsh-resource://file/session/session-a/work/old.md' },
+    { path: '/work/b.md', bytes: 30, mtimeMs: 300, turn: true, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+    { path: '/work/node_modules/x.js', bytes: 40, mtimeMs: 400, turn: false, noise: true, stale: false, address: 'dsh-resource://file/session/session-a/work/node_modules/x.js' },
+    { path: '/work/c.md', bytes: 50, mtimeMs: 500, turn: true, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
+  ]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 3, calls: 2, failed: 0, turnFiles: 2,
+      summary: { text: 'edited two files' },
+      pendingCandidates: 0,
+      skills: { available: false, skills: [] },
+      mcp: [],
+      files: rows,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  // The main number leaves the old row out on purpose: the point of demoting it
+  // is that it stops describing the session as it stands now. It is not lost —
+  // the quiet note counts it, and the two together still name the whole list.
+  check('the main number leaves the old row out', textOf(firstByClass(folded, 'dsse-head-stats')).includes('3 个文件'), textOf(firstByClass(folded, 'dsse-head-stats')))
+  check('and the note names it separately from generated files', textOf(firstByClass(folded, 'dsse-head-note')) === '另有 1 个生成文件 · 1 个较早', textOf(firstByClass(folded, 'dsse-head-note')))
+  // The arithmetic closes with three kinds in play: 3 recent + 1 generated + 1
+  // old is the whole list of five, and the badge counts down from that same five.
+  check('and the three numbers still name the whole list', Number(textOf(firstByClass(folded, 'dsse-head-stats')).match(/(\d+) 个文件/u)[1]) + 2 === 5, `${textOf(firstByClass(folded, 'dsse-head-stats'))} ${textOf(firstByClass(folded, 'dsse-head-note'))}`)
+  check('the badge counts down from the same total', String(firstByClass(folded, 'dsse-expand-action')?.props?.['aria-label'] ?? '') === '显示其余 2 个', String(firstByClass(folded, 'dsse-expand-action')?.props?.['aria-label']))
+
+  // Read the badge before pressing it. Three mutations remove this control on
+  // purpose; an unguarded read turns each of them into a crash before the tally
+  // prints, and a crash looks to the runner like a mutation nothing caught.
+  const badge = firstByClass(folded, 'dsse-expand-action')
+  check('the folded card offers a way to see the rest', badge !== undefined, String(badge === undefined))
+  check('and that way is clickable', typeof badge?.props?.onClick === 'function', typeof badge?.props?.onClick)
+  if (badge !== undefined && typeof badge.props?.onClick === 'function') badge.props.onClick()
+  const openCard = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const groups = byClass(openCard, 'dsse-group')
+  const groupNames = (key) => byClass(groups.find((node) => node.props?.['data-group'] === key), 'dsse-name').map((node) => textOf(node))
+  check('the old row gets its own group', JSON.stringify(groupNames('stale')) === JSON.stringify(['old.md']), JSON.stringify(groupNames('stale')))
+  check('and it sits after today and before the generated files', JSON.stringify(groups.map((node) => node.props?.['data-group'])) === JSON.stringify(['fresh', 'earlier', 'stale', 'noise']), JSON.stringify(groups.map((node) => node.props?.['data-group'])))
+  check('the old group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'stale')).includes('较早'), textOf(groups.find((node) => node.props?.['data-group'] === 'stale')).slice(0, 60))
+  // Every row appears exactly once. A demotion that drew the row twice would look
+  // like a card that found more than the session ever recorded.
+  const all = byClass(openCard, 'dsse-name').map((node) => textOf(node))
+  check('every row is drawn once', JSON.stringify(all) === JSON.stringify(['b.md', 'c.md', 'a.md', 'old.md', 'x.js']), JSON.stringify(all))
+  // Five rows over four groups, and the arithmetic in the header still lands on
+  // five: a row drawn twice would look like a session that recorded more than
+  // it did, which is the failure mode a demotion invites.
+  check('and the rows outnumber no group total', byClass(openCard, 'dsse-row').length === 5, String(byClass(openCard, 'dsse-row').length))
+
+  // The row carries the fact itself, not just its position under a heading: the
+  // heading scrolls away and the dimming has to survive that.
+  const staleRow = byClass(openCard, 'dsse-row').find((node) => textOf(node).includes('old.md'))
+  check('an old row says so on itself', staleRow?.props?.['data-stale'] === 'true', String(staleRow?.props?.['data-stale']))
+  check('and a current row does not', byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-stale'] === 'true').length === 1, String(byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-stale'] === 'true').length))
+  // It is demoted, not deleted: the row must still open, because a person whose
+  // work is buried under an old entry still needs to click it.
+  check('an old row is still openable', firstByClass(staleRow, 'dsse-row-open') !== undefined, String(firstByClass(staleRow, 'dsse-row-open') === undefined))
+
+  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
+  // Quieter, but not struck through: a strikethrough is the missing file's word,
+  // and these rows still point at files that are there.
+  check('an old row is dimmed', /\.dsse-row\[data-stale="true"\] \.dsse-name\{[^}]*label-secondary/.test(sheet), '')
+  check('and it is not struck through like a deleted one', /\.dsse-row\[data-stale="true"\] \.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

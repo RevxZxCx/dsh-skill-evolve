@@ -26,7 +26,9 @@ import {
   decideCandidate,
   readPanel,
   statTouchedFiles,
-  isNoisePath
+  isNoisePath,
+  isGeneratedDirectory,
+  isUnwalkableDirectory
 } from '../packages/ui-evolve/lib/api.js'
 
 let passed = 0
@@ -1836,6 +1838,86 @@ function heldBodyOf(res) {
   const body = JSON.parse(res.body)
   check('a propose with no skill half is not reported as success', body.data?.ok === false, JSON.stringify(body.data))
   check('and it says why', String(body.data?.reason).includes('skill half is not installed'), String(body.data?.reason))
+}
+
+{
+  // The walk and the card answer different questions, and the difference is
+  // load-bearing: the walk may refuse to enter node_modules, while the card must
+  // still be able to call a row it did read generated. What must never happen is
+  // the reverse — a directory the walk enters while the card counts its files as
+  // a person's work.
+  //
+  // Measured on the largest stored session: 200 remembered paths, 114 under
+  // .rv-head/, 62 under .tmp-test/, 21 under .review/. The walk refused none of
+  // them and the card called three rows out of two hundred generated, so both were
+  // answering about a repository this plugin had never looked inside.
+  const walkerSkips = ['.rv-head', '.tmp-test', '.review', '.audit-s8e2b', '.probe-r1', 'node_modules']
+  const walkerEnters = ['packages', 'src', 'out', 'dist', 'build', '.github', '.probing', '_posts']
+  for (const name of walkerSkips) {
+    check(`the walk refuses ${name}`, isUnwalkableDirectory(name) === true, String(isUnwalkableDirectory(name)))
+  }
+  for (const name of walkerEnters) {
+    check(`the walk still enters ${name}`, isUnwalkableDirectory(name) === false, String(isUnwalkableDirectory(name)))
+  }
+  // The one place the two deliberately disagree. A build output directory is where
+  // a script puts a turn's result, so the walk enters it: the S8 bracket exists
+  // because git cannot see ignored files, and dist/ is ignored in every JavaScript
+  // project, so pruning it made the bracket blind exactly where it was needed.
+  check('a build directory is entered even though the card calls it generated', isUnwalkableDirectory('out') === false && isGeneratedDirectory('out') === true, `${String(isUnwalkableDirectory('out'))} / ${String(isGeneratedDirectory('out'))}`)
+  // Case folding: disks deliver whatever case they please, the tables are lower.
+  check('a working copy spelled in capitals is refused too', isUnwalkableDirectory('.RV-HEAD') === true, String(isUnwalkableDirectory('.RV-HEAD')))
+  // The dash in .probe- is what keeps this from eating a real source directory.
+  check('a source directory that merely starts like a probe is entered', isUnwalkableDirectory('.probing') === false, String(isUnwalkableDirectory('.probing')))
+  // The card is never narrower than the walk. If it were, a path could be read and
+  // then counted as a person's work — the 197-of-200 reading.
+  const bothSides = walkerSkips.concat(walkerEnters).map((name) => [name, isUnwalkableDirectory(name), isNoisePath(`/w/${name}/a.js`, '/w')])
+  check('every directory the walk skips is generated to the card', bothSides.every((row) => row[1] === false || row[2] === true), JSON.stringify(bothSides))
+  check('a working copy is generated to the card too', isNoisePath('/w/.rv-head/a.js', '/w') === true, String(isNoisePath('/w/.rv-head/a.js', '/w')))
+  check('and the source beside it is still written by a person', isNoisePath('/w/src/a.js', '/w') === false, String(isNoisePath('/w/src/a.js', '/w')))
+}
+
+{
+  // `stale` ages a remembered path by when the session recorded it, not by the
+  // file's mtime. In a shared checkout an mtime belongs to whoever last ran a
+  // build, checked out a branch or committed — none of which say when this session
+  // last touched the thing.
+  //
+  // Three states, and the third is the one that matters: unknown is not old. A
+  // record written before `at` was kept cannot be aged, and demoting it would be
+  // sorting on a number that was never recorded.
+  const dir = tempDir('skill-evolve-stale-')
+  const fresh = join(dir, 'fresh.js')
+  const old = join(dir, 'old.js')
+  const unknown = join(dir, 'unknown.js')
+  for (const file of [fresh, old, unknown]) writeFileSync(file, 'x')
+  const DAY = 24 * 60 * 60 * 1000
+  const now = 1_800_000_000_000
+  // Rows come back in the order they were handed in, so index is enough and no
+  // path has to be compared — which matters, because a path comparison here would
+  // have to agree with the layer about separators.
+  const files = await statTouchedFiles({
+    paths: [
+      { path: fresh, at: now - 2 * 60 * 1000 },
+      { path: old, at: now - 30 * DAY },
+      { path: unknown },
+    ],
+    now,
+  })
+  check('a path recorded minutes ago is current', files[0]?.stale === false, JSON.stringify(files[0]?.stale))
+  check('a path recorded a month ago is stale', files[1]?.stale === true, JSON.stringify(files[1]?.stale))
+  check('a path with no recorded time is not aged', files[2]?.stale === false, JSON.stringify(files[2]?.stale))
+  check('and it says the time is unknown rather than zero', files[2]?.at === null, JSON.stringify(files[2]?.at))
+  // The threshold is a judgement, so the boundary is the only part worth pinning:
+  // seven days exactly is stale, one millisecond less is not. Otherwise a later
+  // change to the constant would move both sides together and nothing would notice.
+  const edge = await statTouchedFiles({ paths: [{ path: fresh, at: now - 7 * DAY }], now })
+  const near = await statTouchedFiles({ paths: [{ path: fresh, at: now - 7 * DAY + 1 }], now })
+  check('seven days exactly is stale', edge[0]?.stale === true, JSON.stringify(edge[0]?.stale))
+  check('one millisecond short of seven days is not', near[0]?.stale === false, JSON.stringify(near[0]?.stale))
+  // Without an injected clock the predicate still has to answer, or a caller that
+  // forgets `now` would silently get false for everything and nothing would age.
+  const unclocked = await statTouchedFiles({ paths: [{ path: old, at: Date.now() - 30 * DAY }] })
+  check('a caller that passes no clock still measures against the real one', unclocked[0]?.stale === true, JSON.stringify(unclocked[0]?.stale))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

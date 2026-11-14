@@ -42,8 +42,8 @@ const mutations = [
   {
     label: 'the header stats fall back to the old title-only metadata',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "className: 'dsse-head-stats',",
-    to: "className: 'dsse-head-stats-gone',",
+    from: "                head: jsxs('div', {\n                  className: 'dsse-head-stats',\n                  children: [\n                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),",
+    to: "                head: jsxs('div', {\n                  className: 'dsse-head-stats-gone',\n                  children: [\n                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),",
     suites: ['test/client.test.mjs'],
   },
   {

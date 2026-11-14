@@ -555,6 +555,7 @@ window.__ModuleLoader__.load({
 .dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px;flex:0 0 auto}
 .dsse-head-stat b{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;font-variant-numeric:tabular-nums}
 .dsse-head-ago{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
+.dsse-head-note{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsse-clip{position:relative;overflow:hidden}
 .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
 .dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}
@@ -669,6 +670,11 @@ window.__ModuleLoader__.load({
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
 .dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
+/* Older, not gone and not generated: the name steps back a shade, nothing else.
+   No strikethrough — that belongs to the missing state, which means the file is
+   not there. A stale row is still a live link to a real file, and drawing it like
+   a deleted one would make the reader think the work was lost. */
+.dsse-row[data-stale="true"] .dsse-name{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-row[data-status="missing"] .dsse-name,.dsse-row[data-status="invalid"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1);text-decoration:line-through}
 
 .dsse-row[data-status="missing"],.dsse-row[data-status="invalid"]{cursor:default}
@@ -2436,30 +2442,69 @@ window.__ModuleLoader__.load({
       // group.
       const noisy = ordered.filter((file) => file.noise === true)
       const people = ordered.filter((file) => file.noise !== true)
-      const fresh = people.filter((file) => file.turn === true)
-      const earlier = people.filter((file) => file.turn !== true)
+      // Stale is a third question about the same rows: people wrote it, but not
+      // any time recently. Measured on a real session, 197 of 200 remembered paths
+      // were review copies and test scratch — the sort of thing that is real work
+      // on the day and noise a week later.
+      //
+      // It is not deleted, and not merged into `generated`: a copy of a file that
+      // a reviewer once asked about is still a copy *of a file someone wrote*, and
+      // calling it machine output would be a second wrong label on top of the
+      // first. It gets its own group, one shade quieter, and the header says how
+      // many there are.
+      const stale = people.filter((file) => file.stale === true)
+      const current = people.filter((file) => file.stale !== true)
+      const fresh = current.filter((file) => file.turn === true)
+      const earlier = current.filter((file) => file.turn !== true)
       // Folded, the four rows are the reader's own work, this turn's first. Open,
-      // the whole session is there in three labelled groups, so nothing is
+      // the whole session is there in four labelled groups, so nothing is
       // hidden without a way to see it.
+      //
+      // The folded list is `fresh.concat(earlier)` and not `current`, even though
+      // they hold the same rows: `current` is in the order the session remembered
+      // them, which is oldest first, so slicing it would show the oldest four and
+      // push this turn's work below the fold — the one thing a folded card exists
+      // to prevent.
       const groups = filesOpen === true
         ? [
             { key: 'fresh', label: '', files: fresh },
             { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },
+            { key: 'stale', label: stale.length > 0 ? '较早' : '', files: stale },
             { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },
           ]
         : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]
-      // What the header promises, and it promises one thing: how much this
-      // session produced. It counts the generated files too, because they were
-      // produced. The old header counted people's files and then named the
-      // generated ones beside it — two numbers about two lists, sitting next to a
-      // badge naming a third, so a reader had to work out which pair agreed. The
-      // generated files are now labelled by their own group (visible on opening),
-      // and the badge says how many rows are not on screen, which is the other
-      // question a folded card raises.
-      const fileMeta = `${ordered.length} 个文件`
+      // What the header promises, and it promises one thing: how much of this list
+      // still describes the session as it stands. It used to count everything,
+      // which was truthful about the collector and a lie to the reader — one real
+      // session showed `200 个文件` above four rows, and 197 of those rows were a
+      // reviewer's copy of the repository.
+      //
+      // The main number leaves demoted rows out too (see `stale` below), which is
+      // the same claim one step further: a path nobody has touched in a week is
+      // part of the history, not of the current work.
+      //
+      // The other two numbers are still said, in the same breath and in a quieter
+      // voice, because leaving them out would make the badge's remainder
+      // unexplainable: a reader who adds up what the header says must arrive at
+      // the same total the badge counts down from.
+      const staleCount = stale.length
+      const noiseCount = noisy.length
+      const keptNotes = []
+      // With nothing to put in the main number, the grey line has to stand on its
+      // own: `另有 200 个生成文件` says "besides" to a number that is not there.
+      // A real session reached exactly this state — a reviewer's copy of the
+      // repository left two hundred rows and not one of them a person's.
+      if (noiseCount > 0) keptNotes.push(current.length > 0 ? `另有 ${noiseCount} 个生成文件` : `${noiseCount} 个生成文件`)
+      if (staleCount > 0) keptNotes.push(`${staleCount} 个较早`)
       // How many rows the folded card actually draws. Equality with
       // `FOLDED_FILES` is not assumed: a session with two written files shows two.
       const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length
+      // Still counted against the whole list, not against the header's number.
+      // The badge answers "how much of this list am I not seeing", and the list
+      // is every row the card holds — saying `200 - 4 = 196` while the header
+      // says 3 is only confusing if the two are read as the same quantity, so
+      // the header states the remainder explicitly rather than leaving it to be
+      // subtracted.
       const hiddenFiles = ordered.length - (filesOpen === true ? ordered.length : foldedRows)
       // What the sweep could see, said out loud. `paths` empty reads as "this turn
       // produced nothing", and that is a different sentence from "nothing I could
@@ -2950,11 +2995,30 @@ window.__ModuleLoader__.load({
             ? null
             : jsxs(Card, {
                 title: '产出文件',
-                // The folded count has to be visible without opening anything, and
-                // the open state has to say what is on screen rather than repeat the
-                // total. Both numbers sit in the header, where they cannot be scrolled
-                // out of view — that was the whole of DEF-51.
-                meta: fileMeta,
+                // Two numbers and a quieter pair, in the header where they cannot be
+                // scrolled out of view — that was the whole of DEF-51.
+                //
+                // The bold one answers "how much did a person write"; the grey ones
+                // answer "and what else is in here". They add up: bold + grey = every
+                // row the card holds, which is the same total the badge counts down
+                // from. A reader who checks the arithmetic finds it closes.
+                //
+                // Zero is written as a sentence rather than as `0 个文件`. A card
+                // whose only rows are generated files has no honest subject to count,
+                // and "0 个文件 另有 3 个生成文件" reads like something failed. When
+                // nothing was written and nothing was generated the card is not drawn
+                // at all (see `showFiles`), so this branch only runs with a remainder.
+                head: jsxs('div', {
+                  className: 'dsse-head-stats',
+                  children: [
+                    current.length > 0
+                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(current.length) }), jsx('span', { children: '个文件' })] })
+                      : null,
+                    keptNotes.length === 0
+                      ? null
+                      : jsx('span', { className: 'dsse-head-note', children: keptNotes.join(' · ') }),
+                  ].filter(Boolean),
+                }),
                 // The fold's control is the same round badge the 上一轮 card uses,
                 // in the same place and the same size — two cards in one column
                 // should not teach the reader two shapes for one gesture. It has to
@@ -3112,6 +3176,7 @@ window.__ModuleLoader__.load({
                           return [jsxs('div', {
                             className: 'dsse-row',
                             'data-noise': file.noise === true ? 'true' : 'false',
+                            'data-stale': file.stale === true ? 'true' : 'false',
                             'data-status': status,
                             'data-actions': copyButton === null ? 'false' : 'true',
                             'data-menu': open === true ? 'true' : 'false',
