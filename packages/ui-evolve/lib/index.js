@@ -445,7 +445,12 @@ export function apply(ctx, config, options) {
       // bracket: a directory that is not a repository still has a turn, and a
       // turn still has a beginning.
       scanWatch.start(agentId)
-      transcripts.record(agentId, event)
+      // The directory is what turns a relative redirect target into a path that
+      // can be opened. Both brackets above get it; the transcript needs it too,
+      // and for the strongest reason of the three: without it a target stays
+      // relative until the card joins it to the session root, and a command that
+      // did `cd` first then names a file that never existed.
+      transcripts.record(agentId, event, workspaceFor(session))
       return
     }
 
@@ -464,7 +469,7 @@ export function apply(ctx, config, options) {
     // after a restart, because the number never leaves this process.
     const endedTurn = ending?.turn
 
-    transcripts.record(agentId, event)
+    transcripts.record(agentId, event, workspaceFor(session))
 
     // A finished turn is the moment the panel has something worth writing down.
     // Mid-turn events are not: the panel describes the turn that *ended*, and

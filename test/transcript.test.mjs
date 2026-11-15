@@ -168,8 +168,8 @@ check(
   check('no turn is open between turns', view.current.turn === undefined)
   check('call count is recorded', view.previous.calls === 3, String(view.previous.calls))
   check('failure count is recorded', view.previous.failed === 1, String(view.previous.failed))
-  check('the edited path is recorded', view.previous.paths.includes('F:/src/a.js'), JSON.stringify(view.previous.paths))
-  check('a read-only path is not reported as touched', view.previous.paths.includes('F:/src/read-only.js') === false, JSON.stringify(view.previous.paths))
+  check('the edited path is recorded', view.previous.paths.includes('F:\\src\\a.js'), JSON.stringify(view.previous.paths))
+  check('a read-only path is not reported as touched', view.previous.paths.includes('F:\\src\\read-only.js') === false, JSON.stringify(view.previous.paths))
   check('only the edit is a touched file', view.previous.paths.length === 1, JSON.stringify(view.previous.paths))
   check('the command is recorded', view.previous.commands.includes('npm test'), JSON.stringify(view.previous.commands))
   check('the assistant text is recorded', view.previous.said.includes('The test fails'), String(view.previous.said))
@@ -628,19 +628,19 @@ check(
   store.record('a', { type: 'tool/call', data: { callId: run.id, name: run.name, arguments: run.arguments } })
   const reported = store.view('a')?.current
   check('a declared file is recorded', Array.isArray(reported?.paths) && reported.paths.length === 2, JSON.stringify(reported?.paths))
-  check('and it keeps the whole list, not just the first', reported?.paths?.includes('F:/test/test8/image.png') === true, 'dropped the second path')
+  check('and it keeps the whole list, not just the first', reported?.paths?.includes('F:\\test\\test8\\image.png') === true, 'dropped the second path')
 
   // A shell call in the same turn stays a separate rule. The report does not
   // replace the redirect parser; both feed the same list.
   store.record('a', { type: 'tool/call', data: { callId: 'call-2', name: 'bash', arguments: { command: 'echo hi > F:/test/redirected.txt' } } })
   const both = store.view('a')?.current
-  check('a redirect and a declaration both reach the card', both?.paths?.includes('F:/test/redirected.txt') === true && both?.paths?.includes('F:/test/test8/doc.docx') === true, JSON.stringify(both?.paths))
+  check('a redirect and a declaration both reach the card', both?.paths?.includes('F:\\test\\redirected.txt') === true && both?.paths?.includes('F:\\test\\test8\\doc.docx') === true, JSON.stringify(both?.paths))
 
   // The arguments arrive as raw model output, so the array shape has to be
   // read out of a JSON string too — this is the same trap `readPathArgument`
   // documents, and the same answer.
   store.record('a', { type: 'tool/call', data: { callId: 'call-3', name: 'report_output_files', arguments: '{"paths":["F:/test/from-json.txt"]}' } })
-  check('an argument string is parsed before it is read', store.view('a')?.current?.paths?.includes('F:/test/from-json.txt') === true, JSON.stringify(store.view('a')?.current?.paths))
+  check('an argument string is parsed before it is read', store.view('a')?.current?.paths?.includes('F:\\test\\from-json.txt') === true, JSON.stringify(store.view('a')?.current?.paths))
 
   // A relative path is kept relative. Resolving it needs a workspace, and the
   // transcript does not have one — `api.js` resolves on the way out, where the
@@ -664,7 +664,7 @@ check(
   // record anything at all: non-strings and blanks are dropped on the way in.
   const messy = new TranscriptStore()
   messy.record('d', { type: 'tool/call', data: { callId: 'e1', name: 'report_output_files', arguments: { paths: ['  ', 7, null, 'F:/test/kept.txt'] } } })
-  check('only usable entries are recorded', messy.view('d')?.current?.paths?.join(',') === 'F:/test/kept.txt', JSON.stringify(messy.view('d')?.current?.paths))
+  check('only usable entries are recorded', messy.view('d')?.current?.paths?.join(',') === 'F:\\test\\kept.txt', JSON.stringify(messy.view('d')?.current?.paths))
 
   // Missing arguments are not an error at collection time — `execute` is what
   // tells the model. The transcript just records nothing.
@@ -679,7 +679,7 @@ check(
   const fifty = Array.from({ length: 60 }, (_, index) => `F:/test/many-${index}.txt`)
   many.record('f', { type: 'tool/call', data: { callId: 'g1', name: 'report_output_files', arguments: { paths: fifty } } })
   check('one declaration stops at the per-call cap', many.view('f')?.current?.paths?.length === 40, String(many.view('f')?.current?.paths?.length))
-  check('and the paths kept are the first ones declared', many.view('f')?.current?.paths?.[0] === 'F:/test/many-0.txt', many.view('f')?.current?.paths?.[0])
+  check('and the paths kept are the first ones declared', many.view('f')?.current?.paths?.[0] === 'F:\\test\\many-0.txt', many.view('f')?.current?.paths?.[0])
 
   // `readPathListArgument` is exported because the cap and the parsing are the
   // two things `report-tool.js` documents and cannot test from the outside.
@@ -728,7 +728,7 @@ check(
   both.record('f', { type: 'tool/call', data: { callId: 'b1', name: 'present', arguments: { files: [{ path: 'F:/test/one.docx' }] } } })
   both.record('f', { type: 'tool/call', data: { callId: 'b2', name: 'report_output_files', arguments: { paths: ['F:/test/two.png', 'F:/test/three.zip'] } } })
   const merged = both.view('f')?.current?.paths ?? []
-  check('a presentation and a declaration both land', merged.includes('F:/test/one.docx') && merged.includes('F:/test/two.png'), JSON.stringify(merged))
+  check('a presentation and a declaration both land', merged.includes('F:\\test\\one.docx') && merged.includes('F:\\test\\two.png'), JSON.stringify(merged))
   check('and neither is dropped for the other', merged.length === 3, JSON.stringify(merged))
 
   // A path presented twice is still one row: the snapshot de-duplicates, as it
@@ -746,7 +746,7 @@ check(
   keeps.record('f', { type: 'tool/call', data: { callId: 'k1', name: 'write', arguments: { path: 'F:/src/keep.js' } } })
   keeps.record('f', { type: 'tool/call', data: { callId: 'k2', name: 'present', arguments: { files: [{ path: 'F:/out/card.docx' }] } } })
   const kept = keeps.view('f')?.current?.paths ?? []
-  check('a presentation adds to the turn, it does not replace it', kept.includes('F:/src/keep.js') && kept.includes('F:/out/card.docx'), JSON.stringify(kept))
+  check('a presentation adds to the turn, it does not replace it', kept.includes('F:\\src\\keep.js') && kept.includes('F:\\out\\card.docx'), JSON.stringify(kept))
 
   // Order matters at the cap, and it matters against the obvious reading.
   // `snapshot` keeps the first forty; a shell redirect is seen early, a
@@ -758,7 +758,7 @@ check(
   }
   busy.record('f', { type: 'tool/call', data: { callId: 'last', name: 'present', arguments: { files: [{ path: 'F:/out/named.docx' }] } } })
   const crowded = busy.view('f')?.current?.paths ?? []
-  check('a busy turn still shows what the model named', crowded.includes('F:/out/named.docx'), JSON.stringify(crowded.slice(-3)))
+  check('a busy turn still shows what the model named', crowded.includes('F:\\out\\named.docx'), JSON.stringify(crowded.slice(-3)))
   check('and the cap is still forty rows', crowded.length === 40, String(crowded.length))
 
   // The reader itself. JSON-in-a-string is the shape `tool/call` actually
@@ -767,9 +767,20 @@ check(
   check('and a call carrying a JSON string is read end to end', (() => {
     const wire = new TranscriptStore()
     wire.record('f', { type: 'tool/call', data: { callId: 'w1', name: 'present', arguments: JSON.stringify({ files: [{ path: 'F:/out/wired.pdf' }] }) } })
-    return (wire.view('f')?.current?.paths ?? []).includes('F:/out/wired.pdf')
+    return (wire.view('f')?.current?.paths ?? []).includes('F:\\out\\wired.pdf')
   })(), 'the string form works in isolation but not through a call')
   check('the presentation reader skips entries without a path', readPresentedPaths({ files: [{ description: 'no path here' }, { path: 'ok.txt' }] }).length === 1, 'kept a pathless entry')
+
+  // A files array is not a signature. `write` and friends are documented with
+  // one per call; only the tool that means "this is the deliverable" may be
+  // read that way. Without the name check, a turn that merely wrote a document
+  // would have it announced as something the model chose to hand over.
+  const shaped = new TranscriptStore()
+  shaped.record('f', { type: 'tool/call', data: { callId: 'x1', name: 'some_other_tool', arguments: { files: [{ path: 'F:/out/not-a-deliverable.docx' }] } } })
+  shaped.record('f', { type: 'tool/call', data: { callId: 'x2', name: 'present', arguments: { files: [{ path: 'F:/out/really.docx' }] } } })
+  const shapedPaths = shaped.view('f')?.current?.paths ?? []
+  check('a files array is not a signature', shapedPaths.includes('F:\\out\\not-a-deliverable.docx') === false, JSON.stringify(shapedPaths))
+  check('and the tool that does present is still read', shapedPaths.includes('F:\\out\\really.docx'), JSON.stringify(shapedPaths))
   check('the presentation reader skips a bare string entry', readPresentedPaths({ files: ['nope.txt'] }).length === 0, 'read a string as a file object')
   check('the presentation reader rejects a missing files array', readPresentedPaths({ paths: ['a.txt'] }).length === 0, 'read the wrong field name')
   // Not just absent: present with the wrong *type* under the right key. The
@@ -811,6 +822,55 @@ check(
     return (empty.view('f')?.current?.paths ?? []).length === 0
   })(), 'threw or invented a path')
   check('a present call with more entries than the cap keeps the cap', readPresentedPaths({ files: Array.from({ length: 60 }, (unused, index) => ({ path: `p/${index}.txt` })) }).length === MAX_REPORTED_PATHS, 'did not stop at the cap')
+}
+
+
+// ------------------------------------------------- where a command ran --
+//
+// A shell command is the one caller that knows where its relative paths point:
+// it can `cd` first. Recording `packages/lib/a.js` without that base made the
+// card join it to the session root, find nothing, and draw a line through a file
+// the turn had just written.
+{
+  const store = new TranscriptStore()
+  store.record('a', human('write the fixture'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > notes.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a shell target is resolved against the workspace', paths.includes('F:\\repo\\app\\notes.txt') === true, JSON.stringify(paths))
+  check('and no relative copy is kept beside it', paths.includes('notes.txt') === false, JSON.stringify(paths))
+}
+
+{
+  // The `cd` in the command wins over the base, because it is the last thing
+  // that happened before the write.
+  const store = new TranscriptStore()
+  store.record('a', human('write it under the sub-project'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd sub && cat > notes.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a cd inside the command moves the base', paths.includes('F:\\repo\\app\\sub\\notes.txt') === true, JSON.stringify(paths))
+}
+
+{
+  // The whole point of the exercise: the same file named two ways is one row.
+  // Before this, an `edit` call (forward slashes) and a redirect (whatever the
+  // base joined to) were two keys, and the second was stat-ed as missing.
+  const store = new TranscriptStore()
+  store.record('a', human('write client.js'))
+  store.record('a', { type: 'tool/call', data: { callId: 'e1', name: 'edit', arguments: { file_path: 'F:/repo/app/lib/client.js' } } }, 'F:/repo/app')
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: "cat > lib/client.js <<'EOF'\nx\nEOF" } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('one file named two ways is one row', paths.length === 1, JSON.stringify(paths))
+  check('and the row is the file that exists', paths[0] === 'F:\\repo\\app\\lib\\client.js', JSON.stringify(paths))
+}
+
+{
+  // Without a workspace the old behaviour is the only honest one: keep the
+  // path, and let the reader decide it cannot be placed.
+  const store = new TranscriptStore()
+  store.record('a', human('write notes'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > notes.txt' } } })
+  const paths = store.view('a')?.current?.paths ?? []
+  check('with no workspace the path is kept as written', paths.includes('notes.txt') === true, JSON.stringify(paths))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

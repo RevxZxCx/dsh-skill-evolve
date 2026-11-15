@@ -10,7 +10,7 @@
  * an operator glued to its target with no space.
  */
 
-import { writtenPaths, stripHeredocs } from '../packages/core/lib/shellpaths.js'
+import { canonicalPath, writtenPaths, stripHeredocs } from '../packages/core/lib/shellpaths.js'
 
 let passed = 0
 let failed = 0
@@ -122,6 +122,65 @@ check('and the cap keeps the first targets', capped[0] === 'f0.txt' && capped[19
 same('a program that writes files is not guessed at', writtenPaths('python build.py'), [])
 same('a package script is not guessed at', writtenPaths('pnpm build'), [])
 same('a git command names no file', writtenPaths('git add -A'), [])
+
+// ---------------------------------------------------------- a base to use --
+//
+// Without a base the paths come back exactly as the command spelled them, and
+// that is what every assertion above pins. With one, the command's own `cd` is
+// followed, because the panel stores absolute paths: a record that keeps
+// `packages/lib/a.js` cannot be resolved later by anyone — the card joins it to
+// the session root, which is not where the command ran, and then reports a file
+// the turn just wrote as deleted.
+const BASE = 'F:\\work\\app'
+
+same('a relative target is resolved against the base', writtenPaths('cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
+// A shell on Windows is usually an MSYS shell, and a model writing a Windows
+// path into one writes forward slashes — that is the form that has to survive.
+same('an absolute target is left alone', writtenPaths('cat > F:/elsewhere/x.txt', BASE), ['F:\\elsewhere\\x.txt'])
+same('and single quotes preserve the backslashes', writtenPaths("cat > 'F:\\elsewhere\\y.txt'", BASE), ['F:\\elsewhere\\y.txt'])
+// Not a bug, a shell fact: inside double quotes a backslash escapes the next
+// character, so this command really does name `F:elsewherex.txt`.
+same('a double-quoted path is unescaped by the shell, not resolved', writtenPaths('cat > "F:\\elsewhere\\x.txt"', BASE), ['F:\\work\\app\\F:elsewherex.txt'])
+same('a cd moves the base for what follows', writtenPaths('cd sub && cat > notes.txt', BASE), ['F:\\work\\app\\sub\\notes.txt'])
+same('a cd to an absolute path replaces the base', writtenPaths('cd F:/elsewhere && cat > notes.txt', BASE), ['F:\\elsewhere\\notes.txt'])
+same('a nested cd composes', writtenPaths('cd a && cd b && cat > c.txt', BASE), ['F:\\work\\app\\a\\b\\c.txt'])
+same('pushd is followed like cd', writtenPaths('pushd sub && cat > notes.txt', BASE), ['F:\\work\\app\\sub\\notes.txt'])
+same(
+  'a cd only moves what comes after it',
+  writtenPaths('cat > before.txt && cd sub && cat > after.txt', BASE),
+  ['F:\\work\\app\\before.txt', 'F:\\work\\app\\sub\\after.txt'],
+)
+
+// Three spellings of "a directory this module cannot know". Guessing at any of
+// them would write a confidently wrong absolute path — worse than the relative
+// one it replaced, because a relative path can still be resolved by a reader who
+// knows more than this function does.
+same('cd - is not followed', writtenPaths('cd - && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
+same('a cd through a variable is not followed', writtenPaths('cd $DIR && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
+same('a cd through a home shortcut is not followed', writtenPaths('cd ~/x && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
+
+// A shell on Windows is often an MSYS shell, which spells `F:\x` as `/f/x`. The
+// two name one directory, and only the drive form is unambiguous — `/tmp` and
+// `/usr/bin` are the shell's own roots and this module has no way to place them.
+same(
+  'an msys drive path is folded to the windows one',
+  writtenPaths('cd /f/work/app && cat > notes.txt', 'F:\\work'),
+  ['F:\\work\\app\\notes.txt'],
+)
+// The shell's own roots are not the project's. `/tmp` is absolute, so it is not
+// joined to a Windows base — and it is not folded either, because only the
+// drive form is unambiguous.
+same('a shell path without a drive is not joined to the base', writtenPaths('cat > /tmp/x.txt', BASE), ['/tmp/x.txt'])
+
+// One file, one entry. `path.join` spells separators with backslashes while a
+// model writing an `edit` call types forward slashes; both name the same file
+// and the list is keyed by the string, so without this the card draws two rows
+// and one of them is a ghost.
+same('canonicalPath folds a drive path', canonicalPath('F:/a/b.js'), 'F:\\a\\b.js')
+same('canonicalPath leaves a posix path alone', canonicalPath('/home/u/a.js'), '/home/u/a.js')
+same('canonicalPath is a no-op on what it has already done', canonicalPath('F:\\a\\b.js'), 'F:\\a\\b.js')
+check('the same file has one spelling', canonicalPath('F:/a/b.js') === canonicalPath('F:\\a\\b.js'))
+check('a redirect target comes back canonical', writtenPaths('cat > F:/a/b.txt', BASE)[0] === 'F:\\a\\b.txt', JSON.stringify(writtenPaths('cat > F:/a/b.txt', BASE)))
 
 console.log(`${passed} passed, ${failed} failed`)
 process.exitCode = failed === 0 ? 0 : 1

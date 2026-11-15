@@ -57,7 +57,7 @@ export { readSkillArgument, SKILL_GESTURE } from './skillcall.js'
 // copied for the same reason as the skill call parse: the workflow detector and
 // the file card both read commands, and two copies of the heredoc scan would
 // eventually disagree about the same command.
-export { stripHeredocs, writtenPaths } from './shellpaths.js'
+export { canonicalPath, stripHeredocs, writtenPaths } from './shellpaths.js'
 
 export {
   annotateQueue,

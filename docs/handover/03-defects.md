@@ -1352,6 +1352,9 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-134 | 2026-11-15 | 四条突变判成 SURVIVED，其实是套件崩了 | 三条是断言在徽标缺失时对 `undefined` 取属性而崩、一条是 `to:` 重复键产出非法变异体；崩溃没有 tally 行，看起来像「没被抓住」 |
 | DEF-135 | 2026-11-15 | 渲染页复刻谓词，得出与生产相反的画面 | 渲染页不是被测代码，没有任何断言覆盖；它以为自己在画证据，而证据本身没被验证 |
 | DEF-136 | 2026-11-15 | 突变条目的 `file:` 写成路径，整表配对失效 | 元测试抓住了，但它报的是「配对无法检查」而不是「这行写错了」；一旦配对失效，逐锚点检查会静默全过 |
+| DEF-137 | 2026-11-15 | 相对路径被拼到会话根上，画成「已删除」 | 接缝两侧各自正确、中间没人负责：`writtenPaths` 按设计交出相对路径并承诺「caller 会解析」，但 caller 直接 push；状态文件没有 cwd，读取时只能按会话根拼。**历史数据 178 条**因此指向不存在的路径 |
+| DEF-138 | 2026-11-15 | 新写的 14 条突变里 1 条锚点凭空捏造 | 我按记忆写了 `POSIX_DRIVE.test(candidate)`，源码是 `candidate.match(POSIX_DRIVE)`；元测试报 `missing in shellpaths.js` 才发现。凭记忆写锚点是这类错误的唯一来源 |
+| DEF-139 | 2026-11-15 | 一条突变让套件崩溃，runner 报 CRASHED 而非 KILLED | 把 `if (matched === null) return undefined` 改成 `!== null`，非匹配分支会去读 `matched[1]`；变异体语法合法但运行即抛，套件没有 tally 行。与 DEF-122/DEF-134 同族：**「没跑完」有独立名字，而它看起来像没被抓住** |
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -2273,3 +2276,36 @@ press 3 on the border    {"open": false, "renders": 5}
 
 **修法**：`file: client,`。
 
+## DEF-137 · 相对路径被拼到会话根上，画成「已删除」
+
+**症状。** 侧栏产出卡里出现 `F:\dsh-plugin\packages\ui-evolve\lib\client.js`，磁盘上没有这个文件，行被画上删除线、右侧写「已删除」。同一轮里同一文件另有一行是对的，所以头部多算了一个。
+
+**根因。** 三段都正确，接缝空着：
+
+1. `packages/core/lib/shellpaths.js` 的 `writtenPaths(command)` 注释写着「Resolving against the workspace happens in the caller, which is the only place that knows the session's working directory」——它不该猜，也确实没猜。
+2. `packages/ui-evolve/lib/transcript.js:510` 收到后直接 `this.paths.push(target)`。**承诺的「caller 会解析」没有发生。**
+3. `session-state.js` 原样存进状态文件，而状态文件里**没有 cwd**；读取时 `api.js:577` 只能按会话根拼。真实命令是 `cd /f/dsh-plugin/dsh-skill-evolve && cat > packages/ui-evolve/lib/client.js`，它先 cd 过。
+
+**影响面。** 193 个状态文件里 30 个含相对记录、共 217 条，全部没有 cwd。存在性判：25 条在会话根下恰好存在、14 条在子仓库根下能找到、**178 条拼出来根本不存在**。
+
+**为什么测试没抓到。** 三条通路各自都有测试，且都通过：`shellpaths.test.mjs` 断言「不传 base 时相对路径保持相对」（那是设计，断言的是设计）；`transcript.test.mjs:645-650` 甚至有一段注释解释「transcript 没有 workspace，所以保留相对，由 `api.js` 在知道 cwd 时解析」——**一句话把责任交给下一层，而下一层以为上一层已经解析过**；`api.test.mjs` 只喂绝对路径。没有任何一条断言跨过这条接缝，因为跨接缝需要一个真实形状的完整回合，而每个套件都在自己那一层用手造的正确形状。
+
+与 DEF-99（`workspaceFor` 拿错形状，整条链路静默 return）、DEF-106（`skipDirectory` 生产零调用）同族：**两端各自正确，中间没人负责；而且失败方式是静默的**——它不报错，它只是画出一行看起来正常的删除线。
+
+**修法。** 见 D-157~D-160：记录时解析（修法二）+ 第四种状态（修法三）。不做历史回填。
+
+## DEF-138 · 新写的 14 条突变里 1 条锚点凭空捏造
+
+`an msys drive path is resolved as a directory called f` 的 `from` 我写成 `  if (POSIX_DRIVE.test(candidate) === false) return undefined`。源码里没有这行——`windowsDrive` 的真实写法是 `const matched = candidate.match(POSIX_DRIVE)` 再判 `matched === null`。
+
+我第一次写的 14 条里 13 条是按 `grep -n` 抄的真实行，唯独这一条按「应该是这么写的」补的。**凭记忆写锚点，错误率不是 1/14，是 1/1**——因为记忆里只有意图，没有那一行的样子。
+
+**为什么测试没抓到。** 它被抓住了：`test/mutations.test.mjs` 报 `FAIL every mutate-language-and-files.mjs anchor still exists in the file it names — missing in shellpaths.js: …`。这是元测试存在的理由。真正的教训是**发现得太晚**：我先把 14 条全部写完、抬了下限、跑了元测试，才在一次运行里看到它——如果当时只跑 `test/run.mjs` 里的断言而不跑元测试，这条突变会一直「存在」而永远匹配不上。
+
+## DEF-139 · 一条突变让套件崩溃，runner 报 CRASHED 而非 KILLED
+
+`an msys drive path is resolved as a directory called f` 首次运行判 **CRASHED**。我把 `if (matched === null) return undefined` 改成 `if (matched !== null) return undefined`：语法合法，但控制流反转后 `matched` 为 `null` 时会走到 `${matched[1].toUpperCase()}`，抛 `TypeError`。套件在打印 tally 行之前就退出，runner 看不到「有几条失败」，于是既不是 KILLED 也不是 SURVIVED。
+
+**为什么测试没抓到。** 这一条不是测试的问题，是变异体的问题：它不是一个「行为不同但合法」的变异体，而是一个「运行即炸」的变异体。CRASHED 这个判定本身是对的——它诚实地说明「这条不能算通过」。但它看起来像环境故障，很容易被当成噪声忽略。
+
+与 DEF-122（断言里按下标取元素，按钮缺失时崩掉整个套件）、DEF-134（四条 SURVIVED 其实是套件崩了）同族：**「没跑完」有独立名字，而它长得像「没被抓住」。** 修法是把变异体改成 `if (true) return undefined`——同样表达「永不折算盘符」，但不引入新的崩溃路径。

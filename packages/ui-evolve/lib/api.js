@@ -562,7 +562,7 @@ function resourceAddress(sessionId, cwd, path) {
  *
  * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests.
  * @param {number} [input.now] - the clock `stale` is measured against, for tests.
- * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean }>>} one row per candidate.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean }>>} one row per candidate.
  */
 async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
   const clock = Number.isFinite(now) ? now : Date.now()
@@ -575,7 +575,8 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
     // object with nothing but a path means.
     const path = typeof raw === 'string' ? raw : raw?.path
     if (typeof path !== 'string' || path.length === 0) continue
-    const absolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) ? path : join(cwd ?? process.cwd(), path)
+    const isAbsolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)
+    const absolute = isAbsolute === true ? path : join(cwd ?? process.cwd(), path)
     if (seen.has(absolute)) continue
     seen.add(absolute)
     const recordedTurn = typeof raw === 'object' && raw !== null ? raw.turn : undefined
@@ -625,17 +626,22 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
         info = await stat(absolute)
       }
     } catch (error) {
-      // Not there versus not readable is the one distinction the reader can act
-      // on, so it is kept rather than collapsed into "gone".
+      // Three answers, not two. Not there, not readable, and "this path was
+      // assembled from a record that never learned which directory it was
+      // relative to" — the last one is not knowable from here, and reporting it
+      // as deleted turned a file the turn had just written into a row with a
+      // line through it.
       const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'
-      out.push({ ...base, status: gone ? 'missing' : 'invalid', bytes: null, mtimeMs: null })
+      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'
+      out.push({ ...base, status, bytes: null, mtimeMs: null })
       continue
     }
     // A directory the tools reported writing into is not a file this card can
     // describe, and it is not readable content either — the thing that was
-    // claimed to be a file is not there, which is what `missing` says.
+    // claimed to be a file is not there. Same caveat as above: only an absolute
+    // path lets us say that plainly.
     if (!info.isFile()) {
-      out.push({ ...base, status: 'missing', bytes: null, mtimeMs: null })
+      out.push({ ...base, status: isAbsolute === true ? 'missing' : 'unresolved', bytes: null, mtimeMs: null })
       continue
     }
     out.push({ ...base, status: 'available', bytes: info.size, mtimeMs: info.mtimeMs })

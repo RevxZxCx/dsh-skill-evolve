@@ -4431,6 +4431,7 @@ async function openPanel(routes, options) {
     { path: '/work/there.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/there.md' },
     { path: '/work/gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.md' },
     { path: '/work/locked.md', bytes: null, mtimeMs: null, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/locked.md' },
+    { path: '/work/unsure.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'unresolved', address: 'dsh-resource://file/session/session-a/work/unsure.md' },
   ]
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
@@ -4455,7 +4456,8 @@ async function openPanel(routes, options) {
 
   check('a deleted file is still listed', names.includes('gone.md'), JSON.stringify(names))
   check('and so is one that cannot be read', names.includes('locked.md'), JSON.stringify(names))
-  check('so all three rows are drawn', byClass(card, 'dsse-row').length === 3, String(byClass(card, 'dsse-row').length))
+  check('so every row is drawn', byClass(card, 'dsse-row').length === 4, String(byClass(card, 'dsse-row').length))
+  check('including the one that cannot be placed', names.includes('unsure.md'), JSON.stringify(names))
 
   // The state travels on the row, because the dimming and the strike-through are
   // CSS and a mock renderer lays nothing out: asserting the attribute is the only
@@ -4463,6 +4465,7 @@ async function openPanel(routes, options) {
   check('a deleted row says it is deleted', rowOf('gone.md')?.props?.['data-status'] === 'missing', String(rowOf('gone.md')?.props?.['data-status']))
   check('an unreadable row says that instead', rowOf('locked.md')?.props?.['data-status'] === 'invalid', String(rowOf('locked.md')?.props?.['data-status']))
   check('a present row says it is available', rowOf('there.md')?.props?.['data-status'] === 'available', String(rowOf('there.md')?.props?.['data-status']))
+  check('a row this build cannot place says so', rowOf('unsure.md')?.props?.['data-status'] === 'unresolved', String(rowOf('unsure.md')?.props?.['data-status']))
 
   // A selector only paints something if the element it names is really there. The
   // rule below needs a `.dsse-name` *inside* the row; the tree has to contain that
@@ -4475,6 +4478,10 @@ async function openPanel(routes, options) {
   // Where the size used to be, the reason it is not a size any more.
   check('the deleted row does not report a size', textOf(rowOf('gone.md')).includes('已删除'), textOf(rowOf('gone.md')))
   check('the unreadable row says it cannot be read', textOf(rowOf('locked.md')).includes('无法读取'), textOf(rowOf('locked.md')))
+  // Not "已删除": the file may be exactly where the turn left it, and what was
+  // lost is the base the record should have carried.
+  check('the unplaceable row says it cannot be located', textOf(rowOf('unsure.md')).includes('无法定位'), textOf(rowOf('unsure.md')))
+  check('and it does not claim the file was deleted', textOf(rowOf('unsure.md')).includes('已删除') === false, textOf(rowOf('unsure.md')))
   // The exact figure, not a loose unit match: `/B|K|M/` accepts a broken `formatBytes`
   // that returns the letter `B` alone, which is not a size anyone can use.
   check('and the present row still reports its size', textOf(rowOf('there.md')).includes('10 B'), textOf(rowOf('there.md')))
@@ -4490,11 +4497,21 @@ async function openPanel(routes, options) {
   check('and it is not dressed as a button', rowOf('gone.md') !== undefined && rowOf('gone.md')?.type !== 'button', String(rowOf('gone.md')?.type))
   check('its title carries the reason instead of the invitation', String(rowOf('gone.md')?.props?.title ?? '').includes('已被删除或移动') && String(rowOf('gone.md')?.props?.title ?? '').includes('点击在侧栏预览') === false, String(rowOf('gone.md')?.props?.title))
   check('the unreadable row gives its own reason', String(rowOf('locked.md')?.props?.title ?? '').includes('文件存在但无法读取'), String(rowOf('locked.md')?.props?.title))
+  check(
+    'the unplaceable row explains the record, not the file',
+    String(rowOf('unsure.md')?.props?.title ?? '').includes('只存了相对路径') && String(rowOf('unsure.md')?.props?.title ?? '').includes('已删除') === false,
+    String(rowOf('unsure.md')?.props?.title),
+  )
+  check('and it offers no preview to a file it cannot find', firstByClass(rowOf('unsure.md'), 'dsse-row-open') === undefined, String(firstByClass(rowOf('unsure.md'), 'dsse-row-open') !== undefined))
   check('a present row still invites the click', String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title ?? '').includes('点击在侧栏预览'), String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title))
 
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
   check('a row that is gone is struck through', /\.dsse-row\[data-status="missing"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
   check('the strike-through covers unreadable rows too', /\.dsse-row\[data-status="invalid"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
+  // Dimmed, not struck through. The strike-through means "this is gone"; this row
+  // means "I cannot say", and the two must not be drawn the same way.
+  check('an unplaceable row is dimmed', /\.dsse-row\[data-status="unresolved"\][^{]*\.dsse-name\{[^}]*label-tertiary/.test(sheet), '')
+  check('and it is not struck through', /\.dsse-row\[data-status="unresolved"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
   check('a gone row does not highlight under the pointer', /\.dsse-row\[data-status="missing"\]:hover[^{]*\{background:transparent\}/.test(sheet), '')
   check('and the reason takes the place of the size in italics', /\.dsse-size-gone\{font-style:italic\}/.test(sheet), '')
 }

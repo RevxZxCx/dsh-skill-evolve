@@ -56,6 +56,7 @@
 | 2026-11-14 | 复制改成悬停图标 + 展开菜单 | 用户 m14496 要求把两个中文小按钮换成一个复制图标，点开菜单再选绝对/相对。菜单做成**行的兄弟、在文档流内**——两个祖先（`.dsse-card{overflow:hidden}`、`.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`）都会裁掉浮层，而长列表正是最需要它的场合。八单元六个审查者 + 两轮后台审查：修 14 处，最重的是「图标上再按关不掉菜单」（真机 `renders` 2→4 证实）与「聚焦时透明按钮压住文件大小」。3459 断言全绿，突变 143/45/128 全杀，残留 0。**新增 DEF-127~132、D-146~150、R-85** |
 | 2026-11-15 | 产出卡 A/B/C：谁算噪声、数字怎么说、旧文件怎么办 | 200 条真实会话里 197 条是审查副本，卡片却说「200 个文件」（A）。拆出 `UNPRODUCTIVE_DIRS`/`UNPRODUCTIVE_PREFIXES` 只喂遍历，`out`/`dist`/`build` 仍然进得去；卡片侧比遍历侧宽、共用同一张表。头部主数字只数「现在还算数」的行，其余进灰字，两者相加等于徽标倒数（B）。`stale` 用会话记录的 `at` 而不是文件 mtime，七天，只褪色不删除（C）。3506 断言全绿，突变 152/45/128 全杀，残留 0。**新增 DEF-133~136、D-152~156** |
 | 2026-11-14 | 复制菜单去掉路径，只留两个文案 | 用户 m15439 说长路径会把布局撑大。**撑大这件事不成立**——菜单项由卡片定宽（实测两项各 378px，去掉路径后宽度一个像素没变），真正的问题是长路径只能显示成 `F:\dsh-plugin\dsh-ski…`，那比两个词更少地说明剪贴板里会是什么。删掉 `dsse-row-menuitem-value` 与它的样式规则，`menuItem` 的 `children` 从两层变成一层；标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis`，长文案照样不会把菜单推宽。断言从「显示路径」改成「不显示路径」并加一条 CSS 反向断言（`sheet.includes('dsse-row-menuitem-value') === false`），防这条规则以死代码的形式回来。3458 断言全绿，突变 143/45/128 全杀，残留 0。**新增 D-151** |
+| 2026-11-15 | 产出卡：相对路径的两个修法 | 卡片上出现了一行 `F:\dsh-plugin\packages\ui-evolve\lib\client.js`——磁盘上没这个文件，它被画上删除线写着「已删除」。根因是 `writtenPaths` 按原样交出命令里的相对路径（`packages/ui-evolve/lib/client.js`），状态文件又没有 cwd，读的时候被拼到会话根上。**修法二**：`writtenPaths(command, base)` 跟着命令自己的 `cd` 走，`transcript` 存下 `noteCall` 收到的 cwd，`index.js` 把 `workspaceFor(session)` 一路传下去；顺带把 MSYS 的 `/f/x` 折成 `F:/x`、把 `F:/a/b` 与 `F:\a\b` 统一成一种拼写，否则同一个文件仍是两行。**修法三**：`statTouchedFiles` 新增第四种状态 `unresolved`——相对路径算不准时不再冒充 `missing`，卡片写「无法定位」、褪色、不画删除线、不给预览。真机审计 193 个会话 217 条相对记录：204 条 `unresolved`、11 条 `available`。3547 断言全绿，突变 166/45/128 全杀，残留 0。**不做历史回填**（用户 m16812） |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -3983,3 +3984,59 @@ statTouchedFiles`）：真实 200 条那份渲染成头部只有 `200 个生成�
   但先看真实数字再决定调不调。
 - 「较早」的七天是估的，没有真实用户会话用来标定。
 - 这一轮仍然是同源渲染 + 无头 Chrome，不是宿主侧栏实拍（宿主那条路要签 cookie，本轮没做）。
+
+## 2026-11-15 · 一行不存在的文件：相对路径、丢失的 cwd，和第四种状态
+
+### 起点是一张截图
+
+用户贴了侧栏，问「目前这些 js 文件还是会显示在产出文件中吗，这符合你的预期吗」。这个问题有两个答案，只有一个是我原本准备说的。
+
+**js 源码该出现。** 这张卡的职责是回答「这一轮写了什么」，而这一轮确实改了 `client.js`、`api.js`、两个测试文件、一个突变脚本和几份文档。把源码过滤掉，「正在写代码」的会话就会得到一张空卡——而那恰好是最需要它的场景。这一条不需要改。
+
+**但列表第 4 行是假的。** `F:\dsh-plugin\packages\ui-evolve\lib\client.js` 这个文件不存在：`F:\dsh-plugin` 下面没有 `packages` 目录，真身在 `dsh-skill-evolve\packages\…`。同一轮里同一个文件被记了两遍，其中一遍指向它不曾在的地方；`stat` 当然找不到，于是卡片画上删除线写「已删除」——**等于替用户记下了一次他从未做过的删除**。头部那个 `9 个文件` 里因此有一条是重复的，实际是 8 个。
+
+### 根因是三个正确的决定叠在一起
+
+1. `packages/core/lib/shellpaths.js` 的 `writtenPaths(command)` 注释写得很清楚：「Returns the paths exactly as the command spelled them — relative stays relative. Resolving against the workspace happens in the caller, which is the only place that knows the session's working directory.」**它是对的**：它不知道会话在哪，猜就是错。
+2. 但调用方 `transcript.js:510` 直接 `this.paths.push(target)`，没做任何解析。**承诺的「caller 会解析」从未发生。**
+3. `session-state.js` 把相对路径原样写进状态文件，而**状态文件里没有 cwd**（顶层键只有 `paths`、`previous`、`sweep`、`turns`、`updated`、`version` 这些）。读取时 `api.js:577` 只能用会话 cwd 拼——而真实的命令是 `cd /f/dsh-plugin/dsh-skill-evolve && cat > packages/ui-evolve/lib/client.js`，它先 cd 过。
+
+第 1 条和第 2 条各自都站得住，接缝处什么也没有。这与 DEF-99（`workspaceFor` 拿错形状导致整条链路静默失效）、DEF-106（`skipDirectory` 生产零调用）是同一种缺陷：**两端各自正确，中间没人负责。**
+
+### 影响面：不是一处笔误
+
+翻了 193 个状态文件：**30 个含相对记录，共 217 条，全部没有 cwd**。用生产的 `isNoisePath` 跑，151 条落在 `.rv-head`/`.review` 之类新表目录里被判噪声；剩下 66 条会被人看见。用存在性判：25 条在会话根下恰好存在（命令没 cd，所以拼对了）、14 条在子仓库根下能找到、**178 条拼出来根本不存在**——这 178 条每一行都在说「你删了一个文件」。
+
+### 修法二：记录时算准
+
+`writtenPaths(command, base)` 现在跟着命令自己的 `cd`/`pushd` 走，`remember()` 在 `base` 存在时把相对目标解析成绝对路径。`Transcript` 新增 `this.cwd`，`noteCall(call, cwd)` 收下调用方给的目录，`TranscriptStore.record(agentId, event, cwd)` 一路传，`index.js` 在 `turn/start` 与 `turn/end` 两处传 `workspaceFor(session)`。
+
+三个边角是实测才发现要处理的：
+
+- **`cd -`、`cd $DIR`、`cd ~/x` 不跟。** 解错会写下一个自信的绝对路径，比它替换掉的相对路径更糟——相对路径至少能被知道更多的读者再解析一次。判据就写在代码里：目的地以 `$` 或 `~` 开头、或者等于 `-`，就 `continue`。
+- **MSYS 路径要折。** 真实历史里 20 条 `/f/...`、`/c/...` 形态的记录，`resolve` 会把 `/f/dsh-plugin` 接到 Windows base 后面变成 `F:\f\dsh-plugin`——一个存在但错误的目录。`windowsDrive()` 只在 win32 且是单字母驱动形态时转换，`/tmp/x`、`/usr/x` 故意不转（那是这个模块无从知道的安装根）。
+- **拼写要统一。** `join()` 产反斜杠，`edit` 工具给正斜杠；路径表以字符串为键，于是同一文件两行、其中一行 stat 成 `missing` 被画成删除线。真实数据是 126 条正斜杠、1874 条反斜杠`——`canonicalPath()` 统一成反斜杠（Windows 自己打印的形式，也是多数已存数据的写法），`shellpaths` 的 `add()`、`edit` 分支、`readPathListArgument`、`readPresentedPaths` 四处都过一遍。
+
+修完 `fix2_e2e.mjs` 跑真实形状：四种 cwd 情况（`with cwd` / `empty cwd` / `no cwd arg` / `other root`）全部从 2 行降到 **1 行**，幽灵路径彻底消失。
+
+### 修法三：第四种状态
+
+修法二只对**以后**的记录生效。历史那 217 条仍然没有 cwd，而它们读出来时照样会被拼到会话根上、照样被画成「已删除」。
+
+`statTouchedFiles` 现在区分两件原本混在一起的事：**绝对路径 stat 不到**是真的没了（`missing`），**相对路径 stat 不到**只能说明这个构建定位不了（`unresolved`）。判据是 `isAbsolute`，一个在拼接之前就知道的布尔。卡片对 `unresolved`：写「无法定位」而不是「已删除」，褪色而**不画删除线**（删除线是 missing 的语言），`title` 说明「这条记录只存了相对路径」，不给预览（点开也没有东西）。
+
+这与 Qoder 的 `turn_file_change_unsupported`（`reason` 里明确列 `path_outside_workspace`/`path_unavailable`）是同一条原则：**记不全就记「为什么没记全」，不要猜它没用所以不记，也不要猜它没了所以画删除线。**
+
+真机审计跑生产代码：217 条相对记录 → **204 条 `unresolved`、11 条 `available`**。那 11 条在原会话根下恰好存在，说明它们本来就是对的，不该被新状态误伤。
+
+### 验证
+
+- `node test/run.mjs` **3547 passed / 0 failed**（改前 3506，+41）。分套：shellpaths 44→63、transcript 137→145、api 295→303、client 754→762。
+- `mutate-language-and-files` **166 killed / 0 survived / 0 not applied / 0 crashed**；`mutate-persistence` **45 killed**；`mutate-checklist-panel` **128 killed**；`audit_leftovers.py` **leftovers: 0 / unresolved: 0**。
+- 真机两步都在生产代码上跑：`fix3_live.mjs` 复现双 key 场景 → `count: 1`；`fix3_status.mjs` 四行四态 → `available`/`missing`/`unresolved`/`missing`。
+
+### 还没做
+
+- **不做历史回填**（用户 m16812 明确）：217 条旧记录不会重算成绝对路径，它们就停在 `unresolved`。测试环境，不影响生产。
+- `cd` 的其它形态仍然不跟：子 shell `(cd x && …)`、`cd` 到软链、`pushd` 的栈操作只取最上面一个目录。都没做，因为没被真实数据要求过。
+- 这一轮没有独立审查者，也没有第二人复看。四套突变和注入验证是我能提供的最强证据，但它不等于别人看过。

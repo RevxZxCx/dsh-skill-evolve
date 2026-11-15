@@ -1920,6 +1920,85 @@ function heldBodyOf(res) {
   check('a caller that passes no clock still measures against the real one', unclocked[0]?.stale === true, JSON.stringify(unclocked[0]?.stale))
 }
 
+
+{
+  // The fourth answer, and the reason it exists: a record that only kept a
+  // relative path gets joined to the session root here, and that base is a guess
+  // — the command may well have run somewhere else. Reporting ENOENT on a guess
+  // as "deleted" put a line through a file the turn had just written.
+  const dir = tempDir('skill-evolve-stat-unresolved-')
+  const files = await statTouchedFiles({
+    paths: ['packages/ui-evolve/lib/client.js'],
+    cwd: dir,
+    readStat: async () => {
+      const error = new Error('no such file')
+      error.code = 'ENOENT'
+      throw error
+    },
+  })
+  check('a guessed path that is not there is unresolved', files.length === 1 && files[0].status === 'unresolved', JSON.stringify(files))
+  check('and it is not reported as deleted', files[0]?.status !== 'missing', JSON.stringify(files))
+  check('an unresolved row has no size to show', files[0]?.bytes === null, String(files[0]?.bytes))
+  check('and it still carries the path that was recorded', files[0]?.path === join(dir, 'packages', 'ui-evolve', 'lib', 'client.js'), String(files[0]?.path))
+}
+
+{
+  // The other half of the same rule. An absolute path was not a guess, so ENOENT
+  // on it means the file really is gone and the reader should be told so —
+  // otherwise the new state would swallow the one case that was already right.
+  const dir = tempDir('skill-evolve-stat-absolute-gone-')
+  const files = await statTouchedFiles({
+    paths: [join(dir, 'gone.js')],
+    cwd: dir,
+    readStat: async () => {
+      const error = new Error('no such file')
+      error.code = 'ENOENT'
+      throw error
+    },
+  })
+  check('an absolute path that is not there is still missing', files.length === 1 && files[0].status === 'missing', JSON.stringify(files))
+}
+
+{
+  // A path that exists but cannot be read is not a guess about location — the
+  // path resolved, and something else is wrong. That distinction must survive
+  // the new status too.
+  const dir = tempDir('skill-evolve-stat-guess-invalid-')
+  const files = await statTouchedFiles({
+    paths: ['lib/blocked.js'],
+    cwd: dir,
+    readStat: async () => {
+      const error = new Error('permission denied')
+      error.code = 'EACCES'
+      throw error
+    },
+  })
+  check('a guessed path that cannot be read is invalid, not unresolved', files.length === 1 && files[0].status === 'invalid', JSON.stringify(files))
+}
+
+{
+  // A directory found through a guess is the same uncertainty, so it gets the
+  // same word rather than the confident "missing" it used to get.
+  const dir = tempDir('skill-evolve-stat-dir-guess-')
+  const files = await statTouchedFiles({
+    paths: ['src'],
+    cwd: dir,
+    readStat: async () => ({ isFile: () => false, size: 0, mtimeMs: 0 }),
+  })
+  check('a directory reached through a guess is unresolved', files.length === 1 && files[0].status === 'unresolved', JSON.stringify(files))
+}
+
+{
+  // And an absolute directory is still plainly not a file.
+  const dir = tempDir('skill-evolve-stat-dir-absolute-')
+  const files = await statTouchedFiles({
+    paths: [dir],
+    cwd: dir,
+    readStat: async () => ({ isFile: () => false, size: 0, mtimeMs: 0 }),
+  })
+  check('an absolute directory is still missing', files.length === 1 && files[0].status === 'missing', JSON.stringify(files))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

@@ -676,9 +676,10 @@ window.__ModuleLoader__.load({
    a deleted one would make the reader think the work was lost. */
 .dsse-row[data-stale="true"] .dsse-name{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-row[data-status="missing"] .dsse-name,.dsse-row[data-status="invalid"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1);text-decoration:line-through}
+.dsse-row[data-status="unresolved"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
 
-.dsse-row[data-status="missing"],.dsse-row[data-status="invalid"]{cursor:default}
-.dsse-row[data-status="missing"]:hover,.dsse-row[data-status="invalid"]:hover{background:transparent}
+.dsse-row[data-status="missing"],.dsse-row[data-status="invalid"],.dsse-row[data-status="unresolved"]{cursor:default}
+.dsse-row[data-status="missing"]:hover,.dsse-row[data-status="invalid"]:hover,.dsse-row[data-status="unresolved"]:hover{background:transparent}
 .dsse-size-gone{font-style:italic}
 .dsse-badge{display:inline-block;flex:0 0 auto;padding:2px 6px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f4f8);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-badge-own{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.14));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
@@ -3067,12 +3068,17 @@ window.__ModuleLoader__.load({
                           // Reading the opener off props here is how the first draft
                           // made every row inert on every Host.
                           const status = typeof file.status === 'string' ? file.status : 'available'
-                          // Only the two states this build knows how to explain count as
-                          // gone. A fourth name from a newer server would otherwise render
+                          // Only the states this build knows how to explain count as
+                          // gone. A fifth name from a newer server would otherwise render
                           // a row with no reason, no size and no click — the worst of both
                           // outcomes — so it falls back to what every row meant before the
                           // states existed.
-                          const gone = status === 'missing' || status === 'invalid'
+                          //
+                          // `unresolved` belongs on this side of the line for the same
+                          // reason `missing` does: there is nothing here to open. What it
+                          // does not share is the conclusion — the file may be right
+                          // where the turn left it, and only the record lost the base.
+                          const gone = status === 'missing' || status === 'invalid' || status === 'unresolved'
                           // A row is openable only when the file is really there.
                           // `missing` and `invalid` both mean "the thing you edited is
                           // not a file I can open right now", and a row that looks
@@ -3081,7 +3087,14 @@ window.__ModuleLoader__.load({
                           // meant before the three states existed, and a client may
                           // talk to an older server.
                           const openable = gone === false && canPreview === true && typeof file.address === 'string' && file.address.length > 0
-                          const note = status === 'missing' ? '文件已被删除或移动' : status === 'invalid' ? '文件存在但无法读取' : ''
+                          const note =
+                            status === 'missing'
+                              ? '文件已被删除或移动'
+                              : status === 'invalid'
+                                ? '文件存在但无法读取'
+                                : status === 'unresolved'
+                                  ? '这条记录只存了相对路径，无法定位到具体文件'
+                                  : ''
                           const absolute = String(file.path)
                           // Undefined for a file outside the workspace, which is what
                           // makes the second copy button disappear rather than copy a
@@ -3099,7 +3112,14 @@ window.__ModuleLoader__.load({
                             }),
                             jsx('span', {
                               className: gone === true ? 'dsse-size dsse-size-gone' : 'dsse-size',
-                              children: status === 'missing' ? '已删除' : status === 'invalid' ? '无法读取' : formatBytes(file.bytes),
+                              children:
+                                status === 'missing'
+                                  ? '已删除'
+                                  : status === 'invalid'
+                                    ? '无法读取'
+                                    : status === 'unresolved'
+                                      ? '无法定位'
+                                      : formatBytes(file.bytes),
                             }),
                           ]
                           // One control, and the choice behind it. Two buttons could only

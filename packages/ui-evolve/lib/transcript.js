@@ -22,7 +22,7 @@
  * turn ends.
  */
 
-import { writtenPaths } from '@revxz/dsh-evolve-core'
+import { canonicalPath, writtenPaths } from '@revxz/dsh-evolve-core'
 
 /** How many tool calls one turn keeps before it stops recording detail. */
 const MAX_CALLS_PER_TURN = 200
@@ -349,6 +349,20 @@ class Transcript {
     this.declared = []
     /** @type {string[]} shell commands the turn ran, newest last. */
     this.commands = []
+    /**
+     * The directory this turn runs in, or `''` when nobody said.
+     *
+     * A shell command can name a file with a relative path (`cat > notes.txt`),
+     * and the only place that knows what it is relative *to* is the session
+     * header. Left unresolved, that path is later joined to the session root on
+     * the way out, which is right only when the command did not `cd` first —
+     * and `cd sub && cat > notes.txt` did. The result was two rows for one
+     * file: the absolute one from an `edit` call and a second, non-existent one
+     * drawn struck through as though the turn had deleted it.
+     *
+     * @type {string}
+     */
+    this.cwd = ''
     /** @type {string[]} assistant text blocks from this turn, in order. */
     this.said = []
     /** The turn that is currently open, or undefined between turns. */
@@ -471,20 +485,22 @@ class Transcript {
    * Record one tool call.
    *
    * @param {{ id?: string, name: string, arguments: unknown }} call - the call.
+   * @param {string} [cwd] - the directory this turn runs in, when known.
    */
-  noteCall(call) {
+  noteCall(call, cwd) {
+    if (typeof cwd === 'string' && cwd.length > 0) this.cwd = cwd
     if (this.calls.size >= MAX_CALLS_PER_TURN) return
     const key = call.id ?? `${call.name}#${this.calls.size}`
     const path = readPathArgument(call.arguments)
     this.calls.set(key, { id: key, name: call.name, path })
-    if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(path)
+    if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(canonicalPath(path))
     if (REPORT_TOOLS.has(call.name)) {
       // The one path where a turn says what it made instead of the transcript
       // inferring it. Goes to `declared`, not `paths`: a declaration is the
       // last call of a turn, and `snapshot` keeps the first forty, so pushing
       // it in call order would drop it exactly when the turn was busy enough
       // to need it.
-      for (const declared of readPathListArgument(call.arguments)) this.declared.push(declared)
+      for (const declared of readPathListArgument(call.arguments)) this.declared.push(canonicalPath(declared))
     }
     if (PRESENT_TOOLS.has(call.name)) {
       // Read for the same reason as the branch above, with the opposite
@@ -492,7 +508,7 @@ class Transcript {
       // is the one that actually arrives. It carries at most four files, so it
       // covers the few deliverables and misses the rest — which is exactly why
       // both branches exist rather than one replacing the other.
-      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(delivered)
+      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(canonicalPath(delivered))
     }
     if (SHELL_TOOLS.has(call.name)) {
       const command = readCommandArgument(call.arguments)
@@ -507,7 +523,15 @@ class Transcript {
         //
         // Read before the slice: the paths come out of the whole command, while
         // `commands` keeps a short preview for the card's text.
-        for (const target of writtenPaths(command)) this.paths.push(target)
+        //
+        // The base directory goes in so the paths come out resolved. Without it
+        // a `cd sub && cat > x` target stays relative until the card joins it to
+        // the session root, which names a file that does not exist — and the
+        // card then reports it as deleted. `this.cwd` is `''` when the host gave
+        // no header, and `writtenPaths` treats that as "no base" and returns the
+        // paths as written, so the old behaviour is what a session without a
+        // header still gets.
+        for (const target of writtenPaths(command, this.cwd)) this.paths.push(target)
       }
     }
   }
@@ -697,9 +721,10 @@ class TranscriptStore {
    *
    * @param {string} agentId - the agent id.
    * @param {any} event - the `session/event` payload.
+   * @param {string} [cwd] - the session's working directory, when known.
    * @returns {void}
    */
-  record(agentId, event) {
+  record(agentId, event, cwd) {
     const type = event?.type
     const data = event?.data
     if (type === 'user/message') {
@@ -714,7 +739,7 @@ class TranscriptStore {
     if (type === 'tool/call') {
       const call = typeof data?.name === 'string' ? { id: typeof data.callId === 'string' ? data.callId : undefined, name: data.name, arguments: data.arguments } : undefined
       if (call === undefined) return
-      this.for(agentId).noteCall(call)
+      this.for(agentId).noteCall(call, cwd)
       return
     }
     if (type === 'tool/result') {

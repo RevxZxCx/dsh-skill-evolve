@@ -20,6 +20,8 @@
  * @module @revxz/dsh-evolve-core/shellpaths
  */
 
+import { isAbsolute, join, resolve } from 'node:path'
+
 /** More than this many targets in one command means we are reading prose, not a pipeline. */
 const MAX_TARGETS_PER_COMMAND = 20
 
@@ -48,6 +50,49 @@ const COPY_LIKE = new Set(['cp', 'mv', 'install', 'rsync', 'ln'])
 
 /** Commands that take one or more files to create or update. */
 const TARGET_ARG_COMMANDS = new Set(['tee', 'touch'])
+
+/** A Windows path with a drive letter, in either slash. */
+const DRIVE_PATH = /^[A-Za-z]:[\\/]/
+
+/**
+ * Put a path into the one spelling this project stores.
+ *
+ * The file list is a map keyed by path, so two spellings of one file are two
+ * entries that both get stat-ed, both get drawn, and — when one of them was
+ * resolved against the wrong base — one of them is reported as deleted. Only
+ * the drive-letter form is folded, so POSIX paths keep their own separators.
+ *
+ * @param {string} path - a path in either spelling.
+ * @returns {string} the same path with forward slashes replaced.
+ */
+export function canonicalPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return path
+  if (DRIVE_PATH.test(path) === false) return path
+  return path.split('/').join('\\')
+}
+
+/** `/f/x` is how a POSIX shell spells `F:/x`; the drive letter is the whole trick. */
+const POSIX_DRIVE = /^\/([A-Za-z])(\/|$)/
+
+/**
+ * Rewrite a POSIX-spelled Windows path into the form the filesystem uses.
+ *
+ * Only meaningful on Windows, and only for the drive-letter form. A command
+ * written for Git Bash (`cd /f/repo && cat > notes.txt`) names the same file as
+ * `cd F:/repo && cat > notes.txt`, and a card that shows `F:\f\repo\notes.txt`
+ * is showing a file that has never existed.
+ *
+ * @param {string} candidate
+ * @returns {string|undefined} the Windows spelling, or `undefined` when the
+ *   input is not one of these paths.
+ */
+function windowsDrive(candidate) {
+  if (process.platform !== 'win32') return undefined
+  const matched = candidate.match(POSIX_DRIVE)
+  if (matched === null) return undefined
+  const rest = candidate.slice(2)
+  return `${matched[1].toUpperCase()}:${rest.length === 0 ? '/' : rest}`
+}
 
 /**
  * Drop heredoc bodies. They are program text, and splitting them into
@@ -157,14 +202,22 @@ function recordable(candidate) {
 /**
  * Read every file path one shell command writes.
  *
- * Returns the paths exactly as the command spelled them — relative stays
- * relative. Resolving against the workspace happens in the caller, which is the
- * only place that knows the session's working directory.
+ * Without a base directory the paths come back exactly as the command spelled
+ * them. With one, the command's own `cd` is followed and every relative target
+ * is resolved against the directory that was current when it was named.
+ *
+ * The base is what the caller knows and this module does not. A redirect in
+ * `cd sub && cat > notes.txt` names a file under `sub`, and resolving it against
+ * the session root instead recorded a path that never existed — the card then
+ * drew that file struck through, as though the session had deleted it.
  *
  * @param {unknown} command - the `command` argument of a shell tool call.
+ * @param {string} [base] - the directory the command runs in. When given,
+ *   relative targets are resolved against it (and against any `cd` inside the
+ *   command); when absent the paths come back exactly as written.
  * @returns {string[]} the paths, in the order the command names them.
  */
-export function writtenPaths(command) {
+export function writtenPaths(command, base) {
   if (typeof command !== 'string' || command.length === 0) return []
   const out = []
   const seen = new Set()
@@ -172,11 +225,25 @@ export function writtenPaths(command) {
     if (out.length >= MAX_TARGETS_PER_COMMAND) return
     if (recordable(candidate) === false) return
     // `&&`/`;` can arrive glued to a target when there is no space around them.
-    const cleaned = candidate.replace(/[;&|]+$/, '')
+    const cleaned = canonicalPath(candidate.replace(/[;&|]+$/, ''))
     if (cleaned.length === 0 || recordable(cleaned) === false) return
     if (seen.has(cleaned)) return
     seen.add(cleaned)
     out.push(cleaned)
+  }
+
+  // The directory the command is running in, as far as this command says. It
+  // starts at the caller's answer and moves when the command moves. `undefined`
+  // means "nobody told me", and then nothing is resolved — a guess about which
+  // directory a path meant is how a card starts naming files that do not exist.
+  let cwd = windowsDrive(typeof base === 'string' ? base : '') ?? (typeof base === 'string' && base.length > 0 ? base : undefined)
+  const remember = (target) => {
+    const spelled = windowsDrive(target) ?? target
+    if (cwd === undefined) {
+      add(spelled)
+      return
+    }
+    add(isAbsolute(spelled) === true ? spelled : join(cwd, spelled))
   }
 
   for (const segment of segmentsOf(tokenize(stripHeredocs(command)))) {
@@ -187,30 +254,45 @@ export function writtenPaths(command) {
     const name = segment[start] ?? ''
     const args = segment.slice(start + 1)
 
+    // `cd x` moves the directory the rest of the call runs in, and since
+    // segments are executed in order the move applies to every segment after
+    // this one. Only a plain directory literal is followed: `cd -`, `cd $DIR`
+    // and `cd ~/x` are left alone, because resolving them wrongly writes a
+    // confident absolute path, which is worse than the relative one it replaced.
+    if (name === 'cd' || name === 'pushd') {
+      const spelled = args.find((arg) => arg.startsWith('-') === false)
+      const destination = spelled === undefined ? undefined : windowsDrive(spelled) ?? spelled
+      if (destination !== undefined && destination.startsWith('$') === false && destination.startsWith('~') === false && destination !== '-') {
+        if (cwd !== undefined) cwd = resolve(cwd, destination)
+        else if (isAbsolute(destination) === true) cwd = destination
+      }
+      continue
+    }
+
     for (let i = 0; i < args.length; i += 1) {
       const token = args[i]
       if (REDIRECT_OPERATOR.test(token)) {
         const next = args[i + 1]
-        if (next !== undefined) add(next)
+        if (next !== undefined) remember(next)
         i += 1
         continue
       }
       const glued = token.match(REDIRECT_GLUED)
-      if (glued !== null) add(glued[1])
+      if (glued !== null) remember(glued[1])
     }
 
     if (TARGET_ARG_COMMANDS.has(name)) {
       for (const arg of args) {
         if (arg.startsWith('-')) continue
         if (REDIRECT_OPERATOR.test(arg) || REDIRECT_GLUED.test(arg)) break
-        add(arg)
+        remember(arg)
       }
     }
 
     if (COPY_LIKE.has(name)) {
       // Everything but the last word is a source; the last one is what appears.
       const operands = args.filter((arg) => arg.startsWith('-') === false && arg.startsWith('$') === false)
-      if (operands.length >= 2) add(operands[operands.length - 1])
+      if (operands.length >= 2) remember(operands[operands.length - 1])
     }
   }
   return out
