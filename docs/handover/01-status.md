@@ -62,6 +62,7 @@
 | 2026-11-15 | 产出卡：来源说明，和一个字段终于有人读 | `source` 从 S8 起就在写，`client.js` 里 `grep '\.source'` 零命中——数据到了卡片门口没人接。行 `title` 追加一句来源（`git` 差分找到 / 目录扫描找到且差分未确认 / 沉默），另加 `data-source` 三态属性供断言锚定。文案刻意不写「本轮」：`source` 按路径持久化、会跨轮存活，而 `turn` 才是「这一轮」的标志。三个只读审查者（渲染 / 断言有效性 / 突变），抓出 2 条 P0 恒真断言（行缺失时 `''.includes()` 全为 false，沉默检查照样绿）、1 条 P1 缺失的反向断言、3 条 P2。修法全部经注入验证：旧断言对不存在的行得到 `true && true`，新断言让 3 条红、先报「行在不在场上」。3636 断言全绿，突变 180/45/128/69 全杀，残留 0。**新增 DEF-147、D-168~170、R-90** |
 | 2026-11-15 | 来源说明的重新审查：我上一轮不该收尾 | 用户问「审查者失效了，你重新派了吗」——没有。上一轮三人里只有一人交回完整结论，我据那一份修完就提交了。从 d9b86ef..d3dc3e0 重新切三份、重派三人，全部返回。**r2 是真正值钱的一份**：它做 51 个单点变异 + 3 个故障注入，抓出两处裸点击（元素消失时抛异常，24 条断言一条都不打印，我上一轮刚加的「先证在场」断言自己会先撞上它）与四条「786 条全绿但破坏已经发生」（沉默未钉住、邀请句顺序未钉住、死行属性可与文本矛盾、scan 行可同时声称两个来源）。修法含一处结构性改动：套件首次有异常上报——DEF-122/134/139/145/146 六次同形，前五次都在补断言，这次补在框架层。3643 断言全绿，突变 183/45/69/128 全杀，残留 0。**新增 DEF-149、DEF-150、D-171、R-91** |
 | 2026-11-15 | 产出卡：来源不显示了，和一个从没失败过的断言 | 用户 m19819 说来源该只做开发时的判断依据，于是把上一轮刚加进 tooltip 的两句话整块撤掉，`data-source` 属性保留（值不是句子：能 grep、能断言、不会跨轮变成假话）。撤句子时那条 `filter` 变异从 KILLED 掉成 SURVIVED，手注查出两条关键断言写的是 `split('\\n')` —— 两个反斜杠是「反斜杠加字母 n」，永远切不出空行，所以它们自写下那天起就不可能失败（DEF-151）。改成单个反斜杠后同一条变异报 `788 passed, 2 failed`。3640 断言全绿，四套突变 183/45/69/128 全杀，残留 0。**新增 DEF-151、D-172~173** |
+| 2026-11-15 | 完整验收：真实数据画出卡片，而它画错了一个目录 | 用户要求对整个产出卡片做完备测试与端到端测试。盘覆盖发现断在中间：**没有任何测试把真实 `readPanel` 的产物交给真实 `client.js`**（`client.test.mjs:807` 的 `panelRoutes()` 是手写 payload）。新建 `test/end-to-end.test.mjs`（785 行，唯一替身是 DOM/React/fetch）与 `test/real-data.test.mjs`（661 行，对准本机 208 个真实会话），第一次真跑就抓到：`statTouchedFiles` 问 `info.isFile()`，答否且路径绝对就归成 `missing`，于是**会话自己的工作目录**被画上删除线、写「已删除」（4 个真实目录全部中招）。新增第五态 `folder`（不并进 `unresolved`：一个是「没法看」、一个是「看了是目录」），褪色但**永不画删除线**，尺寸列写「目录」而非 `0 B`。补 fixture 后两条 folder 变异由 SURVIVED 变 KILLED。3694 断言全绿，四套突变 184/45/69/128 全杀，残留 0。**宿主仍答旧答案**：同一份数据，新进程答 `folder`、运行中的宿主答 `missing`，差值是主进程 ESM 缓存——重启后的真机确认至今零次 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4543,3 +4544,105 @@ titleOf('edited.md').split('\\n').every((part) => part.length > 0)
 - 面板改动仍需重启宿主才可见。这是我第三次在同一个地方写这句话，而重启后的真机确认至今没做过一次。
 - `data-source` 现在没有任何视觉消费方，也没有 CSS。它是纯数据属性，这一点是刻意的，但意味着外观上「来源不可见」和「来源字段不存在」长得一样。
 - 100 多处同类裸点击只修了审查报的两处，其余靠 `uncaughtException` 兜底。
+
+## 2026-11-15 · 完整验收：卡片第一次由真实数据画出来，而它画错了一个目录
+
+### 起点是一个空白，不是一个 bug
+
+用户 m20022 要求对整个产出卡片做完整验收与端到端测试。先盘覆盖：`test/` 47 个文件
+27,806 行，分层已经不错 —— `persistence.test.mjs` 驱动真实事件、真实状态文件、真实
+`/panel` 路由；`client.test.mjs` 用真实 `client.js` 渲染真实组件树。两边各自都很像真的。
+
+断在中间：**没有任何测试把真实 `readPanel` 的产物交给真实 `client.js`**。
+`client.test.mjs:807` 的 `panelRoutes()` 是手写的 payload，与 `readPanel` 无关。字段改名、
+单位变化（毫秒 vs 秒）、`null` 与缺键、枚举多一个成员，都能穿过手写 fixture 而打断用户的
+卡片，而两侧各自的套件全绿。
+
+### 搭桥，然后第一次真跑就抓到一个
+
+`test/end-to-end.test.mjs`（785 行）把整条链串起来：`applyPanel` → 真实 `session/event`
+→ 真实状态文件 → 真实路由 → 真实 `readPanel` → 真实 JSON 信封 → 真实 `client.js` 求值 →
+组件树。唯一替身是 Node 里不可能有的 DOM、React、fetch。
+
+`test/real-data.test.mjs`（661 行）把同一条链对准本机真实的 208 个会话（复制到临时
+`DSH_HOME`，原始记录只读）。
+
+第一次跑真实数据就撞到：
+
+```
+F:\dsh-plugin\                       status=missing  exists=True dir=True
+C:/Users/.../Temp/s3e-probe2/        status=missing  exists=True dir=True
+F:\dsh-plugin\dsh-skill-evolve\      status=missing  exists=True dir=True
+F:\dsh-plugin\.audit-s8e2b\          status=missing  exists=True dir=True
+```
+
+`statTouchedFiles` 问 `info.isFile()`，答否时只要是绝对路径就归成 `missing`。
+`client.js:678` 的 `[data-status="missing"]` 规则随即画上去一条删除线，右侧写「已删除」。
+于是**会话自己的工作目录**在卡片上被宣称已被删除。
+
+### 第五态，而不是把两个答案塞进四个词
+
+新增 `folder`，没有并进 `unresolved`。两者都表示「这一行没能按文件打开」，但说的不是
+一回事：`unresolved` 是「记录丢了 base，我没法看」，`folder` 是「看了，是目录」。
+一个词担两个意思，总要对其中的一个说谎。
+
+目录行**褪色但不画删除线**。删除线是这个界面上唯一表示「你写的东西没了」的记号，
+而目录还在。它以「目录」占据尺寸那一列，因为走普通尺寸路径的目录会渲染成 `0 B` ——
+那是对一个空文件的断言。
+
+### 两条新断言与一个被推上来的缺口
+
+`client.test.mjs` 里覆盖行状态的那组 fixture 原本四行，四种状态。加了第五态之后，
+两条 folder 相关的变异条目回来是 **SURVIVED**：
+
+```
+a folder is drawn as a row you can open
+a folder reports the size it does not have
+```
+
+原因很直白：**没有任何一条 client 测试渲染过 `status: 'folder'` 的行**。api 层测了分类，
+渲染层一条也没测 —— 又是「答案在一侧、另一侧没人问」。fixture 补上第五行（同时因为
+`FOLDED_FILES = 4` 而必须先展开），两条变异各自报出 1 与 2 条失败。
+
+### 验证
+
+- `node test/run.mjs` **3694 passed / 0 failed**
+- 四套突变：`mutate-language-and-files` **184/184**、`mutate-persistence` **45/45**、
+  `mutate-speed` **69/69**、`mutate-checklist-panel` **128/128**，全 0 survived /
+  0 not applied / 0 crashed
+- `_edit/audit_leftovers.py`：leftovers 0 / unresolved 0
+- 真实浏览器按出厂样式表排五个状态并读回计算样式：folder 是 `rgb(139,146,161)`、
+  `text-decoration-line: none`、不可点、尺寸列写「目录」；missing 是 `line-through`。
+  截图 `_shots/folder-states.png`
+- 新进程直接读存储记录：4 个目录里 3 个答 `folder`、1 个是相对路径（`unresolved`，正确）
+
+### 一件必须说清楚的事：宿主还在说旧答案
+
+同一个存储记录，新起的 node 进程答 `folder`，而运行中的宿主 `/panel` 仍答 `missing`。
+这不是修法的问题 —— 主进程的 ESM 模块在进程生命周期内被缓存，改文件不会让已加载的
+模块失效；客户端 bundle 刷新即换，主进程那半要重启宿主。这条以前只在话里说过
+（「面板改动需重启宿主才可见」），这次有了可复现的对照证据：同一份数据、两个进程、
+两个答案，差值就是缓存。
+
+### 过程中我自己写错的
+
+1. 端到端测试头一版把 `document.head.appendChild` 与 `baseURI` 漏了，套件当场崩。
+   崩溃守卫（D-171）让它打印出 tally 行和失败名，而不是 exit 1 无输出 —— 上一轮加的
+   框架层修复立刻回报了自己。
+2. `makeReact()` 建了两次，module table 一份、渲染一份，hook 状态不共享。
+3. 渲染循环不排空微任务，永远读到「正在加载…」。
+4. 漏发 `turn/start`，git 与 scan 都没有基线，`coverage` 变成 `none`，卡片于是正确地说
+   「这一轮没有检查目录」。**那是我的驱动器缺了一步，不是产品错** —— 补上后
+   `sweep = {"turn":1,"coverage":"complete"}`。
+5. 为新增断言写 Python 时第三次踩「凭记忆敲锚点」：`statSync` 其实早就在 import 行里，
+   我又加了一条，`anchor appears 0 times` 把整个脚本挡在写盘之前 —— 这次是好事。
+
+### 还没做
+
+- **宿主重启后的真机确认仍然零次**。上面那条缓存证据说明：我看到的实时卡片，
+  主进程那半是旧代码。
+- `MAX_SCANNED_ENTRIES = 5000` 没动。本工作区 15,778 目录，走查恒 `partial`。
+- `&1`、`--include=*.md` 这类 shell 泄漏路径（`F:\dsh-plugin\dsh-skill-evolve\&1`）
+  仍是行 —— 它们现在至少不再被说成「已删除」，但仍不该出现在卡片上。
+- `_edit/` 下 256 个历史脚本、`.review/` 数十份 diff、`_shots/` 4 MB 未清。
+- `03-defects.md` 里 DEF-145/146/147 三行的列数错位仍在（判定为不动：改历史行是修补历史）。

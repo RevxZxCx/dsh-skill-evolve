@@ -1366,6 +1366,7 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-146 | 2026-11-15 | 一条规则只认字面量数组，把整个脚本静默跳过 | `mutate-speed.mjs` 19 条 `suites: wire` 全部未被检查 | 规则用 `suites:\s*\[` 匹配，别名首字符是字母，`continue` 不报错 |
 | DEF-147 | 我的覆盖率审计两次报告「没有任何断言会失败」，两次都是检查器看错了地方 | 第一次按单引号找 `label:`，而文件用双引号写；第二次改对了引号，但用 `startsWith('FAIL ')` 解析，而套件打印的是两空格缩进的 `  FAIL xxx`。两次都输出了「15 条全部从不失败」这个结论，而变异体其实每次都让 5/6/1 条变红。**没有一条断言是靠这份审计结论判定的**——判定改用了逐条注入 |
 | DEF-151 | 2026-11-15 | 两条断言用 `split('\\n')` 切换行，那个字面量是两个字符不是换行，于是 `split` 永远返回单元素、`every` 永远为真——自写下那天起就不可能失败 | 断言只检查「有没有空行」，而它连「换行」都没切对；通读代码时人会把 `'\\n'` 当成无害的多余转义。暴露靠变异分数从 KILLED 掉到 SURVIVED |
+| DEF-152 | 2026-11-15 | `statTouchedFiles` 的问法不带方向：一次成功的 `stat` 答 `isFile() === false`，绝对路径归 `missing`，卡片于是给一个存在的目录画删除线、写「已删除」。真实数据里四个，其中一个是会话自己的工作区根 | 分类层的断言只问「是什么状态」，从不问「这个状态是不是真的」；四个真实目录全部中招，而 api 层三条断言把 `missing` 写成了期望值 |
 
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
@@ -2551,3 +2552,70 @@ check('the word this build cannot read adds no blank lines either', titleOf('for
 **修法。** 源码里一个反斜杠。手注同一条变异后 `788 passed, 2 failed`，两条断言同时点名并打印完整错字符串。
 
 **判据。** 「这个断言有没有可能失败」不能靠读，要靠让它失败一次。变异分数是最好的探针：**一条变异从 KILLED 掉到 SURVIVED，通常不是代码变好了，是某条断言从来没在起作用。**
+
+## DEF-152 · 一个存在的目录被报成已删除的文件
+
+### 发生了什么
+
+`packages/ui-evolve/lib/api.js` 的 `statTouchedFiles` 对每个路径做一次 `stat`，成功之后问
+`info.isFile()`。答否的时候，它按「路径是不是绝对的」二分：
+
+```js
+if (!info.isFile()) {
+  out.push({ ...base, status: isAbsolute === true ? 'missing' : 'unresolved', ... })
+}
+```
+
+两条路都在表达「这一行打不开」，但没有一条在说「它是目录」。而 `missing` 在这个插件里
+不是中性的：`client.js` 有一条 `[data-status="missing"]` 的规则给它画删除线，尺寸列写
+「已删除」，行不再可点。于是**一次成功的 `stat`、一个确实存在的东西**，被展示成
+「你写的东西没了」。
+
+真实数据上抓到四个（`_edit/live_dir_rows.py` 走运行中宿主的 `/api/ui-evolve/panel`）：
+
+```
+F:\dsh-plugin\                       exists=True dir=True   status=missing
+F:\dsh-plugin\dsh-skill-evolve\      exists=True dir=True   status=missing
+C:/Users/.../Temp/s3e-probe2/        exists=True dir=True   status=missing
+F:\dsh-plugin\.audit-s8e2b\          exists=True dir=True   status=unresolved
+```
+
+第一条是**当前工作区的根目录**，在一个给用户看的卡片上被画成已删除。
+
+### 为什么测试没抓到
+
+因为断言把缺陷写成了期望值。`test/api.test.mjs` 里三条：
+
+```
+:560   'a directory is reported as missing rather than listed as a file'  → status === 'missing'
+:1988  'a directory reached through a guess is unresolved'                → status === 'unresolved'
+:1999  'an absolute directory is still missing'                          → status === 'missing'
+```
+
+同一个 `isFile: () => false` 的答案，绝对路径得 `missing`、相对路径得 `unresolved`。
+两条断言各自读起来都有道理（一条在测「绝对路径能定位」，一条在测「相对路径不能」），
+但**它们从不同的词里得到同一个事实**，这个矛盾本身没有被任何断言问过。测试问的是
+「这个输入产出什么状态」，从不问「这个状态是不是真的发生了」。
+
+而渲染层一条都没有测：`client.test.mjs` 里覆盖行状态的 fixture 是四行、四种状态，
+没有 `folder`。所以「分类错了」和「画错了」两处都没人问，删除线照样画。
+
+### 怎么发现的
+
+不是读代码读出来的，是**第一次让真实数据走完整条链**时打印出来的。新写的
+`test/real-data.test.mjs` 遍历本机 208 个会话的真实记录，逐行问磁盘，一眼就看到
+`status=missing` 与 `exists=True dir=True` 并列。
+
+### 修法
+
+新增第五态 `folder`（D-174），渲染上褪色但不画删除线（D-175）。四条旧断言改写，
+另加一条「真的消失的绝对路径仍然是 `missing`，那是另一个发现」来把两个词分开钉住。
+
+### 教训
+
+**一个二分法里可能少了一整个格。** 这里的分支看起来完备 —— 路径要么绝对要么相对 ——
+但被分类的对象不是路径，是磁盘上的东西，而「是不是文件」这个答案被折叠进了别处。
+补的办法不是让二分更细，是先问「我到底在分什么」。
+
+同一轮的另一个发现可以并列：补断言之后两条 folder 变异立刻从 SURVIVED 变 KILLED，
+**变异分数变化是最省力的「有没有人真的在问」的探针**，比再读一遍断言有效。
