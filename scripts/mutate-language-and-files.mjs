@@ -1622,6 +1622,38 @@ const mutations = [
     to: "        if (false) {",
     why: "the word `cmd&>both.txt` never splits, so no redirect is read and the file vanishes",
   },
+  {
+    file: client,
+    suites: ['test/client.test.mjs'],
+    label: "the tooltip stops saying which bracket found the row",
+    from: "                          const hint = [absolute, note, provenance].filter((part) => part !== '').join('\\n')",
+    to: "                          const hint = [absolute, note].filter((part) => part !== '').join('\\n')",
+    why: "The field has been written since S8 and never read. Dropping it from the assembled tooltip takes away the only place a reader can see it: data-source still separates the two as a value, but that attribute is not in the accessible name and has no visual mark, so what is lost is the reader's ability to tell a row the diff vouched for from one only the walk found.",
+  },
+  {
+    file: client,
+    suites: ['test/client.test.mjs'],
+    label: "every row claims the diff found it",
+    from: "                          const hint = [absolute, note, provenance].filter((part) => part !== '').join('\\n')",
+    to: "                          const hint = [absolute, note, '本轮由 git 差分找到'].filter((part) => part !== '').join('\\n')",
+    why: "A single fixed sentence is worse than silence: it asserts a provenance for rows that never carried one. The three-way split exists because null is the ordinary case, and this mutation is what happens when a reader cannot tell the difference.",
+  },
+  {
+    file: client,
+    suites: ['test/client.test.mjs'],
+    label: "the row stops saying which bracket it came from",
+    from: "                            'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown',",
+    to: "                            'data-source': 'unknown',",
+    why: "The attribute is the assertion that survives a rewording, and flattening it makes the three-way split unobservable without reading prose. A tooltip-only test would still pass here, which is why the attribute is asserted separately.",
+  },
+  {
+    file: client,
+    suites: ['test/client.test.mjs'],
+    label: "the two brackets describe each other",
+    from: "                          const provenance =\n                            file.source === 'git'\n                              ? '由 git 差分找到'\n                              : file.source === 'scan'\n                                ? '由目录扫描找到，git 差分未确认'\n                                : ''",
+    to: "                          const provenance =\n                            file.source === 'git'\n                              ? '由目录扫描找到，git 差分未确认'\n                              : file.source === 'scan'\n                                ? '由 git 差分找到'\n                                : ''",
+    why: "Swapping the two branches leaves every sentence well formed and every row saying something about a bracket -- just the wrong one. This is the failure that misleads instead of omitting: a row only the walk found claims the diff vouched for it, and the reader has no way to notice. The entry above removes the sentence; this one puts it on the wrong row.",
+  },
 ]
 
 

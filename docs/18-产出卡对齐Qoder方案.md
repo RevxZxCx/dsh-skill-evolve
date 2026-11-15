@@ -86,7 +86,9 @@ for (const [file, value] of Object.entries(stored.paths)) {
 
 反向兼容不做：老版本插件读到 v2 文件会在 `:94` 直接拒绝，退化成「这个会话没有历史」，与今天一个全新会话的观感相同。这是可接受的降级，写进注释。
 
-### 2.3 三态
+### 2.3 四态（原题「三态」，2026-11-15 更正）
+
+> **2026-11-15 更正**：下面这张表与「三种结果」是当时的实现。状态后来扩成四态（新增 `unresolved`），原因与判据见本文末「更正」一节。
 
 `statTouchedFiles`（`api.js:423`）现在两个分支都是「不 push」：
 
@@ -416,3 +418,23 @@ div.dsse-row-menu       ← 行的兄弟，不是子节点
 - **不做 Qoder 式永远显示的空态**：它的产出是十三个分组之一，空着不显眼；我们的卡就是整个面板本身。S1 + 3.4 落地后，「写过但全被删」会自然显示删除线行，不需要空态代码。
 - **不做「在文件管理器中显示」**：需要宿主 shell 能力，`shell.overlay` 拿不到。做不出来却放个按钮等于说谎。
 
+## 更正 2026-11-15：三态变成四态，`checking` 仍然没有
+
+§2.3 写的是三态，并且专门解释过「Qoder 是四态（多一个 `checking`），我们没有它」。这个结论对 `checking` 依然成立——`stat` 在同一次面板请求里同步完成，不存在「还没有答案」的中间态——但**状态总数已经不是三个了**。
+
+相对路径就是当初漏掉的那一类。`shellpaths.js` 把 `cat > notes.txt` 里的 `notes.txt` 原样交出来，`session-state.js` 原样存进状态文件（状态文件里没有 cwd），`api.js` 于是把它拼到**会话根**上。拼出来的路径多半不存在，`stat` 抛 `ENOENT`，卡片判 `missing`、画删除线、写「已删除」——**对一份从未定位成功的记录说文件被删了**。
+
+`ENOENT` 有两种成因，而拼接之前就分得开：
+
+| 拼接之前 | 失败 | 状态 | 卡片文案 |
+| --- | --- | --- | --- |
+| 路径自己是绝对的 | `ENOENT` | `missing` | 「文件已被删除或移动」+ 删除线 |
+| 路径是相对的，位置未知 | `ENOENT` | `unresolved` | 「这条记录只存了相对路径，无法定位到具体文件」+ 褪色，**不加删除线** |
+
+第四态的语言是刻意选的：删除线是 `missing` 的词，`unresolved` 的行**仍然是活链接**——一旦工作目录被补上它就能打开，而 `missing` 不会。
+
+判据落在 `api.js` 的 `statTouchedFiles` 里，`const isAbsolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)` 在拼接之前就有答案，所以三种结果（available / missing / invalid）与第四种（unresolved）是**同一个函数里的一次判断**，不是两处约定。
+
+**这一条同时改写了 §7 的验收表**：原写「`stat` 抛 `EACCES` 时产出 `invalid: true` 且与 `missing` 可区分 — 三态不能塌成两态」，现在要读成「四态不能踏成三态」，并且 `unresolved` 与 `missing` 必须可区分。当前断言在 `test/api.test.mjs` 与 `test/client.test.mjs`，条数见 `docs/handover/04-reviews.md` 的 R-87。
+
+**还有一处相关但不同的事**：同一批改动让「记录时解析」取代了「读取时猜」——`writtenPaths(command, base)` 会跟进命令自己的 `cd`/`pushd`，跟不动（`$VAR`、`~`、`-`、`popd`、括号配不平）就**保持相对**，由下游标 `unresolved`。取舍是「宁可说自己不知道，也不写一个自信的错的绝对路径」，理由在 `docs/handover/02-decisions.md` 的 D-157/D-158。

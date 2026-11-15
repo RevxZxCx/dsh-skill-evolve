@@ -5686,6 +5686,131 @@ async function openPanel(routes, options) {
   check('and it is not struck through like a deleted one', /\.dsse-row\[data-stale="true"\] \.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
 }
 
+{
+  // Provenance: which bracket found the row, said in the tooltip it already has.
+  //
+  // The field has been written since S8 (`api.js` narrows it to 'git' | 'scan' |
+  // null) and was never read by the panel. The half worth saying out loud is
+  // 'scan': the diff ran and did not list the file, so a walk of the directory
+  // found it. That is the one thing a reader cannot infer from the path, and it
+  // is the difference between a change and a thing that moved.
+  //
+  // The other half is silence. `null` is the ordinary case -- a file tool named
+  // the path, so the row is here because something said it wrote it -- and a
+  // word this build does not know must also stay silent rather than guess. Both
+  // are asserted, because inventing a sentence for them would be a claim about a
+  // record that never carried the field.
+  const lines = [
+    { path: 'F:\\work\\src\\diff.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'git', address: 'dsh-resource://file/session/session-a/work/src/diff.md' },
+    { path: 'F:\\work\\src\\walked.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'scan', address: 'dsh-resource://file/session/session-a/work/src/walked.md' },
+    { path: 'F:\\work\\src\\edited.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/src/edited.md' },
+    { path: 'F:\\work\\src\\foreign.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'siege', address: 'dsh-resource://file/session/session-a/work/src/foreign.md' },
+    // A row that is both gone and was found by the walk: the two sentences have to
+    // coexist, because the reason a row cannot be opened is the more urgent fact
+    // and provenance must not push it off the tooltip.
+    { path: 'F:\\work\\src\\gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', source: 'scan' },
+  ]
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 3, calls: 4, failed: 0, turnFiles: 5,
+      summary: { text: 'wrote five files' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      cwd: 'F:\\work',
+      files: lines,
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  const toggle = firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle')
+  check('the panel has a handle to open it with', toggle !== undefined, String(toggle === undefined))
+  if (toggle !== undefined && typeof toggle.props?.onClick === 'function') toggle.props.onClick()
+  const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  // Five rows over a four-row fold, so the last one is not drawn yet. Expanding is
+  // part of the fixture rather than an accident: reading a row that the card chose
+  // not to draw would pass or fail for the wrong reason.
+  const badge = firstByClass(folded, 'dsse-expand-action')
+  // The badge exists whether or not the card is folded, so its presence says
+  // nothing about the fold. What this line can honestly claim is that there is a
+  // control to press; the row count right after is what shows the fold was real.
+  check('the fixture offers a control to expand it with', badge !== undefined, String(badge === undefined))
+  if (badge !== undefined && typeof badge.props?.onClick === 'function') badge.props.onClick()
+  const card = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
+  const titleOf = (name) => String(rowOf(name)?.props?.title ?? '')
+  check('and every row is on screen once it is open', byClass(card, 'dsse-row').length === 5, String(byClass(card, 'dsse-row').length))
+  // The count alone cannot tell a full list from a list that lost one row and
+  // drew another twice. The row this block reads last is the one that was folded
+  // away before the expansion, so its presence is the evidence that expanding
+  // worked rather than that the fixture happens to fit.
+  check('including the one that was folded away', rowOf('gone.md') !== undefined, String(rowOf('gone.md') === undefined))
+
+  // Said when the diff listed it.
+  check('a row from the diff says so', titleOf('diff.md').includes('git 差分找到'), titleOf('diff.md'))
+  // And it must not say anything else. A provenance expression that concatenates
+  // both sentences for the git branch would leave this row claiming the diff
+  // found it (true) and the walk found it (false, and unfalsifiable to a reader).
+  // The assertion above cannot see that, because it only asks whether the true
+  // half is present.
+  check('and does not also claim the walk found it', titleOf('diff.md').includes('目录扫描') === false, titleOf('diff.md'))
+  check('and does not hedge about the diff', titleOf('diff.md').includes('未确认') === false, titleOf('diff.md'))
+  // Said when only the walk found it, and why that is worth knowing.
+  check('a row only the walk found says which walk', titleOf('walked.md').includes('目录扫描找到'), titleOf('walked.md'))
+  check('and says the diff did not confirm it', titleOf('walked.md').includes('git 差分未确认'), titleOf('walked.md'))
+
+  // Silent for the ordinary case: a tool named this path, so the row is here
+  // because something said it wrote it. There is nothing to add.
+  //
+  // The silence is only evidence if the row exists. `titleOf` answers '' for a
+  // row that was never drawn, and ''.includes('差分') is false, so a bare silence
+  // check passes whether the row said nothing or was not there at all. The
+  // presence assertions below are what turn that around: absence now fails.
+  check('the row a tool named is on screen at all', rowOf('edited.md') !== undefined, String(rowOf('edited.md') === undefined))
+  check('the row with a word this build cannot read is on screen', rowOf('foreign.md') !== undefined, String(rowOf('foreign.md') === undefined))
+  check('and the tool-named row has a tooltip to be silent in', titleOf('edited.md') !== '', titleOf('edited.md'))
+  check('and so does the one with the unreadable word', titleOf('foreign.md') !== '', titleOf('foreign.md'))
+  check('a row a tool named says nothing about brackets', titleOf('edited.md').includes('差分') === false && titleOf('edited.md').includes('扫描') === false, titleOf('edited.md'))
+  // Silent for a word this build cannot read. A newer server must not produce a
+  // tooltip that reads as a claim.
+  check('and neither does a word this build cannot read', titleOf('foreign.md').includes('差分') === false && titleOf('foreign.md').includes('扫描') === false, titleOf('foreign.md'))
+
+  // The opener covers most of the row's width. A tooltip added only to the row
+  // would never be seen over the part people actually point at.
+  const openerOf = (name) => firstByClass(rowOf(name), 'dsse-row-open')
+  check('the opener carries the same sentence', String(openerOf('walked.md')?.props?.title ?? '').includes('目录扫描找到'), String(openerOf('walked.md')?.props?.title))
+  check('and still offers the preview', String(openerOf('walked.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
+
+  // The three-way split is also a value, so an assertion about which bracket a
+  // row came from does not depend on the wording of a sentence.
+  check('the row states its bracket as an attribute', rowOf('walked.md')?.props?.['data-source'] === 'scan' && rowOf('diff.md')?.props?.['data-source'] === 'git', `${String(rowOf('diff.md')?.props?.['data-source'])}/${String(rowOf('walked.md')?.props?.['data-source'])}`)
+  check('and an unrecorded one is named as such', rowOf('edited.md')?.props?.['data-source'] === 'unknown', String(rowOf('edited.md')?.props?.['data-source']))
+  check('including a word this build does not know', rowOf('foreign.md')?.props?.['data-source'] === 'unknown', String(rowOf('foreign.md')?.props?.['data-source']))
+
+  // The path opens the tooltip, as it always has: every existing reader of that
+  // string expects the path first, and appending must not reorder it.
+  check('the path still comes first', titleOf('walked.md').startsWith('F:\\work\\src\\walked.md'), titleOf('walked.md').slice(0, 40))
+  // And the reason a row cannot be opened is not displaced by provenance. Both
+  // sentences have to be there when both apply: the file is gone AND the walk is
+  // what found it, and a tooltip that dropped either one would be lying by
+  // omission about the more urgent fact or the less visible one.
+  check('a dead row keeps its reason', titleOf('gone.md').includes('文件已被删除或移动'), titleOf('gone.md'))
+  check('and gains the bracket beside it', titleOf('gone.md').includes('目录扫描找到'), titleOf('gone.md'))
+  // Substring checks cannot see structure: three sentences glued into one line,
+  // or the same two sentences in the other order, satisfy every check above.
+  // This is the only assertion in the block that pins both the separators and
+  // the order, so it spells the whole string out. It is deliberately brittle --
+  // a change to any sentence is supposed to make someone read this line.
+  check(
+    'and the three lines are separate, in that order',
+    titleOf('gone.md') === 'F:\\work\\src\\gone.md\n文件已被删除或移动\n由目录扫描找到，git 差分未确认',
+    JSON.stringify(titleOf('gone.md')),
+  )
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 for (const failure of failures) console.log(`  FAIL ${failure}`)
 process.exit(failed === 0 ? 0 : 1)

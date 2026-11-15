@@ -1362,6 +1362,8 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-144 | 2026-11-15 | 三条突变：两条 CRASHED、一条 UNCOVERED，都不是「没被抓住」 | 重定向锚点时只换了 `from:`，`to:` 里还留着重写后已不存在的 `name`；`>&2` 那一条是真的没有断言（只有 `2>&1` 被写过） |
 | DEF-145 | 2026-11-15 | 多套件的声明从未被验证过 | 14 条里 10 条的第二套件一次都没失败 | 没有人跑过「单独跑每个套件」，而 runner 只跑到第一个失败 |
 | DEF-146 | 2026-11-15 | 一条规则只认字面量数组，把整个脚本静默跳过 | `mutate-speed.mjs` 19 条 `suites: wire` 全部未被检查 | 规则用 `suites:\s*\[` 匹配，别名首字符是字母，`continue` 不报错 |
+| DEF-147 | 我的覆盖率审计两次报告「没有任何断言会失败」，两次都是检查器看错了地方 | 第一次按单引号找 `label:`，而文件用双引号写；第二次改对了引号，但用 `startsWith('FAIL ')` 解析，而套件打印的是两空格缩进的 `  FAIL xxx`。两次都输出了「15 条全部从不失败」这个结论，而变异体其实每次都让 5/6/1 条变红。**没有一条断言是靠这份审计结论判定的**——判定改用了逐条注入 |
+
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
 `transcript.js` 读的是 `data?.content`，本来是对的**；`packages/core/lib/evidence.js:288` 与
@@ -2400,3 +2402,70 @@ DEF-146（规则读不懂就不报）。**五次都是「没跑」与「跑了�
 caller` 的 `to` 是**反引号模板字符串**，探针的 `readLiteral` 只认单双引号，于是
 它报「18 条」而文件里有 19 条。单独实测后：`api` 杀（`a revision that moved ends
 the wait early`），`index` 通。**同一种形状：读不懂就当不存在。**
+
+## DEF-147 · 覆盖率审计两次说「没有断言会失败」，两次都是它在看别处
+
+**现象。** 为了回答「这 15 条新断言里，哪几条真的会在坏改动下变红」，
+我写了 `_edit/s12_coverage_audit.mjs`：解析突变脚本的条目、对每条写入变异体、跑套件、看有没有红。
+第一次运行的输出：
+
+```
+MISSING ENTRY  the tooltip stops saying which bracket found the row
+MISSING ENTRY  every row claims the diff found it
+MISSING ENTRY  the row stops saying which bracket it came from
+15 assertions, 15 never fail
+```
+
+**因为三处 `label:` 都没找到，它跳过了全部三条变异，然后报告「所有断言都从不失败」。**
+一个把「我什么都没测」写成「它们全都是摆设」的结论。
+
+第一次的错因：我用单引号找 label，而 `scripts/mutate-language-and-files.mjs:1628` 写的是双引号
+（`label: "the tooltip stops saying..."`）。这不是格式对不上的小问题——`grep -n` 一直能看见那三行。
+
+第二次：改对了引号，变异真的跑了，套件确实红了：
+
+```
+the tooltip stops saying which bracket found the row   772 passed, 5 failed
+every row claims the diff found it                     771 passed, 6 failed
+the row stops saying which bracket it came from        776 passed, 1 failed
+```
+
+但我按 `line.startsWith('FAIL ')` 提取失败标签，**真实格式是两空格缩进**：
+
+```
+  FAIL and the three lines are separate, in that order — ...
+```
+
+（`test/client.test.mjs` 末尾：`for (const failure of failures) console.log(\`  FAIL ${failure}\`)`）
+
+于是 `red.length === 0`，脚本再次打印「15 条全部从不失败」。
+
+### 为什么算缺陷而不是我的脚本写错了
+
+因为两次的结论格式都是**一个断言**，而不是「我失败了」。
+如果我在写完之后直接相信它，我会得出「这 15 条断言全是装饰」的相反结论，
+然后要么白白推翻一整套刚做好的测试，要么（更可能）去「补」一堆本来就有效的断言。
+**一个在失败时输出「一切正常」的检查器，比没有检查器更危险**——这与 DEF-93 是同一句话
+（不能区分「干净」与「没跑」的检查器会签发通行证），只是这次通行证是我自己签给自己的。
+
+### 为什么测试没抓到
+
+因为它不是产品代码，也不是测试代码，是一次性的审计脚本，没有任何东西会去测它。
+**这一类脚本在本仓库没有任何防线**：`_edit/` 下有 350 多个这样的文件，它们决定过我很多判断。
+这不是第一次：DEF-135（复刻谓词得出与生产相反的画面）也是同一族——
+**我自己写的验证工具，是这套流程里唯一没人验证的东西。**
+
+### 修法与防线
+
+本轮最终没有修那个脚本，而是**换了一种判定方式**：逐条注入（`_edit/s15_prove_new_asserts.mjs`、
+`s21_prove_reverse.mjs`、`s22_prove_absence.mjs`），每条只破一处、只跑一个套件、
+直接读套件自己打印的红行。三份脚本都做了 sha256 复原校验，并在开头明确写出
+「要么红、要么 script 报错」。
+
+可以提炼的两条：
+
+1. **解析别人的输出前，先打印一行它实际长什么样。** 两次错误都是「我以为格式是这样」。
+2. **脚本的结论句必须能表达「没测到」。** 本轮之后我要求自己：审计类脚本的输出里
+   如果出现「全部通过」，必须同时打印它实际执行了多少条、跳过了多少条、跳过的是哪些。
+   第二次的 `red.length === 0` 之所以能写成结论，就是因为它没有一个
+   「我解析到 0 条 FAIL 行，而套件说 5 failed」的交叉校验——**两个数不相等本身就是错误信号。**

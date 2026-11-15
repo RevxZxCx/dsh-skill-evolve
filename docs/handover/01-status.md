@@ -59,6 +59,7 @@
 | 2026-11-15 | 产出卡：相对路径的两个修法 | 卡片上出现了一行 `F:\dsh-plugin\packages\ui-evolve\lib\client.js`——磁盘上没这个文件，它被画上删除线写着「已删除」。根因是 `writtenPaths` 按原样交出命令里的相对路径（`packages/ui-evolve/lib/client.js`），状态文件又没有 cwd，读的时候被拼到会话根上。**修法二**：`writtenPaths(command, base)` 跟着命令自己的 `cd` 走，`transcript` 存下 `noteCall` 收到的 cwd，`index.js` 把 `workspaceFor(session)` 一路传下去；顺带把 MSYS 的 `/f/x` 折成 `F:/x`、把 `F:/a/b` 与 `F:\a\b` 统一成一种拼写，否则同一个文件仍是两行。**修法三**：`statTouchedFiles` 新增第四种状态 `unresolved`——相对路径算不准时不再冒充 `missing`，卡片写「无法定位」、褪色、不画删除线、不给预览。真机审计 193 个会话 217 条相对记录：204 条 `unresolved`、11 条 `available`。3547 断言全绿，突变 166/45/128 全杀，残留 0。**不做历史回填**（用户 m16812） |
 | 2026-11-15 | shellpaths：cd 跟着命令走，跟不动就不猜 | 卡片上那行「已删除」修好后，用户连问两件：cd 的其它形态做不做、为什么没有独立审查。追问逼出两件事——我自己引入的回归（`recordable()` 在 join 之后调用，于是 `F:\work\app\&1` 以 `F` 开头，三条判据全部失效），和一个比它更老的分词器缺陷（`;`/`&&`/`||`/`|` 只有两侧带空格才算边界，`a.txt; cd x && b` 是一整段）。六名只读审查者按 200 行门槛切成 cd1–cd6，四份独立指向同一个根因：子 shell 与「cd 未知」被我做成了整条命令共用的布尔，而 shell 的作用域是段级的。重写成作用域栈（`scopes` + `moveTo` 三态 + 段末按 `endedBy` 恢复）后，`cp "release (final)"`、`(cat > a.txt)`、`dirs > stack.txt`、`(cd /tmp) && cat > b.txt` 全部归位。3606 断言全绿，突变 176/45/128 全杀，残留 0。**新增 DEF-140~144、D-161~166、R-88** |
 | 2026-11-15 | 突变表：多套件的声明变成了可验证的规则 | 14 条多套件条目逐条实测，**10 条的第二套件在该变异下从不失败**——它只是跟着跑了一遍，测的是另一个模块（`api` 的变异不会让 `client` 断言变红）。收窄 10 条、给真正双端 10 条写明实测，并给 `test/mutations.test.mjs` 加一条规则：声明两个以上套件必须留有 `// Measured:`。这条规则写下的一刻报出 13 条违规；注入验证确认它会红。**规则本身还有一层洞**：`mutate-speed.mjs` 用 `suites: wire` 这种模块级常量（19 条），只认字面量数组的第一版规则把整个脚本静默跳过了——补上别名解析后又暴露出 19 条，实测 **17 条的第二套件从不失败**，且被杀死的那个并不固定（纯计量变异由 `index` 抓、路由变异由 `api` 抓）。四套突变收窄后 176/45/69/128 全杀，3612 断言全绿，残留 0。**新增 DEF-145、DEF-146、D-167、R-89** |
+| 2026-11-15 | 产出卡：来源说明，和一个字段终于有人读 | `source` 从 S8 起就在写，`client.js` 里 `grep '\.source'` 零命中——数据到了卡片门口没人接。行 `title` 追加一句来源（`git` 差分找到 / 目录扫描找到且差分未确认 / 沉默），另加 `data-source` 三态属性供断言锚定。文案刻意不写「本轮」：`source` 按路径持久化、会跨轮存活，而 `turn` 才是「这一轮」的标志。三个只读审查者（渲染 / 断言有效性 / 突变），抓出 2 条 P0 恒真断言（行缺失时 `''.includes()` 全为 false，沉默检查照样绿）、1 条 P1 缺失的反向断言、3 条 P2。修法全部经注入验证：旧断言对不存在的行得到 `true && true`，新断言让 3 条红、先报「行在不在场上」。3636 断言全绿，突变 180/45/128/69 全杀，残留 0。**新增 DEF-147、D-168~170、R-90** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4271,3 +4272,129 @@ session-store 空跑）。
 全部落错位置。`git checkout` 回滚后改成按 `
   {` … `
   },` 整块解析才正确。
+
+## 2026-11-15 · 来源说明：一个写了两周、没人读的字段
+
+### 起点是一个 grep
+
+用户问「还差什么」，我去核对 S8 留下的账。`packages/ui-evolve/lib/api.js:618` 早就在算
+`source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null`，
+`session-state.js` 会把它按路径存进状态文件、跨回合保留。可是：
+
+```
+grep -c '\.source' packages/ui-evolve/lib/client.js
+0
+```
+
+零。字段从 S8 起就在写，卡片从来没读过它。这一行的 `title` 原本只有路径，加文件消失的原因——
+也就是说，**同一张卡上「本项目改动」与「目录扫描顺带捞到」看起来完全一样**，
+而这两者的可信度差得很远：前者有人明确说改过它，后者只是「这一轮它被碰到过」。
+
+### 改了什么
+
+`packages/ui-evolve/lib/client.js`，38 行：
+
+1. `const provenance` 三态三元，挂在 `const absolute` 之后。`git` → 「由 git 差分找到」；
+   `scan` → 「由目录扫描找到，git 差分未确认」；其余 → 空串（沉默）。
+2. `const hint = [absolute, note, provenance].filter((part) => part !== '').join('\n')`，
+   行 `title` 与打开按钮的 `title` 都换成它。
+3. 行新增 `'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown'`，
+   让「这行来自哪个支架」成为一个能与文案无关地断言的值。
+
+### 两个不是细节的决定
+
+**不写「本轮」。** 第一版写的是「本轮由目录扫描找到」。审查者指出 `source` 是按路径持久化的记录、
+可以跨轮存活：第 N 轮扫描到 `a.md`，第 N+1 轮没有新来源时 `session-state.js` 保留旧值，
+而那时 `turn` 已是 `false`、这一行落进「更早」分组，`source` 仍然是 `'scan'`——
+**它会理直气壮地说错轮次**。`turn` 才是「这一轮」的标志，`source` 回答的是「哪个支架找到的、最近一次是什么时候」。
+去掉时态，两件事就不冲突了。
+
+**「未确认」而不是「没有它」。** 在没有仓库的目录里 git 差分根本没有东西可列，
+与「跑了但没列出它」是两回事。旧文案「git 差分里没有它」把这两种情况说成一种，
+而其中一种根本不是「没有」。
+
+**来源只进 `title` 与 `data-source`，没有视觉标记。** 这是保守取舍，代价写在 R-90 的缺口里：
+`data-source` 不在可访问名里，行 div 也没有 `tabIndex`，所以**读屏用户拿不到这条信息**。
+不做的理由是这张卡已经很密（单行 28px、四个分组、徽标、caveat），
+再加一个视觉层会让每一行都在争同一个位置；而这条信息是「可信度」而非「内容」，属于点开之前的补充。
+
+### 审查抓出的最值钱一条
+
+新增的 15 条断言里有两条是这样的：
+
+```js
+check('a row a tool named says nothing about brackets',
+  titleOf('edited.md').includes('差分') === false && titleOf('edited.md').includes('扫描') === false, ...)
+```
+
+`titleOf` 落到 `String(rowOf(name)?.props?.title ?? '')`。**当这一行根本没被画出来时它返回空串，
+而 `''.includes('差分') === false` 成立、`''.includes('扫描') === false` 也成立**——
+一条「这一行什么都没说」的断言，在「这一行不存在」时同样通过。
+
+这与 DEF-121（十条 CSS 断言对着空样式表全绿）和 DEF-125（只校验选择器不校验声明体）是同一族，
+也是 DEF-93 的那句话：**不能区分「干净」与「没跑」的检查器会签发通行证。**
+修法是先证在场：
+
+```js
+check('the row a tool named is on screen at all', rowOf('edited.md') !== undefined, ...)
+check('and the tool-named row has a tooltip to be silent in', titleOf('edited.md') !== '', ...)
+check('a row a tool named says nothing about brackets', ...)   // 现在才轮到这条
+```
+
+实测：把 fixture 里那行改名（等同于任何「行没画出来」的回归），
+**旧断言在空串上得到 `true && true`，新断言让 3 条红**，第一条正是「行在不在场上」。
+
+### 审查还抓出一条我自己没想到的
+
+**没有「git 行不得同时宣称扫描找到」的反向断言。** 如果 `provenance` 对 `git` 分支写成两句拼接，
+这一行会同时说「被 git 差分找到」（真）与「被目录扫描找到」（假），而原有关断只检查真的一半在不在。
+补上：
+
+```js
+check('and does not also claim the walk found it', titleOf('diff.md').includes('目录扫描') === false, ...)
+check('and does not hedge about the diff', titleOf('diff.md').includes('未确认') === false, ...)
+```
+
+注入验证：拼接两个句子 → 这两条**同时**变红；整句删掉 → 只红 `a row from the diff says so`。
+两条互补而非冗余。
+
+### 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `node test/run.mjs` | **3636 passed / 0 failed** |
+| `test/client.test.mjs` | **786 passed / 0 failed** |
+| `mutate-language-and-files` | **180 killed / 0 survived / 0 not applied / 0 crashed** |
+| `mutate-persistence` | **45 killed** |
+| `mutate-checklist-panel` | **128 killed** |
+| `mutate-speed` | **69 killed** |
+| `_edit/audit_leftovers.py` | **leftovers: 0 / unresolved: 0** |
+| `test/mutations.test.mjs` | **45 passed / 0 failed**（锚点下限 176 → 180） |
+
+差分自查（`_edit/s11_differential.mjs`，HEAD 与工作树各切出表达式在 25 组
+`status × source` 矩阵上对比）：**没有 provenance 的行 tooltip 逐字节不变**（15 组），
+**有 provenance 的行恰好多一行且前缀不变**（10 组）。
+
+注入验证三份：`.join('')` 与 `[absolute, provenance, note]` 各自只红整句断言一条；
+两种 provenance 拼接各红各自的否定断言；行缺失红 3 条。
+
+### 这一轮教训最贵的一条：我把 LF 写成了 CRLF
+
+审查期间我用 Python 脚本以 `read_text()/write_text()` 改文件，没传 `newline=''`。
+Windows 上那是双向静默翻译：读时 CRLF→LF，写时 LF→CRLF。CRLF 文件往返无害，
+**LF 文件往返就变成了 CRLF**，而本仓库工作区是 LF（`core.autocrlf=true` 只在检出时转）。
+
+后果不是观感问题：**所有含换行的突变锚点写得都是 `\n`，在 CRLF 文件里那些行之间是 `\r\n`，
+于是它们全部匹配不上**，元测试报出几十条 `missing in client.js`，与我正在改的东西毫无关系。
+那几十行里没有一条是真的。修复 `_edit/s17_eol.py` 按字节 `raw.replace(b'\r\n', b'\n')` 并逐文件对照
+`git show HEAD:` 确认仓库约定是 LF；此后所有脚本改用 `newline=''` 或字节模式。
+
+记录此事与 DEF-147 同源：**一个说「锚点不见了」而锚点就在原处的检查器，
+和 DEF-146 那个「规则读不懂就不报」的检查器一样，都会把「看错地方」伪装成「已经检查过」。**
+
+### 还没做
+
+- `data-source` 没有视觉表现也没有可访问名（R-90 的缺口 1）。已决定不做，理由写在上面。
+- 「更早」分组里的 provenance 行没有断言覆盖——fixture 五行全是 `turn: true`。
+- 截图：`_shots/` 里的卡都是同源渲染，不是宿主实拍；token 拿不到（43 字符，只存宿主内存）。
+  这一点在 `docs/handover/index.md` 的「更正」一节里已经记过，此处只是提醒它仍然成立。
