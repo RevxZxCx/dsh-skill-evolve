@@ -5790,86 +5790,74 @@ async function openPanel(routes, options) {
   // worked rather than that the fixture happens to fit.
   check('including the one that was folded away', rowOf('gone.md') !== undefined, String(rowOf('gone.md') === undefined))
 
-  // Said when the diff listed it.
-  // Spelled out, not matched by substring: the scan sentence is pinned by the
-  // whole-string assertion on gone.md, and leaving this one loose meant any
-  // trailing character survived.
-  check('a row from the diff says so', titleOf('diff.md') === 'F:\\work\\src\\diff.md\n由 git 差分找到', JSON.stringify(titleOf('diff.md')))
-  // And it must not say anything else. A provenance expression that concatenates
-  // both sentences for the git branch would leave this row claiming the diff
-  // found it (true) and the walk found it (false, and unfalsifiable to a reader).
-  // The assertion above cannot see that, because it only asks whether the true
-  // half is present.
-  check('and does not also claim the walk found it', titleOf('diff.md').includes('目录扫描') === false, titleOf('diff.md'))
-  check('and does not hedge about the diff', titleOf('diff.md').includes('未确认') === false, titleOf('diff.md'))
-  // Said when only the walk found it, and why that is worth knowing.
-  check('a row only the walk found says which walk', titleOf('walked.md').includes('目录扫描找到'), titleOf('walked.md'))
-  check('and says the diff did not confirm it', titleOf('walked.md').includes('git 差分未确认'), titleOf('walked.md'))
-  // The other direction of the same rule, and the one that misleads:
-  // 'git 差分未确认' is not the phrase '由 git 差分找到', so a scan row that
-  // also prepended the diff sentence satisfies every check above while
-  // claiming both brackets at once.
-  check('and does not claim the diff found it', titleOf('walked.md').includes('由 git 差分找到') === false, titleOf('walked.md'))
-
-  // Silent for the ordinary case: a tool named this path, so the row is here
-  // because something said it wrote it. There is nothing to add.
+  // Nothing on any row claims where it came from. The bracket is a value on the
+  // node, not a sentence in the tooltip: someone reading this card is asking what
+  // changed, and a line about which collector noticed it invites a question the
+  // card cannot answer. `source` also outlives the turn that wrote it, so the same
+  // file could gain the sentence and lose it again between turns, which reads as a
+  // change in the file itself.
   //
-  // The silence is only evidence if the row exists. `titleOf` answers '' for a
-  // row that was never drawn, and ''.includes('差分') is false, so a bare silence
-  // check passes whether the row said nothing or was not there at all. The
-  // presence assertions below are what turn that around: absence now fails.
+  // Checked over every row rather than the two that carry a bracket. A row whose
+  // source is unset and a row whose source is a word this build cannot read are
+  // exactly the two where an accidental fallback sentence would hide, and they are
+  // the majority on a real card.
+  for (const name of ['diff.md', 'walked.md', 'edited.md', 'foreign.md', 'gone.md']) {
+    check(
+      `the row for ${name} says nothing about brackets`,
+      titleOf(name).includes('差分') === false && titleOf(name).includes('扫描') === false,
+      titleOf(name),
+    )
+  }
+  // And the silence is a whole tooltip, not a truncated one. `titleOf` answers ''
+  // for a row that was never drawn, and ''.includes('差分') is false, so the checks
+  // above pass whether the row said nothing or was not there at all. Presence is
+  // what turns that around: absence now fails.
   check('the row a tool named is on screen at all', rowOf('edited.md') !== undefined, String(rowOf('edited.md') === undefined))
   check('the row with a word this build cannot read is on screen', rowOf('foreign.md') !== undefined, String(rowOf('foreign.md') === undefined))
   check('and the tool-named row has a tooltip to be silent in', titleOf('edited.md') !== '', titleOf('edited.md'))
   check('and so does the one with the unreadable word', titleOf('foreign.md') !== '', titleOf('foreign.md'))
-  check('a row a tool named says nothing about brackets', titleOf('edited.md').includes('差分') === false && titleOf('edited.md').includes('扫描') === false, titleOf('edited.md'))
-  // Silent for a word this build cannot read. A newer server must not produce a
-  // tooltip that reads as a claim.
-  check('and neither does a word this build cannot read', titleOf('foreign.md').includes('差分') === false && titleOf('foreign.md').includes('扫描') === false, titleOf('foreign.md'))
-  // Silence means no empty parts, not merely no words. Without the filter in
-  // the hint assembly a tooltip grows a trailing blank line and every check
-  // above still passes, because they all ask what a line says and never
-  // whether what they are looking at is a line at all.
+  // Silence means no empty parts, not merely no words. Without the filter in the
+  // hint assembly a tooltip grows a trailing blank line and every check above
+  // still passes, because they all ask what a line says and never whether what
+  // they are looking at is a line at all.
   check('and the silent tooltip has no blank lines', titleOf('edited.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('edited.md')))
   check('the word this build cannot read adds no blank lines either', titleOf('foreign.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('foreign.md')))
 
-  // The opener covers most of the row's width. A tooltip added only to the row
+  // The opener covers most of the row's width. A tooltip changed only on the row
   // would never be seen over the part people actually point at.
   const openerOf = (name) => firstByClass(rowOf(name), 'dsse-row-open')
-  check('the opener carries the same sentence', String(openerOf('walked.md')?.props?.title ?? '').includes('目录扫描找到'), String(openerOf('walked.md')?.props?.title))
+  check('the opener carries the same tooltip', String(openerOf('walked.md')?.props?.title ?? '').startsWith('F:\\work\\src\\walked.md'), String(openerOf('walked.md')?.props?.title))
+  check('and does not add a bracket of its own', String(openerOf('walked.md')?.props?.title ?? '').includes('扫描') === false, String(openerOf('walked.md')?.props?.title))
   check('and still offers the preview', String(openerOf('walked.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
-  // Membership cannot see order. The point of the opener's template is that
-  // the invitation comes last: the path is what the reader hunts for, and it
-  // has to lead the tooltip it leads inside the row.
+  // Membership cannot see order. The point of the opener's template is that the
+  // invitation comes last: the path is what the reader hunts for, and it has to
+  // lead the tooltip it leads inside the row.
   check('and puts the invitation last', String(openerOf('walked.md')?.props?.title ?? '').endsWith('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
 
-  // The three-way split is also a value, so an assertion about which bracket a
-  // row came from does not depend on the wording of a sentence.
+  // The bracket is still recorded, and the attribute is now the only place it
+  // lives. That is the whole point of keeping it: it has to survive the move off
+  // the tooltip, or the fact is lost rather than hidden.
   check('the row states its bracket as an attribute', rowOf('walked.md')?.props?.['data-source'] === 'scan' && rowOf('diff.md')?.props?.['data-source'] === 'git', `${String(rowOf('diff.md')?.props?.['data-source'])}/${String(rowOf('walked.md')?.props?.['data-source'])}`)
   check('and an unrecorded one is named as such', rowOf('edited.md')?.props?.['data-source'] === 'unknown', String(rowOf('edited.md')?.props?.['data-source']))
   check('including a word this build does not know', rowOf('foreign.md')?.props?.['data-source'] === 'unknown', String(rowOf('foreign.md')?.props?.['data-source']))
-  // A row that cannot be opened still has a bracket. The attribute and the
-  // sentence have to agree on the rows the opener gave up on too, or the value
-  // can degrade to 'unknown' exactly where the row is least inspectable by hand.
+  // A row that cannot be opened still has a bracket. Losing it exactly where the
+  // row is least inspectable by hand is how an attribute quietly becomes useless.
   check('a dead row still states its bracket', rowOf('gone.md')?.props?.['data-source'] === 'scan', String(rowOf('gone.md')?.props?.['data-source']))
 
   // The path opens the tooltip, as it always has: every existing reader of that
-  // string expects the path first, and appending must not reorder it.
+  // string expects the path first, and removing a sentence must not reorder it.
   check('the path still comes first', titleOf('walked.md').startsWith('F:\\work\\src\\walked.md'), titleOf('walked.md').slice(0, 40))
-  // And the reason a row cannot be opened is not displaced by provenance. Both
-  // sentences have to be there when both apply: the file is gone AND the walk is
-  // what found it, and a tooltip that dropped either one would be lying by
-  // omission about the more urgent fact or the less visible one.
+  // The reason a row cannot be opened is not displaced by anything else. It is the
+  // more urgent fact, and it is the last thing the tooltip gained.
   check('a dead row keeps its reason', titleOf('gone.md').includes('文件已被删除或移动'), titleOf('gone.md'))
-  check('and gains the bracket beside it', titleOf('gone.md').includes('目录扫描找到'), titleOf('gone.md'))
-  // Substring checks cannot see structure: three sentences glued into one line,
-  // or the same two sentences in the other order, satisfy every check above.
-  // This is the only assertion in the block that pins both the separators and
-  // the order, so it spells the whole string out. It is deliberately brittle --
-  // a change to any sentence is supposed to make someone read this line.
+  // Substring checks cannot see structure: two sentences glued into one line, or
+  // the same two in the other order, satisfy every check above. This is the only
+  // assertion in the block that pins both the separator and the order, so it
+  // spells the whole string out. It is deliberately brittle -- a change to any
+  // sentence is supposed to make someone read this line.
   check(
-    'and the three lines are separate, in that order',
-    titleOf('gone.md') === 'F:\\work\\src\\gone.md\n文件已被删除或移动\n由目录扫描找到，git 差分未确认',
+    'and its two lines are separate, in that order',
+    titleOf('gone.md') === 'F:\\work\\src\\gone.md\n文件已被删除或移动',
     JSON.stringify(titleOf('gone.md')),
   )
 }

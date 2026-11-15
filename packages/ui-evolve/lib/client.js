@@ -3096,39 +3096,29 @@ window.__ModuleLoader__.load({
                                   ? '这条记录只存了相对路径，无法定位到具体文件'
                                   : ''
                           const absolute = String(file.path)
-                          // Which bracket found this file. `api.js` normalises the
-                          // stored value to 'git' | 'scan' | null, and null is the
-                          // ordinary case -- a file tool named the path, so the row is
-                          // here because something said it wrote it. That needs no
-                          // explanation, and guessing one would be a claim about a
-                          // record that never carried the field.
+                          // Which bracket found this file stays a value, not a sentence.
+                          // `api.js` normalises the stored value to 'git' | 'scan' | null
+                          // and the row carries it as a `data-source` attribute, so the two
+                          // brackets stay tellable apart while developing or while triaging a
+                          // report. A value is checkable; a sentence in a tooltip was read
+                          // once and then had to stay true forever.
                           //
-                          // `scan` is the half worth saying out loud: no diff vouched
-                          // for this file, so a walk of the directory found it.
-                          // Nothing on the row can imply that, and it is the
-                          // difference between a change and a thing that moved.
+                          // It is deliberately not shown. Someone reading this card is asking
+                          // what changed, not which of the collectors happened to notice it,
+                          // and a sentence about provenance invites a question the card cannot
+                          // answer. Worse, `source` is stored per path and outlives the turn
+                          // that wrote it: the same file can gain the sentence on one turn
+                          // and lose it on the next as the brackets disagree, which reads as a
+                          // change in the file. The attribute keeps the fact without the claim.
                           //
-                          // Neither sentence says "this turn". `source` is stored
-                          // per path and outlives the turn that wrote it, while `turn`
-                          // is the flag that means "this turn"; a row found three
-                          // turns ago still carries its bracket and sits in the
-                          // earlier group, where a sentence about the current turn
-                          // would be wrong. Hence the tenseless verbs, and "未确认"
-                          // rather than "没有它": inside a folder with no repository
-                          // the diff named nothing for want of anything to name, which
-                          // is not the same as running and finding none.
-                          const provenance =
-                            file.source === 'git'
-                              ? '由 git 差分找到'
-                              : file.source === 'scan'
-                                ? '由目录扫描找到，git 差分未确认'
-                                : ''
                           // One place that assembles the tooltip, because the row and the
-                          // opener are separate elements and each shows its own title.
-                          // The opener covers most of the row's width, so anything added
-                          // only to the row would be invisible over the part people
-                          // actually point at.
-                          const hint = [absolute, note, provenance].filter((part) => part !== '').join('\n')
+                          // opener are separate elements and each shows its own title. The
+                          // opener covers most of the row's width, so anything added only to
+                          // the row would be invisible over the part people actually point at.
+                          // `note` is empty for the ordinary available row, so the empty parts
+                          // are dropped rather than joined: a plain join would leave the path
+                          // followed by a blank line.
+                          const hint = [absolute, note].filter((part) => part !== '').join('\n')
                           // Undefined for a file outside the workspace, which is what
                           // makes the second copy button disappear rather than copy a
                           // path with `..` in it that no build system ever wrote.

@@ -1365,6 +1365,7 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-145 | 2026-11-15 | 多套件的声明从未被验证过 | 14 条里 10 条的第二套件一次都没失败 | 没有人跑过「单独跑每个套件」，而 runner 只跑到第一个失败 |
 | DEF-146 | 2026-11-15 | 一条规则只认字面量数组，把整个脚本静默跳过 | `mutate-speed.mjs` 19 条 `suites: wire` 全部未被检查 | 规则用 `suites:\s*\[` 匹配，别名首字符是字母，`continue` 不报错 |
 | DEF-147 | 我的覆盖率审计两次报告「没有任何断言会失败」，两次都是检查器看错了地方 | 第一次按单引号找 `label:`，而文件用双引号写；第二次改对了引号，但用 `startsWith('FAIL ')` 解析，而套件打印的是两空格缩进的 `  FAIL xxx`。两次都输出了「15 条全部从不失败」这个结论，而变异体其实每次都让 5/6/1 条变红。**没有一条断言是靠这份审计结论判定的**——判定改用了逐条注入 |
+| DEF-151 | 2026-11-15 | 两条断言用 `split('\\n')` 切换行，那个字面量是两个字符不是换行，于是 `split` 永远返回单元素、`every` 永远为真——自写下那天起就不可能失败 | 断言只检查「有没有空行」，而它连「换行」都没切对；通读代码时人会把 `'\\n'` 当成无害的多余转义。暴露靠变异分数从 KILLED 掉到 SURVIVED |
 
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
@@ -2531,3 +2532,22 @@ sha256 `6e6801893f98c03690a74fdb6776d2d94e3a94e203e227343c146d5ee2549100`、
 **为什么测试没抓到**：它不是被测代码的缺陷，是测具的缺陷，没有任何一层覆盖它。
 让它暴露的是那条 `assert`，而那条 `assert` 原本的作用是「确认破坏真的发生了」。
 这是本轮第二次被自己的工具伤到（第一次是 DEF-148 把 LF 写成 CRLF）。
+
+## DEF-151 · 两条断言用两个反斜杠切换行，从未失败过
+
+**现象。** `test/client.test.mjs` 里：
+
+```js
+check('and the silent tooltip has no blank lines', titleOf('edited.md').split('\\n').every((part) => part.length > 0), ...)
+check('the word this build cannot read adds no blank lines either', titleOf('foreign.md').split('\\n').every((part) => part.length > 0), ...)
+```
+
+**实际内容。** 源码里的 `'\\n'` 按 JS 规则是「反斜杠 + 字母 n」两个字符，不是换行符。tooltip 里不含该组合 → `split` 返回 `["F:\\work\\src\\edited.md"]` 单元素数组 → 该元素长度 26 > 0 → `every` 为真。**把 `client.js` 里的 `.filter((part) => part !== '')` 删掉，tooltip 变成 `"F:\\work\\src\\edited.md\n"`（末尾悬空换行），两条断言依然绿。**
+
+**发现方式。** 撤掉来源句子后跑变异，`the hint keeps the empty parts it was told to drop` 从 KILLED 变成 **SURVIVED**。手动注入同一条删除并单独跑套件：`790 passed, 0 failed`。把 `split('\\\\n')` 的原始字节打出来才看见问题。
+
+**为什么测试没抓到。** 因为它不是「测试没覆盖」，而是**测试本身不可能失败**。通读断言也抓不到：人看到 `split('\n')` 会认为正确，看到 `split('\\n')` 也容易认为「多一个转义而已，无害」—— 而它恰好让整个表达式退化成恒真。这与 DEF-121（CSS 断言对着空样式表跑）、DEF-125（只校验选择器不校验声明体）、DEF-147（FAIL 行缩进假设）、DEF-149（崩溃被读成没跑）同族，是**第七次**：检查器的输入与被检查的东西从来没有对上，而输出长得像「检查过且没问题」。
+
+**修法。** 源码里一个反斜杠。手注同一条变异后 `788 passed, 2 failed`，两条断言同时点名并打印完整错字符串。
+
+**判据。** 「这个断言有没有可能失败」不能靠读，要靠让它失败一次。变异分数是最好的探针：**一条变异从 KILLED 掉到 SURVIVED，通常不是代码变好了，是某条断言从来没在起作用。**
