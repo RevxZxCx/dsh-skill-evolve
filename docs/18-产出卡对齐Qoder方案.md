@@ -7,10 +7,10 @@
 | 维度 | 现在 | 改后 | 是否抄 Qoder |
 | --- | --- | --- | --- |
 | 数据模型 | `Map<path, seq>` | `Map<path, {seq, turn, at}>` | 部分（Qoder 有 `kind`/`target`/`origin`，我们只抄生命周期字段） |
-| 文件消失 | 静默丢弃 | 三态 `available`/`missing`/`invalid`，行保留 | **是**，这是最重要的一条 |
+| 文件消失 | 静默丢弃 | 五态 `available`/`missing`/`invalid`/`unresolved`/`folder`，行保留（原表写三态，2026-11-15 两次扩态，见文末更正） | **是**，这是最重要的一条 |
 | 行结构 | 36px 两行，无图标 | 28px 单行，带类型图标 | 是 |
 | 折叠与总数 | 头部数人与徽标总数互相矛盾 | 头部说总数，按钮说「还剩几个」 | 是 |
-| 行内动作 | 无 | 悬停出「复制绝对/相对路径」 | 部分（Qoder 有溢出菜单六项，我们只能做复制） |
+| 行内动作 | 无 | 悬停出复制图标，点开是「绝对路径 / 相对路径」两行（原表写「悬停出复制绝对/相对路径」，2026-11-14 改过一次结构，见 §5.1） | 部分（Qoder 有溢出菜单六项，我们只能做复制） |
 | 空态 | 整卡不出现 | 仅在「写过但全被删」时出现 | 部分（Qoder 是永远出现） |
 | 打开方式 | 一种 | 一种 | **否**（宿主只有一个入口） |
 | 预览 | 无 | 无 | **否**（无宿主能力） |
@@ -20,7 +20,7 @@
 
 ## 一、差距的根本原因
 
-Qoder 的一行代表**一个产出物**，它自带身份（`artifactId` = `path + "\0" + size` 的哈希）、类型（`kind`）、生命周期（四态）。本项目的一行代表**一次成功的 `fs.stat`**——`api.js:434` 的 `if (!info.isFile()) continue` 就是这句话的字面证据：不是文件的东西不配成为一行。
+Qoder 的一行代表**一个产出物**，它自带身份（`artifactId` = `path + "\0" + size` 的哈希）、类型（`kind`）、生命周期（四态）。本项目的一行代表**一次成功的 `fs.stat`**——`api.js:434` 的 `if (!info.isFile()) continue` 曾是这句话的字面证据：不是文件的东西不配成为一行。**这句已失效** —— 目录现在以 `folder` 行出现，见文末「更正 2026-11-15（之三）」。
 
 所以绝大多数差异都是从这一条派生的：
 
@@ -383,7 +383,7 @@ div.dsse-row-menu       ← 行的兄弟，不是子节点
 | v1 文件读进来后 `pathsSeen` 仍是完整列表，且 `turn` 为 `undefined` | 钉住迁移不丢数据 |
 | v2 写入后 `turn` 存活一次读-写-读往返 | 钉住重启后折叠态正确 |
 | `stat` 抛 `ENOENT` 时产出 `missing: true` 而非消失 | S1 的核心 |
-| `stat` 抛 `EACCES` 时产出 `invalid: true` 且与 `missing` 可区分 | 三态不能塌成两态 |
+| `stat` 抛 `EACCES` 时产出 `invalid: true` 且与 `missing` 可区分 | 五态不能塌成更少（原写「三态不能塌成两态」，2026-11-15 扩态后同时要求 `unresolved` 与 `folder` 各自可区分） |
 | 缺失行渲染为不可点击（`openable === false`） | 防止「看起来能点但点了没反应」 |
 | 头部数字 + 徽标剩余数 = 总数 | S4 的唯一目的 |
 | 复制按钮在 `focus-within` 下可见 | 键盘用户不能只有鼠标路径 |
@@ -438,7 +438,7 @@ div.dsse-row-menu       ← 行的兄弟，不是子节点
 
 判据落在 `api.js` 的 `statTouchedFiles` 里，`const isAbsolute = path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path)` 在拼接之前就有答案，所以三种结果（available / missing / invalid）与第四种（unresolved）是**同一个函数里的一次判断**，不是两处约定。
 
-**这一条同时改写了 §7 的验收表**：原写「`stat` 抛 `EACCES` 时产出 `invalid: true` 且与 `missing` 可区分 — 三态不能塌成两态」，现在要读成「四态不能踏成三态」，并且 `unresolved` 与 `missing` 必须可区分。当前断言在 `test/api.test.mjs` 与 `test/client.test.mjs`，条数见 `docs/handover/04-reviews.md` 的 R-87。
+**这一条同时改写了 §7 的验收表**：原写「`stat` 抛 `EACCES` 时产出 `invalid: true` 且与 `missing` 可区分 — 三态不能塌成两态」，现在要读成「四态不能塌成三态」，并且 `unresolved` 与 `missing` 必须可区分。**2026-11-15 再更正**：`folder` 进来之后是**五态不能塌成更少**，`folder` 与 `missing` 也必须可区分 —— 一个本来就能打开的目录被画成删除线，是比不显示更糟的错误。§7 那一行已按五态改写。当前断言在 `test/api.test.mjs` 与 `test/client.test.mjs`，条数见 `docs/handover/04-reviews.md` 的 R-87。
 
 **还有一处相关但不同的事**：同一批改动让「记录时解析」取代了「读取时猜」——`writtenPaths(command, base)` 会跟进命令自己的 `cd`/`pushd`，跟不动（`$VAR`、`~`、`-`、`popd`、括号配不平）就**保持相对**，由下游标 `unresolved`。取舍是「宁可说自己不知道，也不写一个自信的错的绝对路径」，理由在 `docs/handover/02-decisions.md` 的 D-157/D-158。
 
