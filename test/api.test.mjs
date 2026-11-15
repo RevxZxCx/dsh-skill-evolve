@@ -1852,11 +1852,57 @@ function heldBodyOf(res) {
   // .rv-head/, 62 under .tmp-test/, 21 under .review/. The walk refused none of
   // them and the card called three rows out of two hundred generated, so both were
   // answering about a repository this plugin had never looked inside.
-  const walkerSkips = ['.rv-head', '.tmp-test', '.review', '.audit-s8e2b', '.probe-r1', 'node_modules']
-  const walkerEnters = ['packages', 'src', 'out', 'dist', 'build', '.github', '.probing', '_posts']
+  const walkerSkips = [
+    '.rv-head', '.tmp-test', '.review', '.audit-s8e2b', '.probe-r1', 'node_modules',
+    // The same tables written as whole names only matched the exact spelling. A
+    // separator or a digit keeps a name a variant of the listed one.
+    '.review-tmp', '.review2', '.review_old', '.review.bak', '.tmp-test2',
+    '.jest-cache', '.nyc_output-x', '.vitest',
+  ]
+  const walkerEnters = [
+    'packages', 'src', 'out', 'dist', 'build', '.github', '.probing', '_posts',
+    // A letter after a listed name is a different word, not a variant of it.
+    '.reviewer-notes', '.reviews', '.jesting', 'review', 'tmp-test',
+  ]
   for (const name of walkerSkips) {
     check(`the walk refuses ${name}`, isUnwalkableDirectory(name) === true, String(isUnwalkableDirectory(name)))
   }
+  const variants = ['.review', '.tmp-test', '.vitest', '.jest', '.nyc_output']
+  for (const name of variants) {
+    for (const suffix of ['-tmp', '2', '_old', '.bak']) {
+      check(
+        `a working copy that grew a suffix is still one: ${name}${suffix}`,
+        isUnwalkableDirectory(name + suffix) === true,
+        name + suffix,
+      )
+      check(
+        `and the card does not call it a person's work: ${name}${suffix}`,
+        isNoisePath('/w/' + name + suffix + '/probe.mjs', '/w') === true,
+        name + suffix,
+      )
+    }
+    // The longer-word direction is only meaningful for names the prefix table does
+    // not already claim. `.tmp-test` starts with the `.tmp-` prefix, so `.tmp-tests`
+    // was a working copy long before this rule - asserting otherwise would be
+    // asserting that the prefix table does not exist.
+    for (const suffix of name === '.tmp-test' ? [] : ['er-notes', 's', 'ing']) {
+      check(
+        `a longer word that only starts the same is not a working copy: ${name}${suffix}`,
+        isUnwalkableDirectory(name + suffix) === false,
+        name + suffix,
+      )
+      check(
+        `and the card leaves it among the sources: ${name}${suffix}`,
+        isNoisePath('/w/' + name + suffix + '/a.js', '/w') === false,
+        name + suffix,
+      )
+    }
+  }
+  check(
+    'a prefix that was already there still claims its names',
+    isUnwalkableDirectory('.tmp-tests') === true && isUnwalkableDirectory('.tmp-tester-notes') === true,
+    '.tmp-tests',
+  )
   for (const name of walkerEnters) {
     check(`the walk still enters ${name}`, isUnwalkableDirectory(name) === false, String(isUnwalkableDirectory(name)))
   }
