@@ -4040,3 +4040,9 @@ statTouchedFiles`）：真实 200 条那份渲染成头部只有 `200 个生成�
 - **不做历史回填**（用户 m16812 明确）：217 条旧记录不会重算成绝对路径，它们就停在 `unresolved`。测试环境，不影响生产。
 - `cd` 的其它形态仍然不跟：子 shell `(cd x && …)`、`cd` 到软链、`pushd` 的栈操作只取最上面一个目录。都没做，因为没被真实数据要求过。
 - 这一轮没有独立审查者，也没有第二人复看。四套突变和注入验证是我能提供的最强证据，但它不等于别人看过。
+
+### 更正 2026-11-15：断言总数是 3549，不是 3547
+
+上面两处写的是 3547。写完那段之后又给 `test/transcript.test.mjs` 补了两条断言（`a files array is not a signature` / `and the tool that does present is still read`），因为一条突变暴露了这个缺口：把 `if (PRESENT_TOOLS.has(call.name))` 改成 `if (true)` 时没有任何断言变红。它能变绿是因为 `readPresentedPaths` 对别的工具返回空数组，行为确实没变——但「别的工具带 `files` 数组不会被当成交付物」这件事**从来没有被断言过**，也就从来没有人知道它是对的。
+
+终值是 **3549 passed / 0 failed**，分套：shellpaths 63、transcript **145**（原写 143）、api 303、client 762。其余数字（突变 166/45/128、残留 0、217 条相对记录、204/11）不变。

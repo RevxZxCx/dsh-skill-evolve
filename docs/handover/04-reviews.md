@@ -2016,3 +2016,5 @@ DEF-135（渲染页复刻）、DEF-136（`file:` 别名）。
 - **`cd` 的其它形态没测也没做**：子 shell `(cd x && …)`、软链、`pushd` 栈。真实数据没要求过，但真实数据只有 217 条。
 - **217 条历史记录停在 `unresolved`**，不会变成可用的绝对路径（用户明确不做回填）。11 条恰好拼对的仍是 `available`，其余 204 条永久停在「不知道」。
 - **两份文档的取证来自复刻脚本**：DEF-135 那次教训之后，本轮分类都改为调生产模块（`fix3_audit_real.mjs` 直接 `import statTouchedFiles`），但渲染截图仍走同源渲染，不是宿主实拍。
+
+**更正 2026-11-15：** 上方写的 3547 是补两条断言之前的数字。补的是 `a files array is not a signature` 与 `and the tool that does present is still read`——一条突变（`if (PRESENT_TOOLS.has(call.name))` → `if (true)`）判了 UNCOVERED，查下去发现它对产品行为确实等价（`readPresentedPaths` 对别的工具返回空），但它暴露的是**这个性质从来没被断言过**。终值 3549 passed / 0 failed，transcript 套件 145 条。
