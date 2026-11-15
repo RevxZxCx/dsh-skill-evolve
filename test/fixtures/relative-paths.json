@@ -1,0 +1,181 @@
+{
+  "fixture": {
+    "why": "Both brackets and both spellings: git-found rows beside scan-found ones, absolute beside relative, a POSIX path beside a Windows one, and a directory reached through a relative guess.",
+    "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
+    "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
+    "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
+    "regenerate": "node scripts/make-fixture.mjs"
+  },
+  "version": 1,
+  "state": 2,
+  "turns": 1,
+  "paths": {
+    "$TEMP/rot.mjs": {
+      "seq": 4,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    ".review/check-s3e-now.mjs": {
+      "seq": 17,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    ".review/count-anchors.mjs": {
+      "seq": 10,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    "/fixtures2/chk.mjs": {
+      "seq": 2,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    "D:/fixture-3/AppData/Local/Temp/s3e-probe2/": {
+      "seq": 7,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\check-s3e-now.mjs": {
+      "seq": 20,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\check-s3e-now2.mjs": {
+      "seq": 21,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\chk-anchors.mjs": {
+      "seq": 22,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\count-anchors.mjs": {
+      "seq": 11,
+      "turn": 1,
+      "at": 1794661441680
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\count-anchors2.mjs": {
+      "seq": 23,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\final-lines.mjs": {
+      "seq": 24,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-catch.mjs": {
+      "seq": 25,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-cleanup.mjs": {
+      "seq": 26,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-final.mjs": {
+      "seq": 27,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-final2.mjs": {
+      "seq": 28,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-repoint.mjs": {
+      "seq": 29,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\probe-six.mjs": {
+      "seq": 30,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\rot-all.mjs": {
+      "seq": 31,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\s3a.diff": {
+      "seq": 32,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\s3b.diff": {
+      "seq": 33,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\s3c.diff": {
+      "seq": 34,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\s3d.diff": {
+      "seq": 35,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\.review\\s3e.diff": {
+      "seq": 36,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "scan"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\docs\\18-产出卡对齐Qoder方案.md": {
+      "seq": 37,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "git"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\docs\\handover\\01-status.md": {
+      "seq": 38,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "git"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\docs\\handover\\02-decisions.md": {
+      "seq": 39,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "git"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\docs\\handover\\03-defects.md": {
+      "seq": 40,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "git"
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\packages\\ui-evolve\\lib\\transcript.js": {
+      "seq": 41,
+      "turn": 1,
+      "at": 1794661443011,
+      "source": "git"
+    }
+  },
+  "sweep": {
+    "coverage": "partial",
+    "turn": 1
+  },
+  "updated": "2026-11-14T13:04:03.717Z"
+}

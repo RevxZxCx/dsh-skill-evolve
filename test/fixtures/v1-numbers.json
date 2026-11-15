@@ -1,0 +1,16 @@
+{
+  "fixture": {
+    "why": "A document written before per-file records existed: `state: 1`, one path whose value is a bare number, and no sweep at all. It must render, not be refused.",
+    "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
+    "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
+    "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
+    "regenerate": "node scripts/make-fixture.mjs"
+  },
+  "version": 1,
+  "state": 1,
+  "turns": 1,
+  "paths": {
+    "D:\\fixture-5\\dsh-skill-evolve\\scripts\\_count_anchors.mjs": 1
+  },
+  "updated": "2026-11-07T18:44:56.824Z"
+}

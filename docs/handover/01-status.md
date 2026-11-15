@@ -65,6 +65,7 @@
 | 2026-11-15 | 完整验收：真实数据画出卡片，而它画错了一个目录 | 用户要求对整个产出卡片做完备测试与端到端测试。盘覆盖发现断在中间：**没有任何测试把真实 `readPanel` 的产物交给真实 `client.js`**（`client.test.mjs:807` 的 `panelRoutes()` 是手写 payload）。新建 `test/end-to-end.test.mjs`（785 行，唯一替身是 DOM/React/fetch）与 `test/real-data.test.mjs`（661 行，对准本机 208 个真实会话），第一次真跑就抓到：`statTouchedFiles` 问 `info.isFile()`，答否且路径绝对就归成 `missing`，于是**会话自己的工作目录**被画上删除线、写「已删除」（4 个真实目录全部中招）。新增第五态 `folder`（不并进 `unresolved`：一个是「没法看」、一个是「看了是目录」），褪色但**永不画删除线**，尺寸列写「目录」而非 `0 B`。补 fixture 后两条 folder 变异由 SURVIVED 变 KILLED。3694 断言全绿，四套突变 184/45/69/128 全杀，残留 0。**宿主仍答旧答案**：同一份数据，新进程答 `folder`、运行中的宿主答 `missing`，差值是主进程 ESM 缓存——重启后的真机确认至今零次 |
 | 2026-11-15 | 卡片上那十一行，从来不是文件 | 展开态里 116 行 missing 中有 8 种拼写（&1、2>\dev\null、--include=*.md、&1)）根本不是文件名，卡片却给它们画删除线并写「已删除」。先做回放：把写出这些行的 128 条原始命令交给真实的 writtenPaths，still_produced 为 0，**当前解析器一条都产不出来**，所以改的是读侧而不是采集侧。新增 cannotBeAPath 谓词，但只在 stat 已报 ENOENT/ENOTDIR 之后才用——放前面会在POSIX 上藏掉名字含 * 或 ? 的真实文件，是反方向的同一个谎。三条断言，其中一条如实写明「它抓不到守卫的位置」。三名独立审查者之后又改出六条断言、两条突变与一次 `\d+` 修正，最终 3706 断言全绿，四套突变 188/45/69/128 全杀，残留 0。真实数据：记录里仍有 11 条残渣拼写，画出来的 0 条。**新增 DEF-153/154、D-177/178、R-93** |
 | 2026-11-15 | 后缀：A2 的验收条件第一次真跑，没过 | `docs/20:187` 要求遍历命中数归零，一直标着「已完工」却从没人跑过；实测 83 条仍漏，全在 `.review-tmp`。根因是名字表只认整名，而 `.review-tmp` 两张表都够不着——78 条被卡片当成人写的。改成一个谓词 + 后缀分隔规则（字母算另一个词）；A2 复跑 1064→0；3784 断言、突变 190/45/69/128 全杀，残留 0。新增 DEF-155、D-179 |
+| 2026-11-15 | 真实会话固化成 fixture：三次静默失败，每次让套件更绿 | `test/real-data.test.mjs` 换台机器读到零个会话就 skip 退 0，与通过无法区分。新建 `scripts/make-fixture.mjs` 从本机 214 个真实会话里选五份（6/28/74/1/0 行，分别覆盖五态混合、git+scan 并存、无 `at`、v1 裸数字、v1 空文档），剥掉 `previous.commands` 等字段，把每个绝对根换成编号替身，固定键序写盘，重跑逐字节一致。三次静默失败：缺 `version` 被 `SessionStore.inspect` 判 `foreign`（套件仍 `39 passed`，因为每条「有行」的断言都落在空数组上）、脱敏只枚举了 8 条想得到的根（自检拦下 9 条 `F:\bot` 下的真实路径）、`C:\Users` 被当根使账号名进了第二段；另有裸 `\` 被误映射成 `D:\` 而盘根真实存在。新套件 54 断言只断言 payload，渲染交回已有两个套件（我在里面写的第三份 DOM/React 替身已删，653→431 行）。注入验证：`folder` 改回三元 → `52 passed, 2 failed`；删残渣守卫 → `53 passed, 1 failed`；均按字节恢复。3838 断言全绿，`26903`/`dsh-plugin` 在 fixture 里各 0 次。新增 DEF-156、D-180、R-95 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4821,3 +4822,43 @@ const UNPRODUCTIVE_PREFIXES = ['.rv-', '.audit-', '.tmp-', ...]
 - `.review-tmp` 这个目录本身还在（41 个条目，不在任何仓库里）。它是我的产物，但
   删除它会改变下一轮 A2 复跑的数字——数字归零是因为规则生效，不是因为我删了现场。
 - `docs/20:187` 的 A2 行仍写着"已完工"，本节的数字是它真正被验证的第一次。
+
+## 2026-11-15 · 把真实会话固化成 fixture：三次静默失败，每一次都让套件更绿
+
+`test/real-data.test.mjs` 读的是这台机器上恰好存在的会话文件。换一台机器它读到零个，打印 skip，退 0 —— 一条断言也不跑，而在 CI 上「跳过」和「通过」长得一样。这一轮把它要防的东西反过来做：把真实会话**机械地**抄成 fixture，让它们在任何机器上答案相同。
+
+抄，不是写。手写会重演 DEF-135：一个复刻件证明的是复刻件自己。所以 `scripts/make-fixture.mjs` 从 `~/.dsh/plugin-data/skill-evolve/sessions` 里选五份真实文档，剥掉不该出门的字段，改写每一个绝对根，然后按固定键序写盘。重跑一次得到逐字节相同的文件。
+
+### 五份，对应五种写入器形状
+
+形状散落在不同会话里，一个文件装不下：`mixed-states`（6 行，两目录 + 一条残渣拼写 + 一条 glob）、`relative-paths`（28 行，git 与 scan 并存、绝对与相对并存、`/tmp` 与盘符并存）、`no-timestamps`（74 行，28 行没有 `at`）、`v1-numbers`（`state: 1`，值是裸数字）、`v1-empty`（v1 的空文档）。每份带一个 `fixture` 头说明它为什么被选、从哪里来、剥掉了什么、怎么重建。
+
+### 三次失败，症状都是「看起来成功」
+
+**一、缺 `version` 的 fixture 被静默拒绝。** 第一版只留 `paths`/`sweep`/`turns`/`state`。`SessionStore.inspect`（`packages/ui-evolve/lib/session-store.js:184-193`）要 `value.version === 1`，不符就返回 `foreign`；`SessionState.load()` 于是返回 `false`，`pathsSeen()` 返回空数组，真实路由给出 `files: []`。套件仍然打印 `39 passed`，因为每一条「有行」的断言都落在空数组上。`version` 与 `state` 不是装饰：前者被 `inspect` 用来拒绝，后者被 `readState` 对照 `READABLE_VERSIONS`（`session-state.js:82-83`，`new Set([1, 2])`）拒绝。少了任一项，fixture 变成一个没人读的文件，而它下面的断言全绿。
+
+**二、脱敏只枚举了我想到的根。** 第一版 `ROOTS` 是 8 条手工列表。写盘前加了一道自检（每条绝对路径 `existsSync`），当场拦下 9 条仍在本机存在的路径 —— 全在 `F:\bot`，我从没想起来过。若没有这道自检，那 9 行在别的机器上会从 `available` 变成 `missing`：一个答案取决于运行机器的 fixture，比没有 fixture 更糟。改成通用规则：扫出所有不同的根，排序后统一映射成 `D:\fixture-N` / `/fixturesN`。
+
+**三、`C:\Users` 被当成根，用户名进了第二段。** 通用规则生效后 `26903` 还在 `relative-paths.json` 里，因为它落在根之后的一层。`Users`/`home` 下面的那一段是账号名，所以根必须再深一层。第一版把家目录判断写在一个只拿到已截断根的辅助函数里，永远匹配不到；改成在逐段扫描时就地判断。
+
+**四、裸 `\` 被映射成 `D:\`，而盘根确实存在。** 自检拒写 `mixed-states.json`，理由是 `["D:\\"]`。判定：裸反斜杠不指名任何机器或目录，它在每台机器上都是「当前盘根」，既无需脱敏也不该被自检标记。`rootOf` 返回「无根」，原样保留。
+
+### 这一轮里我自己造的两个坑
+
+写 `test/fixture-data.test.mjs` 第 7 节时，我在这个文件里又建了**第三份** DOM/React 替身。它先崩在模块加载器契约上（真实的 `window.__ModuleLoader__.load(entry)` 是登记、宿主再跑 `entry.factory`，我写成 `load` 直接返回工厂），修好后崩在 `Overlay` 读 `place.side`：hook 槽位按全局下标编号，两个组件的第三个 `useState` 落在同一个槽上，`place` 于是是 `undefined`。
+
+两份都在 `end-to-end.test.mjs` 里写对过。我没有去复用它们，而是又写了一遍 —— 然后花了两轮去调试这份副本，报出来的错误看起来是渲染器的问题。最后把第 7 节改成只断言 payload（真实文档 → 真实路由 → 真实 `readPanel` 交出来的行），渲染交回 `client.test.mjs` 与 `end-to-end.test.mjs`。这个文件从 653 行降到 431 行。
+
+### 三条验收
+
+- 无真实路径：`26903` 与 `dsh-plugin` 在五份 fixture 里各 0 次（`grep` 退出码 1 即无匹配）；109 条路径字符串，`paths that exist on this machine: 0`。
+- 字节一致：连跑两次 `sha1sum` 完全相同。
+- 注入：把 `status: 'folder'` 改回 `"missing" || "unresolved"` 三元 → `52 passed, 2 failed`，其中一条点名 `and is not called a deleted file — missing`；删掉残渣守卫那一行 → `53 passed, 1 failed`，点名 `a record spelled like a redirection is not drawn` 并列出两条漏出的拼写。两次都按字节恢复，`sha256` 一致。
+
+`node test/run.mjs` = **3838 passed / 0 failed**（上轮 3784，本文件贡献 54）。
+
+### 还没做的
+
+- `test/real-data.test.mjs` 保留着：它回答的是另一个问题（这台机器上真实数据现在长什么样），会 skip 是有意的。fixture 管的是「任何机器上答案一致」。
+- 没派独立审查者。改动是一个新脚本、一个新测试、五份生成文件，没有动产品代码；判断依据与 R-94 相同。若下一轮改到 `readPanel` 或 `session-store.js`，仍应派。
+- `docs/handover/03-defects.md` 里 DEF-145/146/147 三行的列数错位仍在（历史行，未动）。

@@ -1370,6 +1370,7 @@ cwdFor: () => (process.platform === 'win32' ? dir.toUpperCase() : dir)
 | DEF-151 | 2026-11-15 | 两条断言用 `split('\\n')` 切换行，那个字面量是两个字符不是换行，于是 `split` 永远返回单元素、`every` 永远为真——自写下那天起就不可能失败 | 断言只检查「有没有空行」，而它连「换行」都没切对；通读代码时人会把 `'\\n'` 当成无害的多余转义。暴露靠变异分数从 KILLED 掉到 SURVIVED |
 | DEF-152 | 2026-11-15 | `statTouchedFiles` 的问法不带方向：一次成功的 `stat` 答 `isFile() === false`，绝对路径归 `missing`，卡片于是给一个存在的目录画删除线、写「已删除」。真实数据里四个，其中一个是会话自己的工作区根 | 分类层的断言只问「是什么状态」，从不问「这个状态是不是真的」；四个真实目录全部中招，而 api 层三条断言把 `missing` 写成了期望值 |
 | DEF-155 | 2026-11-15 | 只有整名匹配的表，接不住带后缀的同名目录——`.review-tmp` 两张表都够不着，78 条被卡片当成人写的 | 断言只枚举字符串，没写「变体」这一维；A2 的验收条件从未真跑过 |
+| DEF-156 | 2026-11 | 少写一个 `version`，fixture 被静默拒绝，而套件全绿 | 断言只有「行数大于零」与「没有一条目录被叫已删除」，后者在空数组上通过 |
 
 
 而测试夹具里的 `human()` 构造的是 `data.message.content`（助手那种形状）。**生产代码
@@ -2692,3 +2693,17 @@ for (const path of after) {
 它写在 `docs/20:187`，标着「已完工」，但那组数字从来没有人跑过。**验收条件写在文档里
 不等于被验证过**——这一条与 DEF-93「不能区分干净与没跑的检查器会签发通行证」同形，
 只是这次的「检查器」是一个从未被执行过的验收条件本身。
+
+## DEF-156 · 少写一个 `version`，fixture 被静默拒绝，而套件全绿
+
+**现象。** 第一版 `scripts/make-fixture.mjs` 只保留 `paths`/`sweep`/`turns`/`state`，把 `version` 剥掉了。五份 fixture 全部写出，`test/fixture-data.test.mjs` 报 `39 passed`，其中一条是 `the fixture reaches the route` —— 通过。
+
+**根因。** `SessionStore.inspect`（`packages/ui-evolve/lib/session-store.js:184-193`）拿到文档后依次检查：非 JSON → `foreign`；不是普通对象 → `foreign`；**`value.version !== VERSION`（`VERSION = 1`，`:39`）→ `foreign`**；`value.session !== sessionId` → `foreign`。落到 `foreign` 的文件被 `SessionState.load()` 当作「不是我的」返回 `false`，`pathsSeen()` 返回空数组，真实路由于是回 `files: []`。每一条「有行」的断言都落在空数组上。
+
+**为什么没抓到。** 断言写成了「行数大于零」与「没有一条目录被叫已删除」两种。前者在空数组上失败，后者在空数组上**通过** —— 而修之前那次运行的输出里，通过的正是后者。这跟 DEF-121（CSS 断言对着空字符串）、DEF-125（只校验选择器不校验声明体）、DEF-147（检查器两次给出假结论）是同一个形状：**一个只描述「不该出现什么」的断言，在没有输入时是满分。**
+
+`state` 有同样的问题，只是它的拒绝点在别处：`readState` 对照 `READABLE_VERSIONS`（`packages/ui-evolve/lib/session-state.js:82-83`，`new Set([1, 2])`）。
+
+**修法。** document 里补 `version: raw.version`，并在生成器里写注释说明这两个字段不是装饰。同时在 `test/fixture-data.test.mjs` 的元检查块里加一条：fixture 必须含 `extractedFrom` 与 `dropped`，且能被 `JSON.parse` 再序列化回逐字节相同的文本 —— 让「文件被读到」这件事本身有断言。
+
+**顺带说明的判据。** 一个 fixture 断言体系里，至少要有**一条**断言在「文件根本没被读到」时会失败。`39 passed` 那次没有这样一条，所以整个文件当时是装饰。

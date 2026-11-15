@@ -1,0 +1,50 @@
+{
+  "fixture": {
+    "why": "Six rows, one of each awkward kind: two directories, one record spelled like a shell redirection, one spelled like a glob, one row the diff found, one that is simply gone. This is the file the folder defect was found on.",
+    "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
+    "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
+    "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
+    "regenerate": "node scripts/make-fixture.mjs"
+  },
+  "version": 1,
+  "state": 2,
+  "turns": 1,
+  "paths": {
+    "D:\\fixture-5\\": {
+      "seq": 6,
+      "turn": 1,
+      "at": 1794720725340
+    },
+    "D:\\fixture-5\\--include=*.md": {
+      "seq": 5,
+      "turn": 1,
+      "at": 1794720725340
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\&1": {
+      "seq": 4,
+      "turn": 1,
+      "at": 1794720725340
+    },
+    "D:\\fixture-5\\dsh-skill-evolve\\packages\\ui-evolve\\lib\\client.js": {
+      "seq": 7,
+      "turn": 1,
+      "at": 1794720726841,
+      "source": "git"
+    },
+    "D:\\fixture-5\\test\\shellpaths.test.mjs": {
+      "seq": 2,
+      "turn": 1,
+      "at": 1794720725340
+    },
+    "\\": {
+      "seq": 3,
+      "turn": 1,
+      "at": 1794720725340
+    }
+  },
+  "sweep": {
+    "coverage": "partial",
+    "turn": 1
+  },
+  "updated": "2026-11-15T05:32:07.841Z"
+}

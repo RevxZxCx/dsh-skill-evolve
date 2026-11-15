@@ -1,0 +1,333 @@
+{
+  "fixture": {
+    "why": "Twenty-eight rows carry no recorded time at all, which is the \"unknown is not old\" branch: they must not be filed under the stale heading.",
+    "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
+    "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
+    "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
+    "regenerate": "node scripts/make-fixture.mjs"
+  },
+  "version": 1,
+  "state": 2,
+  "turns": 32,
+  "paths": {
+    "&1|head": {
+      "seq": 21
+    },
+    "&1|tail": {
+      "seq": 41,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures0/null)": {
+      "seq": 24
+    },
+    "/fixtures1/bot/_adb_tap.sh": {
+      "seq": 22
+    },
+    "/fixtures1/bot/_cap.sh": {
+      "seq": 28
+    },
+    "/fixtures1/bot/_gen_test.sh": {
+      "seq": 26
+    },
+    "/fixtures1/bot/_tmp_mumu1.png": {
+      "seq": 20
+    },
+    "/fixtures1/bot/_ui_tap.sh": {
+      "seq": 25
+    },
+    "/fixtures2/add_log.py": {
+      "seq": 2
+    },
+    "/fixtures2/after.txt": {
+      "seq": 60,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/asarread.mjs": {
+      "seq": 12
+    },
+    "/fixtures2/attr2.py": {
+      "seq": 50,
+      "turn": 22,
+      "at": 1794488159287
+    },
+    "/fixtures2/attrib.py": {
+      "seq": 49,
+      "turn": 22,
+      "at": 1794488159287
+    },
+    "/fixtures2/before.txt": {
+      "seq": 59,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/body.py": {
+      "seq": 4
+    },
+    "/fixtures2/caddy_patch.py": {
+      "seq": 69,
+      "turn": 31,
+      "at": 1794593381486
+    },
+    "/fixtures2/chk.sh": {
+      "seq": 23
+    },
+    "/fixtures2/conn.py": {
+      "seq": 35,
+      "turn": 1,
+      "at": 1794485943700
+    },
+    "/fixtures2/cost.py": {
+      "seq": 67,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/countcost.py": {
+      "seq": 65,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/countcost2.py": {
+      "seq": 66,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/cred.py": {
+      "seq": 74,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/deep.py": {
+      "seq": 72,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/delta.py": {
+      "seq": 36,
+      "turn": 1,
+      "at": 1794485943700
+    },
+    "/fixtures2/dump.sh": {
+      "seq": 64,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/final.py": {
+      "seq": 39,
+      "turn": 1,
+      "at": 1794485943700
+    },
+    "/fixtures2/fix_caddy.py": {
+      "seq": 1
+    },
+    "/fixtures2/gap.py": {
+      "seq": 76,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/gap2.py": {
+      "seq": 80,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/hosts.py": {
+      "seq": 46,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/hourgap.py": {
+      "seq": 81,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/live.py": {
+      "seq": 75,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/meter.sh": {
+      "seq": 51,
+      "turn": 22,
+      "at": 1794488159287
+    },
+    "/fixtures2/mumu1.png": {
+      "seq": 19
+    },
+    "/fixtures2/mux.py": {
+      "seq": 40,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/muxcost.py": {
+      "seq": 55,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/muxcost2.py": {
+      "seq": 56,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/muxfail.py": {
+      "seq": 58,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/muxhour.py": {
+      "seq": 77,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/muxwire.sh": {
+      "seq": 57,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/muxwire2.sh": {
+      "seq": 62,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/pattern.py": {
+      "seq": 82,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/poll_shape.py": {
+      "seq": 10
+    },
+    "/fixtures2/port.py": {
+      "seq": 45,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/q502.py": {
+      "seq": 54,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/rd.sh": {
+      "seq": 61,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/rd2.sh": {
+      "seq": 63,
+      "turn": 30,
+      "at": 1794592950255
+    },
+    "/fixtures2/split.py": {
+      "seq": 42,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/split2.py": {
+      "seq": 43,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/split3.py": {
+      "seq": 44,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/ssh2.py": {
+      "seq": 48,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/sshrecv.py": {
+      "seq": 47,
+      "turn": 21,
+      "at": 1794486963674
+    },
+    "/fixtures2/t0.txt": {
+      "seq": 31
+    },
+    "/fixtures2/t1.txt": {
+      "seq": 32
+    },
+    "/fixtures2/t6.txt": {
+      "seq": 33
+    },
+    "/fixtures2/today.py": {
+      "seq": 71,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/tunnel-meter.service": {
+      "seq": 53,
+      "turn": 22,
+      "at": 1794488159287
+    },
+    "/fixtures2/watch.py": {
+      "seq": 52,
+      "turn": 22,
+      "at": 1794488159287
+    },
+    "/fixtures2/why.py": {
+      "seq": 38,
+      "turn": 1,
+      "at": 1794485943700
+    },
+    "/fixtures2/why2.py": {
+      "seq": 73,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "/fixtures2/wire.py": {
+      "seq": 3
+    },
+    "D:\\fixture-4\\_patch_unblock.py": {
+      "seq": 79,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "D:\\fixture-4\\ops\\dsh-quota\\README.md": {
+      "seq": 70,
+      "turn": 31,
+      "at": 1794593381486
+    },
+    "D:\\fixture-4\\ops\\dsh-quota\\dsh-quota": {
+      "seq": 78,
+      "turn": 1,
+      "at": 1794723564897
+    },
+    "D:\\fixture-4\\remote-web-app\\app\\src\\main\\java\\com\\revxzxcx\\remotewebapp\\core\\events\\RemoteEvents.kt": {
+      "seq": 16
+    },
+    "D:\\fixture-4\\remote-web-app\\app\\src\\main\\java\\com\\revxzxcx\\remotewebapp\\core\\events\\RemoteEventsClient.kt": {
+      "seq": 17
+    },
+    "D:\\fixture-4\\remote-web-app\\app\\src\\main\\java\\com\\revxzxcx\\remotewebapp\\ui\\chat\\ChatViewModel.kt": {
+      "seq": 27
+    },
+    "D:\\fixture-4\\tmp_decomp.py": {
+      "seq": 6
+    },
+    "D:\\fixture-4\\tmp_decomp2.py": {
+      "seq": 7
+    },
+    "D:\\fixture-4\\tmp_wire_cmp.py": {
+      "seq": 5
+    },
+    "docs/dev/决策记录.md": {
+      "seq": 29
+    },
+    "docs/dev/测试记录.md": {
+      "seq": 30
+    },
+    "fetch2.py": {
+      "seq": 14
+    },
+    "fetchsrc.py": {
+      "seq": 13
+    }
+  },
+  "sweep": {
+    "coverage": "partial",
+    "turn": 1
+  },
+  "updated": "2026-11-15T06:19:27.643Z"
+}
