@@ -373,7 +373,7 @@ const mutations = [
     // and simply never takes the open one.
     label: 'the output card is folded even once it is open',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '      const groups = filesOpen === true',
+    from: '      const groups = filesExpanded === true',
     to: '      const groups = false',
     suites: ['test/client.test.mjs'],
   },
@@ -390,7 +390,7 @@ const mutations = [
     label: 'a folded list claims to be open',
     file: 'packages/ui-evolve/lib/client.js',
     from: `                    className: 'dsse-list dsse-files',
-                    'data-open': filesOpen === true ? 'true' : 'false',`,
+                    'data-open': filesExpanded === true ? 'true' : 'false',`,
     to: `                    className: 'dsse-list dsse-files',
                     'data-open': 'true',`,
     suites: ['test/client.test.mjs'],
@@ -400,15 +400,15 @@ const mutations = [
     // says how many there are, the list shows four, and nothing says the rest exist.
     label: 'the way out is never drawn at all',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                badgeAction: hiddenFiles > 0 || filesOpen`,
+    from: `                badgeAction: hiddenFiles > 0 || filesExpanded`,
     to: `                badgeAction: false`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'a card that already fits still offers to expand',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '                badgeAction: hiddenFiles > 0 || filesOpen',
-    to: '                badgeAction: ordered.length > 0 || filesOpen',
+    from: '                badgeAction: hiddenFiles > 0 || filesExpanded',
+    to: '                badgeAction: ordered.length > 0 || filesExpanded',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -491,7 +491,7 @@ const mutations = [
     // files are generated would show "0 个文件" with no way in.
     label: 'a dependency is listed as the reader\'s own work',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true`,
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true`,
     to: `  if (false) return true`,
     suites: ['test/api.test.mjs'],
   },
@@ -541,7 +541,7 @@ const mutations = [
   {
     label: 'a directory name only has to contain a generated one',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true`,
+    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true`,
     to: `  if (normalized.split('/').some((segment) => segment.includes('build'))) return true`,
     suites: ['test/api.test.mjs'],
   },
@@ -581,8 +581,8 @@ const mutations = [
   {
     label: 'a card holding only generated files offers no way in',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                badgeAction: hiddenFiles > 0 || filesOpen`,
-    to: `                badgeAction: ordered.length > FOLDED_FILES || filesOpen`,
+    from: `                badgeAction: hiddenFiles > 0 || filesExpanded`,
+    to: `                badgeAction: ordered.length > FOLDED_FILES || filesExpanded`,
     suites: ['test/client.test.mjs'],
   },
   {

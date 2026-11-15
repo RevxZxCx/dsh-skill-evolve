@@ -66,6 +66,7 @@
 | 2026-11-15 | 卡片上那十一行，从来不是文件 | 展开态里 116 行 missing 中有 8 种拼写（&1、2>\dev\null、--include=*.md、&1)）根本不是文件名，卡片却给它们画删除线并写「已删除」。先做回放：把写出这些行的 128 条原始命令交给真实的 writtenPaths，still_produced 为 0，**当前解析器一条都产不出来**，所以改的是读侧而不是采集侧。新增 cannotBeAPath 谓词，但只在 stat 已报 ENOENT/ENOTDIR 之后才用——放前面会在POSIX 上藏掉名字含 * 或 ? 的真实文件，是反方向的同一个谎。三条断言，其中一条如实写明「它抓不到守卫的位置」。三名独立审查者之后又改出六条断言、两条突变与一次 `\d+` 修正，最终 3706 断言全绿，四套突变 188/45/69/128 全杀，残留 0。真实数据：记录里仍有 11 条残渣拼写，画出来的 0 条。**新增 DEF-153/154、D-177/178、R-93** |
 | 2026-11-15 | 后缀：A2 的验收条件第一次真跑，没过 | `docs/20:187` 要求遍历命中数归零，一直标着「已完工」却从没人跑过；实测 83 条仍漏，全在 `.review-tmp`。根因是名字表只认整名，而 `.review-tmp` 两张表都够不着——78 条被卡片当成人写的。改成一个谓词 + 后缀分隔规则（字母算另一个词）；A2 复跑 1064→0；3784 断言、突变 190/45/69/128 全杀，残留 0。新增 DEF-155、D-179 |
 | 2026-11-15 | 真实会话固化成 fixture：三次静默失败，每次让套件更绿 | `test/real-data.test.mjs` 换台机器读到零个会话就 skip 退 0，与通过无法区分。新建 `scripts/make-fixture.mjs` 从本机 214 个真实会话里选五份（6/28/74/1/0 行，分别覆盖五态混合、git+scan 并存、无 `at`、v1 裸数字、v1 空文档），剥掉 `previous.commands` 等字段，把每个绝对根换成编号替身，固定键序写盘，重跑逐字节一致。三次静默失败：缺 `version` 被 `SessionStore.inspect` 判 `foreign`（套件仍 `39 passed`，因为每条「有行」的断言都落在空数组上）、脱敏只枚举了 8 条想得到的根（自检拦下 9 条 `F:\bot` 下的真实路径）、`C:\Users` 被当根使账号名进了第二段；另有裸 `\` 被误映射成 `D:\` 而盘根真实存在。新套件 54 断言只断言 payload，渲染交回已有两个套件（我在里面写的第三份 DOM/React 替身已删，653→431 行）。注入验证：`folder` 改回三元 → `52 passed, 2 failed`；删残渣守卫 → `53 passed, 1 failed`；均按字节恢复。3838 断言全绿，`26903`/`dsh-plugin` 在 fixture 里各 0 次。新增 DEF-156、D-180、R-95 |
+| 2026-11-16 | 一行被判生成，读者就看不见这一轮 | 用户实测报原型文件被归入生成文件、产出卡为空。两处根因：祖先目录套用了为文件名写的下划线规则（`scratchName` 的注释早写明不该这么用，遍历侧已排除、卡片侧漏了同步）；零人写时头部只剩「N 个生成文件」且列表折叠成空。拆出 `scratchDirectory`、`filesOpen` 加第三态 `null`、零人写换成整句并自动展开。真机 b5ee3f88：25 行 → 人写 14 / 生成 11，头部回到「14 个文件」。新增 34 条断言、5 条突变（195 全杀）、三处注入验证；3863 断言全绿。新增 DEF-157/158、D-181/182、R-96 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4862,3 +4863,91 @@ const UNPRODUCTIVE_PREFIXES = ['.rv-', '.audit-', '.tmp-', ...]
 - `test/real-data.test.mjs` 保留着：它回答的是另一个问题（这台机器上真实数据现在长什么样），会 skip 是有意的。fixture 管的是「任何机器上答案一致」。
 - 没派独立审查者。改动是一个新脚本、一个新测试、五份生成文件，没有动产品代码；判断依据与 R-94 相同。若下一轮改到 `readPanel` 或 `session-store.js`，仍应派。
 - `docs/handover/03-defects.md` 里 DEF-145/146/147 三行的列数错位仍在（历史行，未动）。
+
+
+## 2026-11-16 · 一行被判生成，读者就看不见这一轮
+
+### 起点是一个会话，不是一条规则
+
+用户报的是：上一轮在处理原型、给他看预览，结果原型文件全被判成生成文件，产出卡是空的。
+问的是「过滤噪声的门限是不是太严了，还是有设计问题」。
+
+我读了他那份状态文件（`session-b5ee3f88-20c2-45d3-bdf4-1de948595cbf`，25 条路径），
+用生产谓词跑了一遍：**25 条全部判为生成，人写 0 条**。这已经够说明门限问题，
+但接下来的问题更有意思——头部算术是「主数字 = 非噪声且非较早的行数」，
+`current.length === 0` 时主数字整个不画，只剩一句「另有 N 个生成文件」。
+于是「判错一条」的可见后果不是「多一行灰字」，而是**这一轮看起来什么都没产出**。
+
+### 第一处根因：一条为自己写着「别这么用」的规则
+
+`packages/ui-evolve/lib/api.js` 里 `scratchName` 的 `segment.startsWith('_')`
+是为**文件名**写的（`_slot_probe.mjs` 这种）。同一函数被两处调用：
+
+- `f"if (scratchName(lowerName)) return true"` —— 判文件名，对；
+- `f"if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true"`
+  —— 判**祖先目录**，于是 `_prototype/` 下十四个文件全中招。
+
+而 `isUnwalkableDirectory` 的注释早就写着不该这么用，原文：
+
+> `scratchName` is deliberately NOT applied here: its leading-underscore rule was
+> written for scratch FILES, and on directories it would prune `_posts`/`_layouts`/`_data`
+> in every Jekyll site and `_build` in Hugo — all source.
+
+遍历侧照着这句话做了，卡片侧漏了同步。所以这条不是什么新判断，是两处谓词分家时漏掉的一半。
+
+修法是给目录单独一个函数 `scratchDirectory = (segment) => TEMP_DIRS.has(segment)`：
+只保留 `tmp/`、`.probe/` 这一半（没人把源码放在那里），去掉下划线那一半。
+文件名的判定不动。
+
+**影响面**（`import` 真实 `isNoisePath`，逐段改名再问一次的差值法）：43 个会话 536 条路径里，
+420 条判生成，其中只有 59 条的生成身份完全依赖祖先目录的下划线：`_edt` 17、`_tmp_probes` 13、
+`_prototype` 13、`_edtest` 8、`_proc` 8。
+
+### 第二处根因：折叠列表在零人写时是空的
+
+`groups` 折叠时只画 `fresh.concat(earlier)` 的前四项。全是生成文件时这个数组是空的，
+于是头部有数字、下面一行都没有，读者没有理由去点那个徽标。
+
+`filesOpen` 原来是 `false` 起的布尔。我把它改成三态 `null`：
+`null` 表示读者没碰过徽标，与「他打开过」「他关掉过」是不同的事实。
+`filesExpanded = filesOpen === null ? nothingStillStands : filesOpen === true` ——
+卡片只在「另一种选择是一行都不显示」时替读者决定，而读者一旦点过，就不再抢回来。
+（初始值是 `false` 的话，这类卡片每次渲染都重新展开，读者永远关不掉。）
+
+灰字同时换措辞：零人写时不再说「另有 N 个生成文件」（「另有」指向一个不存在的主数字），
+而是「全部 N 个文件都是生成文件」。
+
+### 真机验收
+
+不是画的同源副本，而是真实链路：真实状态文件 → 真实 `SessionState` → 真实 `readPanel` →
+真实 payload → 从 bundle 切出的真实 CSS + 按真实 `jsxs` 结构生成的 DOM → 无头 Chrome 截图。
+
+```
+storedPaths 25 / rowsFromRoute 25 / written 14 / generated 11
+mainNumber 14 / header "14 个文件"
+prototypeRows 14 / prototypeWritten 14
+probeRows 9 / probeGenerated 9
+```
+
+`_prototype/` 十四个（`index.html`、`proto.css`、四个 mjs、八张 png）全部算人写；
+九个 `_probe*.mjs`/`_slot_probe*.mjs` 仍算生成。两张截图：
+`_shots/card-prototype.png`（真实会话）与 `_shots/card-generated-only.png`（同一会话只留生成行，
+验证整句文案与自动展开）。
+
+### 验证
+
+34 条新断言（api 29 / client 5）、5 条永久突变、突变锚点下限 190 → 195。
+四套突变串行：**195 / 45 / 69 / 128，全杀，0 survived / 0 not applied / 0 crashed**。
+残留审计 0。全量 **3863 passed / 0 failed**。
+
+三处注入验证都真让断言变红：
+- 祖先判定改回 `scratchName` → 405 passed / **7 failed**（七条 `a leading underscore does not make X generated`）；
+- `scratchDirectory` 改成 `=> false` → 404 / **8 failed**；
+- `filesExpanded` 退回 `filesOpen === true` → 798 / **6 failed**；退回「初始强制 true」→ 801 / **3 failed**；
+  `if (nothingStillStands === true)` 改 `if (false)` → 802 / **2 failed**。
+
+### 还没做
+
+- 截图仍然是同源渲染，不是宿主实拍（把 payload 喂给真实 `client.js` 需要一个 hook 槽位正确的
+  React 替身，`end-to-end.test.mjs` 里有一份，我不想再造第三份；见 DEF-156 那一轮的教训）。
+- 本轮没有独立审查者，以注入验证代替（R-96 里如实写了）。

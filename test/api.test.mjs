@@ -1921,6 +1921,61 @@ function heldBodyOf(res) {
   check('every directory the walk skips is generated to the card', bothSides.every((row) => row[1] === false || row[2] === true), JSON.stringify(bothSides))
   check('a working copy is generated to the card too', isNoisePath('/w/.rv-head/a.js', '/w') === true, String(isNoisePath('/w/.rv-head/a.js', '/w')))
   check('and the source beside it is still written by a person', isNoisePath('/w/src/a.js', '/w') === false, String(isNoisePath('/w/src/a.js', '/w')))
+  // The underscore rule answers about a FILE. Asked about a directory it eats
+  // source that the convention never meant to hide.
+  //
+  // A real session asked for a prototype and got fourteen files under
+  // `_prototype/` — the HTML, its stylesheet, the capture scripts and six
+  // screenshots. Every one of them was called generated, the main number
+  // disappeared from the header, and the turn read as though it had produced
+  // nothing. `isGeneratedDirectory` had already refused this rule for
+  // directories and written down why; the card was the half that still applied
+  // it, so the two disagreed about the same folder.
+  const underscoreSources = [
+    '_prototype', '_posts', '_layouts', '_data', '_build', '_includes', '_drafts',
+  ]
+  for (const name of underscoreSources) {
+    check(
+      `a leading underscore does not make ${name} generated`,
+      isNoisePath(`/w/${name}/a.js`, '/w') === false,
+      String(isNoisePath(`/w/${name}/a.js`, '/w')),
+    )
+  }
+  check(
+    'and the walk enters it as it always did',
+    isUnwalkableDirectory('_prototype') === false && isUnwalkableDirectory('_posts') === false,
+    `${String(isUnwalkableDirectory('_prototype'))} / ${String(isUnwalkableDirectory('_posts'))}`,
+  )
+  // The file half of the rule is the half that was written on purpose. Losing it
+  // would put a session's own probe scripts among the work it did.
+  const underscoreScratch = ['_probe5.mjs', '_slot_probe.mjs', '_scratch.py', '_tmp.txt']
+  for (const name of underscoreScratch) {
+    check(
+      `a leading underscore still makes ${name} scratch`,
+      isNoisePath(`/w/${name}`, '/w') === true,
+      String(isNoisePath(`/w/${name}`, '/w')),
+    )
+  }
+  check(
+    'a dunder name is a project marker, not scratch',
+    isNoisePath('/w/__tests__/a.test.js', '/w') === false && isNoisePath('/w/pkg/__init__.py', '/w') === false,
+    `${String(isNoisePath('/w/__tests__/a.test.js', '/w'))} / ${String(isNoisePath('/w/pkg/__init__.py', '/w'))}`,
+  )
+  // What the narrowed rule still hides: a named scratch directory, whatever the
+  // files inside it are called. Nobody keeps source in `tmp/`.
+  const namedScratch = ['tmp', 'temp', 'scratch', '.probe', '.sandbox', '.trash']
+  for (const name of namedScratch) {
+    check(
+      `a directory named ${name} is still scratch`,
+      isNoisePath(`/w/${name}/out.js`, '/w') === true,
+      String(isNoisePath(`/w/${name}/out.js`, '/w')),
+    )
+  }
+  check(
+    'and a build directory is still generated to the card',
+    isNoisePath('/w/dist/a.js', '/w') === true && isNoisePath('/w/build/a.js', '/w') === true,
+    `${String(isNoisePath('/w/dist/a.js', '/w'))} / ${String(isNoisePath('/w/build/a.js', '/w'))}`,
+  )
 }
 
 {

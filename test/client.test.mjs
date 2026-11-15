@@ -4382,15 +4382,38 @@ async function openPanel(routes, options) {
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  check('a card with nothing but generated files shows no rows', byClass(card, 'dsse-name').length === 0, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
-  check('and still offers the way to them', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
-  check('counting them rather than claiming there are none', textOf(firstByClass(card, 'dsse-head-note')).includes('2 个生成文件'), textOf(firstByClass(card, 'dsse-head-stats')))
+  // The card used to fold here and draw nothing: the folded list is the first
+  // four of `fresh.concat(earlier)`, and with every row generated that list is
+  // empty. The header then named a number with nothing under it, which reads as
+  // "this turn produced nothing" — one real turn was summarised exactly that way
+  // by the person who ran it. A filter the reader cannot reach is
+  // indistinguishable from deletion; rows the card declines to draw are the same
+  // thing with the data still on hand.
+  check('a card with nothing but generated files still shows them', byClass(card, 'dsse-name').length === 2, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
+  check('and it opens itself rather than hiding them behind a badge', firstByClass(card, 'dsse-files')?.props?.['data-open'] === 'true', String(firstByClass(card, 'dsse-files')?.props?.['data-open']))
+  check('and still offers the way back to four rows', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
   // `另有` is a word about a number that came before it. With every row generated
   // there is no such number, and the grey line has to read as the whole story: a
   // real session reached this state and the header said `另有 200 个生成文件`
-  // above nothing at all.
-  check('and it does not say "besides" to a number that is not there', textOf(firstByClass(card, 'dsse-head-note')) === '2 个生成文件', textOf(firstByClass(card, 'dsse-head-note')))
+  // above nothing at all. Asserted as the whole sentence rather than as a
+  // substring, because the point is the wording that replaces `另有` -- a contains
+  // check would pass on a line that still began with it.
+  check('and it does not say "besides" to a number that is not there', textOf(firstByClass(card, 'dsse-head-note')) === '全部 2 个文件都是生成文件', textOf(firstByClass(card, 'dsse-head-note')))
   check('and no main number is drawn when every row was generated', firstByClass(card, 'dsse-head-stat') === undefined, String(firstByClass(card, 'dsse-head-stat') === undefined))
+  // Opening itself is a default, not a rule. `null` is the third state — the
+  // reader has not touched the badge — and it is what lets the card make this
+  // decision for them without taking it back the moment they disagree. With a
+  // plain `false` the card would re-open on every render and the badge could
+  // never be closed on a turn where nothing a person wrote is listed.
+  const openedBadge = byClass(card, 'dsse-expand-action')[0]
+  check('the badge of an open card offers to close it', (openedBadge?.props?.['aria-label'] ?? '').includes('收起'), String(openedBadge?.props?.['aria-label']))
+  openedBadge?.props?.onClick()
+  const closedTree = await instance.renderer.deepRender(instance.seat('cards'))
+  const closedCard = byClass(closedTree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  check('a reader who closes it gets a closed card', firstByClass(closedCard, 'dsse-files')?.props?.['data-open'] === 'false', String(firstByClass(closedCard, 'dsse-files')?.props?.['data-open']))
+  check('and it stays closed rather than re-opening itself', byClass(closedCard, 'dsse-name').length === 0, JSON.stringify(byClass(closedCard, 'dsse-name').map((node) => textOf(node))))
+  check('and the badge goes back to counting', (byClass(closedCard, 'dsse-expand-action')[0]?.props?.['aria-label'] ?? '').includes('显示其余'), String(byClass(closedCard, 'dsse-expand-action')[0]?.props?.['aria-label']))
+  check('and the grey line still states the whole list', textOf(firstByClass(closedCard, 'dsse-head-note')) === '全部 2 个文件都是生成文件', textOf(firstByClass(closedCard, 'dsse-head-note')))
 }
 
 {

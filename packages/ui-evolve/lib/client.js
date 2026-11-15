@@ -2257,7 +2257,11 @@ window.__ModuleLoader__.load({
       const [hoverTurn, setHoverTurn] = React.useState("")
       const [pinnedTurn, setPinnedTurn] = React.useState("")
       const [clippedTurn, setClippedTurn] = React.useState("")
-      const [filesOpen, setFilesOpen] = React.useState(false)
+      // `null` means the reader has not touched the badge, which is a different
+      // fact from "they opened it" or "they closed it". The card needs that third
+      // state to open itself when the alternative is showing no rows at all —
+      // see `filesExpanded` below — without overriding a reader who then closes it.
+      const [filesOpen, setFilesOpen] = React.useState(null)
       const [settingsOpen, setSettingsOpen] = React.useState(false)
       const [settingsEpoch, setSettingsEpoch] = React.useState(0)
       const panelRequest = React.useRef(0)
@@ -2466,7 +2470,17 @@ window.__ModuleLoader__.load({
       // them, which is oldest first, so slicing it would show the oldest four and
       // push this turn's work below the fold — the one thing a folded card exists
       // to prevent.
-      const groups = filesOpen === true
+      // A card whose only rows are demoted ones has nothing to put behind a
+      // disclosure: folded, it draws the first four of `fresh.concat(earlier)`,
+      // which is empty, so the reader gets a header naming a number and no rows
+      // under it. That is the same failure as a filter nobody can reach, one
+      // step worse — the rows exist and the card declines to show them.
+      //
+      // So when the main number has nothing left to count, the card opens. The
+      // reader can still fold it back; `filesOpen` remembers that and wins.
+      const nothingStillStands = current.length === 0 && ordered.length > 0
+      const filesExpanded = filesOpen === null ? nothingStillStands : filesOpen === true
+      const groups = filesExpanded === true
         ? [
             { key: 'fresh', label: '', files: fresh },
             { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },
@@ -2491,12 +2505,26 @@ window.__ModuleLoader__.load({
       const staleCount = stale.length
       const noiseCount = noisy.length
       const keptNotes = []
-      // With nothing to put in the main number, the grey line has to stand on its
-      // own: `另有 200 个生成文件` says "besides" to a number that is not there.
+      // With nothing to put in the main number, the grey line has to carry the whole
+      // header: `另有 200 个生成文件` says "besides" to a number that is not there.
       // A real session reached exactly this state — a reviewer's copy of the
       // repository left two hundred rows and not one of them a person's.
-      if (noiseCount > 0) keptNotes.push(current.length > 0 ? `另有 ${noiseCount} 个生成文件` : `${noiseCount} 个生成文件`)
-      if (staleCount > 0) keptNotes.push(`${staleCount} 个较早`)
+      //
+      // Saying it about the whole list is not the same as leading with a count. One
+      // real turn put every row in that group — fourteen files under `_prototype/`,
+      // a preview someone had asked to see — so the header was a bare `N 个生成文件`
+      // and the reader reported "产出文件是空的". The count was right and the sentence
+      // was wrong. The rule that produced it is fixed elsewhere, but this line still
+      // has to survive the next rule that is wrong, so it says what the list *is*
+      // rather than repeating a number twice.
+      if (nothingStillStands === true) {
+        if (noiseCount > 0 && staleCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件里，${noiseCount} 个生成文件 · ${staleCount} 个较早`)
+        else if (noiseCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件都是生成文件`)
+        else if (staleCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件都较早`)
+      } else {
+        if (noiseCount > 0) keptNotes.push(`另有 ${noiseCount} 个生成文件`)
+        if (staleCount > 0) keptNotes.push(`${staleCount} 个较早`)
+      }
       // How many rows the folded card actually draws. Equality with
       // `FOLDED_FILES` is not assumed: a session with two written files shows two.
       const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length
@@ -2506,7 +2534,7 @@ window.__ModuleLoader__.load({
       // says 3 is only confusing if the two are read as the same quantity, so
       // the header states the remainder explicitly rather than leaving it to be
       // subtracted.
-      const hiddenFiles = ordered.length - (filesOpen === true ? ordered.length : foldedRows)
+      const hiddenFiles = ordered.length - (filesExpanded === true ? ordered.length : foldedRows)
       // What the sweep could see, said out loud. `paths` empty reads as "this turn
       // produced nothing", and that is a different sentence from "nothing I could
       // see" — only the collector knows which one happened, so it sends `sweep`
@@ -3037,17 +3065,17 @@ window.__ModuleLoader__.load({
                 // reader of a folded list wants, and "展开全部 7 个" answered
                 // neither — it repeated the header's total in a control whose job
                 // was the remainder.
-                badgeAction: hiddenFiles > 0 || filesOpen
+                badgeAction: hiddenFiles > 0 || filesExpanded
                   ? {
-                      label: filesOpen ? '收起文件' : `显示其余 ${hiddenFiles} 个`,
-                      open: filesOpen === true,
-                      onClick: () => setFilesOpen((open) => open === false),
+                      label: filesExpanded ? '收起文件' : `显示其余 ${hiddenFiles} 个`,
+                      open: filesExpanded === true,
+                      onClick: () => setFilesOpen(filesExpanded === false),
                     }
                   : undefined,
                 children: [
                   jsx('div', {
                     className: 'dsse-list dsse-files',
-                    'data-open': filesOpen === true ? 'true' : 'false',
+                    'data-open': filesExpanded === true ? 'true' : 'false',
                     children: groups.map((group) => group.files.length === 0 ? null : jsxs('div', {
                       className: 'dsse-group',
                       'data-group': group.key,

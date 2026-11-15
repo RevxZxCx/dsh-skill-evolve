@@ -316,11 +316,43 @@ const TEMP_DIRS = new Set(['tmp', 'temp', 'scratch', '.tmp', '.temp', '.scratch'
 // the whole test: no scratch convention starts a name that way, and the cost
 // of guessing wrong is a package marker hidden from the card.
 const dunderName = (segment) => segment.startsWith('__')
+// Files only. `scratchDirectory` below is the half of this that may be asked
+// about a directory, and it deliberately leaves one rule out.
 const scratchName = (segment) => {
   if (dunderName(segment)) return false
   if (TEMP_DIRS.has(segment)) return true
   return segment.startsWith('_')
 }
+
+/**
+ * Whether a directory is a scratch tree, i.e. a place nobody keeps source.
+ *
+ * The same convention as `scratchName` minus one rule, and the missing rule is
+ * the whole point. A leading underscore was written for scratch FILES —
+ * `_slot_probe.mjs`, `_probe5.mjs`, names a session typed and then abandoned.
+ * Asked about a DIRECTORY it catches `_prototype/`, `_posts/`, `_layouts/`,
+ * `_build/`: a preview someone asked to see, a Jekyll site, a Hugo theme.
+ *
+ * Measured on one real session: fourteen files under `_prototype/` — an
+ * `index.html`, a stylesheet, four scripts and eight screenshots — were all
+ * filed as generated. Every row was generated, so the header had no number left
+ * to show, and the turn looked like it had produced nothing. Those files were
+ * the turn.
+ *
+ * `isGeneratedDirectory` already refuses this rule for directories and wrote
+ * down why: "a traversal that pruned a subtree can never get it back". The card
+ * keeps its rows, so its version of the mistake is smaller — but it is the same
+ * mistake. A row filed under "generated" sits behind a disclosure the reader
+ * has no reason to open, which for them is also gone.
+ *
+ * A named temp directory is a different claim and is kept: nobody keeps source
+ * in `tmp/` or `.probe/`, so that half holds whether the question is about a
+ * file or a directory.
+ *
+ * @param {string} segment - one directory name, already case-folded, not a path.
+ * @returns {boolean} whether the directory is a scratch tree.
+ */
+const scratchDirectory = (segment) => TEMP_DIRS.has(segment)
 
 // Dot files are the other half of the convention (`.probe-slice.mjs`), but a
 // dot file is far more often part of the project than temporary, and the cost
@@ -357,6 +389,10 @@ function isGeneratedDirectory(segment) {
   // Hugo — all source. The card can filter a row after reading it; a traversal
   // that pruned a subtree can never get it back, so when the two rules disagree
   // this one must be the narrower of the two.
+  //
+  // The card used to disagree anyway, through `scratchName` on ancestors, and it
+  // cost a real session fourteen files. `scratchDirectory` exists so the two
+  // now answer with the same narrower rule.
   return GENERATED_DIRS.has(segment.toLowerCase())
 }
 
@@ -514,7 +550,11 @@ function isNoisePath(path, cwd) {
   // Directories next: anything under a scratch directory is scratch, whatever
   // it is called. Dot directories are deliberately not covered wholesale —
   // `.github/` and `.vscode/` are project directories — only the named ones.
-  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true
+  //
+  // `scratchDirectory`, not `scratchName`: the underscore rule does not survive
+  // being asked about a directory. See that function for the fourteen real files
+  // it hid.
+  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true
   if (GENERATED_FILES.has(lowerName)) return true
   if (GENERATED_SUFFIXES.some((suffix) => lowerName.endsWith(suffix))) return true
   if (scratchName(lowerName)) return true
