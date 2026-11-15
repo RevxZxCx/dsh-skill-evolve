@@ -54,10 +54,11 @@
 | 2026-11-14 | S6/S7 真机验收：样本 B 多根、样本 C worktree | 用户 m09864 要求补跑。真仓库两套：父目录非仓库加两个子仓库 → 两个根都读到、`coverage=complete`；worktree 的 `.git` 是文件、`--absolute-git-dir` 与 `--git-common-dir` 不等 → 判为 worktree，两个 checkout 的 `status` 互不泄漏。另测三个边界：损坏子仓库 → `partial`、20 根上限 → `partial`、普通 checkout 的 `--git-common-dir` 是相对路径（不 `resolve` 会误判成 worktree）。**未发现新缺陷** |
 | 2026-11-14 | 产出卡 S3：行内复制 | 一行从 `<button>` 改成 `div` 里两个兄弟按钮（打开 / 复制），动作层绝对定位叠在尺寸上——因为展开态的行容器有 `overflow-y:auto`，浮到行外的菜单会被裁掉。复制绝对路径与工作区相对路径（`relativePath` 单独一个函数：工作区外没有相对路径这个答案，编一个就是把 `../` 写进剪贴板）。没有 `navigator.clipboard` 就整层不渲染——这条我先写成「明文 http 所以是常态」，**被真机实测推翻**：loopback 算 secure context，按钮本来就画得出来。八单元独立审查后修 9 处（`İ` 折叠变长切错位、两条永远为真的断言、行高亮≠可点区、焦点下尺寸退出无障碍树、`aria-label` 不播报结果）。3413 断言全绿，三套突变 129/45/128 全杀，残留 0。**新增 DEF-121~126、D-138~145** |
 | 2026-11-14 | 复制改成悬停图标 + 展开菜单 | 用户 m14496 要求把两个中文小按钮换成一个复制图标，点开菜单再选绝对/相对。菜单做成**行的兄弟、在文档流内**——两个祖先（`.dsse-card{overflow:hidden}`、`.dsse-files[data-open="true"]{max-height:245px;overflow-y:auto}`）都会裁掉浮层，而长列表正是最需要它的场合。八单元六个审查者 + 两轮后台审查：修 14 处，最重的是「图标上再按关不掉菜单」（真机 `renders` 2→4 证实）与「聚焦时透明按钮压住文件大小」。3459 断言全绿，突变 143/45/128 全杀，残留 0。**新增 DEF-127~132、D-146~150、R-85** |
-| 2026-11-15 | 产出卡 A/B/C：谁算噪声、数字怎么说、旧文件怎么办 | 200 条真实会话里 197 条是审查副本，卡片却说「200 个文件」（A）。拆出 `UNPRODUCTIVE_DIRS`/`UNPRODUCTIVE_PREFIXES` 只喂遍历，`out`/`dist`/`build` 仍然进得去；卡片侧比遍历侧宽、共用同一张表。头部主数字只数「现在还算数」的行，其余进灰字，两者相加等于徽标倒数（B）。`stale` 用会话记录的 `at` 而不是文件 mtime，七天，只褪色不删除（C）。3506 断言全绿，突变 152/45/128 全杀，残留 0。**新增 DEF-133~136、D-152~156** |
 | 2026-11-14 | 复制菜单去掉路径，只留两个文案 | 用户 m15439 说长路径会把布局撑大。**撑大这件事不成立**——菜单项由卡片定宽（实测两项各 378px，去掉路径后宽度一个像素没变），真正的问题是长路径只能显示成 `F:\dsh-plugin\dsh-ski…`，那比两个词更少地说明剪贴板里会是什么。删掉 `dsse-row-menuitem-value` 与它的样式规则，`menuItem` 的 `children` 从两层变成一层；标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis`，长文案照样不会把菜单推宽。断言从「显示路径」改成「不显示路径」并加一条 CSS 反向断言（`sheet.includes('dsse-row-menuitem-value') === false`），防这条规则以死代码的形式回来。3458 断言全绿，突变 143/45/128 全杀，残留 0。**新增 D-151** |
+| 2026-11-15 | 产出卡 A/B/C：谁算噪声、数字怎么说、旧文件怎么办 | 200 条真实会话里 197 条是审查副本，卡片却说「200 个文件」（A）。拆出 `UNPRODUCTIVE_DIRS`/`UNPRODUCTIVE_PREFIXES` 只喂遍历，`out`/`dist`/`build` 仍然进得去；卡片侧比遍历侧宽、共用同一张表。头部主数字只数「现在还算数」的行，其余进灰字，两者相加等于徽标倒数（B）。`stale` 用会话记录的 `at` 而不是文件 mtime，七天，只褪色不删除（C）。3506 断言全绿，突变 152/45/128 全杀，残留 0。**新增 DEF-133~136、D-152~156** |
 | 2026-11-15 | 产出卡：相对路径的两个修法 | 卡片上出现了一行 `F:\dsh-plugin\packages\ui-evolve\lib\client.js`——磁盘上没这个文件，它被画上删除线写着「已删除」。根因是 `writtenPaths` 按原样交出命令里的相对路径（`packages/ui-evolve/lib/client.js`），状态文件又没有 cwd，读的时候被拼到会话根上。**修法二**：`writtenPaths(command, base)` 跟着命令自己的 `cd` 走，`transcript` 存下 `noteCall` 收到的 cwd，`index.js` 把 `workspaceFor(session)` 一路传下去；顺带把 MSYS 的 `/f/x` 折成 `F:/x`、把 `F:/a/b` 与 `F:\a\b` 统一成一种拼写，否则同一个文件仍是两行。**修法三**：`statTouchedFiles` 新增第四种状态 `unresolved`——相对路径算不准时不再冒充 `missing`，卡片写「无法定位」、褪色、不画删除线、不给预览。真机审计 193 个会话 217 条相对记录：204 条 `unresolved`、11 条 `available`。3547 断言全绿，突变 166/45/128 全杀，残留 0。**不做历史回填**（用户 m16812） |
 | 2026-11-15 | shellpaths：cd 跟着命令走，跟不动就不猜 | 卡片上那行「已删除」修好后，用户连问两件：cd 的其它形态做不做、为什么没有独立审查。追问逼出两件事——我自己引入的回归（`recordable()` 在 join 之后调用，于是 `F:\work\app\&1` 以 `F` 开头，三条判据全部失效），和一个比它更老的分词器缺陷（`;`/`&&`/`||`/`|` 只有两侧带空格才算边界，`a.txt; cd x && b` 是一整段）。六名只读审查者按 200 行门槛切成 cd1–cd6，四份独立指向同一个根因：子 shell 与「cd 未知」被我做成了整条命令共用的布尔，而 shell 的作用域是段级的。重写成作用域栈（`scopes` + `moveTo` 三态 + 段末按 `endedBy` 恢复）后，`cp "release (final)"`、`(cat > a.txt)`、`dirs > stack.txt`、`(cd /tmp) && cat > b.txt` 全部归位。3606 断言全绿，突变 176/45/128 全杀，残留 0。**新增 DEF-140~144、D-161~166、R-88** |
+| 2026-11-15 | 突变表：多套件的声明变成了可验证的规则 | 14 条多套件条目逐条实测，**10 条的第二套件在该变异下从不失败**——它只是跟着跑了一遍，测的是另一个模块（`api` 的变异不会让 `client` 断言变红）。收窄 10 条、给真正双端 10 条写明实测，并给 `test/mutations.test.mjs` 加一条规则：声明两个以上套件必须留有 `// Measured:`。这条规则写下的一刻报出 13 条违规；注入验证确认它会红。**规则本身还有一层洞**：`mutate-speed.mjs` 用 `suites: wire` 这种模块级常量（19 条），只认字面量数组的第一版规则把整个脚本静默跳过了——补上别名解析后又暴露出 19 条，实测 **17 条的第二套件从不失败**，且被杀死的那个并不固定（纯计量变异由 `index` 抓、路由变异由 `api` 抓）。四套突变收窄后 176/45/69/128 全杀，3612 断言全绿，残留 0。**新增 DEF-145、DEF-146、D-167、R-89** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4150,3 +4151,97 @@ cd3 还抓到同族的两个：`dirs > stack.txt` / `popd 2> err.txt` 因为 `co
 ### 更正 2026-11-15：断言总数 3606
 
 上面「验证」一节写的就是终值。中途跑出过 3603（补三条 `>&2` 断言之前），那不是终值。
+
+## 2026-11-15 · 一条突变挂两个套件：一个从未被验证过的声明
+
+### 起点是审查者的一句 P3
+
+cd6 的审查者（`e2e82c39`）在说 `a popd pretends to know where it went back to`
+时提到：这条变异挂着 `test/transcript.test.mjs`，而 transcript 的语料里
+**根本没有 popd 命令**。它只说了这一条，我怀疑同批还有更多，于是把全部 14 条
+多套件条目逐条实测。
+
+### 为什么这个声明从来没被检查过
+
+突变 runner 的流程是「写入变异体 → 跑 `suites` 里第一个套件 → 失败就恢复并记
+KILLED」。它 **在第一个失败处停下**，因此第二个套件：
+
+- 如果它也失败，没人知道，因为不会再跑；
+- 如果它通过，也没人知道，因为「通过」不产生任何输出行。
+
+两种情况下第二套件都不改变结果。唯一的区别是它是否消耗一次运行。所以「挂两个
+套件」在账本里看起来像更强的覆盖，实际上只是一句没人核对的话。
+
+### 实测方法
+
+`_edit/probe_suites.mjs`（可带脚本名参数）：按条目整块解析出 `file`/`suites`/
+`from`/`to`，把变异体写进源码，**单独跑它声明的每个套件**，记录谁红谁绿，
+`finally` 里恢复并比对 sha256。
+
+探针自己的三个 bug 都值得记下来：
+
+1. `eval('"' + label + '"')` 拿到的是带**尾逗号**的 `"...",` → `SyntaxError`。
+   改成和 `from`/`to` 共用的 `decode()`。
+2. `console.log('%-58s ... %d', a, b)` 混用 printf 占位符与逗号参数，原样打印
+   `%-58s ... NaN`。改成 `padEnd` 拼接。
+3. **最值钱的一个**：`window` 从 `label:` 处往后切，而 `file:` 字段在 label
+   **之前**。于是 3 条报 `SKIPPED (anchor matches 0 times)` 的假警报——它们的锚点
+   在文件里确实各出现 1 次，只是被拿去和错误的文件比对。改成按条目整块
+   `\n  {` … `\n  },` 解析后 14 条全部成功。**这和 DEF-136、DEF-143 同族：
+   切片位置错了，检查器就对着错误的对象签字。**
+
+### 结果：10 条的第二套件一次都没失败
+
+语言脚本 7 条：
+
+| 变异 | 真正杀死它的 | 只是陪跑的 |
+| --- | --- | --- |
+| a session that only wrote files has nothing worth keeping | session-state | persistence |
+| the turn ends without its paths being kept | persistence | index |
+| a deleted file is dropped from the card again | api | client |
+| a workspace with no repository is answered as if it had one | git-changes | index |
+| a guessed path that is not there is called deleted | api | client |
+| a descriptor merge becomes a file once it has a base | shellpaths | transcript |
+| a target under a variable is resolved against the base | shellpaths | transcript |
+
+持久化脚本 3 条：`a storage fault takes the panel down with it`（api 杀，
+persistence 空跑）、`the recency clock is read for no session in particular`
+（同上）、`the store deletes files without telling anyone`（session-state 杀，
+session-store 空跑）。
+
+规律很清楚：**陪跑的那个套件测的是另一个模块**。`api` 的变异不会让 `client`
+的断言变红，`shellpaths` 的变异不会让 `transcript` 的断言变红。
+
+另 10 条是真的两边都失败，一条都没动：它们的两个套件分别读「写了什么」与
+「读回来是什么」，是同一行为的两端，不是替补。
+
+### 做了什么
+
+1. 把 10 条收窄成一个套件，每条上方写三行注释说明**为什么**（「The ones this
+   replaces passed with it in place, so they were paying for a run and covering
+   nothing」）。
+2. 给真正双套件的 10 条加上 `// Measured:` 注释，写明两个套件各自读的是哪一端。
+3. **给 `test/mutations.test.mjs` 加一条规则**：一个条目声明了两个以上套件，
+   必须在条目内留有 `// Measured:`。这条规则一写上去立刻报出 13 条违规——正是
+   那 7 条语言 + 6 条持久化。**一条规则在写下的那一刻抓到自己正在描述的问题，
+   比事后补文档有说服力。**
+4. 注入验证：删掉一条 `// Measured:` 注释后，元测试报
+   `FAIL … 1 unmeasured: a separator glued to a word is not a boundary`，并把
+   条目名字打出来；恢复后 sha256 一致。
+
+### 验证
+
+- `node test/run.mjs` = **3609 passed / 0 failed**（+3，含两条新规则断言）。
+- `mutate-language-and-files` 收窄后 **176 killed / 0 survived / 0 not applied /
+  0 crashed** —— 收窄没有削弱任何一条。
+- `mutate-persistence` 收窄后 **45 killed / 0 survived / 0 not applied**。
+- `mutate-checklist-panel` 未受影响（128 killed）。
+- `audit_leftovers.py` leftovers 0 / unresolved 0。
+
+### 还没做
+
+- `mutate-speed.mjs` 的 4 个多套件条目没测（它不在这次改动的路径上）。
+- 「两个套件都失败」是实测结论，但没有任何自动化能重复这个测量；下次有人加一条
+  双套件条目，只有 `// Measured:` 这句话作证，没有跑得起来的证据。
+- 收窄省下的运行时间没有测量。14 条里有 10 条各少跑一个套件，按单套件几秒算
+  是几十秒，不构成值得优化的数字。

@@ -110,7 +110,10 @@ const mutations = [
   {
     file: api,
     label: 'a storage fault takes the panel down with it',
-    suites: ['test/api.test.mjs', 'test/persistence.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     from: "  } catch (error) {\n    if (typeof deps.log === 'function') deps.log(`panel: could not read the stored state — ${error?.message ?? error}`)\n  }",
     to: "  } catch (error) {\n    throw error\n  }",
     why: 'A conversation that exists is not a failed panel because its cache could not be read. The route has to answer.',
@@ -126,7 +129,10 @@ const mutations = [
   {
     file: api,
     label: 'the recency clock is read for no session in particular',
-    suites: ['test/api.test.mjs', 'test/persistence.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     from: "  const recency = typeof deps.recentUse === 'function' ? deps.recentUse(id) : undefined",
     to: "  const recency = typeof deps.recentUse === 'function' ? deps.recentUse('') : undefined",
     why: 'Recency is how the panel orders skills against MCP servers. Sharing one clock across sessions reorders one conversation by another\'s traffic.',
@@ -174,6 +180,9 @@ const mutations = [
   {
     file: transcript,
     label: 'a stored turn is refused because this process has already seen events',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/transcript.test.mjs', 'test/persistence.test.mjs'],
     from: '    if (existing.hydrated === true) return false\n    existing.hydrated = true\n    existing.turns += turns',
     to: '    if (existing.hydrated === true) return false\n    return false\n    existing.hydrated = true\n    existing.turns += turns',
@@ -190,6 +199,9 @@ const mutations = [
   {
     file: transcript,
     label: 'the stored turn is dropped on the way in',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/transcript.test.mjs', 'test/persistence.test.mjs'],
     from: '    transcript.previous = previous',
     to: '    transcript.previous = undefined',
@@ -354,7 +366,10 @@ const mutations = [
   {
     file: store,
     label: 'the store deletes files without telling anyone',
-    suites: ['test/session-state.test.mjs', 'test/session-store.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/session-state.test.mjs'],
     from: "      if (typeof sources.onRemoved === 'function') sources.onRemoved(id, reason)",
     to: '',
     why: 'Deleting the file is only half the decision. The caller keeps memory, and memory is what a landing write consults; with no notification the two disagree for a whole interval.',
@@ -362,6 +377,9 @@ const mutations = [
   {
     file: state,
     label: 'a record that has never read the disk writes over what is on it',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/session-state.test.mjs', 'test/persistence.test.mjs'],
     from: '    if (entry.loaded !== true) {\n      await this.load(sessionId)',
     to: '    if (false) {\n      await this.load(sessionId)',

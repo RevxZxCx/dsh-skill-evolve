@@ -246,6 +246,63 @@ for (const [name, expected] of [
     `${owners.length} owners vs ${anchors.length} anchors; unresolved: ${unresolved.join(',')}`,
   )
 
+  // A mutation that names two suites is claiming that both catch it. Nothing
+  // used to check that claim, and the runner cannot: it stops at the first
+  // suite that fails, so a suite that passes leaves no trace except a run that
+  // cost time. Measuring all fourteen multi-suite entries in the language
+  // script found seven where the second suite proved nothing — each named a
+  // module the mutation never touches. One suite per mutation is the rule; an
+  // entry that names two has to say what it measured, in the entry, where the
+  // next reader will see it. A claim in a comment can be checked against a
+  // transcript; a claim in an array cannot.
+  //
+  // `suites:` is either an array literal or a module-scope constant holding one
+  // (`scripts/mutate-speed.mjs` writes `suites: wire` on nineteen entries). The
+  // first version of this check only matched the literal form and silently
+  // passed over every alias — the same shape of hole as DEF-145 itself, and the
+  // reason the aliases are resolved here rather than skipped.
+  {
+    const aliases = new Map()
+    {
+      const constant = /^const (\w+) = \[([^\]]*)\]/gm
+      let found = constant.exec(script)
+      while (found !== null) {
+        const suites = found[2].split(',').map((part) => part.trim()).filter((part) => part !== '')
+        aliases.set(found[1], suites)
+        found = constant.exec(script)
+      }
+    }
+    const entries = script.split(/\n {2}\{\n/u).slice(1)
+    const unmeasured = []
+    const unknown = []
+    for (const entry of entries) {
+      const declared = entry.match(/suites:\s*(?:\[([^\]]*)\]|(\w+))/u)
+      if (declared === null) continue
+      const suites = declared[2] === undefined
+        ? declared[1].split(',').map((part) => part.trim()).filter((part) => part !== '')
+        : aliases.get(declared[2])
+      const label = entry.match(/label:\s*(?:'([^']*)'|"([^"]*)")/u)
+      const named = label === null ? '?' : (label[1] ?? label[2])
+      if (suites === undefined) {
+        unknown.push(`${named} -> ${declared[2]}`)
+        continue
+      }
+      if (suites.length < 2) continue
+      if (entry.includes('// Measured:') === true) continue
+      unmeasured.push(named)
+    }
+    check(
+      `every ${name} mutation that names two suites records what it measured`,
+      unmeasured.length === 0,
+      `${unmeasured.length} unmeasured: ${unmeasured.join(' | ')}`,
+    )
+    check(
+      `every ${name} suite constant resolves to a list`,
+      unknown.length === 0,
+      `${unknown.length} unresolved: ${unknown.join(' | ')}`,
+    )
+  }
+
   // Read each target once. The same file is the target of several mutations, and
   // re-reading it per anchor turns a forty-anchor check into forty file reads.
   const contents = new Map()

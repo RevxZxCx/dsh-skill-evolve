@@ -229,7 +229,10 @@ const mutations = [
   {
     file: state,
     label: 'a session that only wrote files has nothing worth keeping',
-    suites: ['test/session-state.test.mjs', 'test/persistence.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/session-state.test.mjs'],
     from: '  if (facts.paths instanceof Map && facts.paths.size > 0) return true',
     to: '  if (false) return true',
     why: 'the document that holds the very list the reader is looking at would be refused as empty, and the card would reset on every restart',
@@ -269,7 +272,10 @@ const mutations = [
   {
     file: index,
     label: 'the turn ends without its paths being kept',
-    suites: ['test/persistence.test.mjs', 'test/index.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/persistence.test.mjs'],
     from: '      if (ended !== undefined) sessionState.rememberPaths(agentId, ended, endedTurn)',
     to: '      if (false) sessionState.rememberPaths(agentId, ended, endedTurn)',
     why: 'without this the list is never fed and the card stays empty however many files were written',
@@ -320,7 +326,10 @@ const mutations = [
   {
     file: api,
     label: 'a deleted file is dropped from the card again',
-    suites: ['test/api.test.mjs', 'test/client.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     from: "      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'\n      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'\n      out.push({ ...base, status, bytes: null, mtimeMs: null })\n      continue",
     to: '      continue',
     why: 'dropping the row is the old behaviour that made "edited then deleted" and "never touched" the same sentence; the whole of S1 exists to tell them apart',
@@ -756,6 +765,9 @@ const mutations = [
   {
     file: gitChanges,
     label: 'every uncommitted change is credited to the turn',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/git-changes.test.mjs', 'test/git-watch.test.mjs'],
     from: "    if (known.has(path) === true) continue",
     to: "    if (false) continue",
@@ -973,6 +985,9 @@ const mutations = [
   {
     file: coverage,
     label: 'a half-read bracket is vouched for as complete',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/index.test.mjs', 'test/coverage.test.mjs'],
     from: "  if (left === 'partial' || right === 'partial') return 'partial'",
     to: "  if (left === 'partial' || right === 'partial') return 'complete'",
@@ -1021,7 +1036,10 @@ const mutations = [
   {
     file: gitChanges,
     label: 'a workspace with no repository is answered as if it had one',
-    suites: ['test/git-changes.test.mjs', 'test/index.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/git-changes.test.mjs'],
     from: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: false }",
     to: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: true }",
     why: 'With `repository: true` and no ignored paths the merge treats the walk as fully redundant and drops it, so a session in a plain folder loses every file it wrote -- the exact turn where the walk is the only witness.',
@@ -1386,6 +1404,9 @@ const mutations = [
   {
     file: shellpaths,
     label: 'a shell target is stored without the base it was written in',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
     from: '    add(isAbsolute(spelled) === true ? spelled : join(cwd, spelled))',
     to: '    add(spelled)',
@@ -1410,6 +1431,9 @@ const mutations = [
   {
     file: shellpaths,
     label: 'one file keeps two spellings',
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
     from: '  return path.split(\'/\').join(\'\\\\\')',
     to: '  return path',
@@ -1450,7 +1474,10 @@ const mutations = [
   {
     file: api,
     label: 'a guessed path that is not there is called deleted',
-    suites: ['test/api.test.mjs', 'test/client.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     from: '      const status = gone === false ? \'invalid\' : isAbsolute === true ? \'missing\' : \'unresolved\'',
     to: '      const status = gone === false ? \'invalid\' : \'missing\'',
     why: 'this is exactly the defect the fourth status exists for: a record that only kept a relative path was joined to the session root, and ENOENT on that guess was reported as the user having deleted the file',
@@ -1498,7 +1525,10 @@ const mutations = [
   {
     file: shellpaths,
     label: "a descriptor merge becomes a file once it has a base",
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/shellpaths.test.mjs'],
     from: "    if (recordable(spelled) === false) return",
     to: "    if (false) return",
     why: "filtering after resolution instead of before let `2>&1` through as a path beginning with a drive letter, because every test in recordable() looks at the start of the string",
@@ -1506,6 +1536,9 @@ const mutations = [
   {
     file: shellpaths,
     label: "a separator glued to a word is not a boundary",
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
     from: "    if (ch === ';' || ch === '|' || ch === '&') {",
     to: "    if (ch === ';;' || ch === '|||' || ch === '&&&') {",
@@ -1514,6 +1547,9 @@ const mutations = [
   {
     file: shellpaths,
     label: "a cd through a variable keeps the directory it was leaving",
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
     from: '      if (knowable === false) {\n        // `cd $DIR`, `cd ~/x`, `cd -`, a bare `cd`: the result is not in this\n        // command. Staying put would resolve later targets against a directory\n        // the shell has already left, which is how a wrong absolute path gets\n        // written with full confidence.\n        moveTo = undefined',
     to: "      if (knowable === false) {\n        cwd = cwd",
@@ -1522,7 +1558,12 @@ const mutations = [
   {
     file: shellpaths,
     label: "a popd pretends to know where it went back to",
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
+    // shellpaths only: the transcript corpus contains no `popd` command, so
+    // running that suite here spends its runtime to learn nothing. Measured with
+    // this mutation in place: transcript reported 158 passed while shellpaths
+    // failed, which is the whole difference between a suite that covers a change
+    // and a suite that merely runs beside it.
+    suites: ['test/shellpaths.test.mjs'],
     from: "    } else if (word === \'popd\') {\n      // Returning to a remembered directory needs a stack, and no stack is kept.\n      // Guessing \"back to the base\" is right only for a single pushd.\n      moveTo = undefined",
     to: "    } else if (word === \'popd\') {\n      // Returning to a remembered directory needs a stack, and no stack is kept.\n      // Guessing \"back to the base\" is right only for a single pushd.\n      moveTo = null",
     why: "no stack is kept, so after a popd the only honest answer is that the directory is unknown; keeping the pushed-to one puts later writes where the shell no longer is",
@@ -1530,6 +1571,9 @@ const mutations = [
   {
     file: shellpaths,
     label: "a subshell writes into the directory outside it",
+    // Measured: both suites fail under this mutation. They are not
+    // alternates for the same behaviour -- one reads the write, the other
+    // reads the read-back -- so neither one can be dropped.
     suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
     from: "    const opens = substituted === true || (raw.startsWith(\'(\') === true && raw.startsWith(\'((\') === false)\n    if (opens === true) scopes.push(cwd)",
     to: "    const opens = substituted === true || (raw.startsWith(\'(\') === true && raw.startsWith(\'((\') === false)\n    if (false) scopes.push(cwd)",
@@ -1538,7 +1582,10 @@ const mutations = [
   {
     file: shellpaths,
     label: "a target under a variable is resolved against the base",
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
+    // Measured: only this suite fails under the mutation. The ones this
+    // replaces passed with it in place, so they were paying for a run and
+    // covering nothing.
+    suites: ['test/shellpaths.test.mjs'],
     from: "    const unexpanded = spelled.includes('$') || spelled.includes('`') || spelled.startsWith('~')",
     to: "    const unexpanded = false",
     why: "joining the base to `$OUT/x.txt` yields a path that looks resolved and names nothing; the card then reports a file nobody wrote, in a directory nobody chose",

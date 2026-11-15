@@ -239,7 +239,10 @@ const mutations = [
   // ---------------------------------------------------------------------
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'text deltas are never fed to the meter',
     from: '    speeds.push(agentId, chunk.text)',
     to: '    if (false) speeds.push(agentId, chunk.text)',
@@ -247,7 +250,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'thinking counts as output',
     from: '    if (chunk?.type !== \'text-delta\') return',
     to: '    if (chunk?.type !== \'text-delta\' && chunk?.type !== \'reasoning-delta\') return',
@@ -255,7 +261,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+        // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'the provider\'s count never corrects the estimate',
     from: '    speeds.settle(agentId, text)',
     to: '    if (false) speeds.settle(agentId, text)',
@@ -263,7 +272,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'reasoning tokens are counted as text',
     from: '    speeds.settle(agentId, text)',
     to: '    speeds.settle(agentId, output)',
@@ -271,7 +283,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'a tool-call message teaches the scale too',
     from: '    if (Array.isArray(content) && content.some((block) => readToolCallBlock(block) !== undefined)) return',
     to: '    if (false) return',
@@ -279,7 +294,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+        // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'a new attempt keeps the abandoned one\'s text',
     from: '    if (frame?.type === \'start\') {\n      speeds.begin(agentId)\n      return\n    }',
     to: '    if (frame?.type === \'start\') return',
@@ -303,7 +321,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'chunk frames are the ones skipped',
     from: '    if (frame?.type !== \'chunk\') return',
     to: '    if (frame?.type === \'chunk\') return',
@@ -311,7 +332,10 @@ const mutations = [
   },
   {
     file: index,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/index.test.mjs'],
     label: 'a disposed session keeps its window',
     from: '    speeds.forget(agentId)',
     to: '    if (false) speeds.forget(agentId)',
@@ -319,6 +343,9 @@ const mutations = [
   },
   {
     file: api,
+    // Measured: both suites fail under this mutation. They are not
+    // alternates -- one reads the wire, the other reads the session
+    // the wire answers for -- so neither can be dropped.
     suites: wire,
     label: 'the speed route answers a session it was not asked about',
     from: '        return json(res, 200, { ok: true, data: deps.speedOf(agentId) }, headOnly)',
@@ -327,7 +354,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'the speed route accepts a request with no session',
     from: '        if (typeof agentId !== \'string\' || agentId.length === 0) {\n          return json(res, 400, { ok: false, code: \'error.agent.missing\', error: \'the speed route needs a session id\' }, headOnly)',
     to: '        if (false) {\n          return json(res, 400, { ok: false, code: \'error.agent.missing\', error: \'the speed route needs a session id\' }, headOnly)',
@@ -335,7 +365,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a host with no meter answers as though it had one',
     from: '        if (typeof deps.speedOf !== \'function\') {\n          return json(res, 200, { ok: false, code: \'error.speed.absent\', error: \'this panel does not measure output speed\' }, headOnly)',
     to: '        if (false) {\n          return json(res, 200, { ok: false, code: \'error.speed.absent\', error: \'this panel does not measure output speed\' }, headOnly)',
@@ -343,7 +376,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'the wait is skipped entirely',
     from: '        if (headOnly !== true) await speedWait(deps, req, agentId, url.searchParams)',
     to: '        if (false) await speedWait(deps, req, agentId, url.searchParams)',
@@ -351,7 +387,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a head request holds the socket open',
     from: '        if (headOnly !== true) await speedWait(deps, req, agentId, url.searchParams)',
     to: '        await speedWait(deps, req, agentId, url.searchParams)',
@@ -359,7 +398,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'the wait compares against the meter rather than the caller',
     from: '  const moved = () => deps.speedRevision(agentId) !== after',
     to: `  const started = deps.speedRevision(agentId)
@@ -368,7 +410,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a wait that starts up to date is answered anyway',
     from: '  if (moved() === true) return Promise.resolve()',
     to: '  if (false) return Promise.resolve()',
@@ -376,7 +421,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a host with no revision holds every request',
     from: '  if (typeof deps.speedRevision !== \'function\') return Promise.resolve()',
     to: '  if (typeof deps.speedRevision !== \'function\') return new Promise(() => {})',
@@ -384,7 +432,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'the wait ignores the deadline',
     from: '  const deadline = Date.now() + SPEED_WAIT_MS',
     to: '  const deadline = Infinity',
@@ -392,7 +443,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a change before the deadline is not enough to end the wait',
     from: '      if (moved() === true || Date.now() >= deadline) finish()',
     to: '      if (moved() === true && Date.now() >= deadline) finish()',
@@ -400,7 +454,10 @@ const mutations = [
   },
   {
     file: api,
-    suites: wire,
+    // Measured: only this suite fails under the mutation. The other
+    // one passed with it in place, so it was paying for a run and
+    // covering nothing.
+    suites: ['test/api.test.mjs'],
     label: 'a wait that is never answered keeps its timer',
     from: '    const finish = () => {\n      clearInterval(timer)\n      resolve()\n    }',
     to: '    const finish = () => {\n      resolve()\n    }',
