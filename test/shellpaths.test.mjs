@@ -151,13 +151,20 @@ same(
   ['F:\\work\\app\\before.txt', 'F:\\work\\app\\sub\\after.txt'],
 )
 
-// Three spellings of "a directory this module cannot know". Guessing at any of
-// them would write a confidently wrong absolute path — worse than the relative
-// one it replaced, because a relative path can still be resolved by a reader who
-// knows more than this function does.
-same('cd - is not followed', writtenPaths('cd - && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
-same('a cd through a variable is not followed', writtenPaths('cd $DIR && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
-same('a cd through a home shortcut is not followed', writtenPaths('cd ~/x && cat > notes.txt', BASE), ['F:\\work\\app\\notes.txt'])
+// Three spellings of "a directory this module cannot know". The shell has left
+// the base and the command does not say where it went, so the location becomes
+// unknown rather than stale: the target comes back exactly as written, and the
+// card reports it as unplaceable instead of inventing a directory. Saying "I
+// cannot tell you which directory" is recoverable; saying "F:\work\app" when
+// the file is in `$DIR` is a wrong claim that nothing downstream can check.
+same('cd - leaves the directory unknown', writtenPaths('cd - && cat > notes.txt', BASE), ['notes.txt'])
+same('a cd through a variable leaves it unknown', writtenPaths('cd $DIR && cat > notes.txt', BASE), ['notes.txt'])
+same('a cd through a home shortcut leaves it unknown', writtenPaths('cd ~/x && cat > notes.txt', BASE), ['notes.txt'])
+// `popd` needs the stack, and the stack is not kept. Falling back to the base is
+// right only when exactly one pushd happened, which this function cannot count.
+same('popd leaves the directory unknown', writtenPaths('pushd sub && popd && cat > back.txt', BASE), ['back.txt'])
+// A subshell changes directory in a scope that is not modelled.
+same('a subshell resolves inside its own directory', writtenPaths('(cd /tmp && cat > note.txt)', BASE), ['F:\\tmp\\note.txt'])
 
 // A shell on Windows is often an MSYS shell, which spells `F:\x` as `/f/x`. The
 // two name one directory, and only the drive form is unambiguous — `/tmp` and
@@ -171,6 +178,108 @@ same(
 // joined to a Windows base — and it is not folded either, because only the
 // drive form is unambiguous.
 same('a shell path without a drive is not joined to the base', writtenPaths('cat > /tmp/x.txt', BASE), ['/tmp/x.txt'])
+
+// The filter has to run on what the command spelled, not on the result. Every
+// test in recordable() looks at the start of the string: `&1` begins with `&`,
+// `NUL` is a device name, `-a` begins with `-`. Resolving first turns `&1` into
+// `F:\work\app\&1`, which begins with `F`, so all three slip through and the card
+// offers to open a file nobody named. These four need a base to fail: without
+// one the old order happened to give the right answer.
+same('a descriptor merge is not a file', writtenPaths('node build.js 2>&1 | tail -2', BASE), [])
+same('a device sink is not a file', writtenPaths('echo hi > NUL', BASE), [])
+same('a bare flag after tee is not a file', writtenPaths('tee -a log.txt', BASE), ['F:\\work\\app\\log.txt'])
+same('a descriptor merge beside a real target', writtenPaths('make >> build.log 2>&1', BASE), ['F:\\work\\app\\build.log'])
+check(
+  'and the same command without a base agrees',
+  JSON.stringify(writtenPaths('node build.js 2>&1 | tail -2')) === '[]',
+  JSON.stringify(writtenPaths('node build.js 2>&1 | tail -2')),
+)
+
+// A subshell's closing paren sits where a space would be, so it arrives glued to
+// the last target. Trimming it is only correct when a subshell was opened — a
+// file may legitimately end in a paren.
+same('a subshell does not put its paren in the file name', writtenPaths('(cd /tmp && cat > note.txt)', '/tmp'), ['F:\\tmp\\note.txt'])
+same('but a real paren in a name survives', writtenPaths('cat > notes(1).txt', BASE), ['F:\\work\\app\\notes(1).txt'])
+
+// ------------------------------------------ separators without spaces --
+//
+// A command is not obliged to put spaces around its own punctuation, and `a;b`
+// was read as one word until this round. The failure is silent: the segment scan
+// never sees the boundary, so a `cd` in the middle of the line does not move the
+// directory, and everything after it is resolved against the directory from
+// before -- naming files that do not exist while looking entirely confident.
+same('a spaced semicolon starts a new command', writtenPaths('cat > a.txt; cd sub && cat > b.txt', BASE), ['F:\\work\\app\\a.txt', 'F:\\work\\app\\sub\\b.txt'])
+same('a glued semicolon starts one too', writtenPaths('cat > a.txt;cd sub && cat > b.txt', BASE), ['F:\\work\\app\\a.txt', 'F:\\work\\app\\sub\\b.txt'])
+same('a glued and is a boundary', writtenPaths('cd sub&&cat > b.txt', BASE), ['F:\\work\\app\\sub\\b.txt'])
+same('a glued or is a boundary', writtenPaths('cd sub||cat > b.txt', BASE), ['F:\\work\\app\\sub\\b.txt'])
+same('a glued pipe does not let its left side move the parent', writtenPaths('cd sub|cat > b.txt', BASE), ['F:\\work\\app\\b.txt'])
+// `&` is the exception: it lives inside two redirection forms. Splitting `2>&1`
+// would invent a file called `1`.
+same('a descriptor duplicate keeps its ampersand', writtenPaths('cmd 2>&1', BASE), [])
+same('an ampersand redirect keeps its ampersand', writtenPaths('cmd &> both.txt', BASE), ['F:\\work\\app\\both.txt'])
+same('a background job does not move the parent', writtenPaths('cd sub & cat > b.txt', BASE), ['F:\\work\\app\\b.txt'])
+
+// `>&2` is the spelling that reaches the descriptor guard: in `2>&1` the leading
+// digit lets the glued-redirect rule claim it first, and the `&1` is dropped for
+// starting with `&`. Reading `2` as a file name is the failure this guards.
+same('a bare descriptor after >& is not a file', writtenPaths('cat >&2', BASE), [])
+same('and stays empty without a base', writtenPaths('cat >&2'), [])
+same('but a name after >& is a file', writtenPaths('cat >&2.log', BASE), ['F:\\work\\app\\2.log'])
+
+// ------------------------------- a subshell is a scope, not a property of the line --
+//
+// The first cut of this rule made `cwd` unknown for the *rest of the command* as
+// soon as any `(` appeared, and trimmed a trailing `)` off *every* target. Both
+// halves were wrong in opposite directions: one lost targets that were perfectly
+// placeable, the other renamed files that really do end in a paren.
+same('a subshell keeps the target inside its own segment', writtenPaths('(cat > a.txt)', BASE), ['F:\\work\\app\\a.txt'])
+same('and both of them when the segment has two', writtenPaths('(cat > a.txt && cat > b.txt)', BASE), ['F:\\work\\app\\a.txt', 'F:\\work\\app\\b.txt'])
+same('a subshell does not poison what follows it', writtenPaths('echo hi > a.txt; (cd /tmp && echo x > b.txt); echo y > c.txt', BASE), ['F:\\work\\app\\a.txt', 'F:\\tmp\\b.txt', 'F:\\work\\app\\c.txt'])
+same('a real name ending in a paren survives', writtenPaths('cp app.zip "release (final)"', BASE), ['F:\\work\\app\\release (final)'])
+same('and survives next to a subshell', writtenPaths('(echo a) && cat > "note)"', BASE), ['F:\\work\\app\\note)'])
+same('a paren inside a heredoc body is not a subshell', writtenPaths("cat > notes(1) <<'EOF'\nif (x) {\n}\nEOF", BASE), ['F:\\work\\app\\notes(1)'])
+same('arithmetic is not a subshell', writtenPaths('((count++)) && cat > n.txt', BASE), ['F:\\work\\app\\n.txt'])
+same('and a command substitution is one', writtenPaths('cd /tmp && x=$(cat > n.txt)', BASE), ['F:\\tmp\\n.txt'])
+
+// ------------------------------------------- commands that move nowhere at all --
+same('dirs prints the stack, it does not move', writtenPaths('dirs > stack.txt', BASE), ['F:\\work\\app\\stack.txt'])
+same('popd keeps the redirect it was given', writtenPaths('pushd sub && popd > stack.txt', BASE), ['F:\\work\\app\\sub\\stack.txt'])
+same('a posix root after an unknown cd is still absolute', writtenPaths('cd $DIR && cd /tmp && cat > n.txt', BASE), ['F:\\tmp\\n.txt'])
+
+// --------------------------------------------- both streams, one file, two spellings --
+//
+// `cmd &>out.log` and `cmd >&out.log` are the same redirect. Neither was read:
+// the first was glued to the command name so no operator was ever seen, the second
+// stopped parsing at `>` and handed back `&out.log` -- a file nobody wrote, on a
+// card, looking exactly like a real one.
+same('a glued both-stream redirect names its file', writtenPaths('cmd&>both.txt', BASE), ['F:\\work\\app\\both.txt'])
+same('and the spaced spelling does the same', writtenPaths('cmd &>both.txt', BASE), ['F:\\work\\app\\both.txt'])
+same('an ampersand redirect names its file, not the ampersand', writtenPaths('cmd >&out.log', BASE), ['F:\\work\\app\\out.log'])
+same('a descriptor duplication still names nothing', writtenPaths('cmd 2>&1', BASE), [])
+// And the whole point of splitting: a device sink before a cd must not survive
+// as a file, and must not stop the cd from being seen.
+same('a device sink before a boundary is still not a file', writtenPaths('echo hi > NUL; cd sub && cat > z.txt', BASE), ['F:\\work\\app\\sub\\z.txt'])
+same('a noclobber redirect still names its file', writtenPaths('cat >| out.txt', BASE), ['F:\\work\\app\\out.txt'])
+same('an appended noclobber redirect names its file', writtenPaths('cat >>| log.txt', BASE), ['F:\\work\\app\\log.txt'])
+same('a numbered noclobber redirect names its file', writtenPaths('cat 2>| err.log', BASE), ['F:\\work\\app\\err.log'])
+same('a pipe next to a word is still a pipe', writtenPaths('a|b', BASE), [])
+
+// --------------------------------------- targets this module cannot place --
+//
+// The `cd` branch already refuses to guess where an unexpanded variable points.
+// A write target has the same problem in the other direction: `$OUT/x.txt` is a
+// file under whatever OUT holds, and joining the base to it produces
+// `F:\\work\\app\\$OUT\\x.txt` -- resolved-looking, naming nothing. Same rule, same
+// answer: hand it on as written.
+same('a target under a variable keeps its spelling', writtenPaths('cat > $OUT/x.txt', BASE), ['$OUT/x.txt'])
+same('a target under a braced variable keeps its spelling', writtenPaths('cat > ${OUT}/x.txt', BASE), ['${OUT}/x.txt'])
+same('a home-relative target keeps its spelling', writtenPaths('cat > ~/notes.txt', BASE), ['~/notes.txt'])
+// And the ordinary case still resolves: one unplaceable target does not make the
+// whole command unreadable.
+{
+  const mixed = writtenPaths('cat > $OUT/a.txt 2> err.log', BASE)
+  check('a variable target does not take the resolved one with it', JSON.stringify(mixed) === JSON.stringify(['$OUT/a.txt', 'F:\\work\\app\\err.log']), JSON.stringify(mixed))
+}
 
 // One file, one entry. `path.join` spells separators with backslashes while a
 // model writing an `edit` call types forward slashes; both name the same file

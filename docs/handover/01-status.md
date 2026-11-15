@@ -57,6 +57,7 @@
 | 2026-11-15 | 产出卡 A/B/C：谁算噪声、数字怎么说、旧文件怎么办 | 200 条真实会话里 197 条是审查副本，卡片却说「200 个文件」（A）。拆出 `UNPRODUCTIVE_DIRS`/`UNPRODUCTIVE_PREFIXES` 只喂遍历，`out`/`dist`/`build` 仍然进得去；卡片侧比遍历侧宽、共用同一张表。头部主数字只数「现在还算数」的行，其余进灰字，两者相加等于徽标倒数（B）。`stale` 用会话记录的 `at` 而不是文件 mtime，七天，只褪色不删除（C）。3506 断言全绿，突变 152/45/128 全杀，残留 0。**新增 DEF-133~136、D-152~156** |
 | 2026-11-14 | 复制菜单去掉路径，只留两个文案 | 用户 m15439 说长路径会把布局撑大。**撑大这件事不成立**——菜单项由卡片定宽（实测两项各 378px，去掉路径后宽度一个像素没变），真正的问题是长路径只能显示成 `F:\dsh-plugin\dsh-ski…`，那比两个词更少地说明剪贴板里会是什么。删掉 `dsse-row-menuitem-value` 与它的样式规则，`menuItem` 的 `children` 从两层变成一层；标签接手 `flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis`，长文案照样不会把菜单推宽。断言从「显示路径」改成「不显示路径」并加一条 CSS 反向断言（`sheet.includes('dsse-row-menuitem-value') === false`），防这条规则以死代码的形式回来。3458 断言全绿，突变 143/45/128 全杀，残留 0。**新增 D-151** |
 | 2026-11-15 | 产出卡：相对路径的两个修法 | 卡片上出现了一行 `F:\dsh-plugin\packages\ui-evolve\lib\client.js`——磁盘上没这个文件，它被画上删除线写着「已删除」。根因是 `writtenPaths` 按原样交出命令里的相对路径（`packages/ui-evolve/lib/client.js`），状态文件又没有 cwd，读的时候被拼到会话根上。**修法二**：`writtenPaths(command, base)` 跟着命令自己的 `cd` 走，`transcript` 存下 `noteCall` 收到的 cwd，`index.js` 把 `workspaceFor(session)` 一路传下去；顺带把 MSYS 的 `/f/x` 折成 `F:/x`、把 `F:/a/b` 与 `F:\a\b` 统一成一种拼写，否则同一个文件仍是两行。**修法三**：`statTouchedFiles` 新增第四种状态 `unresolved`——相对路径算不准时不再冒充 `missing`，卡片写「无法定位」、褪色、不画删除线、不给预览。真机审计 193 个会话 217 条相对记录：204 条 `unresolved`、11 条 `available`。3547 断言全绿，突变 166/45/128 全杀，残留 0。**不做历史回填**（用户 m16812） |
+| 2026-11-15 | shellpaths：cd 跟着命令走，跟不动就不猜 | 卡片上那行「已删除」修好后，用户连问两件：cd 的其它形态做不做、为什么没有独立审查。追问逼出两件事——我自己引入的回归（`recordable()` 在 join 之后调用，于是 `F:\work\app\&1` 以 `F` 开头，三条判据全部失效），和一个比它更老的分词器缺陷（`;`/`&&`/`||`/`|` 只有两侧带空格才算边界，`a.txt; cd x && b` 是一整段）。六名只读审查者按 200 行门槛切成 cd1–cd6，四份独立指向同一个根因：子 shell 与「cd 未知」被我做成了整条命令共用的布尔，而 shell 的作用域是段级的。重写成作用域栈（`scopes` + `moveTo` 三态 + 段末按 `endedBy` 恢复）后，`cp "release (final)"`、`(cat > a.txt)`、`dirs > stack.txt`、`(cd /tmp) && cat > b.txt` 全部归位。3606 断言全绿，突变 176/45/128 全杀，残留 0。**新增 DEF-140~144、D-161~166、R-88** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4046,3 +4047,106 @@ statTouchedFiles`）：真实 200 条那份渲染成头部只有 `200 个生成�
 上面两处写的是 3547。写完那段之后又给 `test/transcript.test.mjs` 补了两条断言（`a files array is not a signature` / `and the tool that does present is still read`），因为一条突变暴露了这个缺口：把 `if (PRESENT_TOOLS.has(call.name))` 改成 `if (true)` 时没有任何断言变红。它能变绿是因为 `readPresentedPaths` 对别的工具返回空数组，行为确实没变——但「别的工具带 `files` 数组不会被当成交付物」这件事**从来没有被断言过**，也就从来没有人知道它是对的。
 
 终值是 **3549 passed / 0 failed**，分套：shellpaths 63、transcript **145**（原写 143）、api 303、client 762。其余数字（突变 166/45/128、残留 0、217 条相对记录、204/11）不变。
+
+## 2026-11-15 · 一行紧跟一行：分词器、作用域，和三次「没跑完」
+
+### 用户问的两件事
+
+修好幽灵路径之后，用户（m17467）问：cd 的其它形态——子 shell、软链、`pushd` 栈——要不要做，另外为什么没有独立审查。第二个问题我先答：**漏了，没有正当理由。** 前面三轮（R-83 八单元、R-84 五单元、R-85 八单元）都派过；这一轮改完直接进自己的断言与突变，R-87 里写的「没有独立审查者」是记录，不是理由。而且这一轮尤其该审，因为 `writtenPaths` 的改动把出错方式从「少一行」变成了「多一行假话」——少一行有人会问，假的那行没人会问。
+
+对第一个问题我先查了真实语料：193 个状态文件、1142 条命令里子 shell **0 次**、`pushd`/`popd` **0 次**、`cd $VAR` **0 次**、`cd -` **0 次**。所以「真实数据没要求过」这句话对那五种形态是对的。**但我查错了对象**——该查的是「我的改动对它们做了什么」，不是「它们出现过多少次」。
+
+### 我自己引入的回归
+
+我先做了一个探针，专门跑 `recordable()` 这条我自己加的判据：
+
+```
+node build.js 2>&1 | tail -2     不带 base → []    带 base → ["F:\work\app\&1"]   ← 我引入的
+echo hi > NUL                    不带 base → []    带 base → ["F:\work\app\NUL"]  ← 我引入的
+make >> build.log 2>&1           带 base → ["F:\work\app\build.log","F:\work\app\&1"]
+```
+
+根因是顺序：`recordable()` 的每条判据都看字符串开头（`&1` 以 `&` 起、`NUL` 是设备名、`-a` 以 `-` 起），而我把 `remember()` 写成先 `join` 后过滤——解析完 `F:\work\app\&1` 以 `F` 开头，三条判据同时失效。修法是把过滤提到解析之前一行。
+
+**这正是「没被真实数据要求过」的反面**：真实语料里 `&1` 出现过 3 次、`/dev/null)` 1 次，而它们原本被 `recordable()` 挡住了；我加的那层 base 解析把挡住它们的理由拆掉了。
+
+### 比分词器更老的一个缺陷
+
+继续追「跟不动就别猜」时发现：`cat > a.txt; cd F:/repo/other && cat > b.txt` 里那个 `cd` 被完全无视，路径用旧目录解析。
+
+```
+"cat > a.txt; cd F:/repo/other && cat > b.txt" -> ["F:\repo\app\a.txt","F:\repo\app\b.txt"]   ← cd 被无视
+"cat > a.txt;cd F:/repo/other && cat > b.txt"  -> ["F:\repo\app\a.txt;cd","F:\repo\app\b.txt"] ← `;` 进了文件名
+"cd F:/x&&cat > y.txt"                          -> []                                                ← 整条空手而归
+```
+
+`tokenize` 只在空格、制表、回车、换行处收词，所以 `;`/`&&`/`||`/`|`/`&` 只有在**两侧都有空格**时才会成为独立 token，`segmentsOf` 才看得见段边界。这个缺陷比我这轮所有改动都老，而且它和上面的回归是同一类：**分词是所有人的前提，而它从来没被按「紧贴」测过。**
+
+改法是在 `tokenize` 里把这五个字符当边界，但留两个例外：`2>&1` 的 `&`（描述符复制）与 `&>`/`>` 的 `&`（两路重定向）。`>|`（noclobber）也是同一个洞——它原来被拆成 `>` 与 `|`，写出的文件从卡片消失；这是 cd1 审查者抓到的 P1。
+
+### 四份审查指向同一处
+
+| 单元 | 改动行 | 审查者 | 结论 |
+| --- | --- | --- | --- |
+| cd1 分词器 | 22 | `31c24e34` | 1 P1（`>|` 被拆开）、0 P0 |
+| cd2 过滤顺序 | 8 | `52c80d09` | 1 P1（`subshell` 是全局布尔，剥掉真实文件名的 `)`）、1 P2 |
+| cd3 cd 未知 | 40 | `91bc297f` | 2 P1 / 3 P2 / 1 P3 |
+| cd4 shellpaths 测试 | 64 | `5700a599` | 3 P1 / 2 P2 / 2 P3 |
+| cd5 transcript 测试 | 57 | `7801bc02` | 1 P1 / 2 P2 / 2 P3 |
+| cd6 突变 | 50 | `e2e82c39` | 见 R-88 |
+
+cd2、cd3、cd4 三份独立得出同一个判断：**我把「子 shell」做成了整条命令共用的布尔。** 于是命令里任意位置出现一个「空格 + `(`」，全命令的候选都要剥掉尾部 `)`：
+
+```
+cp build/app.zip "release (final)"   -> F:\work\app\release (final     ← 真实文件名被啃掉一个字符
+(cd /tmp && cat > note.txt) && cat > "log(1)" -> ["note.txt","log(1"]    ← 两个都错
+```
+
+剥完仍是绝对路径，于是下游判 `missing`，卡片画上删除线写「文件已被删除或移动」——**对没删的文件说假话**。这与 DEF-137 是同一种伤害，只是换了个入口。
+
+cd3 还抓到同族的两个：`dirs > stack.txt` / `popd 2> err.txt` 因为 `continue` 写在参数扫描之前而**吞掉自己这条命令的重定向**；`(echo hi > note.txt)` 同样吞掉首段目标。cd4 抓到三条断言是空的：子 shell 那条恰好盖不住「子 shell 自己的目标被吞」、也把「子 shell 之后 cwd 永不恢复」当成正确行为锁死；`cat > notes(1).txt` 那条**永远不失败**（该样例里 `(` 前没有空格，全局标志为 false，`trim` 从不执行）。
+
+### 重写成作用域
+
+一次修掉全部四条 P1 的办法不是加判据，是换模型：shell 的作用域是段级的，不是命令级的。
+
+- `segmentsOf` 从 `string[][]` 改成 `{ words, endedBy }[]`，因为**管道左侧与后台任务在子 shell 里跑**，它们的 `cd` 不该影响父 shell。
+- 删掉全局 `subshell`/`trim`，改成 `scopes` 栈：`opens` 时 `push(cwd)`，`closes` 时只剥**与右括号粘连的那一个词**的尾部 `)`，段末 `cwd = scopes.pop()`——回到**进入作用域时**的目录，不是本段开始时的目录（第一版写 `before` 是错的）。
+- `cd`/`pushd` 改成算 `moveTo` 三态（`null`=不动 / `undefined`=不可知 / 字符串=新目录），**等读完本段的重定向才应用**：shell 在 `cd` 之前的目录里打开重定向。`popd` 只置 `undefined` 而不 `continue`，所以它不再吞自己的重定向。
+- `((count++))` 不算子 shell（算术不改变目录），`$()` 算作用域。
+
+改完 27 条反例全部符合。**其中 6 条第一次不符，是我的期望值写错了**——子 shell 里没 cd 时目录仍已知，正确答案是绝对路径，而我把「子 shell」当成了「未知」。这是这轮第二次「期望值本身是错的」，上一条是 `cd $DIR` 之后又 `cd sub`。
+
+### 三条突变：两条 CRASHED、一条 UNCOVERED
+
+作用域重写让 5 条锚点失效。重定向锚点时我只替换了 `from:`，没动 `to:` —— 于是两条突变的 `to` 里还写着 `name` 与 `cwd = cwd`，`name` 这个名字在重写后已经不存在了。
+
+变异体语法不合法 → 套件在打印 tally 之前就崩了 → runner 判 **CRASHED**。这**不是**「没被抓住」，是「根本没跑」。三条同族记录（DEF-122、DEF-134、DEF-139）都指向同一件事：**「没跑完」有独立名字，而它看起来像「没被抓住」。**
+
+第三条 SURVIVED 是真的没覆盖：`a descriptor number becomes a file name` 把 `>&` 后面的纯数字改成当文件名。我探了一遍：
+
+```
+"cat >&2"    -> []      ← 只有这条拼写走到描述符判据
+"cat 2>&1"   -> []      ← 领头的数字让 REDIRECT_GLUED 先认领
+"cat >&2.log" -> ["F:\work\app\2.log"]   ← 名字要留下来
+```
+
+`>&2` 只有一条拼写能触发它，而**没有任何断言写过 `>&2`**。补三条断言（`>&2` 有 base / 无 base / `>&2.log` 是文件），那条突变随即变 KILLED。
+
+### 验证
+
+- `node test/run.mjs` **3606 passed / 0 failed**（本轮起点 3549）。分套：shellpaths 63→107、transcript 145→158。
+- `mutate-language-and-files` **176 killed / 0 survived / 0 not applied / 0 crashed**；`mutate-persistence` **45 killed**；`mutate-checklist-panel` **128 killed**；`audit_leftovers.py` **leftovers: 0 / unresolved: 0**。
+- 三套突变**串行**跑，且**不与全量回归并行**。这一条是被污染教会的：上一轮我边跑突变边跑回归，结果 `3208 passed, 2 failed`，2 条与改动无关（DEF-103 复发）。
+
+### 还没做
+
+- `cat > "a;b;"` 引号包住的末尾分号仍被 `.replace(/[;&|]+$/, '')` 吃掉。只影响名字里恰好以分隔符结尾的文件，未修。
+- `cd /nonexistent` 会解析出一个不存在的目录。静态分析没法 stat，取舍是「跟它」，但没固化成断言。
+- UNC（`cd \\server\share && cat > x.txt`）仍会算成 `F:\servershare\x.txt`。未加引号时的行为与 bash 一致（bash 也丢反斜杠），带引号的正确——但没断言。
+- `${VAR}` 出现在名字中段（`pre$X.txt`）时被整体判为不可定位，是安全方向，但不是精确的。
+- 这一轮的分词器改动只覆盖 `sh`/`bash` 的语法；`cmd.exe` 的重定向（`2>nul`）不在范围内。
+
+### 更正 2026-11-15：断言总数 3606
+
+上面「验证」一节写的就是终值。中途跑出过 3603（补三条 `>&2` 断言之前），那不是终值。

@@ -153,6 +153,38 @@ function tokenize(text) {
     }
     if (ch === '"' || ch === "'") { quote = ch; started = true; continue }
     if (ch === '\\' && i + 1 < text.length) { current += text[i + 1]; i += 1; started = true; continue }
+    // `;` `&&` `||` `|` are boundaries whether or not a space follows them, and a
+    // command written without spaces (`cd x&&cat > y`) is common enough that
+    // missing it silently mis-resolved every target after the boundary.
+    //
+    // `&` and `|` are the two that cannot be split blindly. `&` sits inside
+    // `2>&1` and `&>file`; `|` sits inside `>|` (the noclobber override) and its
+    // relatives `>>|`, `2>|`, `&>|`. Both spellings are listed as redirect
+    // operators downstream, so splitting them made the operator unreachable and
+    // the target disappeared from the card altogether. A `&` that neither
+    // follows nor precedes a `>` is a background marker, and a `|` whose
+    // predecessor is not `>` is a pipe; both end the command.
+    if (ch === ';' || ch === '|' || ch === '&') {
+      const next = text[i + 1]
+      const paired = next === ch
+      const redirectAmpersand = ch === '&' && (text[i - 1] === '>' || next === '>')
+      const redirectPipe = ch === '|' && text[i - 1] === '>'
+      if (redirectAmpersand === true || redirectPipe === true) {
+        // `&>file` is a single operator, and the word in front of it ends here:
+        // in `cmd&>file` the `&` belongs to the redirect, not to the command name.
+        if (ch === '&' && next === '>' && started === true) {
+          tokens.push(current)
+          current = ''
+        }
+        current += ch
+        started = true
+        continue
+      }
+      if (started) { tokens.push(current); current = ''; started = false }
+      tokens.push(paired === true ? ch + ch : ch)
+      if (paired === true) i += 1
+      continue
+    }
     if (ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n') {
       if (started) { tokens.push(current); current = ''; started = false }
       // A newline ends a command the same way `;` does, and keeping it as its own
@@ -174,15 +206,21 @@ function tokenize(text) {
  * @returns {string[][]} one entry per command.
  */
 function segmentsOf(tokens) {
-  const segments = [[]]
+  // Each segment carries the separator that ended it, because `|` and `&` change
+  // what the segment's `cd` means: the left side of a pipe runs in a subshell, so
+  // a directory it moves to does not follow the rest of the line.
+  const segments = []
+  let current = []
   for (const token of tokens) {
     if (SEGMENT_SEPARATORS.has(token)) {
-      segments.push([])
+      if (current.length > 0) segments.push({ words: current, endedBy: token })
+      current = []
       continue
     }
-    segments[segments.length - 1].push(token)
+    current.push(token)
   }
-  return segments.filter((segment) => segment.length > 0)
+  if (current.length > 0) segments.push({ words: current, endedBy: '' })
+  return segments
 }
 
 /**
@@ -225,6 +263,9 @@ export function writtenPaths(command, base) {
     if (out.length >= MAX_TARGETS_PER_COMMAND) return
     if (recordable(candidate) === false) return
     // `&&`/`;` can arrive glued to a target when there is no space around them.
+    // A closing paren is a different story: it is handled where the segment is
+    // read, because only the one word it is glued to loses it, and only while a
+    // subshell scope is open.
     const cleaned = canonicalPath(candidate.replace(/[;&|]+$/, ''))
     if (cleaned.length === 0 || recordable(cleaned) === false) return
     if (seen.has(cleaned)) return
@@ -239,35 +280,108 @@ export function writtenPaths(command, base) {
   let cwd = windowsDrive(typeof base === 'string' ? base : '') ?? (typeof base === 'string' && base.length > 0 ? base : undefined)
   const remember = (target) => {
     const spelled = windowsDrive(target) ?? target
-    if (cwd === undefined) {
+    // Filter here, on the text the command spelled -- not inside add(), after
+    // resolution. Every test in recordable() inspects the start of the string:
+    // `&1` begins with `&`, `NUL` is a device name, `-a` begins with `-`.
+    // Resolving first turns `&1` into `F:\\work\\app\\&1`, which begins with `F`,
+    // so the filter lets it through and the card offers to open a file that was
+    // never named.
+    if (recordable(spelled) === false) return
+    // A target holding an unexpanded substitution names a file this module
+    // cannot place: joining the base to `$OUT/x.txt` yields
+    // `F:\\repo\\app\\$OUT\\x.txt`, and the backtick form resolved just as
+    // confidently, both naming nothing. The rule is the one the `cd` branch
+    // already follows -- when the location is not in the command, say so rather
+    // than guess, and let the card report the row as unplaceable.
+    //
+    // The test looks anywhere in the token, not just at the front, because a
+    // substitution can sit in the middle (`a$X.txt`) or be spelled with a
+    // backtick. It is deliberately wide: by this point tokenize() has stripped
+    // quotes, so a file genuinely named `a$b.txt` looks the same as a variable.
+    // Treating it as unplaceable is the safe direction -- the row says so, and
+    // reading the command settles it; a resolved guess cannot be detected later.
+    const unexpanded = spelled.includes('$') || spelled.includes('`') || spelled.startsWith('~')
+    if (cwd === undefined || unexpanded === true) {
       add(spelled)
       return
     }
     add(isAbsolute(spelled) === true ? spelled : join(cwd, spelled))
   }
 
-  for (const segment of segmentsOf(tokenize(stripHeredocs(command)))) {
+  // A subshell is a scope, not a property of the command. `(` opens one and the
+  // matching `)` arrives glued to the last word inside, so only that word is
+  // trimmed -- and only while a scope is open. A real file may end in a paren
+  // (`cp app.zip "release (final)"`), and this module has no business renaming it
+  // just because some other segment happened to open a subshell.
+  const scopes = []
+
+  for (const { words: segment, endedBy } of segmentsOf(tokenize(stripHeredocs(command)))) {
     // Skip leading `FOO=bar` assignments; the command name is the first word
     // that is not one.
+    // A leading `FOO=bar` is an assignment, not a command -- unless the value
+    // contains a command substitution, in which case the command being run is
+    // inside it and the words after it are that command's arguments.
     let start = 0
-    while (start < segment.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[start])) start += 1
-    const name = segment[start] ?? ''
-    const args = segment.slice(start + 1)
+    while (
+      start < segment.length &&
+      /^[A-Za-z_][A-Za-z0-9_]*=/.test(segment[start]) === true &&
+      segment[start].includes('$(') === false
+    ) {
+      start += 1
+    }
+    const head = segment[start] ?? ''
+    const marker = head.indexOf('$(')
+    const substituted = marker >= 0
+    const raw = substituted === true ? head.slice(marker + 2) : head
+    // `((count++))` is arithmetic, not a subshell: it neither opens nor closes a
+    // scope, and treating it as one silently dropped the directory for the rest
+    // of the line.
+    const opens = substituted === true || (raw.startsWith('(') === true && raw.startsWith('((') === false)
+    if (opens === true) scopes.push(cwd)
+    const word = opens === false ? raw : raw.replace(/^\(+/, '')
+    const closes = scopes.length > 0 && segment.length > 0 && segment[segment.length - 1].endsWith(')') === true
+    // Only the word the parenthesis is glued to loses it.
+    const bare = (candidate, index) =>
+      closes === true && index === segment.length - 1 ? candidate.replace(/\)+$/, '') : candidate
+    const args = segment.slice(start + 1).map((arg, offset) => bare(arg, start + 1 + offset))
+    const before = cwd
 
-    // `cd x` moves the directory the rest of the call runs in, and since
-    // segments are executed in order the move applies to every segment after
-    // this one. Only a plain directory literal is followed: `cd -`, `cd $DIR`
-    // and `cd ~/x` are left alone, because resolving them wrongly writes a
-    // confident absolute path, which is worse than the relative one it replaced.
-    if (name === 'cd' || name === 'pushd') {
+    // The directory move is decided here and applied after the redirects, because
+    // a shell opens the redirect in the directory that was current before the
+    // `cd`. `null` means "this segment does not move", `undefined` means "the
+    // command moved somewhere this module cannot name".
+    let moveTo = null
+    if (word === 'cd' || word === 'pushd') {
       const spelled = args.find((arg) => arg.startsWith('-') === false)
       const destination = spelled === undefined ? undefined : windowsDrive(spelled) ?? spelled
-      if (destination !== undefined && destination.startsWith('$') === false && destination.startsWith('~') === false && destination !== '-') {
-        if (cwd !== undefined) cwd = resolve(cwd, destination)
-        else if (isAbsolute(destination) === true) cwd = destination
+      const knowable =
+        destination !== undefined &&
+        destination.startsWith('$') === false &&
+        destination.startsWith('~') === false &&
+        destination !== '-'
+      if (knowable === false) {
+        // `cd $DIR`, `cd ~/x`, `cd -`, a bare `cd`: the result is not in this
+        // command. Staying put would resolve later targets against a directory
+        // the shell has already left, which is how a wrong absolute path gets
+        // written with full confidence.
+        moveTo = undefined
+      } else if (cwd !== undefined) {
+        moveTo = resolve(cwd, destination)
+      } else if (isAbsolute(destination) === true) {
+        // Resolved, not kept: a bare `/tmp` handed on as-is is not recognised as
+        // absolute downstream (no drive, no leading slash after normalisation),
+        // so the card would join it to the session root and invent a directory.
+        moveTo = resolve(destination)
+      } else {
+        moveTo = undefined
       }
-      continue
+    } else if (word === 'popd') {
+      // Returning to a remembered directory needs a stack, and no stack is kept.
+      // Guessing "back to the base" is right only for a single pushd.
+      moveTo = undefined
     }
+    // `dirs` prints the stack; it does not move. Treating it as a move made the
+    // rest of the line unplaceable for no reason.
 
     for (let i = 0; i < args.length; i += 1) {
       const token = args[i]
@@ -277,11 +391,19 @@ export function writtenPaths(command, base) {
         i += 1
         continue
       }
+      // `>&name` and `&>name` both mean "send both streams there". A number after
+      // `>&` duplicates a descriptor instead, and treating `1` as a filename is
+      // how `&1` used to reach the card.
+      const both = token.match(/^>>?&(.+)$/)
+      if (both !== null && /^[0-9]+$/u.test(both[1]) === false) {
+        remember(both[1])
+        continue
+      }
       const glued = token.match(REDIRECT_GLUED)
       if (glued !== null) remember(glued[1])
     }
 
-    if (TARGET_ARG_COMMANDS.has(name)) {
+    if (TARGET_ARG_COMMANDS.has(word)) {
       for (const arg of args) {
         if (arg.startsWith('-')) continue
         if (REDIRECT_OPERATOR.test(arg) || REDIRECT_GLUED.test(arg)) break
@@ -289,11 +411,21 @@ export function writtenPaths(command, base) {
       }
     }
 
-    if (COPY_LIKE.has(name)) {
+    if (COPY_LIKE.has(word)) {
       // Everything but the last word is a source; the last one is what appears.
       const operands = args.filter((arg) => arg.startsWith('-') === false && arg.startsWith('$') === false)
       if (operands.length >= 2) remember(operands[operands.length - 1])
     }
+
+    if (moveTo !== null) cwd = moveTo
+
+    // Leaving the scope puts the directory back where it was when the scope
+    // opened -- not where it was when this segment started, which is a directory
+    // the subshell itself may have just cd'd into.
+    if (closes === true) cwd = scopes.pop()
+    // The left side of a pipe or a background job runs in a subshell of its own,
+    // so a `cd` there does not follow the rest of the line.
+    if (endedBy === '|' || endedBy === '&') cwd = before
   }
   return out
 }

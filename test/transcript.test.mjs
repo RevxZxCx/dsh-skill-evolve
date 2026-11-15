@@ -873,6 +873,97 @@ check(
   check('with no workspace the path is kept as written', paths.includes('notes.txt') === true, JSON.stringify(paths))
 }
 
+{
+  // A store that was told its directory keeps it when a later call does not
+  // repeat it. That is the documented behaviour, not an accident -- a session's
+  // header cwd does not change, so "not told this time" and "no longer known"
+  // are different things, and only the second should reach `writtenPaths`.
+  const store = new TranscriptStore()
+  const call = { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > g.txt' } } }
+  store.record('a', call, 'F:/repo/app')
+  store.record('a', call)
+  const kept = store.view('a')?.current?.paths ?? []
+  check('a store keeps the directory it was told', kept.includes('F:\\repo\\app\\g.txt') === true, JSON.stringify(kept))
+
+  // And an empty answer is "not told", not "unknown": the same value stays.
+  store.record('a', call, '')
+  const afterEmpty = store.view('a')?.current?.paths ?? []
+  check('and an empty answer does not move it', afterEmpty.includes('F:\\repo\\app\\g.txt') === true, JSON.stringify(afterEmpty))
+
+  // A fresh store told nothing at all must not inherit anything.
+  const cold = new TranscriptStore()
+  cold.record('a', human('write notes'))
+  cold.record('a', call)
+  const written = cold.view('a')?.current?.paths ?? []
+  check('a store never told anything keeps the path as written', written.includes('g.txt') === true, JSON.stringify(written))
+}
+
+// ------------------------------------- a directory the command lost --
+//
+// The transcript now passes its base into `writtenPaths`, which means the base
+// is also something a command can invalidate: `cd $DIR`, `cd -`, a `popd`, or a
+// subshell all move the shell somewhere the command does not name. Handing the
+// card an absolute path in that case is the same mistake as before -- a
+// confident claim about a file -- so these stay relative and `api.js` calls them
+// unplaceable.
+{
+  const store = new TranscriptStore()
+  store.record('a', human('write into a directory from a variable'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > notes.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a variable cd leaves the target unplaced', paths.includes('notes.txt') === true, JSON.stringify(paths))
+  // The property is "no absolute path was invented", not "the string repo does
+  // not appear": a guess against any other root would pass a substring test.
+  check('and no resolved guess is recorded beside it', paths.every((path) => /^[A-Za-z]:[\\/]/.test(path) === false), JSON.stringify(paths))
+}
+
+{
+  const store = new TranscriptStore()
+  store.record('a', human('go back a directory'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd - && cat > notes.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a cd - leaves the target unplaced', paths.includes('notes.txt') === true, JSON.stringify(paths))
+}
+
+{
+  const store = new TranscriptStore()
+  store.record('a', human('work inside a subshell'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: '(cd sub && cat > inner.txt)' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a subshell target keeps no paren', paths.some((path) => path.endsWith(')')) === false, JSON.stringify(paths))
+  // The cd inside the parens applies to that subshell alone, so the target is
+  // placed there. The earlier expectation -- that any subshell leaves the
+  // directory unknown -- described the command-wide flag this rewrite removed,
+  // and would have kept the card from naming a file written at a known place.
+  check('and it is placed inside the subshell', paths.includes('F:\\repo\\app\\sub\\inner.txt') === true, JSON.stringify(paths))
+  // One row, not two: the failure mode this guards is the relative spelling and a
+  // fabricated absolute one for the same file both landing in the list.
+  check('and nothing absolute is recorded beside it', paths.length === 1, JSON.stringify(paths))
+}
+
+{
+  // One unknown directory poisons what follows it. `cd $DIR` then `cd sub` is
+  // still unknown: `sub` is relative to a directory nobody named, so the second
+  // cd has nothing to resolve against. Only an absolute cd can come back.
+  const store = new TranscriptStore()
+  store.record('a', human('write into two directories, the first from a variable'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > a.txt; cd sub && cat > b.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('a relative cd after an unknown one stays unknown', paths.includes('b.txt') === true, JSON.stringify(paths))
+  check('and the earlier one is unplaced too', paths.includes('a.txt') === true, JSON.stringify(paths))
+}
+
+{
+  // Recovery has to exist, or a single `cd $VAR` early in a session would make
+  // every later row unplaceable. An absolute cd says exactly where the shell is.
+  const store = new TranscriptStore()
+  store.record('a', human('go somewhere absolute after a variable'))
+  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > a.txt; cd F:/repo/other && cat > b.txt' } } }, 'F:/repo/app')
+  const paths = store.view('a')?.current?.paths ?? []
+  check('an absolute cd restores a known directory', paths.includes('F:\\repo\\other\\b.txt') === true, JSON.stringify(paths))
+  check('and the unplaced one stays unplaced', paths.includes('a.txt') === true, JSON.stringify(paths))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

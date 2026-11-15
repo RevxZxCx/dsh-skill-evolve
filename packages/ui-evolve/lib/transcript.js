@@ -488,6 +488,9 @@ class Transcript {
    * @param {string} [cwd] - the directory this turn runs in, when known.
    */
   noteCall(call, cwd) {
+    // Sticky on purpose: an empty or missing answer means the caller did not
+    // say, not that the directory changed. A session's header cwd is fixed, so
+    // the value is either the same each turn or absent every turn.
     if (typeof cwd === 'string' && cwd.length > 0) this.cwd = cwd
     if (this.calls.size >= MAX_CALLS_PER_TURN) return
     const key = call.id ?? `${call.name}#${this.calls.size}`
@@ -527,10 +530,15 @@ class Transcript {
         // The base directory goes in so the paths come out resolved. Without it
         // a `cd sub && cat > x` target stays relative until the card joins it to
         // the session root, which names a file that does not exist — and the
-        // card then reports it as deleted. `this.cwd` is `''` when the host gave
-        // no header, and `writtenPaths` treats that as "no base" and returns the
-        // paths as written, so the old behaviour is what a session without a
-        // header still gets.
+        // card then reports it as deleted.
+        //
+        // `this.cwd` is the last directory the host named, not this turn's
+        // answer: a call that arrives without one keeps the previous value,
+        // because a session's header cwd does not change between turns and
+        // "not told this time" is not "the directory is now unknown". Clearing
+        // it instead would turn placeable rows into unplaceable ones. A store
+        // never told anything still has `''`, and `writtenPaths` treats that as
+        // "no base" and hands the paths back as written.
         for (const target of writtenPaths(command, this.cwd)) this.paths.push(target)
       }
     }
