@@ -38,6 +38,40 @@ function check(label, condition, detail) {
   failures.push(detail === undefined ? label : `${label} — ${detail}`)
 }
 
+// A crash is not a failure to anything that greps output for failures. Before
+// this, a TypeError anywhere in this file exited with code 1 and no tally line,
+// and the mutation runner -- which decides KILLED by looking for a failing suite
+// -- read that as SURVIVED. Silently. Five separately-recorded defects (DEF-122,
+// DEF-134, DEF-139, DEF-145, DEF-146) all have that same shape: "did not run"
+// reported as "ran and found nothing".
+//
+// The tally is the contract with the runner, so print it however the run ends,
+// and name the throw. Exiting is deliberate: after an uncaught throw the blocks
+// below have lost their state, and carrying on would report assertions that
+// never had a chance to run as though they had passed.
+let reported = false
+
+function report(extra) {
+  if (reported === true) return
+  reported = true
+  if (extra !== undefined) {
+    failed += 1
+    failures.push(extra)
+  }
+  console.log(`\n${passed} passed, ${failed} failed`)
+  for (const failure of failures) console.log(`  FAIL ${failure}`)
+}
+
+process.on('uncaughtException', (error) => {
+  report(`the suite threw before it finished — ${error === undefined || error === null ? 'unknown' : error.message ?? String(error)}`)
+  process.exit(1)
+})
+
+process.on('unhandledRejection', (error) => {
+  report(`the suite rejected before it finished — ${error === undefined || error === null ? 'unknown' : error.message ?? String(error)}`)
+  process.exit(1)
+})
+
 /**
  * Element stub for the jsx runtime.
  *
@@ -941,7 +975,12 @@ check(
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const handle = firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle')
+  // Guarded. Unguarded, a missing control throws here and the rest of the file
+  // never runs, so every later assertion is reported as absent rather than as
+  // passing or failing -- which a runner reads as 'no failures'.
+  check('the panel renders a control to open it with', handle !== undefined, String(handle === undefined))
+  if (handle !== undefined && typeof handle.props?.onClick === 'function') handle.props.onClick()
   const tree = await instance.renderer.deepRender(cards)
   const rail = firstByClass(tree, 'dsse-rail')
   check('a right-side setting from the config puts the rail on the right', rail?.props?.['data-side'] === 'right', String(rail?.props?.['data-side']))
@@ -5105,6 +5144,7 @@ async function openPanel(routes, options) {
 
     const inside = rowIn(await redraw(), 'inside.ts')
     const buttons = byClass(inside, 'dsse-row-copy')
+    check('the row renders a control to open its menu', buttons.length > 0, String(buttons.length))
     check('a host with a clipboard draws one control per row', buttons.length === 1, String(buttons.length))
     check('and the row says it has actions', inside?.props?.['data-actions'] === 'true', String(inside?.props?.['data-actions']))
     // The control is a sibling of the opener, not a child: nesting one button in
@@ -5120,8 +5160,9 @@ async function openPanel(routes, options) {
     // a control that is usually closed is a cost every Host surface would pay.
     check('nothing listens while the menu is closed', listenersNow().length === 0, JSON.stringify(listenersNow().map((row) => row.type)))
 
-    // Opening it.
-    buttons[0].props.onClick()
+    // Opening it. Guarded for the same reason as the handle above: a missing
+    // control has to fail here rather than take the rest of the file with it.
+    if (buttons.length > 0 && typeof buttons[0].props?.onClick === 'function') buttons[0].props.onClick()
     const opened = await redraw()
     const openedRow = rowIn(opened, 'inside.ts')
     const openedMenu = menuIn(opened, 'inside.ts')
@@ -5750,7 +5791,10 @@ async function openPanel(routes, options) {
   check('including the one that was folded away', rowOf('gone.md') !== undefined, String(rowOf('gone.md') === undefined))
 
   // Said when the diff listed it.
-  check('a row from the diff says so', titleOf('diff.md').includes('git 差分找到'), titleOf('diff.md'))
+  // Spelled out, not matched by substring: the scan sentence is pinned by the
+  // whole-string assertion on gone.md, and leaving this one loose meant any
+  // trailing character survived.
+  check('a row from the diff says so', titleOf('diff.md') === 'F:\\work\\src\\diff.md\n由 git 差分找到', JSON.stringify(titleOf('diff.md')))
   // And it must not say anything else. A provenance expression that concatenates
   // both sentences for the git branch would leave this row claiming the diff
   // found it (true) and the walk found it (false, and unfalsifiable to a reader).
@@ -5761,6 +5805,11 @@ async function openPanel(routes, options) {
   // Said when only the walk found it, and why that is worth knowing.
   check('a row only the walk found says which walk', titleOf('walked.md').includes('目录扫描找到'), titleOf('walked.md'))
   check('and says the diff did not confirm it', titleOf('walked.md').includes('git 差分未确认'), titleOf('walked.md'))
+  // The other direction of the same rule, and the one that misleads:
+  // 'git 差分未确认' is not the phrase '由 git 差分找到', so a scan row that
+  // also prepended the diff sentence satisfies every check above while
+  // claiming both brackets at once.
+  check('and does not claim the diff found it', titleOf('walked.md').includes('由 git 差分找到') === false, titleOf('walked.md'))
 
   // Silent for the ordinary case: a tool named this path, so the row is here
   // because something said it wrote it. There is nothing to add.
@@ -5777,18 +5826,32 @@ async function openPanel(routes, options) {
   // Silent for a word this build cannot read. A newer server must not produce a
   // tooltip that reads as a claim.
   check('and neither does a word this build cannot read', titleOf('foreign.md').includes('差分') === false && titleOf('foreign.md').includes('扫描') === false, titleOf('foreign.md'))
+  // Silence means no empty parts, not merely no words. Without the filter in
+  // the hint assembly a tooltip grows a trailing blank line and every check
+  // above still passes, because they all ask what a line says and never
+  // whether what they are looking at is a line at all.
+  check('and the silent tooltip has no blank lines', titleOf('edited.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('edited.md')))
+  check('the word this build cannot read adds no blank lines either', titleOf('foreign.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('foreign.md')))
 
   // The opener covers most of the row's width. A tooltip added only to the row
   // would never be seen over the part people actually point at.
   const openerOf = (name) => firstByClass(rowOf(name), 'dsse-row-open')
   check('the opener carries the same sentence', String(openerOf('walked.md')?.props?.title ?? '').includes('目录扫描找到'), String(openerOf('walked.md')?.props?.title))
   check('and still offers the preview', String(openerOf('walked.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
+  // Membership cannot see order. The point of the opener's template is that
+  // the invitation comes last: the path is what the reader hunts for, and it
+  // has to lead the tooltip it leads inside the row.
+  check('and puts the invitation last', String(openerOf('walked.md')?.props?.title ?? '').endsWith('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
 
   // The three-way split is also a value, so an assertion about which bracket a
   // row came from does not depend on the wording of a sentence.
   check('the row states its bracket as an attribute', rowOf('walked.md')?.props?.['data-source'] === 'scan' && rowOf('diff.md')?.props?.['data-source'] === 'git', `${String(rowOf('diff.md')?.props?.['data-source'])}/${String(rowOf('walked.md')?.props?.['data-source'])}`)
   check('and an unrecorded one is named as such', rowOf('edited.md')?.props?.['data-source'] === 'unknown', String(rowOf('edited.md')?.props?.['data-source']))
   check('including a word this build does not know', rowOf('foreign.md')?.props?.['data-source'] === 'unknown', String(rowOf('foreign.md')?.props?.['data-source']))
+  // A row that cannot be opened still has a bracket. The attribute and the
+  // sentence have to agree on the rows the opener gave up on too, or the value
+  // can degrade to 'unknown' exactly where the row is least inspectable by hand.
+  check('a dead row still states its bracket', rowOf('gone.md')?.props?.['data-source'] === 'scan', String(rowOf('gone.md')?.props?.['data-source']))
 
   // The path opens the tooltip, as it always has: every existing reader of that
   // string expects the path first, and appending must not reorder it.
@@ -5811,6 +5874,5 @@ async function openPanel(routes, options) {
   )
 }
 
-console.log(`\n${passed} passed, ${failed} failed`)
-for (const failure of failures) console.log(`  FAIL ${failure}`)
+report()
 process.exit(failed === 0 ? 0 : 1)

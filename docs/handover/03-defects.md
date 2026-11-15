@@ -104,6 +104,8 @@
 | DEF-98 | 2026-11-13 | `git-watch.js` 没有导出 `readChanges`，整包在 import 阶段就崩 | 已修 |
 | DEF-99 | 2026-11-13 | `workspaceFor` 只认 agent 形状，事件流传 session → cwd 恒空，git 差分对每个会话静默失效 | 已修 |
 | DEF-100 | 2026-11-13 | 文件系统预检被套在注入的 runner 上，10 条断言全红 | 已修 |
+| DEF-149 | 高 | 崩溃在测试框架里长得像「没跑」：整套断言一条都不打印 | `test/client.test.mjs` 全局 |
+| DEF-150 | 高 | 我自己的探针把 sha256 摘要当成文件内容写回 | `_edit/r_prove_asserts.py` |
 
 ---
 
@@ -2469,3 +2471,63 @@ the row stops saying which bracket it came from        776 passed, 1 failed
    如果出现「全部通过」，必须同时打印它实际执行了多少条、跳过了多少条、跳过的是哪些。
    第二次的 `red.length === 0` 之所以能写成结论，就是因为它没有一个
    「我解析到 0 条 FAIL 行，而套件说 5 failed」的交叉校验——**两个数不相等本身就是错误信号。**
+
+## DEF-149 · 崩溃在测试框架里长得像「没跑」
+
+**症状**：`test/client.test.mjs` 里任何一处未捕获的异常（例如对 `undefined` 取 `.props`
+去点击一个不存在的手），会让 node 立刻以 exit 1 退出，**在打印 tally 行之前**。
+突变 runner 判定某条变异是否被杀，依据是「跑完后有没有失败」——
+没有 tally 行的运行在它眼里与「跑完了、零失败」不同，被归入 SURVIVED（或 CRASHED）。
+
+**发现方式**：不是我自己发现的。r2 审查者在临时副本上做了 3 个故障注入，逐个看输出：
+把 `client.js:3494` 的 `className: "dsse-toggle"` 改掉，得到 exit 1、栈停在 `:944`、**零 FAIL 行**。
+那一刻该块 24 条断言一条都没跑。
+
+**为什么值钱**：这与我上一轮特意修的东西直接冲突。我刚加了「先证在场」的前置断言
+（`check('the panel renders a control to open it with', handle !== undefined, ...)`），
+理由是「沉默型断言必须在空值上先失败」。但如果点击发生在守卫**之前**、
+或者在另一个没有守卫的块里，那条新断言永远不会成为报告者——它自己会先撞上崩溃。
+
+**修法**：给套件加一层兜底，而不是再补几处守卫。`check()` 之后定义
+`report(extra)`（打印 tally 与全部 FAIL 行），注册 `process.on('uncaughtException')`
+与 `process.on('unhandledRejection')`，两者各调
+`report('the suite threw/rejected before it finished — ' + error.message)` 后 `exit(1)`；
+文末的 tally 改为调 `report()`。
+
+**为什么这是第六次同形**：DEF-122（CRASHED 不是 KILLED）、DEF-134（SURVIVED 有时是套件崩了）、
+DEF-139（变异体非法 = 没跑）、DEF-145（多套件声明从未被验证）、DEF-146（规则读不懂就不报），
+加上这次。六次里有五次的修法是「补一条断言」，都只治了当时那一个洞。
+这次的修法在框架层，它让剩下每一处裸点击从「静默」变成「具名」。
+
+**验证**：把 toggle 的 class 改掉 → `exit=1  tally=YES -> 25 passed, 5 failed`，
+含 `FAIL the panel renders a control to open it with — true`。修前同场景零 FAIL 行。
+
+**没修的部分**：全文件还有 100 多处同类裸点击写法，我没有清点。r2 报的是它测到的两处。
+兜底层让它们不再是「静默」，但那不等于它们被逐个验证过。
+
+## DEF-150 · 我自己的探针把摘要当成文件内容写回
+
+**症状**：`_edit/r_prove_asserts.py` 要把 `client.js` 逐个改坏、跑测试、再恢复。
+第一版写成：
+
+```python
+before = hashlib.sha256(path.read_bytes()).hexdigest()
+...
+path.write_bytes(bytes.fromhex(before))   # 把摘要写进了文件
+```
+
+**`bytes.fromhex` 把 64 个十六进制字符解成 32 个字节，写回文件。**
+`client.js` 从 201,532 字节变成 32 字节。恢复后的第一次 `assert sha256 == before` 立刻失败，
+所以事故在几秒内被自己的断言抓住——但抓住它的是那条「我以为在防篡改」的断言，
+不是任何为这个目的写下的东西。
+
+**恢复**：`git checkout -- packages/ui-evolve/lib/client.js` → 201,532 字节、
+sha256 `6e6801893f98c03690a74fdb6776d2d94e3a94e203e227343c146d5ee2549100`、
+`node --check` OK、`git status` 干净。当时的改动都已在 `d3dc3e0` 里提交，所以没有丢东西。
+
+**修法**：`original = path.read_bytes()` 保留原始字节，恢复时写 `original`；
+摘要只用于事后比对。**破坏性探针必须保留原始字节，摘要不能当备份。**
+
+**为什么测试没抓到**：它不是被测代码的缺陷，是测具的缺陷，没有任何一层覆盖它。
+让它暴露的是那条 `assert`，而那条 `assert` 原本的作用是「确认破坏真的发生了」。
+这是本轮第二次被自己的工具伤到（第一次是 DEF-148 把 LF 写成 CRLF）。

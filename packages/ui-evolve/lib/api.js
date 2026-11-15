@@ -562,7 +562,7 @@ function resourceAddress(sessionId, cwd, path) {
  *
  * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests.
  * @param {number} [input.now] - the clock `stale` is measured against, for tests.
- * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean }>>} one row per candidate.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
  */
 async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
   const clock = Number.isFinite(now) ? now : Date.now()

@@ -1654,6 +1654,30 @@ const mutations = [
     to: "                          const provenance =\n                            file.source === 'git'\n                              ? '由目录扫描找到，git 差分未确认'\n                              : file.source === 'scan'\n                                ? '由 git 差分找到'\n                                : ''",
     why: "Swapping the two branches leaves every sentence well formed and every row saying something about a bracket -- just the wrong one. This is the failure that misleads instead of omitting: a row only the walk found claims the diff vouched for it, and the reader has no way to notice. The entry above removes the sentence; this one puts it on the wrong row.",
   },
+  {
+    file: client,
+    suites: ["test/client.test.mjs"],
+    label: "the opener invites the click before it says where the file is",
+    from: "                                    title: `${hint}\\n点击在侧栏预览`,",
+    to: "                                    title: `点击在侧栏预览\\n${hint}`,",
+    why: "The invitation belongs last: the path is what a reader hunts for, and a tooltip that opens with a verb buries it. Membership checks cannot see the order, which is why the assertion asks where the sentence ends rather than whether it is present.",
+  },
+  {
+    file: client,
+    suites: ["test/client.test.mjs"],
+    label: "the hint keeps the empty parts it was told to drop",
+    from: "                          const hint = [absolute, note, provenance].filter((part) => part !== '').join('\\n')",
+    to: "                          const hint = [absolute, note, provenance].join('\\n')",
+    why: "A row with no note and no provenance would end in a blank line, and every assertion that asks what a line says still passes -- they never ask whether a line is blank. Dropping the filter is invisible to prose checks and visible only to an assertion counting non-empty parts.",
+  },
+  {
+    file: api,
+    suites: ["test/api.test.mjs"],
+    label: "the stored source is passed through without being narrowed",
+    from: "      source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,",
+    to: "      source: recordedSource ?? null,",
+    why: "The narrowing is what makes 'unknown' in the panel mean 'no bracket was recorded' rather than 'a word this build cannot read'. Passing the raw value through lets any future server word reach the row, where it becomes indistinguishable from a missing record.",
+  },
 ]
 
 

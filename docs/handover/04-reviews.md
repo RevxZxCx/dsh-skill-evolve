@@ -79,6 +79,7 @@
 | R-73 | 2026-11-12 | 产出卡 S5：`report_output_files` | 自审 4 个单元（审查代理本会话不可用），1 P1 + 2 P2 | 3 / 0 |
 | R-74 | 2026-11-12 | 产出卡 S5 补丁：读 `present` + 容量统一 | 3 个单元（r5a/r5b/r5c 审查者返回，r5d 测试单元），1 P0 + 6 P1 + 13 P2 + 4 P3 | 修 5 / 推迟 9 |
 | R-75 | 2026-11-13 | 产出卡 S6：git 差分 | 自审 4 个单元（审查代理本会话多次 `failed before it finished`），1 P1 + 3 P2 + 1 P3 | 修 4 / 推迟 1 |
+| R-91 | 2026-11-15 | 来源说明的重新审查（渲染 / 断言 / 突变三单元） | 上一轮只有一名审查者交出完整结论即收尾，用户点名后从 d9b86ef..d3dc3e0 重新切三份、重派三人，全部返回；r2 抓出 2 条 P1（两处裸点击使 24 条断言在真实回归里从不打印）与 4 条 P2（沉默未钉住、邀请句顺序未钉住、死行属性可与文本矛盾、scan 行可同时声称两个来源）；修复含一处结构性改动：套件首次有异常上报 | 修 8 / 驳回 3 |
 
 ---
 
@@ -2222,3 +2223,112 @@ R-89 第一次写的时候只测了语言与持久化两套（20 条多套件条
 3. **`data-source` 对用户不可见**（D-169）。测试断言的是一个没有消费方的属性。
 4. **截图不是宿主实拍。** `_shots/` 里的卡都是同源渲染。
 5. **`_edit/` 下 350 多个一次性脚本没有任何防线**，而它们决定过我很多判断（DEF-147）。
+
+## R-91 · 来源说明的重新审查
+
+**背景**：R-90 派出三名审查者，只有 p1 交回完整结论，`f5aeb155` 与 `306558ed` 失败，
+`6e3ee746` 部分返回。我据这一份不完整的结果修完就提交了 `d3dc3e0`。用户随后直接问：
+「审查者因为实际的模型问题失效了，你后续有重新派出审查吗？没有请重新进行审查，这是必要步骤」。
+没有。**「有人失败了」不是收尾理由**——而我当时把它当成了收尾理由。
+
+### 单元划分
+
+从**提交后**的范围 `d9b86ef..d3dc3e0` 切分（不是旧 diff），保证审查者描述的代码就是磁盘上的代码。
+
+| 单元 | 文件 | 行数 | 审查者 |
+| --- | --- | --- | --- |
+| r1 渲染 | `.review/r1-render.diff` | 80（+36 −2） | `0a6621ec…` |
+| r2 断言 | `.review/r2-assertions.diff` | 139（+125 −0） | `65b8c677…` |
+| r3 突变 | `.review/r3-mutations.diff` | 68（+33 −1） | `e387d316…` |
+
+三名全部返回，无一人失败。
+
+### 结论
+
+**r1 渲染：0 P0 / 0 P1 / 0 P2 / 3 P3。** 三条全部驳回或只采纳注解：
+
+- P3-1 `'unknown'` 这个名字承载的是 `null`（最常见、最可信的一类），未来写 `[data-source="unknown"]`
+  想取「来源可疑」会命中绝大多数常态行。**驳回**：改名要连带改断言与突变，
+  而 `data-source` 与 `data-status` 对未知值的方向本来就不同源——两者服务不同读者，
+  同一份值不值得两次命名。
+- P3-2 两个相邻属性对未知值的方向相反（`data-status` 透传、`data-source` 归并）且注释未交代。**驳回**，
+  理由同上；这属于有意的策略差异。
+- P3-3 `api.js:565` 的 `@returns` 缺 `source`。**采纳**（上一轮我报告「已补」但实际没落地，本轮复核才发现）。
+
+**r2 断言：0 P0 / 2 P1 / 4 P2 / 3 P3。这是本轮真正值钱的一份。** 它在临时副本上做了
+51 个单点变异 + 3 个故障注入，然后逐条验证断言是否变红。
+
+- **P1a/P1b 两处裸点击**（`test/client.test.mjs:944`、`:5124`）：把手或行消失时点击抛
+  `TypeError`，进程 exit 1 且**连 tally 行都不打印**。把 `className: "dsse-toggle"` 改掉即可复现。
+  我上一轮特意新增的两条「先证在场」断言，在真实回归里永远不会成为报告者——
+  它们自己会先撞上那处裸点击。**采纳**。
+- **P2a 沉默没被钉住**：删掉 `filter((part) => part !== '')`，`edited.md` 的 tooltip 末尾多出两个悬空换行，
+  而 786 条断言全绿。**采纳**。
+- **P2b 邀请句顺序没被钉住**：opener 的模板把 `点击在侧栏预览` 挪到 `${hint}` 之前，仍全绿。**采纳**。
+- **P2c 属性与文本可互相矛盾**：让 `data-source` 在不可预览的行上降级为 `unknown`，
+  `gone.md` 的属性从 `scan` 掉成 `unknown` 而文本三句全对。**采纳**。
+- **P2d scan 行可同时声称来源**：让 scan 分支前置一句 git 差分，`walked.md` 同时说两个来源，
+  仍全绿——互斥只查了 git 行。**采纳**。
+- P3：git 句子只做子串（加一个「的」仍绿）→ **采纳，改整串相等**；复述已有断言 → **驳回**
+  （重复但无害，删掉会降低可读性）；两条 `data-source` 都期待 `unknown` → **驳回**（服务端已收窄成只产 `null`）。
+
+**r3 突变：0 P0 / 0 P1 / 1 P2 / 3 P3。** 四条变异全部真杀死、无等价突变、无非法 JS。
+
+- **P2 没有变异专打 opener 的插值**——变异都作用在 `hint` 上，而 opener 是另一处 `${hint}`。**采纳**。
+- P3 三处覆盖缺口：`filter` 无变异、`api.js:618` 的归一化无变异、下限只防减少不防同数替换。**两处采纳**。
+
+### 修复（十处，每处都注入验证）
+
+**先做结构性修复**：整个套件此前没有异常处理。现在 `check()` 之后有 `report()`，
+并注册 `process.on('uncaughtException')` 与 `process.on('unhandledRejection')`，
+两者都先打印 tally 与具名失败、再 `exit(1)`。理由写在注释里：DEF-122 / DEF-134 / DEF-139 /
+DEF-145 / DEF-146 五次同形，都是「没跑」被报成「跑了没抓到」，这是第六次的通用解。
+
+实测（`_edit/r_prove_crash_a.py`，锚点从文件读取而非记忆）：
+
+```
+anchor : '        className: "dsse-toggle",'
+mutant : '        className: "dsse-toggle-gone",'
+A: the control stops being drawn (real regression)
+exit=1  tally=YES -> 25 passed, 5 failed
+   FAIL the toggle is a button — undefined
+   FAIL the toggle starts inactive — undefined
+   FAIL the panel renders a control to open it with — true
+   FAIL a right-side setting from the config puts the rail on the right — undefined
+```
+
+修前同场景是 exit 1 + 零 FAIL 行。**我新加的那条前置断言真的成了报告者。**
+
+五条新断言逐个注入，全部变红（`_edit/r_prove_asserts.py`）：
+
+| 破坏 | 变红的断言 |
+| --- | --- |
+| 删掉 `filter` | `and the silent tooltip has no blank lines` |
+| 邀请句提前 | `and puts the invitation last` |
+| 不可预览时属性降级 | `a dead row still states its bracket — unknown` |
+| scan 行同时声称 git | `and does not claim the diff found it` |
+| git 句子加一个「的」 | `a row from the diff says so` |
+
+三处变异缺口补齐后条目 180 → 183，三条全部 KILLED（`1 failed` / `3 failed` / `1 failed`）。
+
+### 收尾判据
+
+| 项 | 值 |
+| --- | --- |
+| 全量 | **3643 passed / 0 failed**（改前 3636，+7） |
+| client 套件 | 786 → **793 passed** |
+| 语言突变 | **183 killed / 0 survived / 0 not applied / 0 crashed** |
+| 持久化突变 | **45 killed** |
+| 速度突变 | **69 killed** |
+| 清单面板突变 | **128 killed** |
+| 残留审计 | leftovers 0 / unresolved 0 |
+
+### 诚实的缺口
+
+1. **P1 的两处裸点击只修了两处，全文件还有 100 多处同类写法。** r2 报的是它测到的两处，
+   不是全部；我没有做全量清点。真正的防线是那层 `uncaughtException` 兜底，
+   它让剩下每一处都从「静默」变成「具名」。
+2. **`_edit/` 下 340 多个脚本没有任何防线。** 本轮我自己就在其中写坏了一次文件（DEF-150）。
+3. **r1 的 tooltip 观感没有真机观测**，只有 CSS 静态推理；原生 `title` 不受 CSS 约束，判断风险为零。
+4. **这一轮的审查者仍是同一个模型**，它们的「确认不是问题」不构成独立证据，只是第二次读。
+5. **面板改动需重启宿主才可见**（`client.js` 是手写 bundle，无构建步骤）。
