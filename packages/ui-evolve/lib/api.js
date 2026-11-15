@@ -560,9 +560,9 @@ function resourceAddress(sessionId, cwd, path) {
  * the card asks is "is this still part of what I am doing", and only the session
  * can answer that.
  *
- * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests.
+ * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests. `isFile()` returning false is not a failure: it is how a folder is told apart from an unreadable path, and the row reports it as `folder`.
  * @param {number} [input.now] - the clock `stale` is measured against, for tests.
- * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved' | 'folder', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
  */
 async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
   const clock = Number.isFinite(now) ? now : Date.now()
@@ -636,12 +636,20 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       out.push({ ...base, status, bytes: null, mtimeMs: null })
       continue
     }
-    // A directory the tools reported writing into is not a file this card can
-    // describe, and it is not readable content either — the thing that was
-    // claimed to be a file is not there. Same caveat as above: only an absolute
-    // path lets us say that plainly.
+    // Something is at this path and it is not a file. The awkward part is that
+    // this used to say `missing`, and `missing` is a claim about the past: "what
+    // you wrote is not here". That claim is false — a folder is there. It showed
+    // up in a real session as `F:\dsh-plugin\` struck through and labelled
+    // 已删除, which is the card telling someone their working directory had been
+    // deleted.
+    //
+    // `unresolved` is not the answer either. That word means the record lost its
+    // base and the path could not be looked at; here it was looked at and the
+    // answer was "a folder". Two different answers must not share a word, or
+    // neither of them can be reported honestly. So: a fifth status, which says
+    // exactly what was found.
     if (!info.isFile()) {
-      out.push({ ...base, status: isAbsolute === true ? 'missing' : 'unresolved', bytes: null, mtimeMs: null })
+      out.push({ ...base, status: 'folder', bytes: null, mtimeMs: null })
       continue
     }
     out.push({ ...base, status: 'available', bytes: info.size, mtimeMs: info.mtimeMs })

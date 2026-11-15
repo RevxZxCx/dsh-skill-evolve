@@ -4471,6 +4471,7 @@ async function openPanel(routes, options) {
     { path: '/work/gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.md' },
     { path: '/work/locked.md', bytes: null, mtimeMs: null, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/locked.md' },
     { path: '/work/unsure.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'unresolved', address: 'dsh-resource://file/session/session-a/work/unsure.md' },
+    { path: '/work/folder', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'folder', address: 'dsh-resource://file/session/session-a/work/folder' },
   ]
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
@@ -4488,6 +4489,13 @@ async function openPanel(routes, options) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  const folded = await instance.renderer.deepRender(instance.seat('cards'))
+  // Five rows no longer fit the folded list, and this block is about the states a
+  // row can be in rather than about which rows survive folding. Expanding first
+  // keeps it from depending on the fold threshold.
+  const expand = firstByClass(folded, 'dsse-expand-action')
+  check('the fixture offers a way to show every row', typeof expand?.props?.onClick === 'function', String(expand === undefined))
+  if (typeof expand?.props?.onClick === 'function') expand.props.onClick()
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   const names = byClass(card, 'dsse-name').map((node) => textOf(node))
@@ -4495,7 +4503,7 @@ async function openPanel(routes, options) {
 
   check('a deleted file is still listed', names.includes('gone.md'), JSON.stringify(names))
   check('and so is one that cannot be read', names.includes('locked.md'), JSON.stringify(names))
-  check('so every row is drawn', byClass(card, 'dsse-row').length === 4, String(byClass(card, 'dsse-row').length))
+  check('so every row is drawn', byClass(card, 'dsse-row').length === 5, String(byClass(card, 'dsse-row').length))
   check('including the one that cannot be placed', names.includes('unsure.md'), JSON.stringify(names))
 
   // The state travels on the row, because the dimming and the strike-through are
@@ -4505,6 +4513,7 @@ async function openPanel(routes, options) {
   check('an unreadable row says that instead', rowOf('locked.md')?.props?.['data-status'] === 'invalid', String(rowOf('locked.md')?.props?.['data-status']))
   check('a present row says it is available', rowOf('there.md')?.props?.['data-status'] === 'available', String(rowOf('there.md')?.props?.['data-status']))
   check('a row this build cannot place says so', rowOf('unsure.md')?.props?.['data-status'] === 'unresolved', String(rowOf('unsure.md')?.props?.['data-status']))
+  check('a directory is called a directory, not a deletion', rowOf('folder')?.props?.['data-status'] === 'folder', String(rowOf('folder')?.props?.['data-status']))
 
   // A selector only paints something if the element it names is really there. The
   // rule below needs a `.dsse-name` *inside* the row; the tree has to contain that
@@ -4521,6 +4530,13 @@ async function openPanel(routes, options) {
   // lost is the base the record should have carried.
   check('the unplaceable row says it cannot be located', textOf(rowOf('unsure.md')).includes('无法定位'), textOf(rowOf('unsure.md')))
   check('and it does not claim the file was deleted', textOf(rowOf('unsure.md')).includes('已删除') === false, textOf(rowOf('unsure.md')))
+  // A folder is a real thing that is really there. The row says which thing it
+  // is; it does not borrow the sentence that means "what you wrote is gone".
+  check('the folder row says it is a directory', rowOf('folder') !== undefined && textOf(rowOf('folder')).includes('目录'), textOf(rowOf('folder')))
+  check('and it does not say the file was deleted', textOf(rowOf('folder')).includes('已删除') === false, textOf(rowOf('folder')))
+  // `formatBytes(null)` renders a number, so a folder drawn through the ordinary
+  // size path would read "0 B" -- a claim about an empty file.
+  check('and it reports no size at all', /\d/.test(textOf(rowOf('folder')).replace('目录', '')) === false, textOf(rowOf('folder')))
   // The exact figure, not a loose unit match: `/B|K|M/` accepts a broken `formatBytes`
   // that returns the letter `B` alone, which is not a size anyone can use.
   check('and the present row still reports its size', textOf(rowOf('there.md')).includes('10 B'), textOf(rowOf('there.md')))
@@ -4542,6 +4558,14 @@ async function openPanel(routes, options) {
     String(rowOf('unsure.md')?.props?.title),
   )
   check('and it offers no preview to a file it cannot find', firstByClass(rowOf('unsure.md'), 'dsse-row-open') === undefined, String(firstByClass(rowOf('unsure.md'), 'dsse-row-open') !== undefined))
+  // Nothing to preview: a directory cannot be opened in the sidebar's file view,
+  // and a control that promises it would be the same broken click.
+  check('a folder row offers no preview', rowOf('folder') !== undefined && firstByClass(rowOf('folder'), 'dsse-row-open') === undefined, String(firstByClass(rowOf('folder'), 'dsse-row-open') !== undefined))
+  check(
+    'and its title explains instead of inviting',
+    String(rowOf('folder')?.props?.title ?? '').includes('目录') && String(rowOf('folder')?.props?.title ?? '').includes('点击在侧栏预览') === false,
+    String(rowOf('folder')?.props?.title),
+  )
   check('a present row still invites the click', String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title ?? '').includes('点击在侧栏预览'), String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title))
 
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
@@ -4551,6 +4575,10 @@ async function openPanel(routes, options) {
   // means "I cannot say", and the two must not be drawn the same way.
   check('an unplaceable row is dimmed', /\.dsse-row\[data-status="unresolved"\][^{]*\.dsse-name\{[^}]*label-tertiary/.test(sheet), '')
   check('and it is not struck through', /\.dsse-row\[data-status="unresolved"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
+  check('a folder row is dimmed too', /\.dsse-row\[data-status="folder"\][^{]*\.dsse-name\{[^}]*label-tertiary/.test(sheet), '')
+  // Never struck through. That line is the claim "this is gone", and it was drawn
+  // over a real session's own working directory until this status existed.
+  check('and a folder is never struck through', /\.dsse-row\[data-status="folder"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
   check('a gone row does not highlight under the pointer', /\.dsse-row\[data-status="missing"\]:hover[^{]*\{background:transparent\}/.test(sheet), '')
   check('and the reason takes the place of the size in italics', /\.dsse-size-gone\{font-style:italic\}/.test(sheet), '')
 }

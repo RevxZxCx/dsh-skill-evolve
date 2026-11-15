@@ -554,10 +554,11 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
   const dir = tempDir('skill-evolve-stat-dir-')
   mkdirSync(join(dir, 'folder'))
   const files = await statTouchedFiles({ paths: [join(dir, 'folder')] })
-  // A directory was claimed as an edited file. Nothing to open, and nothing was
-  // deleted either — but `missing` is the status that says "the file you named
-  // is not there", which is exactly true of a directory.
-  check('a directory is reported as missing rather than listed as a file', files.length === 1 && files[0].status === 'missing', JSON.stringify(files))
+  // A directory was claimed as an edited file. Nothing to open — but nothing was
+  // deleted either, and this used to say `missing`, which is a claim about the
+  // past tense. The folder is right there, so the row says so.
+  check('a directory is reported as a folder rather than a file', files.length === 1 && files[0].status === 'folder', JSON.stringify(files))
+  check('and it is not reported as deleted', files[0]?.status !== 'missing', JSON.stringify(files))
   check('a directory has no size', files[0]?.bytes === null, String(files[0]?.bytes))
 }
 
@@ -1977,26 +1978,36 @@ function heldBodyOf(res) {
 }
 
 {
-  // A directory found through a guess is the same uncertainty, so it gets the
-  // same word rather than the confident "missing" it used to get.
+  // A directory found through a guess. The guess is irrelevant here: `stat`
+  // succeeded, so the record's uncertainty about the base never mattered — what
+  // was found is a folder either way. This is the pair that used to disagree
+  // with itself: the same answer meant `missing` for an absolute path and
+  // `unresolved` for a relative one, so neither word said "a folder".
   const dir = tempDir('skill-evolve-stat-dir-guess-')
   const files = await statTouchedFiles({
     paths: ['src'],
     cwd: dir,
     readStat: async () => ({ isFile: () => false, size: 0, mtimeMs: 0 }),
   })
-  check('a directory reached through a guess is unresolved', files.length === 1 && files[0].status === 'unresolved', JSON.stringify(files))
+  check('a directory reached through a guess is a folder too', files.length === 1 && files[0].status === 'folder', JSON.stringify(files))
 }
 
 {
-  // And an absolute directory is still plainly not a file.
+  // And an absolute directory lands on the same word as a relative one. Before,
+  // these two blocks asserted different statuses for the same finding, which is
+  // how the bug survived: each assertion was locally reasonable and together
+  // they said the card reports on where the path came from rather than on what
+  // is at it.
   const dir = tempDir('skill-evolve-stat-dir-absolute-')
   const files = await statTouchedFiles({
     paths: [dir],
     cwd: dir,
     readStat: async () => ({ isFile: () => false, size: 0, mtimeMs: 0 }),
   })
-  check('an absolute directory is still missing', files.length === 1 && files[0].status === 'missing', JSON.stringify(files))
+  check('an absolute directory is a folder as well', files.length === 1 && files[0].status === 'folder', JSON.stringify(files))
+  check('and an absent absolute path is still missing, which is a different finding', (
+    await statTouchedFiles({ paths: [join(dir, 'never-existed')], cwd: dir })
+  )[0]?.status === 'missing', '')
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
