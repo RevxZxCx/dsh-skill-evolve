@@ -2010,6 +2010,88 @@ function heldBodyOf(res) {
   )[0]?.status === 'missing', '')
 }
 
+{
+  // A record can outlive the parser that wrote it. `2>&1` used to leave `&1` behind, a
+  // glob in an argument could arrive as a target, and one real state file still holds
+  // `F:\dsh-plugin\&1` from that era. Those rows were drawn as `missing`, which says
+  // "you deleted this" about something that was never a file name.
+  //
+  // The refusal has to be narrow in both directions, so all three checks below are
+  // load-bearing: refuse the impossible, keep the odd-but-real, and do not turn into
+  // "hide everything absent".
+  const dir = tempDir('skill-evolve-stat-junk-')
+  const junk = await statTouchedFiles({
+    paths: [join(dir, '&1'), join(dir, '2>'), join(dir, 'notes*.md'), '&1)'],
+    cwd: dir,
+  })
+  check('a record spelled like a redirection is not drawn as a deleted file', junk.length === 0, JSON.stringify(junk.map((row) => row.path)))
+
+  // A file anyone may legitimately name. `stat` finds it, so the row is drawn whatever
+  // it is called -- refusing the spelling up front would hide a file the session wrote,
+  // which is the same lie in the opposite direction.
+  const odd = join(dir, 'a&b.txt')
+  writeFileSync(odd, 'x')
+  const drawn = await statTouchedFiles({ paths: [odd], cwd: dir })
+  check('a file with an ampersand in its name is drawn, not refused', drawn.length === 1 && drawn[0].status === 'available', JSON.stringify(drawn))
+
+  // `&1` is a descriptor to a shell and a perfectly legal file name to a filesystem.
+  // This one really exists, so the refusal must never see it: it is only consulted after
+  // `stat` has already reported the path absent.
+  const descriptor = join(dir, '&1')
+  writeFileSync(descriptor, 'x')
+  const descriptorRow = await statTouchedFiles({ paths: [descriptor], cwd: dir })
+  check('a file literally named &1 is drawn when it exists', descriptorRow.length === 1 && descriptorRow[0].status === 'available', JSON.stringify(descriptorRow))
+
+  // The reordering the check above cannot see: a path whose spelling looks like a glob
+  // but which `stat` reports as present. Refusing before asking would drop this row; the
+  // guard runs afterwards, so the answer is `available`. `readStat` is injected because
+  // what matters is the order, not whether this platform can create such a file.
+  const globish = join(dir, 'notes*.md')
+  const shown = await statTouchedFiles({
+    paths: [globish],
+    cwd: dir,
+    readStat: async () => ({ isFile: () => true, size: 1, mtimeMs: 1 }),
+  })
+  check('a path that exists is drawn even when it is spelled like a glob', shown.length === 1 && shown[0].status === 'available', JSON.stringify(shown))
+
+  // A bare `&` is a legal file name, so the descriptor rule must require digits. Without
+  // that, an absent file called `&` would be withheld as if it had never been a name.
+  const bare = await statTouchedFiles({ paths: [join(dir, '&')], cwd: dir })
+  check('a missing file called & is reported missing, not withheld', bare.length === 1 && bare[0].status === 'missing', JSON.stringify(bare))
+
+  // A spelling that cannot be a name is still only withheld when the filesystem says it
+  // is absent. When `stat` fails for another reason the row survives as `invalid` --
+  // "I could not read it" is true, and `missing` is what would be the lie.
+  const unreadable = await statTouchedFiles({
+    paths: [join(dir, 'notes*.md')],
+    cwd: dir,
+    readStat: async () => {
+      const error = new Error('permission denied')
+      error.code = 'EACCES'
+      throw error
+    },
+  })
+  check('an impossible spelling that stat could not read is kept as invalid', unreadable.length === 1 && unreadable[0].status === 'invalid', JSON.stringify(unreadable))
+
+  // The `/dev/` clause on its own: no fixture above contains a device path.
+  const device = await statTouchedFiles({ paths: ['/dev/null)', '/dev/tty'], cwd: dir })
+  check('a device path left behind by a redirection is withheld', device.length === 0, JSON.stringify(device.map((row) => row.path)))
+
+  // The real shape: `pathsSeen` hands over objects, and `cwd` can be undefined.
+  const shaped = await statTouchedFiles({
+    paths: [{ path: join(dir, '&1'), turn: 1, at: 1, source: 'git' }],
+    cwd: undefined,
+    turnPaths: new Set(),
+    turnNow: 1,
+  })
+  check('a record handed over as an object is read the same way', shaped.length === 1 && shaped[0].status === 'available', JSON.stringify(shaped))
+
+  // The cheapest way to pass the first check is to drop every absent row, which would
+  // delete the reason the card exists.
+  const absent = await statTouchedFiles({ paths: [join(dir, 'never-existed.txt')], cwd: dir })
+  check('an absent ordinary path is still reported as missing', absent.length === 1 && absent[0].status === 'missing', JSON.stringify(absent))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

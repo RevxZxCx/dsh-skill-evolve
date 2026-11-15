@@ -330,7 +330,7 @@ const mutations = [
     // replaces passed with it in place, so they were paying for a run and
     // covering nothing.
     suites: ['test/api.test.mjs'],
-    from: "      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'\n      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'\n      out.push({ ...base, status, bytes: null, mtimeMs: null })\n      continue",
+    from: "      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'\n      // A record can outlive the parser that wrote it. When the filesystem also says\n      // there is nothing there and the spelling could not be a path anyway, the record\n      // is a mis-parse rather than a deleted file -- drawing it would say \"you deleted\n      // this\" about something that was never a name. The state file is append-only, so\n      // the record survives for whoever works out later what the command meant; only\n      // the row is withheld.\n      //\n      // This sits here, after `stat`, and not before it: a real file may legitimately be\n      // called `a*b.txt`, `stat` would have found it, and refusing up front would hide a\n      // file the session had written -- the same lie in the opposite direction.\n      if (gone === true && cannotBeAPath(path) === true) continue\n      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'",
     to: '      continue',
     why: 'dropping the row is the old behaviour that made "edited then deleted" and "never touched" the same sentence; the whole of S1 exists to tell them apart',
   },
@@ -1690,6 +1690,38 @@ const mutations = [
     to: "      source: recordedSource ?? null,",
     why: "The narrowing is what makes 'unknown' in the panel mean 'no bracket was recorded' rather than 'a word this build cannot read'. Passing the raw value through lets any future server word reach the row, where it becomes indistinguishable from a missing record.",
   },
+  {
+    file: api,
+    suites: ['test/api.test.mjs'],
+    label: "a record spelled like a redirection is drawn as a deleted file",
+    from: "      if (gone === true && cannotBeAPath(path) === true) continue",
+    to: "",
+    why: "The state file keeps rows the parser no longer produces. Counting with the same predicate this guard uses, the live state directory holds 20 such records in 12 spellings across 12 sessions (`&1`, `/dev/null)`, `2>\\dev\\null`, `--include=*.md`, `&1|head`). Without the refusal they come back as missing, which tells the reader they deleted a file whose name was never a name.",
+  },
+  {
+    file: api,
+    suites: ['test/api.test.mjs'],
+    label: "a descriptor like &1 is judged to be a file name",
+    from: "  return /^&\\d+\\)*$/u.test(tail)",
+    to: "  return false",
+    why: "Spanning: this is the only clause that stops `&1` from being treated as a name. Measured against the broad mutation that drops the whole row (17 failures), this one fails a check that mutation never fails, so the two are not alternates. Dropping the clause puts `&1` and `&1)` back on the card as deleted files.",
+  },
+  {
+    file: api,
+    suites: ["test/api.test.mjs"],
+    label: "the spelling is judged before the filesystem is asked",
+    from: "    let info\n    try {",
+    to: "      if (cannotBeAPath(path) === true) continue\n    let info\n    try {",
+    why: "Refusing before stat hides a file the session really wrote whenever its name merely looks like an operator. The injected-readStat assertion fails only under this reordering, so it is the one check standing between the narrow guard and a wide one.",
+  },
+  {
+    file: api,
+    suites: ["test/api.test.mjs"],
+    label: "a device path is recorded as a deleted file",
+    from: "  if (path.startsWith('/dev/') === true) return true",
+    to: "",
+    why: "The glued-paren spelling `/dev/null)` is what a subshell redirection leaves behind and it exists nowhere, so nothing else in the function catches it once this clause is gone.",
+  }
 ]
 
 

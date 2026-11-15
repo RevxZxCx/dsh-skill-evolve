@@ -522,6 +522,51 @@ function resourceAddress(sessionId, cwd, path) {
 }
 
 /**
+ * Whether a recorded spelling can name a file at all.
+ *
+ * These rows are not a rendering accident. The collector once took a descriptor for a
+ * target -- `2>&1` leaves `&1` behind, `cmd > out 2>&1` can leave `&1)`, and a glob in an
+ * argument (`--include=*.md`) can arrive as a target. The parser no longer produces them,
+ * but the state file is append-only, so they have to be refused on the way out or they
+ * outlive the bug that made them.
+ *
+ * The test is narrow on purpose. A false refusal silently hides a real file, which is a
+ * worse failure than the row it prevents, so each clause names something that cannot be a
+ * file name: `>` `|` `*` `?` are how a shell spells an operator and are illegal on
+ * Windows, and `&1` is a descriptor. `&` alone *is* legal inside a file name, so only the
+ * descriptor form is refused -- `a&b.txt` stays.
+ *
+ * On POSIX those four characters are legal in a file name, so this is narrower than it
+ * looks: the caller only consults it once `stat` has said the path is absent, which
+ * means a file the session really did write and the user later deleted is withheld
+ * instead of reported as `missing`. That is the accepted cost -- on Windows, where the
+ * card is read, such names cannot exist, so nothing real is ever hidden there. It is
+ * recorded here because it is conditional on the platform, not free.
+ *
+ * @param {string} path - a path as the record spelled it.
+ * @returns {boolean}
+ */
+function cannotBeAPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return true
+  if (/[>|*?]/.test(path) === true) return true
+  // `/dev/null` is a device rather than a file, and its glued-paren spelling `/dev/null)`
+  // is what a redirection inside a subshell leaves behind. The prefix makes this safe to
+  // refuse: `/dev/` is the POSIX device directory and a project file lives elsewhere,
+  // while a rule on the bare word `null` would hide a file anyone may legitimately name.
+  //
+  // What this does not do: on POSIX, plain `/dev/null` still exists, so `stat` succeeds
+  // and the row is reported as a device instead of being refused here. Only the paren
+  // spelling dies of absence. On Windows every `/dev/...` path is absent, so the clause
+  // does fire -- which is the platform the card is read on.
+  if (path.startsWith('/dev/') === true) return true
+  // `&` followed by digits is the descriptor form; trailing parens are what a subshell
+  // leaves behind. Digits are required: a bare `&` is a legal file name on every platform
+  // this runs on, so requiring the digits is what keeps the rule pointed at descriptors.
+  const tail = path.split(/[\\/]/u).pop() ?? ''
+  return /^&\d+\)*$/u.test(tail)
+}
+
+/**
  * Resolve the files a session remembers against the disk, keeping what is gone.
  *
  * A path recorded from a tool call is a claim, not a fact: an `edit` may have
@@ -564,6 +609,7 @@ function resourceAddress(sessionId, cwd, path) {
  * @param {number} [input.now] - the clock `stale` is measured against, for tests.
  * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved' | 'folder', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
  */
+
 async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
   const clock = Number.isFinite(now) ? now : Date.now()
   const seen = new Set()
@@ -632,6 +678,17 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       // as deleted turned a file the turn had just written into a row with a
       // line through it.
       const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'
+      // A record can outlive the parser that wrote it. When the filesystem also says
+      // there is nothing there and the spelling could not be a path anyway, the record
+      // is a mis-parse rather than a deleted file -- drawing it would say "you deleted
+      // this" about something that was never a name. The state file is append-only, so
+      // the record survives for whoever works out later what the command meant; only
+      // the row is withheld.
+      //
+      // This sits here, after `stat`, and not before it: a real file may legitimately be
+      // called `a*b.txt`, `stat` would have found it, and refusing up front would hide a
+      // file the session had written -- the same lie in the opposite direction.
+      if (gone === true && cannotBeAPath(path) === true) continue
       const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'
       out.push({ ...base, status, bytes: null, mtimeMs: null })
       continue

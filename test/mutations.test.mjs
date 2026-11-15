@@ -200,7 +200,7 @@ for (const [label, source, want] of [
 // checks silent, so a floor that is too low is the one gap a list like this
 // cannot see.
 for (const [name, expected] of [
-  ["mutate-language-and-files.mjs", 184],
+  ["mutate-language-and-files.mjs", 188],
   ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 45],
 ]) {
@@ -272,7 +272,26 @@ for (const [name, expected] of [
         found = constant.exec(script)
       }
     }
-    const entries = script.split(/\n {2}\{\n/u).slice(1)
+    // Any indentation, and then a line that is only `{` -- entries are the only
+    // such lines in these scripts. The old split demanded exactly two spaces and
+    // silently dropped two entries written with three and one.
+    // The split is indentation-agnostic and also catches the runner block at the end of
+    // each script, so an entry is a part that names `suites:` -- that is what every real
+    // entry has and the trailing code does not.
+    const entries = script
+      .split(/\n *\{\n/u)
+      .slice(1)
+      .filter((part) => part.includes('suites:'))
+    // Two different parses read this file: `parseAnchors` counts `from:` occurrences and
+    // this block counts entries. If they disagree, one of the checks below is looking at
+    // a subset of the file and reporting a clean bill of health -- so make the
+    // disagreement itself the failure. This check exists because the old split demanded
+    // exactly two spaces and silently dropped two entries written with three and one.
+    check(
+      `every ${name} entry is examined by the suite rules`,
+      entries.length === parseAnchors(script).length,
+      `${entries.length} entries vs ${parseAnchors(script).length} anchors`,
+    )
     const unmeasured = []
     const unknown = []
     for (const entry of entries) {

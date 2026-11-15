@@ -63,6 +63,7 @@
 | 2026-11-15 | 来源说明的重新审查：我上一轮不该收尾 | 用户问「审查者失效了，你重新派了吗」——没有。上一轮三人里只有一人交回完整结论，我据那一份修完就提交了。从 d9b86ef..d3dc3e0 重新切三份、重派三人，全部返回。**r2 是真正值钱的一份**：它做 51 个单点变异 + 3 个故障注入，抓出两处裸点击（元素消失时抛异常，24 条断言一条都不打印，我上一轮刚加的「先证在场」断言自己会先撞上它）与四条「786 条全绿但破坏已经发生」（沉默未钉住、邀请句顺序未钉住、死行属性可与文本矛盾、scan 行可同时声称两个来源）。修法含一处结构性改动：套件首次有异常上报——DEF-122/134/139/145/146 六次同形，前五次都在补断言，这次补在框架层。3643 断言全绿，突变 183/45/69/128 全杀，残留 0。**新增 DEF-149、DEF-150、D-171、R-91** |
 | 2026-11-15 | 产出卡：来源不显示了，和一个从没失败过的断言 | 用户 m19819 说来源该只做开发时的判断依据，于是把上一轮刚加进 tooltip 的两句话整块撤掉，`data-source` 属性保留（值不是句子：能 grep、能断言、不会跨轮变成假话）。撤句子时那条 `filter` 变异从 KILLED 掉成 SURVIVED，手注查出两条关键断言写的是 `split('\\n')` —— 两个反斜杠是「反斜杠加字母 n」，永远切不出空行，所以它们自写下那天起就不可能失败（DEF-151）。改成单个反斜杠后同一条变异报 `788 passed, 2 failed`。3640 断言全绿，四套突变 183/45/69/128 全杀，残留 0。**新增 DEF-151、D-172~173** |
 | 2026-11-15 | 完整验收：真实数据画出卡片，而它画错了一个目录 | 用户要求对整个产出卡片做完备测试与端到端测试。盘覆盖发现断在中间：**没有任何测试把真实 `readPanel` 的产物交给真实 `client.js`**（`client.test.mjs:807` 的 `panelRoutes()` 是手写 payload）。新建 `test/end-to-end.test.mjs`（785 行，唯一替身是 DOM/React/fetch）与 `test/real-data.test.mjs`（661 行，对准本机 208 个真实会话），第一次真跑就抓到：`statTouchedFiles` 问 `info.isFile()`，答否且路径绝对就归成 `missing`，于是**会话自己的工作目录**被画上删除线、写「已删除」（4 个真实目录全部中招）。新增第五态 `folder`（不并进 `unresolved`：一个是「没法看」、一个是「看了是目录」），褪色但**永不画删除线**，尺寸列写「目录」而非 `0 B`。补 fixture 后两条 folder 变异由 SURVIVED 变 KILLED。3694 断言全绿，四套突变 184/45/69/128 全杀，残留 0。**宿主仍答旧答案**：同一份数据，新进程答 `folder`、运行中的宿主答 `missing`，差值是主进程 ESM 缓存——重启后的真机确认至今零次 |
+| 2026-11-15 | 卡片上那十一行，从来不是文件 | 展开态里 116 行 missing 中有 8 种拼写（&1、2>\dev\null、--include=*.md、&1)）根本不是文件名，卡片却给它们画删除线并写「已删除」。先做回放：把写出这些行的 128 条原始命令交给真实的 writtenPaths，still_produced 为 0，**当前解析器一条都产不出来**，所以改的是读侧而不是采集侧。新增 cannotBeAPath 谓词，但只在 stat 已报 ENOENT/ENOTDIR 之后才用——放前面会在POSIX 上藏掉名字含 * 或 ? 的真实文件，是反方向的同一个谎。三条断言，其中一条如实写明「它抓不到守卫的位置」。三名独立审查者之后又改出六条断言、两条突变与一次 `\d+` 修正，最终 3706 断言全绿，四套突变 188/45/69/128 全杀，残留 0。真实数据：记录里仍有 11 条残渣拼写，画出来的 0 条。**新增 DEF-153/154、D-177/178、R-93** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4646,3 +4647,86 @@ a folder reports the size it does not have
   仍是行 —— 它们现在至少不再被说成「已删除」，但仍不该出现在卡片上。
 - `_edit/` 下 256 个历史脚本、`.review/` 数十份 diff、`_shots/` 4 MB 未清。
 - `03-defects.md` 里 DEF-145/146/147 三行的列数错位仍在（判定为不动：改历史行是修补历史）。
+
+## 2026-11-15 · 卡片上那十一行，从来不是文件
+
+### 起点：一次读数，八种拼写
+
+完整验收那一轮把真实卡片读出来之后，展开态里有 116 行 `missing`、4 行 `unresolved`。`missing` 在卡片上的意思是「文件已删除」，`client.js` 会为它画删除线。用户在截图上看到的是 `F:\dsh-plugin\2>\dev\null`、`F:\dsh-plugin\&1)`、`F:\dsh-plugin\--include=*.md` 这样的行，配一条删除线。
+
+这些不是文件，也从来不是。它们是 shell 重定向与描述符的碎片，被某一版采集器当成了写入目标记进状态文件。记录一进去就永久留下：`session-state.js` 按路径为键存 `{seq,turn,at,source}`，没有任何地方会把它们清掉。
+
+### 第一件事是先证明它是谁写的，而不是先改代码
+
+最省事的判断是「采集器把 `&1` 当路径了，去 `shellpaths.js` 里加个过滤」。这个判断有可能是错的，而且错得很贵：在采集侧加规则会改写以后每一次会话的记录。
+
+所以我先做了回放。`_edit/junk_cases.py` 从 208 个真实状态文件里捞出含残渣的记录，得到 8 个会话、14 行、8 种不同拼写；`_edit/junk_replay.py` 把写出这些行的 **128 条原始命令**逐条交给真实的 `writtenPaths(command, base)`——直接 `import` 自 `packages/core/lib/shellpaths.js`，不重写一份——结果是 **`still_produced: 0`**。
+
+**当前解析器一条都产不出来。** `recordable()` 早就拒绝了 `DEVICE_TARGETS`（`/dev/null`、`nul`、`con`、`prn`）、`DESCRIPTOR_DUPLICATE`（`/^&\d+$|^&$/`）与 `-` 开头的 token，`REDIRECT_OPERATOR` 与 `REDIRECT_GLUED` 也早就在正确的位置切分了重定向。这些记录是旧版本留下的化石。
+
+结论：`shellpaths.js` 一个字都不改。要改的是读的那一侧——记录会活得比解析器久，而卡片每次都会把它们重新读出来。
+
+### 修法与它的位置
+
+`packages/ui-evolve/lib/api.js` 新增一个模块级谓词：
+
+```js
+function cannotBeAPath(path) {
+  if (typeof path !== 'string' || path.length === 0) return true
+  if (/[>|*?]/.test(path) === true) return true
+  if (path.startsWith('/dev/') === true) return true
+  const tail = path.split(/[\\/]/u).pop() ?? ''
+  return /^&\d*\)*$/u.test(tail)
+}
+```
+
+四条判据各有理由。`>` `|` `*` `?` 是 shell 运算符的写法，在 Windows 文件名里是禁用字符；`/dev/` 是 POSIX 设备目录，而且**不能用「最后一段叫 null」来判**——真实文件可以合法叫 `null`，我自己的审计脚本就因为笼统地拒了 `dev` 段，把 `docs/dev/决策记录.md` 误报成残渣；`&1` 是描述符，但 `&` 单独出现在文件名里完全合法，所以只拒绝描述符形式，`a&b.txt` 必须留下。
+
+**位置比谓词更重要。** 第一版把 `if (cannotBeAPath(path) === true) continue` 放在拼 `isAbsolute` 之前、`stat` 之前，探针显示 12/12 残渣被拒、8/8 真实文件通过，看起来完美。但它有一个相反方向的谎：POSIX 上真实文件可以合法含 `*` 和 `?`，在 `stat` 之前丢弃就等于**静默隐藏一个存在的文件**。丢一条没用的记录和藏一个有用的文件，错的是同一件事。
+
+所以守卫挪到 `stat` 失败之后：
+
+```js
+      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'
+      if (gone === true && cannotBeAPath(path) === true) continue
+      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'
+```
+
+从「stat 说它不在」出发，才有资格谈它「不可能是文件名」。存在的文件走不到这一行，所以名字里带 `*` 的真实文件永远不会被这个谓词碰到。
+
+### 断言与它们的诚实边界
+
+`test/api.test.mjs` 加三条：残渣拼写不画成已删除、名字带 `&` 的文件照常画出、普通的不存在路径仍然是 `missing`。
+
+注入验证做了四次，三次变红，一次没有：
+
+- 把守卫改成恒假 → 1 条红，点名残渣那条。
+- 改成「所有 stat 失败都丢」 → 12 条红，含 `every candidate is listed`、`a deleted file is missing, not absent`。这条把「别矫枉过正」钉住了。
+- 把描述符规则收窄成只认整段 `&1` → 1 条红，detail 显示漏掉的正是 `&1)`。
+- **把拒绝挪回 `stat` 之前 → 全绿。** 这条断言抓不到位置。
+
+原因很具体：让守卫移动后仍然沉默，需要一个真实存在、且名字含 `*` 或 `?` 或 `>` 的文件；Windows 建不出来这样的文件。所以「位置」这一条在这台机器上**只能靠读代码，不能靠断言**。我没有把它写成假的绿，而是把第二条断言改名成 `a file with an ampersand in its name is drawn, not refused`，并在注释里写明这条断言**不**证明什么。留着它仍然有价值：它钉住「`&` 在名字里合法」这个方向，而「把拒绝放宽一点」正是那个诱人的简化。
+
+### 突变
+
+`scripts/mutate-language-and-files.mjs` 加两条，条目 184 → 186，锚点下限同步抬到 186（`test/mutations.test.mjs` 是 Medium 完整性级别，只能用 `edit` 工具改）。两条分别实测 1 failed 与 12 failed。
+
+这一轮的锚点写错了四次，值得记下来：凭记忆重打锚点（把文件里的单反斜杠写成双）、把 `from` 手工拼成固定四行（真实是 13 行，中间夹着长注释）、用 `json.dumps` 生成含转义撇号的字面量、插入条目时 `lead` 已带 `},` 又补一个逗号变成 `},,`（运行时 `TypeError: Cannot read properties of undefined (reading 'file')`）。最终的对法是所有锚点都用 `line_with(path, needle)` **从源码文件里读出来**并断言唯一命中，转义自己算不靠 `json.dumps`，插入时先 `rstrip()` 再断言结尾是 `},`。
+
+### 验证
+
+- `node test/run.mjs`：**3697 passed / 0 failed**（本轮 +3）。
+- `test/api.test.mjs`：**308 passed**。
+- 四套突变：**186 / 45 / 69 / 128 killed，0 survived / 0 not applied / 0 crashed**。
+- `_edit/audit_leftovers.py`：leftovers 0 / unresolved 0。
+- `test/mutations.test.mjs`：45 passed。
+- 真实数据（208 个状态文件、2,461 条记录）：残渣拼写**仍有 11 条留在记录里**，交给真实 `statTouchedFiles` 后**画出来的 0 条**。
+
+记录留着是有意的——它证明那一次会话确实发生过这件事，只是不该出现在「这次改了什么」的卡片上。
+
+### 还没做
+
+- `api.js` 是服务端代码，面板要重启宿主才会读到新版本。重启后的实拍确认要等用户配合。
+- `docs/18` §2.3 与 §7 验收表里「四态」的表述，在加上 `folder` 之后已经是五态，尚未追加更正。
+- `MAX_SCANNED_ENTRIES = 5000` 是否要调，仍未决定。本工作区 15,778 个目录，走查恒为 `partial`。
+- `test/real-data.test.mjs` 在没有真实状态文件的机器上会打印 skip 并退 0，在 CI 上等于空跑。
