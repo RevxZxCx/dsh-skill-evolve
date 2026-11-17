@@ -410,6 +410,8 @@ const error = new Error(`cannot get property "${name}" without declaring it in i
 
 **为什么测试没抓到**：原测试只覆盖保存成功路径。
 
+**现状**：`panelSide` 随旧卡片布局一起删除（D-186），这个侧向设置与它的回滚路径都不再存在；监控列是唯一布局，「被拒侧」不再是可能的状态。回滚思路本身在 `panelSummary` 的拒绝路径上仍然有效。
+
 ## DEF-24 · 字体变量写回根节点会再次触发 observer
 
 **现象**：字体 observer 监听 `documentElement` 的 style 属性，而同步函数把 `--dsse-font-*` 写回同一个 style，可能形成自我触发循环。

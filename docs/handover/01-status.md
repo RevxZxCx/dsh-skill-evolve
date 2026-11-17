@@ -193,7 +193,7 @@ DSH 插件。在会话进行中观察，识别值得复用的流程，把候选�
 - 两个插件在运行时只通过一条服务相连：skill 侧 `ctx.provide('skillEvolve', {...六成员...})`，ui 侧每次请求现读 `service('skillEvolve')`（不缓存 —— cordis 可能在之后才激活兄弟插件）。取不到时面板**少画一个「建议」按钮**，而不是报错。
 - 路由前缀从 `/api/skill-evolve` 改成 `/api/ui-evolve`。宿主侧 `ROUTE_PREFIX`（`packages/ui-evolve/lib/api.js:60`）与浏览器侧字面量无法共享常量（bundle 无 `import` 无构建），由 `test/route-prefix.test.mjs` 锁住两者相等。这是本插件最安静的一种失败：客户端挂载、渲染、每个请求 404，看起来和「这个会话没东西可看」一模一样。
 - 客户端 bundle 的注册 id 必须是**包名全称** `@revxz/dsh-ui-evolve`。宿主 `dsh-client-modules` 对不匹配的 id 报 `bundle ... loaded without registering "<id>"`，对重复 id 直接抛错。
-- 配置键一分为二：skill 侧 28 键（原样）、ui 侧 5 键（`panelSummary`/`summaryProvider`/`summaryModel`/`panelSide`/`panelCollapsed`）。合计仍是 33。
+- 配置键一分为二：skill 侧 28 键（原样）、ui 侧若干键（`panelSummary`/`summaryProvider`/`summaryModel`/`monitorColumn`/`monitorWidth`）。`panelSide`/`panelCollapsed` 已随旧卡片布局一起删除（D-186）。
 
 **安装方式变了**：profile 不再 link 仓库根。`C:/Users/26903/.dsh/profiles/desktop/package.json` 现在 link 两个包目录，`dsh.profile.bundles` 里也是两条（`@revxz/dsh-skill-evolve`、`@revxz/dsh-ui-evolve`）。旧条目 `dsh-skill-evolve: link:F:/dsh-plugin/dsh-skill-evolve` 会让宿主启动失败，因为仓库根已经不是插件。
 
@@ -250,7 +250,7 @@ ui 侧通过 `lib/index.js:418` 的 `halfDependency(member)` 转发，**每次�
 
 ### 四、配置键（5 个，全部可选）
 
-`panelSummary`(true) / `summaryProvider`('') / `summaryModel`('') / `panelSide`('left') / `panelCollapsed`(false)。
+`panelSummary`(true) / `summaryProvider`('') / `summaryModel`('') / `monitorColumn`(true) / `monitorWidth`(300)。
 
 **面板开关只在本进程生效**：`lib/index.js:129` 的 `overrides` 对象，`liveConfig()` 把宿主 config 与它合并。插件不写宿主配置文件，理由是那会毁掉同 profile 其它插件的设置；代价是**重启即丢失**，面板 UI 有提示。
 

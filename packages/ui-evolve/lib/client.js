@@ -52,7 +52,38 @@ window.__ModuleLoader__.load({
     const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
     const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
     const REFRESH_MS = 8000
-    const CARD_WIDTH = 288
+
+    /**
+     * How wide the monitor column starts out.
+     *
+     * The design width: 300px is the narrowest column that holds a file path and
+     * a skill name without wrapping, and it leaves 734px of prose on a 1440px
+     * window with the host sidebar open — the width the prototype was signed off
+     * at. `placeMonitor` clamps whatever is asked for; this is only the ask.
+     */
+    const MONITOR_DEFAULT_WIDTH = 300
+
+    /**
+     * The custom property the reserved column publishes to the host's scroller.
+     *
+     * The column is drawn in `shell.overlay`, which the host lays *over* the
+     * conversation rather than inside it, so nothing makes room for it on its own.
+     * The one lever that does is a margin on the host's scroll container, applied
+     * by the rule keyed on `data-dsse-monitor` in the stylesheet above. The value
+     * has to travel through a custom property on `documentElement` because that is
+     * the only node both the overlay and the host's scroller can see.
+     */
+    const MONITOR_RESERVE_PROP = "--dsse-monitor-reserve"
+
+    /**
+     * The reservation currently written, as a string, so a re-measure that
+     * produced the same number does not touch the DOM again.
+     *
+     * `element.style.setProperty` with an unchanged value still invalidates style
+     * for the whole document, and this runs on every resize frame of a window
+     * drag; the guard is what keeps a drag cheap.
+     */
+    let appliedReserve = ""
 
     /**
      * How many output files the card lists before the fold.
@@ -523,16 +554,23 @@ window.__ModuleLoader__.load({
     }
 
     const CSS = `
-.dsse-toggle{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font-family:var(--dsse-font-family,inherit);font-size:var(--dsse-font-size,inherit);line-height:var(--dsse-line-height,inherit);font-weight:500;cursor:pointer;white-space:nowrap}
-.dsse-toggle:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
-.dsse-toggle[data-active="true"],.dsse-toggle-count{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.12));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
-.dsse-toggle[data-active="true"]{border-color:var(--dsw-alias-state-business-primary,rgba(77,107,254,.5))}
-.dsse-toggle-count{display:inline-block;min-width:20px;padding:1px 6px;border-radius:999px;font-size:max(.85em,11px);text-align:center}
+/* A square glyph button, sized and padded to sit in the host's header action row
+   without changing its height. Borderless until hover, because the host's own
+   buttons in that row are borderless: a bordered box here reads as a control that
+   belongs to a different toolbar. */
+.dsse-toggle{display:inline-grid;place-items:center;width:24px;height:24px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);font-family:var(--dsse-font-family,inherit);cursor:pointer}
+.dsse-toggle:hover{background:var(--dsw-alias-bg-layer-2,rgba(15,17,21,.06));color:var(--dsw-alias-label-primary,#0f1115)}
+.dsse-toggle[data-active="true"]{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.12));color:var(--dsw-alias-state-business-primary,#2f4bd8)}
+/* No state-business-secondary token exists in the theme, so hover keeps the
+   tertiary fill rather than naming a variable that would fall through. */
+.dsse-toggle[data-active="true"]:hover{background:var(--dsw-alias-state-business-tertiary,rgba(77,107,254,.12))}
 .dsse-rail{position:absolute;display:flex;flex-direction:column;gap:12px;overflow-y:auto;overflow-x:hidden;padding:0 2px 0 0;scrollbar-width:thin;font-family:var(--dsse-font-family,inherit);font-size:var(--dsse-font-size,inherit);line-height:var(--dsse-line-height,inherit);color:var(--dsw-alias-label-primary,#0f1115)}
 .dsse-rail::-webkit-scrollbar,.dsse-candidates::-webkit-scrollbar,.dsse-detail-body::-webkit-scrollbar{width:6px}
 .dsse-rail::-webkit-scrollbar-thumb,.dsse-candidates::-webkit-scrollbar-thumb,.dsse-detail-body::-webkit-scrollbar-thumb{background:var(--dsw-alias-border-l2,rgba(15,17,21,.16));border-radius:3px}
-.dsse-top-row{flex:0 0 auto;display:flex;align-items:center;gap:6px;min-height:40px;padding:2px 4px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:10px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 2px 8px rgba(15,17,21,.04)}
-.dsse-top-row .dsse-queue{width:auto;min-height:32px;margin-left:auto;padding:0 12px}
+.dsse-top-row{flex:0 0 auto;display:flex;align-items:center;gap:6px;min-height:34px;padding:0}
+/* The queue is first in the row, so it takes the left edge; the auto margin on
+   the speed badge is what pushes the three controls to the right as one group. */
+.dsse-top-row .dsse-queue{width:auto;min-height:32px;padding:0 12px}
 .dsse-top-row .dsse-speed{flex:0 0 auto;margin-left:auto;display:inline-flex;align-items:baseline;gap:3px;min-width:44px;justify-content:center;padding:0 4px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.78em,11px);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1;user-select:none;white-space:nowrap}
 .dsse-top-row .dsse-speed-idle{color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:.7}
 .dsse-top-row .dsse-speed-previous{opacity:.85}
@@ -565,13 +603,56 @@ window.__ModuleLoader__.load({
 .dsse-summary-title{margin:0 0 6px;font-size:1em;line-height:1.45;font-weight:500}
 .dsse-muted{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-tiny{font-size:.86em;line-height:1.55}
-.dsse-expand{box-sizing:border-box;position:absolute;left:50%;transform:translateX(-50%);bottom:8px;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-secondary,#5b6270);box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}
+/* Two states, two placements -- they are not the same gesture and they do not get
+   the same box.
+   Folded, the badge is a hint that there is more to see: it floats on the fade at
+   the list's foot, because a folded list has no room to give it a line of its own.
+   Open, there is nothing left to hint at and the list is not clipped any more, so
+   the badge becomes a plain row under the content -- floating there would park the
+   circle on the last file name, and a row that shifts down when you open it reads
+   as the list having gained an item.
+   The float is what the folded state needs; the row is what the open state needs.
+   One rule for both is what kept putting the circle on top of a file name. */
+.dsse-expand{box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-secondary,#5b6270);box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none;opacity:0;transition:opacity 160ms ease}
+/* Folded: out of the flow, riding the fade band, centred like a page turn. */
+.dsse-card[data-open="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}
+/* Open: a row under what it revealed. */
+.dsse-card[data-open="true"] .dsse-expand{position:static;left:auto;bottom:auto;transform:none;margin:6px auto 0}
+/* The badge is a hint, not furniture: it fades in when the pointer reaches the
+   card and leaves when it goes. Two cards learnt one shape for one gesture, so
+   both follow it — and the fade also means a folded list no longer carries a
+   permanent circle over the last row it is hiding.
+   It stays on screen while the card is open. The open state is the one place a
+   reader needs the way back out without hunting for it with the pointer, and
+   aria-expanded already says the card is in that state for a screen reader. */
+.dsse-card:hover .dsse-expand,
+.dsse-card:focus-within .dsse-expand,
+.dsse-card[data-open="true"] .dsse-expand,
+.dsse-recap:hover .dsse-expand,
+.dsse-recap:focus-visible .dsse-expand,
+.dsse-recap[aria-expanded="true"] .dsse-expand,
+/* The summary and the queue row are one card now, so the pointer reaching any
+   part of it has to reveal the summary's badge. Without this the badge only
+   answers a pointer that lands on the summary text itself, which reads as a
+   card that has nothing to offer. Same for keyboard focus. */
+.dsse-col-top:hover .dsse-expand,
+.dsse-col-top:focus-within .dsse-expand{opacity:1}
 .dsse-expand .dsse-icon{width:15px;height:15px}
-.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}
-.dsse-expand-action{pointer-events:auto;cursor:pointer;padding:0;font:inherit}
+/* Open, it stays visible without the pointer: closing is the one thing a reader
+   should not have to hunt for. */
+.dsse-card[data-open="true"] .dsse-expand{opacity:1;pointer-events:auto}
+.dsse-recap[aria-expanded="true"] .dsse-expand{opacity:1}
+/* The header's own badge has no folded/open split -- the summary is either cut
+   short or it is not -- so it takes the row placement in both states. */
+.dsse-recap .dsse-expand{margin:6px auto 0}
+/* Hidden means unreachable too: at opacity 0 a live button would still eat the
+   clicks of the row underneath it, and the row underneath it is a file. */
+.dsse-expand-action{pointer-events:none;cursor:pointer;padding:0;font:inherit}
+.dsse-card:hover .dsse-expand-action,
+.dsse-card:focus-within .dsse-expand-action,
+.dsse-card[data-open="true"] .dsse-expand-action{pointer-events:auto}
 .dsse-expand-action:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9)}
 .dsse-expand-action:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:2px}
-.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}
 .dsse-loading{margin:0;padding:8px 4px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px)}
 .dsse-list{display:grid;gap:3px}
 .dsse-row{position:relative;display:flex;align-items:center;gap:6px;min-width:0;min-height:28px;padding:2px 6px;border-radius:7px;box-sizing:border-box}
@@ -603,7 +684,20 @@ window.__ModuleLoader__.load({
    which directory a row came from. */
 .dsse-where{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 .dsse-size{flex:0 0 auto;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.85em,11px);white-space:nowrap}
-.dsse-files{display:grid;gap:3px}
+.dsse-files{display:grid;gap:3px;position:relative}
+/* A folded list has to show that it is folded. The rows simply stopped after
+   four with nothing to say so, and the badge was the only hint — invisible
+   until the pointer arrived, which is useless to someone deciding whether to
+   look. The last row fades into the card and the edge is the message. */
+/* Four rows and the half-row of fade under them. Overflow hidden is the part
+   that does the clipping: a max-height alone leaves the overflow visible, so the
+   list kept drawing every row and the badge that follows it landed on top of the
+   last one. Rows are 28px with a 3px gap, so four of them measure 121. */
+.dsse-files[data-open="false"]{max-height:calc(4 * 31px - 3px);overflow:hidden}
+/* One row tall, so it covers the half row the fold cuts and no more. The badge
+   rides this band; a taller one would wash out the whole last row instead of
+   marking where the list stops. */
+.dsse-files[data-open="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff) 70%)}
 .dsse-files[data-open="true"]{max-height:${FILE_LIST_MAX_PX}px;overflow-y:auto;overscroll-behavior:contain}
 .dsse-row-open{display:flex;align-items:center;gap:6px;flex:1;min-width:0;margin:-2px -6px;padding:2px 6px;align-self:stretch;border:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
 .dsse-row-open:focus-visible{outline:2px solid var(--dsw-alias-brand-text,#2f4bd8);outline-offset:-2px}
@@ -728,20 +822,140 @@ window.__ModuleLoader__.load({
 .dsse-setting-desc{display:block;margin-top:2px;color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
 .dsse-check{width:19px;height:19px;accent-color:var(--dsw-alias-brand-primary,#2f4bd8)}
 .dsse-select{max-width:180px;min-height:36px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-primary,#0f1115);font:inherit}
-.dsse-side-options{display:flex;gap:4px;padding:3px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f2f4f8)}
-.dsse-side-option{min-width:50px;min-height:32px;border:0;border-radius:6px;background:transparent;color:var(--dsw-alias-label-primary,#0f1115);font:inherit;cursor:pointer}
-.dsse-side-option[aria-pressed="true"]{background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-brand-text,#2f4bd8)}
-.dsse-settings-note{margin:7px 0 0;padding:9px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-secondary,#5b6270);font-size:max(.85em,11px)}
-.dsse-settings-foot{display:flex;justify-content:flex-end;padding:11px 16px;border-top:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.08))}
-.dsse-handle{position:absolute;width:16px;height:54px;display:flex;align-items:center;justify-content:center;cursor:pointer;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-tertiary,#8b92a1);font-family:var(--dsse-font-family,inherit);font-size:var(--dsse-font-size,inherit);padding:0;box-shadow:0 1px 4px rgba(15,17,21,.07)}
-.dsse-handle[data-side="left"]{border-radius:0 7px 7px 0;border-left:0}
-.dsse-handle[data-side="right"]{border-radius:7px 0 0 7px;border-right:0}
-.dsse-handle:hover{color:var(--dsw-alias-brand-text,#2f4bd8);border-color:var(--dsw-alias-state-business-primary,rgba(77,107,254,.5))}
-@media(max-width:680px){.dsse-review-grid{grid-template-columns:minmax(0,1fr);grid-template-rows:auto minmax(0,1fr)}.dsse-candidates{max-height:min(220px,35vh);border-right:0;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.08))}.dsse-layer{padding:10px}.dsse-dialog{max-height:calc(100vh - 20px)}.dsse-detail-body{padding:15px}.dsse-detail-foot{padding:11px 14px}}
-@media(max-height:520px){.dsse-dialog-head{padding-top:10px;padding-bottom:10px}.dsse-review-grid{height:calc(100vh - 110px)}.dsse-candidates{max-height:30vh}.dsse-detail-note{display:none}}
-@media(prefers-reduced-motion:reduce){.dsse-layer,.dsse-dialog,.dsse-icon-btn,.dsse-queue,.dsse-btn{transition:none}}
-`
+/* The column draws no edges of its own. Earlier versions ruled the left and top
+   sides and cast a shadow leftwards; the verdict was that the ruling makes the
+   panel look like a separate window rather than part of the conversation, so
+   all three are gone and the column is told apart by its own surface and the
+   cards' outlines instead.
+   Overflow is left visible on purpose. The grab strip hangs 12px outside the
+   left edge, and overflow:hidden was clipping that half away — the strip was
+   20px wide but only 8px of it could be hit. The body below clips its own
+   overflow, so nothing escapes the column. */
+.dsse-monitor{position:absolute;display:flex;flex-direction:column;box-sizing:border-box;background:var(--dsw-alias-bg-base,#fff);border-radius:var(--dsw-radius-md,12px) 0 0 var(--dsw-radius-md,12px);color:var(--dsw-alias-label-primary,#0f1115);font-family:var(--dsse-font-family,inherit);font-size:var(--dsse-font-size,inherit);line-height:var(--dsse-line-height,inherit);pointer-events:auto}
+/* The header is the list's first child, not a sibling above it, so it can be
+   stuck to the top of the one scroller the column has. It carries the column's
+   own surface: cards slide underneath as the list scrolls, and a transparent
+   header would let them show through the queue row and the summary at once.
+   The negative margins cancel the body's horizontal padding so the header's
+   background spans the full column width; the padding puts the insets back. */
+.dsse-col-top{position:sticky;top:0;z-index:2;margin:0 0 8px;padding:0;background:var(--dsw-alias-bg-base,#fff)}
+/* The header's surface is a card, not a band. It used to be stretched past the
+   body's padding with negative margins so its background covered the full
+   column width while scrolling; that made it 20px wider than the cards below
+   it, which is what the eye reads as a broken edge. The wrapper is now nothing
+   but a sticky strip that carries the column's own surface, and the card inside
+   it is sized like every other card: same width, same outline, same radius. */
+.dsse-col-card{border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.1));border-radius:11px;background:var(--dsw-alias-bg-layer-1,#fff);box-shadow:0 2px 8px rgba(15,17,21,.04);padding:8px 10px 6px}
+.dsse-col-top .dsse-top-row{margin-bottom:0}
+/* The previous turn, in the header. One quiet line saying how fresh the telling
+   is, then the telling. The rules are the card's rules, moved: same fade, same
+   cap, so a summary behaves the same way in either place. */
+.dsse-recap{position:relative;margin-top:8px;padding-top:8px;border-top:1px solid var(--dsw-alias-border-l1,rgba(15,17,21,.06))}
+.dsse-recap[data-clickable="true"]{cursor:pointer}
+/* No strip reserved under the text. The badge floats over the last line the
+   fade is already covering, so a folded summary is exactly five lines tall —
+   it used to reserve 24px for a circle that only appears on hover, and the
+   empty band under the text is what made four lines look like a mistake. */
+.dsse-recap[data-clickable="true"] .dsse-clip::after{height:34px}
+.dsse-recap-when{display:flex;align-items:center;gap:6px;margin:0 0 5px;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);line-height:1.4}
+.dsse-recap-dot{flex:0 0 auto;width:5px;height:5px;border-radius:999px;background:var(--dsw-alias-brand-primary,#2f4bd8);opacity:.55}
+/* Five lines, not four. dsse-tiny is 0.86em with line-height 1.55, so one line
+   is 1.333em and five is 6.67em; the cap is stated in the same unit as the text
+   so the two cannot drift apart. */
+.dsse-recap .dsse-text{max-height:calc(5 * 1.55 * 1em)}
+.dsse-recap[data-expanded="true"] .dsse-text{max-height:none}
+.dsse-recap .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:30px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
+/* The scrolling body of the column, and the rail it holds. Both were casualties
+   of the pass that deleted the old gutter layout: the body lost its own rule and
+   kept only the two descendant ones below, so the column had no scroller at all,
+   and the cards — which are a plain flex column when embedded — were cut off by
+   the column's own overflow:hidden the moment the width was dragged in. The rail
+   likewise kept its floating rule's position:absolute and collapsed. */
+.dsse-monitor-body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:8px 10px 10px;scrollbar-width:thin}
+.dsse-rail[data-embedded="true"]{position:static;width:auto;height:auto;max-height:none;overflow:visible;padding:0;gap:10px}
+.dsse-monitor-body .dsse-card{box-shadow:none}
+.dsse-monitor-body .dsse-icon-btn{width:30px;height:30px;border-radius:7px}
+/* The grab strip reaches well outside the column edge and is wider than it
+   looks. At 8px it sat exactly under the border, which meant the pointer had to
+   find a line one pixel wide between two things that both look like edges; the
+   report was that dragging cards near the edge was awkward. The visible line
+   stays 3px so the edge still reads as an edge. */
+.dsse-monitor-grip{position:absolute;left:-12px;top:0;bottom:0;width:20px;cursor:col-resize;touch-action:none;display:flex;justify-content:flex-end;align-items:center}
+.dsse-monitor-grip::after{content:"";width:3px;height:34px;border-radius:999px;background:transparent;transition:background-color 160ms ease}
+.dsse-monitor-grip:hover::after,.dsse-monitor-grip[data-dragging="true"]::after{background:var(--dsw-alias-state-business-primary,rgba(77,107,254,.55))}
+html[data-dsse-monitor="1"] [data-conversation-content] [data-conversation-scroll]{margin-right:var(--dsse-monitor-reserve,0px)}
+html[data-dsse-monitor="1"] [data-conversation-content] [data-width-handle="right"]{display:none}
+/* The host hides its turn rail whenever the scrolling container is 900px or
+   narrower: @container (width<=900px){...display:none}. That container is the
+   rail's own slot, and its width is the scroll area minus 32px of padding a
+   side. The measurement is of the area, not of the room the prose leaves in it,
+   and those differ by a lot: 1160px of area with 742px of prose leaves 209px a
+   side, five times the 40 the rail spends, and the host hides it anyway.
 
+   Our column narrows that area, which is why the rail vanished the moment the
+   column was wide enough to be worth having, and came back when it was dragged
+   thin again. That report is the whole reason this rule exists.
+
+   A width query at 900px cannot answer the question either. Whether the rail
+   has room is a question about the room the prose leaves beside itself, and the
+   host's query never looks at the prose — so it hides the rail on windows that
+   have five times the space the rail needs.
+
+   An earlier version answered it anyway, measuring the gutter and publishing a
+   yes/no. That was wrong for two reasons and both of them were the same bug:
+   the measurement was taken against an area that already had this column's
+   reservation subtracted from it, so on the default column it read as "no room"
+   at every window size the panel was used at; and even measured correctly it
+   would have hidden the rail in cases where the rail fits, because the prose's
+   centred box leaves half of the leftover space a side and only the right half
+   is the rail's to use.
+
+   So this rule does not ask. While our column is on, we have already paid the
+   rail's 40px out of the column's budget in placeMonitor — the budget goes to
+   the rail first and the column takes what is left — and the rule below spends
+   that budget by showing the rail the host decided to hide. When the column is
+   off we have taken no width, the host's own threshold is the correct one, and
+   we stay out of its way.
+
+   The class is a CSS-module hash and will change when the host is rebuilt; the
+   aria-label is the stable fallback. Matching neither costs the rail, never the
+   conversation. */
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav[class*="SNx2jG_frame"],
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav[aria-label="轮次导航"],
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav[aria-label="Turn navigation"],
+/* Structural fallback. TurnNavigator is the only nav inside the conversation
+   scroll body (the breadcrumb nav lives in the header). The three selectors
+   above key on a CSS-module hash and two translations, any of which can differ
+   between the asar the bundle was read from and the build actually running; a
+   mismatch there leaves only the host's 900px query, which hides the rail. This
+   selector has nothing to drift, so the rule holds even when they do not match. */
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !important;visibility:visible !important;pointer-events:auto !important}
+
+/* Retire a stand-in rail once the host's own rail is back.
+   The claude-style theme ships a "redraw the turn rail" feature that marks the
+   host nav with data-dsh-claude-turn-nav-replaced, hides it with visibility and
+   pointer-events, and paints its own .dsh-claude-turn-rail into the same slot.
+   We re-show the host nav, so that stand-in is a second rail drawn over the
+   first — and the two do not agree on geometry. Measured in the desktop app
+   they shared x 1263..1291 but ran 281..543 against 292..532, an 11px offset
+   that reads as the rail being misaligned. The stand-in carries its own
+   @container (width<=900px){display:none}, which is why the doubling came and
+   went as the column was dragged: a 978px slot minus 64px of padding is 914,
+   just over its threshold, and narrowing the column pushed it back under.
+   Hiding the stand-in leaves exactly one rail, the host's, at every width. Its
+   own markup is aria-hidden, so nothing is lost for screen readers. */
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
+
+/* No stacking lift is needed, and one was tried. The column is drawn beside the
+   scroll area rather than over it: measured in a live session the scroll area
+   ran 280..475, the rail 425..453, and the column 475..695 — the rail ends
+   exactly where the column begins. An earlier rule raised the slot's z-index to
+   30 on the theory that the column covered the rail. That theory came from a
+   probe which had moved the column by hand without moving the reservation with
+   it, so the overlap it measured was an artefact of the probe rather than a
+   property of the layout. Keeping the rule would only disturb the host's
+   stacking to fix a collision that does not happen. */
+`
     let typographyObserver = null
     let typographyContent = null
 
@@ -828,7 +1042,7 @@ window.__ModuleLoader__.load({
      * re-reads it on every fetch, and a stale id would only cost one discarded
      * response.
      */
-    const bridge = { sessionId: "", open: false, side: "left", collapsed: false, listeners: new Set() }
+    const bridge = { sessionId: "", open: true, monitorWidth: 0, listeners: new Set() }
 
     /**
      * Where output-file rows ask for a preview.
@@ -858,39 +1072,161 @@ window.__ModuleLoader__.load({
       for (const listener of bridge.listeners) listener()
     }
 
+    /**
+     * Hand prose width to the monitor column, or take it back.
+     *
+     * The column is drawn in `shell.overlay`, which the host lays *over* the
+     * conversation rather than inside it, so nothing makes room for it on its own.
+     * The one lever that does is a margin on the host's scroll container, applied
+     * by the rule keyed on `data-dsse-monitor` in the stylesheet above; the value
+     * travels through a custom property because that is the only thing both the
+     * overlay and the host's scroller can see.
+     *
+     * Both writes are guarded. The attribute comes from `setAttribute`, which a
+     * non-element root may not have — a Host (or a test harness) whose
+     * `documentElement` carries only `style` still draws the column, it just
+     * covers the prose instead of reserving room. The property is skipped when the
+     * number did not change, because re-setting an identical custom property still
+     * invalidates style for the document and this runs on every frame of a resize.
+     *
+     * The turn-rail attribute rides on the same write and is the column's own
+     * state, not a second measurement: while there is a column, its width budget
+     * has already been reduced to leave the rail its 40px, so the rail is shown.
+     * See the rule keyed on `data-dsse-turn-rail` in the stylesheet for why the
+     * bundle must answer that and the host's 900px query must not.
+     *
+     * @param {number} reserve - pixels of prose to hand over; 0 releases them.
+     */
+    function applyMonitorReserve(reserve) {
+      if (typeof document === "undefined") return
+      const root = document.documentElement
+      if (root === undefined || root === null) return
+      const width = Number.isFinite(reserve) && reserve > 0 ? Math.round(reserve) : 0
+      if (typeof root.setAttribute === "function") {
+        const wanted = width > 0 ? "1" : "0"
+        if (typeof root.getAttribute !== "function" || root.getAttribute("data-dsse-monitor") !== wanted) {
+          root.setAttribute("data-dsse-monitor", wanted)
+        }
+        // Same value as the reservation, so the two cannot disagree about whether
+        // we are the reason the scroll area is narrow.
+        if (typeof root.getAttribute !== "function" || root.getAttribute("data-dsse-turn-rail") !== wanted) {
+          root.setAttribute("data-dsse-turn-rail", wanted)
+        }
+      }
+      const value = `${width}px`
+      if (value === appliedReserve) return
+      appliedReserve = value
+      if (root.style !== undefined && root.style !== null) root.style.setProperty(MONITOR_RESERVE_PROP, value)
+    }
+
+    /**
+     * Force the host's turn rail to stay visible while our column is open.
+     *
+     * The stylesheet carries three selectors for this (plus a structural one),
+     * but isolation proved the cascade is fine and the real GUI still hid the
+     * rail: the running build's CSS-module hash or aria-label translation did
+     * not match what the bundle was authored against, so only the host's own
+     * 900px container query answered and the rail vanished until the column was
+     * narrowed. An inline style wins over that non-important query regardless
+     * of how the host hashes its classes or translates its labels, and searching
+     * the document rather than a CSS selector removes the last thing that could
+     * drift. TurnNavigator is the only nav inside the conversation scroll body;
+     * the breadcrumb nav is in the header and is deliberately left alone.
+     *
+     * @param {boolean} visible - true to hold the rail open, false to release it.
+     * @returns {number} how many rail nodes were touched (useful to tests).
+     */
+    /**
+     * Whether the host has its right column open.
+     *
+     * The host publishes both facts on the frame, written with the
+     * `flag || void 0` idiom -- React drops an `undefined` attribute -- so the
+     * attribute's *absence* is what says "open":
+     *
+     *   data-sidebar-collapsed   the LEFT column, the session list
+     *   data-rightbar-collapsed  the RIGHT column, where previews open
+     *
+     * This has to read the right one. The left column is open in the default
+     * layout, so `data-sidebar-collapsed` is absent on an ordinary screen, and
+     * binding to it answered "the sidebar is open" everywhere -- which skipped
+     * the column on every render and is why the panel went missing in the
+     * desktop app *and* in the browser.
+     *
+     * The right column is also the one that competes for the space: it takes
+     * 400-570px out of the centre, which is the room this column wanted. The
+     * left column costs nothing here; the conversation was never going to use
+     * it.
+     *
+     * The frame has no stable class or id, so it is reached through the overlay
+     * layer, which is a literal `data-shell-overlay` member of it.
+     *
+     * A frame that cannot be reached reads as "not open", which is the answer
+     * that changes nothing: this overlay is mounted *inside* that layer, so its
+     * absence means the host is not the one we know, and closing the panel on
+     * that guess would hide it for reasons the reader could never see.
+     *
+     * @returns {boolean} true when the host's right column is open.
+     */
+    function sidebarOpen() {
+      if (typeof document === "undefined") return false
+      if (typeof document.querySelector !== "function") return false
+      const overlay = document.querySelector("[data-shell-overlay]")
+      if (overlay === null || overlay === undefined) return false
+      const frame = overlay.parentElement
+      if (frame === null || frame === undefined) return false
+      if (typeof frame.hasAttribute !== "function") return false
+      return frame.hasAttribute("data-rightbar-collapsed") === false
+    }
+
+    function forceTurnRail(visible) {
+      if (typeof document === "undefined") return 0
+      if (typeof document.querySelectorAll !== "function") return 0
+      const nodes = document.querySelectorAll("[data-conversation-scroll] nav")
+      let touched = 0
+      for (const node of nodes) {
+        if (node === null || node === undefined) continue
+        // Leave the header breadcrumb nav alone even if a host nests one here.
+        const label = typeof node.getAttribute === "function" ? (node.getAttribute("aria-label") ?? "") : ""
+        if (/hierarchy|breadcrumb/i.test(label)) continue
+        if (node.style === undefined || node.style === null) continue
+        if (visible === true) {
+          node.style.display = "block"
+          node.style.zIndex = "21"
+          // The host can hide the whole conversation subtree with
+          // visibility:hidden, and visibility inherits: a nav carrying
+          // display:block and full size is still invisible when an ancestor
+          // says hidden. That is exactly what the desktop app showed — the rail
+          // measured 28x192 with 19 marks and correct ::before colours, yet
+          // elementFromPoint fell through to the scroll body. Declaring
+          // visibility here re-shows the rail without touching the ancestor,
+          // which may be hiding other things on purpose.
+          node.style.visibility = "visible"
+          // The rail also has to take the mouse back. Its parent slot is
+          // pointer-events:none on purpose — the slot spans the whole scroll
+          // area and must not swallow clicks meant for the conversation — and
+          // the rail only becomes clickable because the host's own stylesheet
+          // sets pointer-events:auto on it. On the desktop build that computed
+          // to none anyway: the rail measured 28x222, hover previews only
+          // appeared for synthesized events, and elementFromPoint fell through
+          // to the scroll body, so the rail could not be hovered or clicked
+          // with a real mouse. Declaring it here restores the behaviour the
+          // host intended without making the slot opaque to the pointer.
+          node.style.pointerEvents = "auto"
+          touched++
+        } else {
+          if (node.style.display === "block") delete node.style.display
+          if (node.style.zIndex === "21") delete node.style.zIndex
+          if (node.style.visibility === "visible") delete node.style.visibility
+          if (node.style.pointerEvents === "auto") delete node.style.pointerEvents
+        }
+      }
+      return touched
+    }
+
     // <gutter>
     // Generated from lib/gutter.js by scripts/sync-gutter.mjs. Do not edit here:
     // edit the module, re-run the sync, and the drift test will confirm the two
     // agree. The bundle cannot import because it is a browser script.
-    /** Narrowest column worth drawing. Below this the text wraps to unreadable. */
-    const MIN_CARD_WIDTH = 168
-
-    /** Widest column. Wider than this and it stops reading as a sidebar. */
-    const MAX_CARD_WIDTH = 300
-
-    /** Space kept between the prose and the cards, and between cards and the edge. */
-    const CARD_GAP = 16
-
-    /** Space kept above the cards, so they never touch the tab strip. */
-    const TOP_INSET = 12
-
-    /** Space kept below the cards, so they never sit on the composer. */
-    const BOTTOM_INSET = 12
-
-    /**
-     * Width of the collapsed handle, matching `.dsse-handle` in the bundle.
-     *
-     * It has its own placement rule rather than reusing the cards' edge, because it
-     * is wider than the gap between the cards and the prose: anchored on the cards'
-     * edge it would either land on the text (left side) or float in the middle of
-     * nothing (right side). Anchored to the prose it reads as a tab attached to the
-     * card and can never cover a word.
-     *
-     * Kept equal to the CSS width: the number is used for geometry, so a drift here
-     * is a visible misalignment that no other assertion would catch.
-     */
-    const HANDLE_WIDTH = 16
-
     /**
      * Space kept between any popover and the edge of the viewport.
      *
@@ -948,9 +1284,6 @@ window.__ModuleLoader__.load({
       return edges.every((edge) => Number.isFinite(rect[edge]))
     }
 
-    /** The horizontal pair, which is all a gutter measurement needs. */
-    const HORIZONTAL = ['left', 'right']
-
     /** All four edges, which is what a placement needs. */
     const ALL_EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -995,212 +1328,6 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /**
-     * Measure the two gutters beside the prose, within the conversation column.
-     *
-     * The column is the outer bound, not the frame: everything outside the
-     * conversation column belongs to the host (its sidebar, its tab strip), and
-     * drawing there puts plugin UI on top of host UI. The prose is centred inside
-     * the column, so the usable space on a side is the gap between the two.
-     *
-     * Both arguments are expected to be already snapped by {@link snap}; treated as
-     * integers the two subtractions are exact, and flooring them again is a no-op
-     * that only documents the intent.
-     *
-     * @param {{ left: number, right: number }} chatRect - the prose's horizontal extent.
-     * @param {{ left: number, right: number }} [columnRect] - the conversation column; defaults to the prose when absent.
-     * @returns {{ left: number, right: number }} empty space on each side, never negative.
-     */
-    function gutters(chatRect, columnRect) {
-      const clean = (value) => (Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0)
-      // No usable prose means no space that is provably ours. Returning a zero gutter
-      // rather than guessing keeps the failure mode "no panel" instead of "panel on
-      // top of the sidebar".
-      if (!usableRect(chatRect, HORIZONTAL)) return { left: 0, right: 0 }
-      const proseLeft = chatRect.left
-      const proseRight = chatRect.right
-      // Falling back to the prose rather than to the window keeps the failure mode
-      // "no room" instead of "draw over the sidebar": with no column known there is
-      // no space that is provably ours.
-      const columnLeft = Number.isFinite(columnRect?.left) ? columnRect.left : proseLeft
-      const columnRight = Number.isFinite(columnRect?.right) ? columnRect.right : proseRight
-      return {
-        left: clean(proseLeft - columnLeft),
-        right: clean(columnRight - proseRight),
-      }
-    }
-
-    /**
-     * Decide where a card column goes, or that it cannot go anywhere.
-     *
-     * Deliberately picks one side and never both: two columns of small text flanking
-     * the prose compete with the prose, and the point of these cards is to be
-     * glanceable, not to be a second reading surface.
-     *
-     * @param {object} input - the measurement.
-     * @param {{ left: number, top: number, right: number, bottom: number }} input.chatRect - the prose block.
-     * @param {{ left: number, top: number, right: number, bottom: number }} [input.columnRect] - the conversation column; defaults to the prose.
-     * @param {'left'|'right'} [input.side] - the preferred side; ignored when it has no room.
-     * @param {number} [input.cardWidth] - desired width before clamping.
-     * @returns {{ visible: boolean, side: 'left'|'right', left: number, top: number, width: number, height: number, reason?: string }} the box, or `visible: false` with a reason.
-     */
-    function placeCards(input) {
-      const chatRect = input?.chatRect
-      const columnRect = input?.columnRect ?? chatRect
-      const side = input?.side === 'right' ? 'right' : 'left'
-      const wanted = Number(input?.cardWidth ?? MAX_CARD_WIDTH)
-
-      // Every edge must be a real number. A rect missing one of them is a failed
-      // measurement, not a box at zero — and treating it as the latter put a card at
-      // x=16 while the gutter arithmetic believed there was room to the right.
-      if (!usableRect(chatRect, ALL_EDGES)) {
-        return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }
-      }
-      if (columnRect !== null && columnRect !== undefined && !usableRect(columnRect, ALL_EDGES)) {
-        return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }
-      }
-
-      const { prose, column } = snap(chatRect, columnRect ?? chatRect)
-      const room = gutters(prose, column)
-      const preferred = side
-      const other = side === 'left' ? 'right' : 'left'
-
-      // The requested side wins while it fits; the other side is only a fallback for
-      // when it does not. Ordering by "whichever is wider" looked reasonable and was
-      // wrong: the left gutter is wider than the right on any window with a left
-      // sidebar, which is the default, so a 'right' preference was silently flipped
-      // back to 'left' almost everywhere. Cards that vanish when the window shrinks
-      // still look like a bug, hence the fallback rather than nothing.
-      const order = [preferred, other]
-
-      for (const candidate of order) {
-        // Both gaps come out of the gutter, not one:
-        //
-        //   [ column edge | CARD_GAP | card | CARD_GAP | prose ]
-        //
-        // An earlier version of this line subtracted a single gap, which let the card
-        // grow until it touched the column edge: on 1100–1400px windows the card sat
-        // at x=0 with a 0px margin, contradicting both the `CARD_GAP` doc comment and
-        // the "cards do not touch the column edge" assertion.
-        const usable = room[candidate] - CARD_GAP * 2
-        if (usable < MIN_CARD_WIDTH) continue
-        // `wanted` is caller input, so it cannot be trusted to be a width. A NaN
-        // passes `usable < MIN_CARD_WIDTH` untouched (NaN compares false to
-        // everything), and a negative number survives Math.min — both then reach the
-        // DOM as `width:NaNpx` / a negative width, which the browser discards, leaving
-        // a card that collapsed to its content. The left side was accidentally immune
-        // because a `left` finiteness check caught the NaN; the right side was not,
-        // which is exactly the kind of one-sided accident that hides until the caller
-        // changes. Rejecting a non-width here makes both sides agree.
-        //
-        // A *positive* width below MIN_CARD_WIDTH is honoured rather than rejected:
-        // the gutter check above already guarantees the card fits, and a caller asking
-        // for something narrower than the default is asking for something narrower than
-        // the default. Only values that cannot be a width are refused.
-        //
-        // `Math.floor` rather than a round: the width must not exceed the budget, or
-        // the card grows past the column edge the budget came from.
-        const width = Math.floor(Math.min(MAX_CARD_WIDTH, wanted, usable))
-        if (!Number.isFinite(width) || width <= 0) continue
-        // Hugging the prose, not the frame edge. The gap is the only thing between
-        // the cards and the text, which is what makes them read as an annotation of
-        // the conversation rather than as a second sidebar.
-        //
-        // The prose edges are already rounded outward, so `prose.left - CARD_GAP -
-        // width` is at most the real value: the card cannot reach the text. On the
-        // right, `prose.right + CARD_GAP` is at least the real value for the same
-        // reason.
-        const left = candidate === 'left' ? prose.left - CARD_GAP - width : prose.right + CARD_GAP
-        const top = prose.top + TOP_INSET
-        const bottom = prose.bottom - BOTTOM_INSET
-        return {
-          visible: true,
-          side: candidate,
-          // Not clamped to zero: a negative `left` would mean the column starts off
-          // screen, and silently moving the card to 0 is what put it over the host's
-          // sidebar. If the arithmetic says negative, the measurement was wrong.
-          left,
-          top: Math.max(0, top),
-          width,
-          height: Math.max(0, bottom - top),
-        }
-      }
-
-      return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-room' }
-    }
-
-    /**
-     * Where the collapsed handle goes: the same edge as the cards, hugging the prose.
-     *
-     * The handle is anchored to the prose edge rather than to the cards' edge. While
-     * `HANDLE_WIDTH` equals `CARD_GAP` the two rules agree, but they stop agreeing the
-     * moment either constant moves: anchored to the cards, a wider handle would sit on
-     * the text and a narrower one would leave a gap that reads as a misalignment.
-     * Anchored to the prose, the handle's outer edge *is* the text's edge at any width,
-     * so the one thing that must never happen — a control on top of a paragraph —
-     * cannot.
-     *
-     * With no cards at all there is no card edge to tuck under, so the handle needs its
-     * full width of clear gutter — otherwise a narrow window would strand the panel
-     * with no way to reopen it. That is why the fallback checks *both* gutters: on an
-     * asymmetric window the requested side can be too narrow while the other is not,
-     * and refusing outright would leave the panel unreachable.
-     *
-     * @param {object} input - the same measurement `placeCards` takes.
-     * @returns {{ visible: boolean, side: 'left'|'right', left: number, top: number }} the handle's box.
-     */
-    function placeHandle(input) {
-      const chatRect = input?.chatRect
-      const columnRect = input?.columnRect ?? chatRect
-      const preferred = input?.side === 'right' ? 'right' : 'left'
-      const other = preferred === 'left' ? 'right' : 'left'
-
-      // Same rule as `placeCards`, for the same reason: a rect missing an edge is a
-      // failed measurement, not a box at zero. Diverging here meant one function
-      // refused an incomplete rect while the other silently drew a handle at top 60.
-      if (!usableRect(chatRect, ALL_EDGES)) {
-        return { visible: false, side: preferred, left: 0, top: 0 }
-      }
-      if (columnRect !== null && columnRect !== undefined && !usableRect(columnRect, ALL_EDGES)) {
-        return { visible: false, side: preferred, left: 0, top: 0 }
-      }
-
-      // The same rounding the cards used, so the fallback gutter check and the anchor
-      // below divide the same integers.
-      const { prose, column } = snap(chatRect, columnRect ?? chatRect)
-      const room = gutters(prose, column)
-
-      const placed = placeCards(input)
-      let side = preferred
-      if (placed.visible) {
-        side = placed.side
-      } else if (room[preferred] >= HANDLE_WIDTH) {
-        side = preferred
-      } else if (room[other] >= HANDLE_WIDTH) {
-        side = other
-      } else {
-        return { visible: false, side: preferred, left: 0, top: 0 }
-      }
-
-      // Anchored to the prose: the handle's outer edge *is* the prose edge, so it can
-      // never cover a word. On the left that means starting HANDLE_WIDTH before the
-      // text; on the right it means starting exactly at the text.
-      //
-      // Containment is a consequence of the gutter check above rather than a clamp
-      // here, and that is worth stating because a clamp used to be here. On integers
-      // `room.left >= HANDLE_WIDTH` means `prose.left - column.left >= HANDLE_WIDTH`,
-      // so `prose.left - HANDLE_WIDTH >= column.left`: the anchor is inside the
-      // column by construction. The clamp was unreachable then and is unreachable now,
-      // so the invariant is asserted in the sweeps instead of guarded by dead code.
-      const left = side === 'left' ? prose.left - HANDLE_WIDTH : prose.right
-
-      return {
-        visible: true,
-        side,
-        left,
-        top: Math.max(0, placed.visible ? placed.top + 48 : prose.top + TOP_INSET + 48),
-      }
-    }
 
     /**
      * Settle a vertical position inside the viewport.
@@ -1355,6 +1482,148 @@ window.__ModuleLoader__.load({
 
       return { visible: true, left, top, width, side }
     }
+
+
+    /**
+     * The narrowest monitor column that still reads.
+     *
+     * Below this the cards' own padding and a file path's two halves stop fitting on
+     * one line each, and a column that wraps every row is worse than no column: it
+     * costs the prose width and gives back noise. Higher than `MIN_CARD_WIDTH`
+     * because this column also carries its own header row.
+     */
+    const MONITOR_MIN_WIDTH = 220
+
+    /**
+     * The widest monitor column before it stops reading as an annotation.
+     *
+     * Past this the column competes with the prose for attention, which is the thing
+     * the gutter layout was already careful about. 460 is the widest the prototype
+     * was measured at.
+     */
+    const MONITOR_MAX_WIDTH = 460
+
+    /**
+     * The prose width the column refuses to go below.
+     *
+     * The host's own clamp bottoms out at 680px (`--dsh-chat-content-width:
+     * clamp(680px, ...)`), and 560 is deliberately under that: on a window narrow
+     * enough to matter, taking the column down to its minimum and keeping 560 of
+     * prose is a better trade than dropping the column, because dropping it is what
+     * left the panel invisible on the windows where it was wanted.
+     */
+    const MONITOR_MIN_PROSE = 560
+
+    /**
+     * The width the host's own turn rail takes at the right edge of the scroll area.
+     *
+     * The rail's frame is 28px wide and sits 12px in from that edge, so its left
+     * edge is 40px from it. The prose is centred in the scroll area, so each side
+     * gets half of what the prose does not use and the rail sits on the right one —
+     * which is why the column's budget below subtracts twice this number.
+     *
+     * This is a budget, not a measurement. The rail's visibility is not decided from
+     * it: see the note on `placeMonitor`.
+     */
+    const TURN_RAIL_WIDTH = 40
+
+    /**
+     * Work out the monitor column's box, and how much the prose must give up.
+     *
+     * The column is pinned to the conversation column's right edge and the prose is
+     * asked to narrow by exactly the column's width, so the two never compete.
+     *
+     * The prose is measured by its *centred box*, so the caller implements the
+     * reservation as `margin-right` on the scrolling container rather than as
+     * padding: padding on a centred box only moves it left by half the amount, which
+     * made an earlier version subtract the width twice and look correct in one
+     * screenshot while being wrong at every other width. `reserve` below is the
+     * number that goes into that margin, and it is the column width — not double.
+     *
+     * Three budgets decide the width, and the column takes the smallest:
+     *
+     * 1. What the person asked for, clamped to `[MONITOR_MIN_WIDTH, MONITOR_MAX_WIDTH]`.
+     * 2. `MONITOR_MIN_PROSE` — the prose keeps a floor.
+     * 3. The turn rail. The host's rail sits at the scroll area's right edge, which
+     *    is exactly where this column starts, so a column that eats the whole area
+     *    leaves the rail nowhere regardless of what the host's own query says. Where
+     *    the two disagree, the rail wins the argument down to `MONITOR_MIN_WIDTH`:
+     *    a slightly narrower column is worth having and a missing rail is not.
+     *
+     *    This is a *budget*, not a verdict: it decides how wide the column may be,
+     *    never whether the rail is shown. The rail's visibility is decided in the
+     *    bundle, which forces it on whenever this column is; asking here whether it
+     *    "fits" and then hiding it on a no was the bug that kept it invisible.
+     *
+     * The column is *not* dropped when the budgets run out. It used to be, and that
+     * was wrong twice over: it made the panel disappear on the windows where a
+     * narrow column would still have been readable, and it handed the user a second
+     * layout to be confused by — the one this column replaced. Below
+     * `MONITOR_MIN_WIDTH` of available area there is genuinely nothing to draw, and
+     * that is the only case that reports `visible: false`.
+     *
+     * @param {object} input - the measurement.
+     * @param {{ left: number, top: number, right: number, bottom: number }} input.columnRect - the conversation column.
+     * @param {number} [input.width] - the width the person last chose.
+     * @param {number} [input.proseWidth] - the prose's measured width, if known.
+     * @param {number} [input.scrollbarWidth] - the scroll area's scrollbar, if any.
+     * @returns {{ visible: boolean, left: number, top: number, width: number, height: number, reserve: number, reason?: string }}
+     *   the column's box relative to its own origin, and the width the prose must give up.
+     */
+    function placeMonitor(input) {
+      const column = input?.columnRect
+      const idle = { visible: false, left: 0, top: 0, width: 0, height: 0, reserve: 0 }
+
+      // A column missing an edge is a failed measurement, not a box at zero — the
+      // same rule the placement functions above follow, for the same reason.
+      if (!usableRect(column, ALL_EDGES)) return { ...idle, reason: 'no-conversation' }
+
+      const { column: snapped } = snap(column, column)
+      const full = Math.max(0, snapped.right - snapped.left)
+      const height = Math.max(0, snapped.bottom - snapped.top)
+      if (full <= 0 || height <= 0) return { ...idle, reason: 'no-conversation' }
+      // The one case with no answer: an area narrower than the narrowest column.
+      if (full < MONITOR_MIN_WIDTH) return { ...idle, reason: 'too-narrow' }
+
+      // What the person asked for. `wanted` cannot be trusted to be a width: a NaN
+      // passes every comparison untouched and reaches the DOM as `width:NaNpx`, which
+      // the browser discards, leaving a column that collapsed to its content.
+      const asked = Number(input?.width)
+      const wanted = Number.isFinite(asked) && asked > 0 ? asked : MONITOR_MAX_WIDTH
+
+      // The prose's own width when it was measurable, and the floor when it was not.
+      // The larger of the two is the one the column has to respect.
+      const measured = Number(input?.proseWidth)
+      const prose = Math.max(MONITOR_MIN_PROSE, Number.isFinite(measured) && measured > 0 ? measured : 0)
+      const scrollbar = Number(input?.scrollbarWidth)
+      const bar = Number.isFinite(scrollbar) && scrollbar > 0 ? scrollbar : 0
+
+      // Budget 2 and budget 3, both as the widest column that leaves what they need.
+      const forProse = full - prose
+      const forRail = full - bar - prose - TURN_RAIL_WIDTH * 2
+
+      let width = Math.floor(Math.min(MONITOR_MAX_WIDTH, wanted, forProse))
+      // Give the rail its room back. Only downwards: a column narrower than the rail
+      // needs does not make the rail need more.
+      if (Number.isFinite(forRail) && width > forRail) width = Math.floor(forRail)
+      // The floor wins over both budgets. A column at its minimum that pushes the
+      // prose under its own floor is the lesser evil: the prose re-wraps, the panel
+      // would otherwise vanish. At that size the rail may well sit on the gutter's
+      // last few pixels, which is the trade the caller makes deliberately — see the
+      // turn-rail rule in the bundle.
+      if (width < MONITOR_MIN_WIDTH) width = MONITOR_MIN_WIDTH
+
+      return {
+        visible: true,
+        left: snapped.right - width,
+        top: snapped.top,
+        width,
+        height,
+        // Not `width * 2`. See the doc comment: the prose is centred, so one
+        // margin of exactly this much is what actually narrows it by this much.
+        reserve: width,
+      }
+    }
     // </gutter>
 
     /**
@@ -1396,6 +1665,33 @@ window.__ModuleLoader__.load({
         proseWidth = Math.min(920, Math.max(680, Math.round(contentRect.width * 0.64)))
       }
 
+      // The scrolling area, which is the box the prose is centred in and the box
+      // the host's turn rail positions itself against. It is *not* the same as the
+      // conversation column: the column carries a two-pixel scroll gutter and the
+      // area carries the scrollbar, and both are width the rail cannot use. An
+      // earlier version of the rail test read the column's border-box width, over-
+      // reported the gutter by half a scrollbar, and called a 38px gutter "40" —
+      // the rail it then drew sat on the last line of the reply.
+      const scrollArea = document.querySelector("[data-conversation-scroll]")
+      let scrollClientWidth = 0
+      let scrollbarWidth = 0
+      if (scrollArea !== null && scrollArea !== undefined) {
+        const areaNode = scrollArea
+        const areaWidth = Number(areaNode.getBoundingClientRect().width)
+        const inner = Number(areaNode.clientWidth)
+        if (Number.isFinite(inner) && inner > 0) {
+          scrollClientWidth = inner
+          // `clientWidth` excludes the scrollbar and the border, `getBounding-
+          // ClientRect().width` includes both. The difference is exactly what the
+          // rail loses, and it is zero on a host that is not rendering one.
+          if (Number.isFinite(areaWidth) && areaWidth > inner) {
+            scrollbarWidth = Math.max(0, Math.round(areaWidth - inner))
+          }
+        } else if (Number.isFinite(areaWidth) && areaWidth > 0) {
+          scrollClientWidth = Math.round(areaWidth)
+        }
+      }
+
       const inset = Math.max(0, Math.round((contentRect.width - proseWidth) / 2))
       const frame = host === null || host === undefined ? null : host.getBoundingClientRect()
       const originLeft = frame === null ? contentRect.left : contentRect.left - frame.left
@@ -1413,6 +1709,12 @@ window.__ModuleLoader__.load({
 
       return {
         phase,
+        // The area's inner width, with the scrollbar already taken out. It feeds
+        // the column's width budget, which spends part of it on the rail. Zero
+        // when the host did not publish an area, which callers read as "cannot
+        // tell".
+        scrollWidth: scrollClientWidth,
+        scrollbarWidth,
         // Relative to the overlay container, which is what absolute positioning
         // inside it uses.
         chatRect: {
@@ -1488,6 +1790,85 @@ window.__ModuleLoader__.load({
       })
     }
 
+    /**
+     * The previous turn, written into the column's header instead of a card.
+     *
+     * It is the same summary the 上一轮 card used to draw, minus the card: the
+     * title and the three counts (calls, commands, files) are gone because they
+     * answered "how much did that turn cost", and the header answers "what
+     * happened". What is left is one quiet line saying how fresh the telling is,
+     * then the telling itself.
+     *
+     * The fade and the click are the same contract the card had, so the reader
+     * does not have to learn a second one: nothing hidden means nothing to
+     * click, and the block only takes a tab stop when there is something to
+     * reveal.
+     *
+     * @param {object} props - injected props.
+     * @returns {object} the element.
+     */
+    function Recap(props) {
+      const ago = typeof props.ago === "string" ? props.ago : ""
+      const detail = typeof props.detail === "string" ? props.detail : ""
+      const expanded = props.expanded === true
+      const interactive = typeof props.onClick === "function" && props.clickable === true
+      return jsxs('div', {
+        className: 'dsse-recap',
+        'data-clickable': interactive === true ? 'true' : 'false',
+        'data-expanded': expanded === true ? 'true' : 'false',
+        // What the badge says, and whether it is drawn at all. The card this
+        // replaces carried the same two facts; only the box around them moved.
+        'data-hint': props.hint === undefined ? 'false' : 'true',
+        onMouseEnter: typeof props.onMouseEnter === 'function' ? props.onMouseEnter : undefined,
+        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,
+        onClick: interactive === true ? props.onClick : undefined,
+        onKeyDown: interactive === false
+          ? undefined
+          : (event) => {
+              if (event === null || event === undefined) return
+              if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return
+              if (typeof event.preventDefault === 'function') event.preventDefault()
+              props.onClick()
+            },
+        tabIndex: interactive === true ? 0 : undefined,
+        role: interactive === true ? 'button' : undefined,
+        'aria-expanded': interactive === true ? expanded : undefined,
+        'aria-label': interactive === true ? props.hint : undefined,
+        children: [
+          // Only dated when there is something dated. A failed summary has no
+          // time, and inventing one would invite the reader to wait for a retry
+          // that is never scheduled.
+          ago === ''
+            ? null
+            : jsxs('p', {
+                className: 'dsse-recap-when',
+                children: [
+                  jsx('span', { className: 'dsse-recap-dot', 'aria-hidden': 'true' }),
+                  jsx('span', { title: props.stamp, children: `更新于 ${ago}` }),
+                ],
+              }),
+          jsx(Clip, {
+            text: props.text,
+            title: detail === '' ? undefined : detail,
+            expanded,
+            onClipped: props.onClipped,
+          }),
+          // The same badge the card carried, in the same place. A summary that
+          // fits draws none: an offer to reveal nothing is a lie the pointer pays
+          // for. It is decoration -- the whole block takes the click -- so there is
+          // no tab stop here and no `title`; `aria-label` carries the words.
+          props.hint === undefined
+            ? null
+            : jsx('div', {
+                className: 'dsse-expand',
+                role: 'img',
+                'aria-label': props.hint,
+                children: jsx(Icon, { name: 'chevron', up: expanded }),
+              }),
+        ],
+      })
+    }
+
     function Icon(props) {
       if (props.name === 'close') return jsx('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: jsx('path', { d: 'M6 6l12 12M18 6L6 18' }) })
       if (props.name === 'refresh') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M20 11a8 8 0 10-2 5.3' }), jsx('path', { d: 'M20 5v6h-6' })] })
@@ -1508,6 +1889,11 @@ window.__ModuleLoader__.load({
       // heavier than the 17px icons beside it.
       if (props.name === 'copy') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('rect', { x: '9', y: '9', width: '11', height: '11', rx: '2.5' }), jsx('path', { d: 'M15 5.5A2.5 2.5 0 0012.5 3H6.5A2.5 2.5 0 004 5.5v6A2.5 2.5 0 006.5 14' })] })
       if (props.name === 'chevron') return jsx('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: jsx('path', { d: props.up === true ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6' }) })
+      // A screen with a trace on it, not a star. The star was the panel's mark when
+      // the panel held one card per skill; now it holds the turn, the files and the
+      // queue, and the glyph has to say "something is being watched here" rather than
+      // "skills". The trace is what makes the rectangle a monitor and not a window.
+      if (props.name === 'monitor') return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('rect', { x: '2.5', y: '4', width: '19', height: '16', rx: '3.2' }), jsx('path', { d: 'M6.2 13h2.6l1.6-4 2.6 7.5 1.6-3.5h2.8' })] })
       return jsxs('svg', { className: 'dsse-icon', viewBox: '0 0 24 24', 'aria-hidden': 'true', children: [jsx('path', { d: 'M12 3l1.5 5.5L19 10l-5.5 1.5L12 17l-1.5-5.5L5 10l5.5-1.5L12 3z' }), jsx('path', { d: 'M18.5 15l.7 2.3 2.3.7-2.3.7-.7 2.3-.7-2.3-2.3-.7 2.3-.7.7-2.3z' })] })
     }
 
@@ -2142,6 +2528,13 @@ window.__ModuleLoader__.load({
         // The reserved strip at the bottom belongs to the badge, so it is on only
         // while a badge is drawn. A card that fits needs none of it.
         'data-badge': props.badgeAction === undefined ? 'false' : 'true',
+        // Where the badge goes, which is not the same convention in both states.
+        // It has to be an attribute of its own rather than aria-expanded: the
+        // files card hands its expansion to a real button, which means its own
+        // `interactive` is false and aria-expanded is never written to the card.
+        // Rules keyed off aria-expanded matched nothing on the one card that
+        // needed them, and the badge stayed where the shared rule put it.
+        'data-open': (props.badgeAction === undefined ? props.expanded : props.badgeAction.open) === true ? 'true' : 'false',
         onMouseEnter: props.onMouseEnter,
         onMouseLeave: props.onMouseLeave,
         onClick: interactive === true ? props.onClick : undefined,
@@ -2227,6 +2620,11 @@ window.__ModuleLoader__.load({
      * @returns {object} the element.
      */
     function Cards(props) {
+      // The rail never positions itself any more: the monitor column owns the
+      // geometry and hands the rail a box to fill. It stays a separate element
+      // because the scroll container inside it is what keeps the top row stuck to
+      // the column's top edge, and that is a job the column's own box cannot do.
+      const railBox = { 'data-embedded': 'true' }
       const [state, setState] = React.useState({ status: "loading" })
       const [config, setConfig] = React.useState(undefined)
       const [models, setModels] = React.useState([])
@@ -2378,10 +2776,6 @@ window.__ModuleLoader__.load({
         } catch (failure) {
           if (request !== configRequest.current) return
           setConfig(prior)
-          if (patch.panelSide !== undefined) {
-            bridge.side = prior?.panelSide === 'right' ? 'right' : 'left'
-            notify()
-          }
           setError(String(failure?.message ?? failure))
         }
       }
@@ -2808,34 +3202,6 @@ window.__ModuleLoader__.load({
                     }),
                   ],
                 }),
-                jsxs('div', {
-                  className: 'dsse-setting',
-                  children: [
-                    jsxs('span', {
-                      className: 'dsse-setting-copy',
-                      children: [
-                        jsx('span', { className: 'dsse-setting-label', children: '面板位置' }),
-                        jsx('span', { className: 'dsse-setting-desc', children: '空间不足时自动切换到另一侧。' }),
-                      ],
-                    }),
-                    jsx('div', {
-                      className: 'dsse-side-options',
-                      role: 'group',
-                      'aria-label': '面板位置',
-                      children: ['left', 'right'].map((side) => jsx('button', {
-                        className: 'dsse-side-option',
-                        type: 'button',
-                        'aria-pressed': bridge.side === side,
-                        onClick: () => {
-                          bridge.side = side
-                          notify()
-                          saveConfig({ panelSide: side })
-                        },
-                        children: side === 'left' ? '左侧' : '右侧',
-                      }, side)),
-                    }),
-                  ],
-                }),
                 jsx('p', { className: 'dsse-settings-note', children: '此处修改立即生效，重启宿主后恢复。永久修改请前往插件设置。' }),
               ],
             }),
@@ -2883,13 +3249,7 @@ window.__ModuleLoader__.load({
           : jsxs('div', {
               className: 'dsse-rail',
               'data-dsse-rail': '1',
-              'data-side': props.place.side,
-              style: {
-                left: `${props.place.left}px`,
-                top: `${props.place.top}px`,
-                width: `${props.place.width}px`,
-                height: `${props.place.height}px`,
-              },
+              ...railBox,
               children: [
                 jsx('p', { className: 'dsse-loading', role: 'status', children: '正在加载…' }),
                 settings,
@@ -2900,17 +3260,47 @@ window.__ModuleLoader__.load({
       return jsxs('div', {
         className: 'dsse-rail',
         'data-dsse-rail': '1',
-        'data-side': props.place.side,
-        style: {
-          left: `${props.place.left}px`,
-          top: `${props.place.top}px`,
-          width: `${props.place.width}px`,
-          height: `${props.place.height}px`,
-        },
+        ...railBox,
         children: [
+          // The header and the list share one scroll container, and the header
+          // is that container's first child, stuck to the top. One scroller
+          // instead of two keeps a single scrollbar and lets the header's own
+          // surface cover the cards sliding beneath it; putting the list in a
+          // scroller of its own would draw a clip edge right under the header
+          // and read as a seam.
+          jsx('div', {
+            className: 'dsse-col-top',
+            children: jsxs('div', {
+              className: 'dsse-col-card',
+              children: [
           jsxs('div', {
             className: 'dsse-top-row',
             children: [
+              // Reading order runs from what you look at to what you press: the
+              // queue is the thing the panel exists to report, so it goes first
+              // and takes the left edge where the eye lands. The three controls
+              // sit together on the right (speed, refresh, settings) because they
+              // are all "how am I doing" / "act on the panel", and separating them
+              // by the counter would put a number between two buttons a person
+              // aims at.
+              jsx(Checklist, {
+                sessionId,
+                onDecided: () => load(true),
+                children: jsxs('button', {
+                  className: 'dsse-queue',
+                  type: 'button',
+                  'aria-label': '建议 候选审核',
+                  title: '候选审核',
+                  children: [
+                    jsx('span', { children: '建议' }),
+                    jsx('span', { className: 'dsse-count', children: String(data?.pendingCandidates ?? 0) }),
+                  ],
+                }),
+              }),
+              // The stretch between the queue and the controls is the only place
+              // a width-varying number can appear without moving anything a person
+              // aims at.
+              jsx(SpeedBadge, { sessionId }),
               jsx('button', {
                 className: 'dsse-icon-btn dsse-refresh',
                 type: 'button',
@@ -2930,75 +3320,35 @@ window.__ModuleLoader__.load({
                 },
                 children: jsx(Icon, { name: 'settings' }),
               }),
-              // Between the two controls and the queue: the empty stretch in this
-              // row is the only place a number can appear and disappear without
-              // moving anything a person aims at, and reading order puts it after
-              // the two buttons that act on the panel rather than before them.
-              jsx(SpeedBadge, { sessionId }),
-              jsx(Checklist, {
-                sessionId,
-                onDecided: () => load(true),
-                children: jsxs('button', {
-                  className: 'dsse-queue',
-                  type: 'button',
-                  'aria-label': '建议 候选审核',
-                  title: '候选审核',
-                  children: [
-                    jsx('span', { children: '建议' }),
-                    jsx('span', { className: 'dsse-count', children: String(data?.pendingCandidates ?? 0) }),
-                  ],
-                }),
-              }),
             ],
           }),
-          error === '' ? null : jsx('p', { className: 'dsse-err', role: 'alert', children: error }),
-          showTurn === false
-            ? null
-            : jsxs(Card, {
-                title: '上一轮',
-                // Hover and click are wired separately on purpose. Both arrive on
-                // the same element, and neither handler reads the other's state.
-                onMouseEnter: () => setHoverTurn(turnId),
-                onMouseLeave: () => setHoverTurn(""),
-                onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),
-                expanded,
-                clickable: turnExpandable,
-                // Two wordings, and both are reachable now: an open card offers the
-                // click that closes it, and it offers it whether or not the pointer
-                // is still on the card. Making the badge hover-only while open would
-                // hide the one control that leads back out at the moment the pointer
-                // drifts away from the card it just opened.
-                expandHint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,
-                head: jsxs('div', {
-                  className: 'dsse-head-stats',
-                  children: [
-                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),
-                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(commands) }), jsx('span', { children: '命令' })] }),
-                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(turnFiles) }), jsx('span', { children: '文件' })] }),
-                    // Dated only when there is a summary to date. Placed after the
-                    // counts rather than before them because the counts are what
-                    // the turn *was* and the time is only how fresh the telling of
-                    // it is — the card is about the work, not about the model call.
-                    summaryAgo === ''
-                      ? null
-                      : jsx('span', { className: 'dsse-head-ago', title: `摘要生成于 ${new Date(summary.at).toLocaleString()}`, children: `更新于 ${summaryAgo}` }),
-                  ],
-                }),
-                children: jsx(Clip, {
-                  text: summaryText,
-                  // The English original, reachable without spending card space on
-                  // it. Empty when the card is showing a real summary.
-                  title: summaryReason.detail === '' ? undefined : summaryReason.detail,
-                  expanded,
-                  // The measurement is reported with the turn it measured, so a late
-                  // report cannot describe text that is no longer on screen. A hidden
-                  // report still records the turn: "measured, and nothing hidden" is a
-                  // fact about this turn, and the empty tag is what says so.
-                  onClipped: (hidden) => {
-                    setClippedTurn(hidden === true ? turnId : "")
-                  },
-                }),
-              }),
+              error === '' ? null : jsx('p', { className: 'dsse-err', role: 'alert', children: error }),
+              // The previous turn, written into the header rather than drawn as a
+              // card of its own. The card used to lead the list, which meant the
+              // thing you read first scrolled away first. In the header it stays
+              // put, and the list below it is only what changed since.
+              showTurn === false
+                ? null
+                : jsx(Recap, {
+                    ago: summaryAgo,
+                    detail: summaryReason.detail,
+                    expanded,
+                    clickable: turnExpandable,
+                    hint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,
+                    // Only dated when dated. The stamp is the tooltip on the
+                    // relative time, so it is meaningless without one.
+                    stamp: summaryAgo === '' ? undefined : `摘要生成于 ${new Date(summary.at).toLocaleString()}`,
+                    text: summaryText,
+                    onMouseEnter: () => setHoverTurn(turnId),
+                    onMouseLeave: () => setHoverTurn(""),
+                    onClick: () => setPinnedTurn(turnPinned === true ? "" : turnId),
+                    onClipped: (hidden) => {
+                      setClippedTurn(hidden === true ? turnId : "")
+                    },
+                  }),
+            ],
+          }),
+          }),
           showActivity === false
             ? null
             : jsxs(Card, {
@@ -3288,7 +3638,14 @@ window.__ModuleLoader__.load({
                   // "nothing was produced" and "nothing was produced that I could
                   // see" look identical in a list, and only this line tells them
                   // apart. Nothing is drawn for a complete sweep.
-                  blindNote === '' ? null : jsx('p', { className: 'dsse-note', children: blindNote }),
+                  //
+                  // Folded away with the rows it explains. The note is a caveat
+                  // about a list the reader is not looking at while the card is
+                  // closed, and on a closed card it is the only line besides the
+                  // rows that is always there — a permanent "the directory may not
+                  // be complete" under a list of three files reads as a warning
+                  // about the three files. Opened, it comes back with them.
+                  blindNote === '' || (filesExpanded === false && hiddenFiles > 0) ? null : jsx('p', { className: 'dsse-note', children: blindNote }),
                 ],
               }),
           settings,
@@ -3314,8 +3671,13 @@ window.__ModuleLoader__.load({
     function Overlay() {
       const hostRef = React.useRef(null)
       const [place, setPlace] = React.useState({ visible: false })
-      const [handle, setHandle] = React.useState({ visible: false })
+      const [monitor, setMonitor] = React.useState({ visible: false })
       const [, bump] = React.useState(0)
+      // The column the reader is currently dragging, if any. Deliberately a ref:
+      // the drag is a run of pointer events between two renders, and re-rendering
+      // on every one of them to store a number the next event overwrites would put
+      // a full column of cards through reconciliation sixty times a second.
+      const drag = React.useRef(null)
 
       const remeasure = React.useCallback(() => {
         // No early return on a null ref: React attaches refs after render, so the
@@ -3327,22 +3689,50 @@ window.__ModuleLoader__.load({
         const geometry = measure(host)
         if (geometry === null) {
           setPlace({ visible: false })
-          setHandle({ visible: false })
+          setMonitor({ visible: false })
+          applyMonitorReserve(0)
+          forceTurnRail(false)
           return
         }
-        const next = placeCards({
-          chatRect: geometry.chatRect,
+
+        const prose = geometry.chatRect.right - geometry.chatRect.left
+        const column = placeMonitor({
           columnRect: geometry.columnRect,
-          side: bridge.side,
-          cardWidth: CARD_WIDTH,
+          width: bridge.monitorWidth > 0 ? bridge.monitorWidth : MONITOR_DEFAULT_WIDTH,
+          proseWidth: prose,
+          scrollbarWidth: geometry.scrollbarWidth,
         })
-        setPlace({ ...next, phase: geometry.phase })
-        setHandle(placeHandle({ chatRect: geometry.chatRect, columnRect: geometry.columnRect, side: next.side }))
+        // The rail needs no second look here. `placeMonitor` already spent 40px
+        // of the column's budget on it, so a drawn column is a column that left
+        // the rail its room — the reservation and the rail's visibility are the
+        // same fact, which is why `applyMonitorReserve` writes both attributes
+        // from one number instead of measuring a second time.
+        // An open sidebar takes the width the panel would have used, so the
+        // panel steps aside rather than squeezing the prose under its documented
+        // minimum. Closed, not narrowed: a half-width panel is a panel the reader
+        // would have to re-learn every time they open the sidebar, and the header
+        // switch is still there waiting for them.
+        const on = bridge.open === true && column.visible === true && sidebarOpen() === false
+        if (on) {
+          applyMonitorReserve(column.reserve)
+          forceTurnRail(true)
+          setMonitor({ ...column, phase: geometry.phase })
+          setPlace({ visible: false })
+          return
+        }
+        // Off, or a conversation column genuinely too narrow to hold the column.
+        // There is no second layout to fall back to any more: the gutter cards
+        // were removed with the reservation, because a panel that changes shape
+        // when someone drags a handle is a panel that has to be learned twice.
+        applyMonitorReserve(0)
+        forceTurnRail(false)
+        setMonitor({ visible: false })
+        setPlace({ visible: false })
       }, [])
 
       // Re-measure on every notification, not just re-render. The notification
-      // fires when the side changes or the session switches, and both change what
-      // the geometry should say — bumping a counter alone redrew the same box.
+      // fires when the session switches, which changes what the geometry should
+      // say — bumping a counter alone redrew the same box.
       React.useEffect(() =>
         subscribe(() => {
           remeasure()
@@ -3378,12 +3768,18 @@ window.__ModuleLoader__.load({
         //
         // Attributes only. A `childList` observer here would fire on every
         // streamed token, which is the one thing this overlay must not pay for.
+        //
+        // `data-rightbar-collapsed` is on the list because it decides whether
+        // the column may be drawn at all. It lives on the frame, a parent of the
+        // element above, so `subtree` is what makes it visible from here — and
+        // its arrival and removal are the two moments the panel has to change,
+        // neither of which changes any box this overlay measures.
         let phaseObserver = null
         if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
           phaseObserver = new MutationObserver(() => remeasure())
           phaseObserver.observe(document.documentElement, {
             attributes: true,
-            attributeFilter: ["data-content-phase"],
+            attributeFilter: ["data-content-phase", "data-rightbar-collapsed"],
             subtree: true,
           })
         }
@@ -3394,6 +3790,7 @@ window.__ModuleLoader__.load({
         // second and stops as soon as there is something to observe.
         let timer = setInterval(() => {
           remeasure()
+          attachRailObserver()
           if (observer !== null) {
             // Nothing left to wait for: the conversation exists and is observed,
             // so the per-second layout read has done its job.
@@ -3411,9 +3808,48 @@ window.__ModuleLoader__.load({
           timer = null
         }, 1000)
 
+        // The rail is mounted by the host only once a conversation holds enough
+        // turns, which is usually later than this overlay's first measurement.
+        // Nothing `ResizeObserver` watches changes size when a nav appears, so
+        // the inline hold written during `remeasure` could never reach a rail
+        // that arrived afterwards: it waited for an unrelated resize, and the
+        // reported symptom was exactly that — the rail came back only once the
+        // column was dragged. Observe the scroll body's children instead, which
+        // is the direct signal, and coalesce to one pass per frame so a
+        // streaming conversation costs a membership test rather than a layout
+        // read per token.
+        let railObserver = null
+        let railFrame = 0
+        // Attached lazily: this effect runs while the overlay is still waiting
+        // for a session, and the scroll body belongs to the conversation that
+        // mounts afterwards. `attachRailObserver` is therefore called once here
+        // and again from the poll below until it finds something to watch.
+        const attachRailObserver = () => {
+          if (railObserver !== null) return
+          if (typeof MutationObserver === "undefined" || typeof document === "undefined") return
+          if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") return
+          const scrollBody = document.querySelector("[data-conversation-scroll]")
+          if (scrollBody === null) return
+          railObserver = new MutationObserver(() => {
+            if (railFrame !== 0) return
+            railFrame = window.requestAnimationFrame(() => {
+              railFrame = 0
+              if (bridge.open !== true) return
+              forceTurnRail(true)
+            })
+          })
+          railObserver.observe(scrollBody, { childList: true, subtree: true })
+        }
+        attachRailObserver()
+
         return () => {
           if (observer !== null) observer.disconnect()
           if (phaseObserver !== null) phaseObserver.disconnect()
+          if (railObserver !== null) railObserver.disconnect()
+          if (railFrame !== 0 && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+            window.cancelAnimationFrame(railFrame)
+            railFrame = 0
+          }
           if (typeof window !== "undefined") window.removeEventListener("resize", onResize)
           if (timer !== null) clearInterval(timer)
         }
@@ -3424,7 +3860,17 @@ window.__ModuleLoader__.load({
         remeasure()
       }, [remeasure, place.side])
 
-      if (bridge.open !== true || bridge.sessionId === "") return null
+      // A closed panel reserves nothing. This return is the only path that draws
+      // nothing at all, so it is also the only one where nothing else hands the
+      // width back: leaving the reservation in place would narrow the
+      // conversation for the rest of the session because someone used the
+      // switch. `applyMonitorReserve` compares before writing, so the repeated
+      // call during a re-render costs nothing.
+      if (bridge.open !== true || bridge.sessionId === "") {
+        applyMonitorReserve(0)
+        forceTurnRail(false)
+        return null
+      }
 
       // The overlay is mounted at the shell, so it is on screen on every page the
       // host has, not only on a conversation. The conversation *body* element is
@@ -3434,29 +3880,118 @@ window.__ModuleLoader__.load({
       // rather than guessing from the DOM. An unpublished phase is a host we cannot
       // read; the cards stay, because hiding them on a version that does publish
       // nothing would remove the feature entirely.
-      const phase = place.phase ?? ""
+      // `place` keeps the phase only while the gutter layout owns the panel; the
+      // monitor branch is the one that drew, so it is also the one that says which
+      // page this is. Reading it from `place` alone let a launcher page through:
+      // that branch clears `place` on its way out, so the phase read as "" and the
+      // hero guard below never fired.
+      const phase = (monitor.visible === true ? monitor.phase : place.phase) ?? ""
       if (phase === "hero") return null
 
-      if (bridge.collapsed === true || place.visible === false) {
-        if (handle.visible === false) return jsx("div", { ref: hostRef, style: { display: "none" } })
+      // The monitor column, when it is on and has room, is the whole panel: the
+      // header toggle opened it, so there is no second thing to open. `collapsed`
+      // is deliberately not read here — it started life as "the cards are folded
+      // into a 16px handle at the edge of the prose", and a column that reserves
+      // its own width has nothing to fold into; the header icon is its switch.
+      if (monitor.visible === true) {
+        const stopDrag = (event) => finishDrag(event)
+        const onGripDown = (event) => {
+          const current = monitor.width
+          if (!Number.isFinite(current)) return
+          drag.current = { startX: event?.clientX ?? 0, startWidth: current, pointerId: event?.pointerId }
+          event?.preventDefault?.()
+          try {
+            event?.currentTarget?.setPointerCapture?.(event?.pointerId)
+          } catch {
+            // Not every pointer is capturable (and a synthetic one never is). The
+            // move handler is on `window`, so losing capture costs nothing.
+          }
+        }
+        const onGripMove = (event) => {
+          const state = drag.current
+          if (state === null) return
+          const dx = (event?.clientX ?? 0) - state.startX
+          const asked = state.startWidth - dx
+          // Clamped here, at the only place a width ever originates, and clamped
+          // to the column's own range rather than to the prose budget. The budget
+          // moves with the window, so a drag performed on a narrow window used to
+          // persist a width that a wide window would then honour — which is how a
+          // handle dragged once left the panel pinned to its minimum for good. The
+          // range does not move with the window, so the number a person chooses is
+          // the number they get back.
+          const clamped = Math.max(MONITOR_MIN_WIDTH, Math.min(MONITOR_MAX_WIDTH, Math.round(asked)))
+          // Written straight to the bridge and re-measured rather than held in
+          // state: `placeMonitor` needs the same inputs during a drag as after
+          // one. Persisting happens once, on release — a POST per pixel would be a
+          // POST per frame.
+          bridge.monitorWidth = clamped
+          remeasure()
+        }
+        const finishDrag = (event) => {
+          if (drag.current === null) return
+          drag.current = null
+          try {
+            event?.currentTarget?.releasePointerCapture?.(event?.pointerId)
+          } catch {
+            // Released already, or never captured. Nothing to undo.
+          }
+          const width = monitor.width
+          if (!Number.isFinite(width) || width <= 0) return
+          bridge.monitorWidth = width
+          call("/config", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ monitorWidth: width }),
+          }).catch(() => {
+            // A refused width is not worth a visible error: the drag already took
+            // effect in this window, and the next mount re-reads the saved value.
+          })
+        }
         return jsx("div", {
           ref: hostRef,
           style: { position: "absolute", inset: 0, pointerEvents: "none" },
-          children: jsx("button", {
-            className: "dsse-handle",
-            type: "button",
-            "data-side": handle.side,
-            style: { left: `${handle.left}px`, top: `${handle.top}px`, pointerEvents: "auto" },
-            title: "展开技能面板",
-            onClick: () => {
-              bridge.collapsed = false
-              remeasure()
-              bump((value) => value + 1)
+          children: jsxs("div", {
+            className: "dsse-monitor",
+            "data-dsse-monitor": "1",
+            style: {
+              left: `${monitor.left}px`,
+              top: `${monitor.top}px`,
+              width: `${monitor.width}px`,
+              height: `${monitor.height}px`,
             },
-            children: handle.side === "left" ? "\u203a" : "\u2039",
+            children: [
+              jsx("div", {
+                className: "dsse-monitor-grip",
+                "data-dragging": drag.current !== null ? "true" : "false",
+                role: "separator",
+                "aria-orientation": "vertical",
+                "aria-label": "拖动调整监控列宽度",
+                title: "拖动调整宽度",
+                onPointerDown: onGripDown,
+                onPointerMove: onGripMove,
+                onPointerUp: stopDrag,
+                onPointerCancel: stopDrag,
+                onLostPointerCapture: stopDrag,
+              }, "grip"),
+              // No column header. A title saying "monitor" on a column whose only
+              // content is the monitor is a caption on the obvious, and at 220px
+              // the width it costs is a row of a card. The panel's switch is in
+              // the session header, so closing does not need a control in here
+              // either. What the old header carried — nothing but a label and a
+              // close button — is exactly what the top row of the cards already
+              // is once you stop separating them.
+              jsx("div", { className: "dsse-monitor-body", children: jsx(Cards, { place: monitor, embedded: true }) }),
+            ],
           }),
         })
       }
+
+      // Nothing to draw, and no second layout to fall back to: the old gutter cards
+      // and the 16px handle they folded into are gone with the reservation. A
+      // conversation column too narrow to hold the column now simply has no panel,
+      // which is the honest version of "there is not room" — a panel that changes
+      // shape when someone drags a window edge has to be learned twice.
+      if (place.visible === false) return jsx("div", { ref: hostRef, style: { display: "none" } })
 
       return jsx("div", {
         ref: hostRef,
@@ -3503,8 +4038,18 @@ window.__ModuleLoader__.load({
         call("/config")
           .then((next) => {
             if (live === false) return
-            if (next?.panelSide === "left" || next?.panelSide === "right") bridge.side = next.panelSide
-            if (typeof next?.panelCollapsed === "boolean") bridge.collapsed = next.panelCollapsed
+            // The monitor column is on by default; only an explicit `false` in the
+            // saved config turns it off, which is also how `readConfig` reports it
+            // (`monitorColumn: config.monitorColumn !== false`).
+            //
+            // This sets `bridge.open`, the same flag the switch in the header
+            // flips. There were two flags until the card rail was removed — one
+            // for "did the person turn the panel on", one for "is the column the
+            // layout" — and with the cards gone they mean the same thing. Keeping
+            // both is what let a saved "off" draw nothing while the switch stayed
+            // lit, which is a worse lie than either state on its own.
+            if (typeof next?.monitorColumn === "boolean") bridge.open = next.monitorColumn
+            if (Number.isFinite(next?.monitorWidth) && next.monitorWidth > 0) bridge.monitorWidth = next.monitorWidth
             notify()
           })
           .catch(() => {
@@ -3517,20 +4062,25 @@ window.__ModuleLoader__.load({
 
       const open = bridge.open === true && bridge.sessionId === sessionId
 
-      return jsxs("button", {
+      // A 24px glyph in the header's action row, not a labelled button. The row
+      // already holds the host's sidebar toggle and whatever other plugins add,
+      // and a word with a count badge reads as a tab beside icons for panels.
+      // The count went with the label: the column shows the queue itself, and a
+      // number that repeats it is the part that made the old button look busy.
+      const label = open === true ? "收起任务监控" : "打开任务监控"
+      return jsx("button", {
         className: "dsse-toggle",
         type: "button",
         "data-active": String(open),
-        title: "技能面板：上一轮 / 技能与 MCP / 产出文件",
+        "aria-pressed": String(open),
+        "aria-label": label,
+        title: label,
         onClick: () => {
           bridge.sessionId = sessionId
           bridge.open = open === false
-          // Opening always clears a collapse: a person who clicked the button is
-          // asking to see the cards, not to be shown a handle.
-          if (bridge.open === true) bridge.collapsed = false
           notify()
         },
-        children: ["技能", jsx("span", { className: "dsse-toggle-count", children: "3" })],
+        children: jsx(Icon, { name: "monitor" }),
       })
     }
 
@@ -3542,12 +4092,24 @@ window.__ModuleLoader__.load({
      * @param {any} ctx - the client plugin context.
      */
     function apply(ctx) {
+      // `utilities`, not `actions`.
+      //
+      // `actions` ends before the header's flexible middle, so a switch
+      // registered there lands among the conversation's own controls and reads
+      // as one of them. `utilities` is the right-aligned run whose slot contract
+      // calls it "session utilities in ascending order"; after it comes the
+      // corner seat the sidebar-right package took for its expand button, and
+      // after that the native window buttons. Registering here with a high order
+      // puts the switch at the right edge of the document, one seat short of the
+      // window controls — as close to them as a renderer-side plugin can get,
+      // because those three buttons are drawn by Electron's titleBarOverlay and
+      // are not elements in the DOM at all.
       ctx.effect(
         () =>
-          ctx.slots.inject("conversation.session.header.actions", () =>
+          ctx.slots.inject("conversation.session.header.utilities", () =>
             ctx.slots.register(
               {
-                name: "conversation.session.header.actions",
+                name: "conversation.session.header.utilities",
                 id: TOGGLE_ID,
                 order: 40,
                 registrant: NS,
@@ -3582,6 +4144,11 @@ window.__ModuleLoader__.load({
           bridge.listeners.clear()
           openResource = undefined
           stopHostTypography()
+          // The reservation is a modification of the host's own scroll container.
+          // Leaving it behind keeps the conversation narrowed after the plugin is
+          // gone — a width nobody is drawing into and nothing will give back.
+          applyMonitorReserve(0)
+          forceTurnRail(false)
           if (typeof document !== "undefined") {
             document.getElementById(`${NS}:style`)?.remove()
           }

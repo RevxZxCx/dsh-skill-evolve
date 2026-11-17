@@ -63,21 +63,6 @@ const mutations = [
     to: '  return Number.isFinite(rect.left) && Number.isFinite(rect.right)',
   },
   {
-    label: 'gutters falls back to the prose for a missing right edge',
-    from: '  if (!usableRect(chatRect, HORIZONTAL)) return { left: 0, right: 0 }',
-    to: '  if (chatRect == null) return { left: 0, right: 0 }',
-  },
-  {
-    label: 'placeCards accepts an incomplete rect, so a stale frame still draws',
-    from: "  if (!usableRect(chatRect, ALL_EDGES)) {\n    return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }\n  }",
-    to: "  if (chatRect == null) {\n    return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }\n  }",
-  },
-  {
-    label: 'placeHandle accepts an incomplete rect',
-    from: '  if (!usableRect(chatRect, ALL_EDGES)) {\n    return { visible: false, side: preferred, left: 0, top: 0 }\n  }',
-    to: '  if (chatRect == null) {\n    return { visible: false, side: preferred, left: 0, top: 0 }\n  }',
-  },
-  {
     label: 'clampTop drops the bottom bound in a window tall enough to hold the box',
     from: [
       '  if (foot !== undefined && foot >= height + EDGE_MARGIN * 2) {',

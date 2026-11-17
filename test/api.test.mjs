@@ -1159,28 +1159,37 @@ async function route(overrides, req) {
   const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/config` }))
   check('the config route answers 200', res.statusCode === 200, String(res.statusCode))
   check('the config route reports the summary switch', typeof bodyOf(res).data.panelSummary === 'boolean', String(res.body))
-  // The panel reads these to decide where it draws and whether it starts
-  // collapsed. When they were missing the client's guards never fired, so both
+  // The panel reads these to decide whether it draws at all and how wide it
+  // starts. When they were missing the client's guards never fired, so both
   // settings were inert — and nothing failed, because the client test fakes this
   // route rather than calling it.
   check(
-    'the config route reports which side the cards go on',
-    bodyOf(res).data.panelSide === 'left' || bodyOf(res).data.panelSide === 'right',
+    'the config route reports the monitor column switch',
+    typeof bodyOf(res).data.monitorColumn === 'boolean',
     String(res.body),
   )
   check(
-    'the config route reports whether the cards start collapsed',
-    typeof bodyOf(res).data.panelCollapsed === 'boolean',
+    'and no longer reports the removed side setting',
+    bodyOf(res).data.panelSide === undefined,
+    String(res.body),
+  )
+  check(
+    'nor the removed collapsed setting',
+    bodyOf(res).data.panelCollapsed === undefined,
     String(res.body),
   )
 }
 
 {
-  // A configured 'right' must come back as 'right'. A payload that hard-coded
-  // 'left' would satisfy the shape assertions above and still ignore the setting.
-  const res = await route({ config: { panelSide: 'right', panelCollapsed: true } }, fakeReq({ url: `${ROUTE_PREFIX}/config` }))
-  check('a right-side setting is reported as right', bodyOf(res).data.panelSide === 'right', String(res.body))
-  check('a collapsed setting is reported as collapsed', bodyOf(res).data.panelCollapsed === true, String(res.body))
+  // A configured 'false' must come back as 'false', and a width as a number. A
+  // payload that hard-coded the defaults would satisfy the shape assertions
+  // above and still ignore the setting.
+  const res = await route(
+    { config: { monitorColumn: false, monitorWidth: 260 } },
+    fakeReq({ url: `${ROUTE_PREFIX}/config` }),
+  )
+  check('a switched-off column is reported as off', bodyOf(res).data.monitorColumn === false, String(res.body))
+  check('a configured width is reported', bodyOf(res).data.monitorWidth === 260, String(res.body))
 }
 
 {
@@ -1193,11 +1202,11 @@ async function route(overrides, req) {
   const applied = {}
   const res = await route(
     { config: () => ({ ...applied }), applyOverride: (patch) => Object.assign(applied, patch) },
-    fakeReq({ url: `${ROUTE_PREFIX}/config`, method: 'POST', body: JSON.stringify({ panelSide: 'right' }) }),
+    fakeReq({ url: `${ROUTE_PREFIX}/config`, method: 'POST', body: JSON.stringify({ monitorWidth: 240 }) }),
   )
-  check('posting the side applies it', bodyOf(res).data.panelSide === 'right', String(res.body))
-  check('posting the side reports success', bodyOf(res).ok === true, String(res.body))
-  check('posting the side reaches the override sink', applied.panelSide === 'right', JSON.stringify(applied))
+  check('posting a width applies it', bodyOf(res).data.monitorWidth === 240, String(res.body))
+  check('posting a width reports success', bodyOf(res).ok === true, String(res.body))
+  check('posting a width reaches the override sink', applied.monitorWidth === 240, JSON.stringify(applied))
 }
 
 {

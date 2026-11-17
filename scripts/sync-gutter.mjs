@@ -44,7 +44,18 @@ export function buildBlock(source) {
 
   // Keep the constants and the functions; drop the file header, which talks about
   // testing rather than about the bundle.
-  const start = body.indexOf('/** Narrowest column worth drawing')
+  //
+  // The anchor is a line *inside* the first doc comment the bundle needs, and
+  // the block is taken from the comment's own opening: everything from there on
+  // is inlined, so anchoring past a declaration silently removes it from the
+  // bundle while leaving the module that still imports it green in Node.
+  // EDGE_MARGIN is the first survivor — the card-placement constants that used
+  // to precede it were deleted with the gutter layout, and the anchor went with
+  // them. Matching a single line keeps this readable and newline-free.
+  const anchor = ' * Space kept between any popover and the edge of the viewport.'
+  const at = body.indexOf(anchor)
+  if (at < 0) throw new Error('could not find the constants in gutter.js')
+  const start = body.lastIndexOf('/**', at)
   if (start < 0) throw new Error('could not find the constants in gutter.js')
 
   const inlined = body

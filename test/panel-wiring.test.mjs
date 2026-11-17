@@ -280,7 +280,7 @@ function fakeReq(url, method = 'GET', body = undefined) {
   const payload = JSON.parse(res.body)
   check('saving applies the patch', applied.length === 1 && applied[0].panelSummary === false, JSON.stringify(applied))
   check('the reply carries the config fields, not just a receipt', payload.data.panelSummary === false, res.body)
-  check('the reply keeps the fields the patch did not touch', payload.data.panelSide === 'left', res.body)
+  check('the reply keeps the fields the patch did not touch', payload.data.monitorColumn === true, res.body)
   check('the reply still reports success', payload.data.ok === true, res.body)
 }
 

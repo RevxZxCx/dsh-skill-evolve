@@ -20,7 +20,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { placeCards } from '../packages/ui-evolve/lib/gutter.js'
+import { placeMonitor, MONITOR_MIN_WIDTH, MONITOR_MAX_WIDTH } from '../packages/ui-evolve/lib/gutter.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -62,7 +62,23 @@ function report(extra) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)
 }
 
+/**
+ * Click the header toggle only when the panel is not already showing.
+ *
+ * The panel opens by default now, so an unconditional click *closes* it. Every
+ * fixture that wanted the cards on screen used to say "click the toggle", and
+ * after the default flipped that sentence meant the opposite of what it read.
+ * The intent was always "make sure the panel is showing", so the helper states
+ * the intent and the read-then-click guard makes it true regardless of default.
+ */
+function pressToggle(button) {
+  if (button === undefined || button === null) return
+  if (button.props?.['data-active'] === 'true') return
+  if (typeof button.props?.onClick === 'function') button.props.onClick()
+}
+
 process.on('uncaughtException', (error) => {
+  if (process.env.DS_SE_TRACE === '1') console.error(error.stack)
   report(`the suite threw before it finished — ${error === undefined || error === null ? 'unknown' : error.message ?? String(error)}`)
   process.exit(1)
 })
@@ -554,12 +570,69 @@ function boot(options) {
       querySelector: (selector) => (selector === 'code, pre' ? code : null),
     }
 
+  // The scrolling area is the box the prose is centred in *and* the box the
+  // monitor column's reservation is a margin on, so the fixture models the one
+  // fact that matters about it: reserving width shrinks its client width. A stub
+  // that reported a constant width would describe a world where the column costs
+  // nothing, and the rail test could never fail there.
+  //
+  // Opt-in through `settings.scrollWidth`: suites that do not care about the rail
+  // keep the previous behaviour (no scrolling area), so nothing that already
+  // passed is re-measured against a new number.
+  const scrollArea = settings.scrollWidth === undefined ? null : {
+    getBoundingClientRect: () => {
+      const reserved = Number.parseFloat(hostStyle.get('--dsse-monitor-reserve') ?? '0') || 0
+      const width = Math.max(0, settings.scrollWidth - reserved)
+      return { left: rect.left, top: rect.top, right: rect.left + width, bottom: rect.bottom, width, height: rect.height }
+    },
+    get clientWidth() {
+      const reserved = Number.parseFloat(hostStyle.get('--dsse-monitor-reserve') ?? '0') || 0
+      return Math.max(0, Math.round(settings.scrollWidth - reserved - (settings.scrollbar ?? 0)))
+    },
+  }
+
+  // The host's turn rail is a <nav> inside the conversation scroll body. The
+  // plugin finds it with querySelectorAll and pins an inline style on it, so the
+  // fixture exposes an opt-in list of nav nodes for suites that care about the
+  // rail. Nodes are plain objects with the two things forceTurnRail touches.
+  const navNodes = settings.navNodes ?? []
+
+  // The shell frame is what publishes whether the host's RIGHT column is open:
+  // React writes `data-rightbar-collapsed` only while it is closed, so the
+  // presence of the attribute *is* the closed state. The plugin reads it to get
+  // out of the way, and the fixture models it as two plain objects so a suite
+  // can flip the column without a DOM.
+  //
+  // It must be the right column and not the left one. `data-sidebar-collapsed`
+  // describes the session list, which is open in the default layout -- binding
+  // to it answered "open" on every ordinary screen and skipped this column on
+  // every render, which is how the panel disappeared everywhere at once.
+  //
+  // `settings.sidebar === false` is a host that never renders the overlay at
+  // all; that has to read as "the column is not open", because a panel that
+  // closed itself over an unknown page would be hiding for a reason nobody can
+  // see.
+  const sidebarOpen = settings.sidebarOpen
+  const shellFrame = {
+    hasAttribute: (name) => (name === 'data-rightbar-collapsed' ? (sidebarOpen === true ? false : true) : false),
+    getAttribute: (name) => (name === 'data-rightbar-collapsed' ? (sidebarOpen === true ? null : '') : null),
+  }
+  const shellOverlay = settings.sidebar === false ? null : { parentElement: shellFrame }
+
+  const rootAttributes = new Map()
   const documentStub = {
     baseURI: 'http://127.0.0.1:19387/',
     head: { appendChild: (node) => styles.push(node) },
     body: { attributes: new Map() },
     documentElement: {
       lang: settings.lang ?? '',
+      attributes: rootAttributes,
+      // `applyMonitorReserve` publishes two switches on <html>, and the CSS that
+      // reads them is what makes the rail visible or not. A document element
+      // without these methods makes that path dead code, which is exactly how the
+      // double-subtracted reservation survived: nothing could observe the answer.
+      setAttribute: (name, value) => { rootAttributes.set(name, String(value)) },
+      getAttribute: (name) => rootAttributes.get(name) ?? null,
       style: {
         getPropertyValue: (name) => hostStyle.get(name) ?? '',
         setProperty: (name, value) => { hostWrites.push([name, String(value)]); hostStyle.set(name, String(value)) },
@@ -569,7 +642,16 @@ function boot(options) {
     activeElement: null,
     getElementById: () => null,
     createElement: () => ({ id: '', textContent: '' }),
-    querySelector: (selector) => (selector === '[data-conversation-content]' ? conversation : null),
+    querySelector: (selector) => {
+      if (selector === '[data-conversation-content]') return conversation
+      if (selector === '[data-conversation-scroll]') return scrollArea
+      if (selector === '[data-shell-overlay]') return shellOverlay
+      return null
+    },
+    querySelectorAll: (selector) => {
+      if (selector === '[data-conversation-scroll] nav') return navNodes
+      return []
+    },
   }
 
   const openedResources = []
@@ -650,6 +732,23 @@ function boot(options) {
     // set this explicitly.
     navigator: settings.navigator,
   }
+  // The rail observer coalesces to one pass per frame. A window without
+  // `requestAnimationFrame` is a window the observer can never attach to, so the
+  // suite would pass while the mechanism stayed dead: that is how a timing bug
+  // survives six rounds of "fixed". The fixture drives frames by hand.
+  const rafQueue = []
+  let rafSeq = 0
+  if (settings.requestAnimationFrame !== false) {
+    windowStub.requestAnimationFrame = (callback) => {
+      rafSeq += 1
+      rafQueue.push({ id: rafSeq, callback })
+      return rafSeq
+    }
+    windowStub.cancelAnimationFrame = (id) => {
+      const at = rafQueue.findIndex((row) => row.id === id)
+      if (at >= 0) rafQueue.splice(at, 1)
+    }
+  }
 
   const timers = []
   const routes = settings.routes ?? {}
@@ -698,6 +797,13 @@ function boot(options) {
     disconnect() {
       this.disconnected = true
       this.targets = []
+    }
+    // Stands in for the browser delivering a mutation record. The rail observer
+    // exists to react to a nav that mounts after the first measurement, and only
+    // a suite can stage that ordering — nothing about a static DOM is late.
+    trigger() {
+      if (this.disconnected === true) return
+      this.callback([], this)
     }
   }
 
@@ -790,7 +896,20 @@ function boot(options) {
     mutationObservers,
     clock,
     document: documentStub,
+    // The two switches the plugin publishes on <html>. The turn-rail one is the
+    // whole answer to "is the host's rail allowed to draw", so a suite that
+    // cannot read it can only test the pure function and never the wiring.
+    rootAttributes,
+    navNodes,
     conversation,
+    scrollArea,
+    rafQueue,
+    // One frame's worth of work: the observer schedules into this queue, so a
+    // suite that never flushes it observes nothing.
+    flushRaf() {
+      const pending = rafQueue.splice(0, rafQueue.length)
+      for (const row of pending) row.callback(0)
+    },
     captured,
     renderer,
     seat(name) {
@@ -839,9 +958,12 @@ function panelRoutes() {
         ],
       },
     },
+    // The monitor column is the only layout there is. Fixtures that want cards
+    // rendered ask for it by leaving `monitorColumn` on; one block near the end
+    // of this file turns it off to pin what a closed column looks like.
     '/api/ui-evolve/config': {
       ok: true,
-      data: { panelSummary: true, panelSide: 'left', panelCollapsed: false },
+      data: { panelSummary: true, monitorColumn: true },
     },
     '/api/ui-evolve/models': { ok: true, data: { providers: [{ provider: 'p', models: [{ id: 'm', name: 'M' }] }] } },
     '/api/ui-evolve/propose': { ok: true, data: { hinted: true } },
@@ -877,9 +999,12 @@ check('the bundle requires react', booted.requested.includes('react'), JSON.stri
 booted.module.apply(booted.ctx)
 
 check('two slots are injected', booted.injectedNames.length === 2, JSON.stringify(booted.injectedNames))
+// `utilities` is the right-aligned run in the session header; `actions` is the
+// left half beside the tab strip. The switch has to be next to the window
+// buttons, so this names the seat it must land in rather than just its presence.
 check(
-  'the toggle goes into the session header',
-  booted.injectedNames.includes('conversation.session.header.actions'),
+  'the toggle goes into the session header utilities',
+  booted.injectedNames.includes('conversation.session.header.utilities'),
   JSON.stringify(booted.injectedNames),
 )
 check('the cards go into the shell overlay', booted.injectedNames.includes('shell.overlay'), JSON.stringify(booted.injectedNames))
@@ -899,7 +1024,7 @@ check(
 )
 
 for (const { spec } of booted.registrations) {
-  const expected = spec.id.endsWith(':toggle') ? 'conversation.session.header.actions' : 'shell.overlay'
+  const expected = spec.id.endsWith(':toggle') ? 'conversation.session.header.utilities' : 'shell.overlay'
   check(`"${spec.id}" declares the slot it registers into`, spec.name === expected, `${spec.id} → ${spec.name}`)
   check(`"${spec.id}" names this plugin as registrant`, spec.registrant === '@revxz/dsh-ui-evolve', String(spec.registrant))
   check(`"${spec.id}" carries a numeric order`, Number.isFinite(spec.order), String(spec.order))
@@ -946,9 +1071,27 @@ check(
   const tree = await instance.renderer.render(toggle, { sessionId: 'session-a' })
   const button = firstByClass(tree, 'dsse-toggle')
   check('the toggle is a button', button?.type === 'button', String(button?.type))
-  check('the toggle is labelled', textOf(tree).includes('技能'), textOf(tree).slice(0, 40))
-  check('the toggle counts the three cards', textOf(firstByClass(tree, 'dsse-toggle-count')) === '3', textOf(tree).slice(0, 40))
-  check('the toggle starts inactive', button?.props?.['data-active'] === 'false', String(button?.props?.['data-active']))
+  // The control is a glyph in the header's action row, so it is named by an
+  // accessible label rather than by visible text: there is no room for a word in
+  // a 24px square, and the row it joined is made of icon buttons.
+  check(
+    'the toggle names itself for people who cannot see the glyph',
+    button?.props?.['aria-label'] === '收起任务监控',
+    String(button?.props?.['aria-label']),
+  )
+  check(
+    'the toggle explains itself on hover',
+    button?.props?.title === '收起任务监控',
+    String(button?.props?.title),
+  )
+  // The count badge went with the word. The column lists the queue itself, so a
+  // number beside the icon repeated what the panel already showed.
+  check('the toggle carries no count badge any more', firstByClass(tree, 'dsse-toggle-count') === undefined, textOf(tree).slice(0, 40))
+  // On by default: the monitor column is the panel's default shape, so the header
+  // glyph starts lit. A person who has never opened the settings should see the
+  // cards without hunting for a button first.
+  check('the toggle starts on, because the panel does', button?.props?.['data-active'] === 'true', String(button?.props?.['data-active']))
+  check('the toggle reports its pressed state', button?.props?.['aria-pressed'] === 'true', String(button?.props?.['aria-pressed']))
   check(
     'the toggle reads the config on mount so the side setting is honoured',
     instance.calls.some((row) => row.url.endsWith('/api/ui-evolve/config')),
@@ -957,10 +1100,10 @@ check(
 }
 
 {
-  // Removing panelSide from readConfig kept every assertion green before this
-  // block existed, which means the setting could have shipped dead. This drives
-  // the path end to end: the route answers 'right', the toggle applies it, and
-  // the cards come out on the right.
+  // Removing a config key from readConfig kept every assertion green once before
+  // this kind of block existed, which means the setting could have shipped dead.
+  // This drives the surviving one end to end: the route answers 260, and the
+  // column is drawn at 260 rather than at the design default.
   const instance = boot({
     rect: { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 },
     proseWidth: '920px',
@@ -968,7 +1111,7 @@ check(
       ...panelRoutes(),
       '/api/ui-evolve/config': {
         ok: true,
-        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
+        data: { panelSummary: true, monitorColumn: true, monitorWidth: 260 },
       },
     },
   })
@@ -980,10 +1123,12 @@ check(
   // never runs, so every later assertion is reported as absent rather than as
   // passing or failing -- which a runner reads as 'no failures'.
   check('the panel renders a control to open it with', handle !== undefined, String(handle === undefined))
-  if (handle !== undefined && typeof handle.props?.onClick === 'function') handle.props.onClick()
+  pressToggle(handle)
   const tree = await instance.renderer.deepRender(cards)
-  const rail = firstByClass(tree, 'dsse-rail')
-  check('a right-side setting from the config puts the rail on the right', rail?.props?.['data-side'] === 'right', String(rail?.props?.['data-side']))
+  const column = firstByClass(tree, 'dsse-monitor')
+  const width = Number.parseFloat(String(column?.props?.style?.width ?? 'NaN'))
+  check('a configured width from the config sizes the column', width === 260, String(column?.props?.style?.width))
+  check('and the width it holds is what the conversation gives up', instance.hostStyle.get('--dsse-monitor-reserve') === '260px', JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')))
 }
 
 {
@@ -1013,55 +1158,77 @@ check(
 
   // Mount the header but leave the config request unanswered.
   const header = await instance.renderer.deepRender(toggle, { sessionId: 'session-a' })
-  firstByClass(header, 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(header, 'dsse-toggle'))
 
   // The overlay measures now, on the default (left) side.
   const first = await instance.renderer.deepRender(cards)
-  const firstRail = firstByClass(first, 'dsse-rail')
-  check('the overlay measures before the setting arrives', firstRail?.props?.['data-side'] === 'left', String(firstRail?.props?.['data-side']))
-  const firstLeft = Number.parseFloat(String(firstRail?.props?.style?.left ?? 'NaN'))
+  // With the answer still in flight the panel keeps its own default, which is the
+  // monitor column. This is the state a person sees on the first frame, so it is
+  // the one worth pinning: a column, reserving width, naming itself.
+  const firstColumn = firstByClass(first, 'dsse-monitor')
+  check('the panel measures before the setting arrives', firstColumn !== undefined, textOf(first).slice(0, 60))
+  const firstReserve = Number.parseFloat(String(instance.hostStyle.get('--dsse-monitor-reserve') ?? 'NaN'))
   check(
-    'and starts in the left gutter',
-    Number.isFinite(firstLeft) && firstLeft < 960,
-    JSON.stringify(firstRail?.props?.style ?? null),
+    'and claims width for the column it drew',
+    Number.isFinite(firstReserve) && firstReserve > 0,
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
   )
 
-  // Now the setting arrives, which notifies the already-mounted overlay.
-  releaseConfig({ ok: true, data: { panelSummary: true, panelSide: 'right', panelCollapsed: false } })
+  // Now the setting arrives, which notifies the already-mounted overlay. A saved
+  // "off" is the case that has to be honoured late: the panel drew itself and
+  // took the width before it knew, so the arrival must both stop the drawing and
+  // hand the width back.
+  releaseConfig({ ok: true, data: { panelSummary: true, monitorColumn: false } })
   for (let turn = 0; turn < 12; turn += 1) await Promise.resolve()
 
   const after = await instance.renderer.deepRender(cards)
-  const rail = firstByClass(after, 'dsse-rail')
-  check('a side that arrives after the first measure moves the cards', rail?.props?.['data-side'] === 'right', String(rail?.props?.['data-side']))
-  const placedLeft = Number.parseFloat(String(rail?.props?.style?.left ?? "NaN"))
+  check('a switched-off column that arrives late is dropped', firstByClass(after, 'dsse-monitor') === undefined, textOf(after).slice(0, 60))
+  check('and no cards are drawn in its place', firstByClass(after, 'dsse-rail') === undefined, textOf(after).slice(0, 60))
   check(
-    'and the box is re-measured into the right gutter',
-    Number.isFinite(placedLeft) && placedLeft > 960,
-    JSON.stringify(rail?.props?.style ?? null),
+    'and the width the column held goes back to the conversation',
+    instance.hostStyle.get('--dsse-monitor-reserve') === '0px',
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
   )
 }
 {
-  // panelCollapsed: true must start the column as a handle, not as cards.
+  // A saved "off" must start the panel closed, not just become closed after the
+  // first click. The switch is the only way the panel is visible, so a config
+  // that says off and a panel that draws anyway is the bug worth pinning: the
+  // person turned it off, and it came back on the next restart.
   const instance = boot({
     rect: { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 },
     proseWidth: '920px',
     routes: {
       ...panelRoutes(),
-      '/api/ui-evolve/config': {
-        ok: true,
-        data: { panelSummary: true, panelSide: 'left', panelCollapsed: true },
-      },
+      '/api/ui-evolve/config': { ok: true, data: { panelSummary: true, monitorColumn: false } },
     },
   })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  const toggleTree = await instance.renderer.render(toggle, { sessionId: 'session-a' })
-  // The toggle clears a collapse on an explicit click: a person clicking the
-  // button is asking to see the cards, not to be shown a handle again.
-  firstByClass(toggleTree, 'dsse-toggle').props.onClick()
-  const tree = await instance.renderer.deepRender(cards)
-  check('clicking the toggle overrides a collapsed config', firstByClass(tree, 'dsse-rail') !== undefined, textOf(tree).slice(0, 60))
+  // Let the saved config land before pressing anything: the claim is that a saved
+  // off is in effect at mount, not that a click wins a race with a request.
+  await settle()
+  const closedTree = await instance.renderer.deepRender(cards)
+  check(
+    'a switched-off config starts the panel closed',
+    firstByClass(closedTree, 'dsse-monitor') === undefined && firstByClass(closedTree, 'dsse-rail') === undefined,
+    textOf(closedTree).slice(0, 60),
+  )
+  check(
+    'and reserves no width while it is closed',
+    instance.hostStyle.get('--dsse-monitor-reserve') === '0px',
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
+  )
+  const closedToggle = firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle')
+  check('and the switch reads as off', closedToggle?.props?.['data-active'] === 'false', String(closedToggle?.props?.['data-active']))
+  // A real click, not pressToggle: the panel is closed, so this press is what
+  // opens it, and the column has to appear and claim its width.
+  closedToggle.props.onClick()
+  const openTree = await instance.renderer.deepRender(cards)
+  check('and a click opens the column the config closed', firstByClass(openTree, 'dsse-monitor') !== undefined, textOf(openTree).slice(0, 60))
+  const openedReserve = Number.parseFloat(String(instance.hostStyle.get('--dsse-monitor-reserve') ?? 'NaN'))
+  check('and it claims width on the way in', Number.isFinite(openedReserve) && openedReserve > 0, String(openedReserve))
 }
 
 // ---------------------------------------------------------------------------
@@ -1101,7 +1268,7 @@ check(
     }
     const instance = boot({ routes })
     instance.module.apply(instance.ctx)
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
     check(`a failure reason is translated rather than shown raw: ${reason}`, textOf(tree).includes(reason) === false, textOf(tree).slice(0, 160))
     check(`and it does not fall through to the generic line: ${reason}`, textOf(tree).includes('暂无摘要') === false, textOf(tree).slice(0, 160))
@@ -1145,7 +1312,7 @@ check(
       }
       const instance = boot({ routes })
       instance.module.apply(instance.ctx)
-      firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+      pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
       const tree = await instance.renderer.deepRender(instance.seat('cards'))
       rendered.set(reason, { group, word: entry.word, text: textOf(tree) })
     }
@@ -1180,7 +1347,7 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   check('the failure is stated in words', textOf(tree).includes('摘要生成失败'), textOf(tree).slice(0, 160))
   // The tooltip lives on the <p>, not on the .dsse-clip box: the box is what the
@@ -1204,9 +1371,9 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
-  const ago = firstByClass(tree, 'dsse-head-ago')
+  const ago = firstByClass(tree, 'dsse-recap-when')
   check('a summary carries the time it was written', ago !== undefined && textOf(ago).includes('更新于'), textOf(ago))
   check('the age is relative, not a clock reading', /更新于\s*5\s*分钟前/u.test(textOf(ago)), textOf(ago))
 }
@@ -1222,9 +1389,9 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
-  check('a failure is not given a time', firstByClass(tree, 'dsse-head-ago') === undefined, textOf(tree).slice(0, 160))
+  check('a failure is not given a time', firstByClass(tree, 'dsse-recap-when') === undefined, textOf(tree).slice(0, 160))
 }
 
 // ---------------------------------------------------------------------------
@@ -1238,15 +1405,22 @@ check(
   const cards = instance.seat('cards')
 
   const toggleTree = await instance.renderer.render(toggle, { sessionId: 'session-a' })
-  firstByClass(toggleTree, 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(toggleTree, 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
 
-  check('three cards are rendered together', byClass(tree, 'dsse-card').length === 3, String(byClass(tree, 'dsse-card').length))
-  check('skills and MCP share the second card', textOf(byClass(tree, 'dsse-card')[1]).includes('技能与 MCP') && textOf(byClass(tree, 'dsse-card')[1]).includes('github'), textOf(byClass(tree, 'dsse-card')[1]).slice(0, 160))
+  // The previous turn is no longer a card. It lives in the column's header, so
+  // the list below holds only what is still changing: skills, and files.
+  check('two cards are rendered together', byClass(tree, 'dsse-card').length === 2, String(byClass(tree, 'dsse-card').length))
+  check('skills and MCP share the first card', textOf(byClass(tree, 'dsse-card')[0]).includes('技能与 MCP') && textOf(byClass(tree, 'dsse-card')[0]).includes('github'), textOf(byClass(tree, 'dsse-card')[0]).slice(0, 160))
   check(
-    'the first card is the last turn',
-    textOf(byClass(tree, 'dsse-card')[0]).includes('上一轮'),
-    textOf(byClass(tree, 'dsse-card')[0]).slice(0, 60),
+    'the last turn is in the header instead',
+    firstByClass(tree, 'dsse-col-top') !== undefined && textOf(firstByClass(tree, 'dsse-col-top')).includes('Read three files and edited one'),
+    textOf(firstByClass(tree, 'dsse-col-top')).slice(0, 80),
+  )
+  check(
+    'and it is not a card any more',
+    textOf(tree).includes('上一轮') === false,
+    textOf(tree).slice(0, 80),
   )
   check('the summary text is shown', textOf(tree).includes('Read three files and edited one'), textOf(tree).slice(0, 120))
   {
@@ -1260,14 +1434,42 @@ check(
     // made against the stylesheet itself; asserting the element exists proves
     // nothing about its appearance.
     const sheet = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
-    check('the top row carries a background, a border and a radius', /\.dsse-top-row\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet) && /\.dsse-top-row\{[^}]*border:1px solid/.test(sheet) && /\.dsse-top-row\{[^}]*border-radius:10px/.test(sheet), 'top-row rule')
+    // The row is a line inside the header card now. A second border and a second
+  // shadow around it would read as two boxes stacked, which is the thing the
+  // merge was for, so the surface belongs to the header alone.
+  check('the top row no longer wears a surface of its own', /\.dsse-top-row\{[^}]*border:/.test(sheet) === false && /\.dsse-top-row\{[^}]*box-shadow:/.test(sheet) === false && /\.dsse-top-row\{[^}]*background:/.test(sheet) === false, (sheet.match(/\.dsse-top-row\{[^}]*\}/) ?? [''])[0].slice(0, 200))
+  // The card inside the header wears it, not the sticky wrapper around it. The
+  // wrapper has to stay full-bleed so its fill covers the cards sliding under
+  // it; carrying the outline there made the header 20px wider than every card
+  // below it, which is the broken edge the merge was meant to remove.
+  check('and the card inside it wears it instead', /\.dsse-col-card\{[^}]*border:1px solid/.test(sheet) && /\.dsse-col-card\{[^}]*border-radius:11px/.test(sheet) && /\.dsse-col-card\{[^}]*background:var\(--dsw-alias-bg-layer-1/.test(sheet), (sheet.match(/\.dsse-col-card\{[^}]*\}/) ?? [''])[0].slice(0, 200))
+  // Five lines of summary, and no strip reserved under them. The recap used to
+  // cap at 6.6em — four lines at its own line-height — with 24px of empty card
+  // beneath it for a badge that is invisible until hover, so four lines looked
+  // like a mistake rather than a decision.
+  const recapText = /[.]dsse-recap [.]dsse-text[{][^}]*max-height:([^;}]+)/.exec(sheet)
+  check('the summary shows five lines, not four', recapText !== null && recapText[1].includes('5 * 1.55 * 1em'), recapText === null ? 'no rule' : recapText[1])
+  check('and reserves nothing under the last of them', /[.]dsse-recap\[data-clickable="true"\] \{[^}]*padding-bottom/.test(sheet) === false, 'the recap still reserves a strip')
+
+  // A folded file list says it is folded. The rows simply stopped after four,
+  // and the only hint was a badge that is invisible until the pointer arrives —
+  // useless to someone deciding whether to look.
+  const foldedFiles = /[.]dsse-files\[data-open="false"\]::after\{[^}]*linear-gradient/.exec(sheet)
+  check('a folded file list fades its last row', foldedFiles !== null, 'no fade under the folded list')
+  // A max-height on its own clips nothing: the overflow stays visible, so every
+  // row was still drawn and the badge that follows the list landed on top of the
+  // last one. The cap has to come with overflow hidden to be a fold at all.
+  const foldedClip = /[.]dsse-files\[data-open="false"\]\{[^}]*overflow:hidden/.exec(sheet)
+  check('and a folded list actually stops drawing rows', foldedClip !== null, 'max-height without overflow hidden')
+  check('and the header is no wider than the cards under it', /\.dsse-col-top\{[^}]*margin:0 0 8px/.test(sheet), (sheet.match(/\.dsse-col-top\{[^}]*\}/) ?? [''])[0].slice(0, 200))
   }
-  check('the card header carries the call count', firstHead !== undefined && textOf(firstHead).includes('12'), textOf(tree).slice(0, 120))
-    // Numbers, not just labels: swapping the command count for the file count used
-    // to leave every assertion green because both were labelled.
-    const headStats = firstHead === undefined ? [] : byClass(firstHead, 'dsse-head-stat').map((node) => textOf(node))
-    check('the card header carries the command count', headStats.some((row) => /^0\s*命令$/.test(row)), JSON.stringify(headStats))
-    check('the card header carries the file count', headStats.some((row) => /^1\s*文件$/.test(row)), JSON.stringify(headStats))
+    // The counts are gone with the card that carried them. What the header says
+    // now is how fresh the telling is, and nothing about the size of the turn:
+    // "12 calls, 0 commands, 1 file" answered a question about cost, and the
+    // column is a monitor, not an invoice.
+    check('the header carries no call count', firstByClass(firstByClass(tree, 'dsse-col-top'), 'dsse-head-stat') === undefined, textOf(tree).slice(0, 120))
+    check('the header carries no command count', textOf(tree).includes('命令') === false, textOf(tree).slice(0, 120))
+    check('the header carries no file count', /\d\s*文件/.test(textOf(tree)) === false, textOf(tree).slice(0, 120))
     check('the old stat strip is gone', firstByClass(tree, 'dsse-facts') === undefined, textOf(tree).slice(0, 160))
     check('the header carries no action button', firstHead !== undefined && firstByClass(firstHead, 'dsse-propose') === undefined && firstByClass(firstHead, 'dsse-head-btn') === undefined, textOf(tree).slice(0, 160))
     // Cards without a `head` still get their metadata from `meta`. Both paths have
@@ -1370,9 +1572,9 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
-  const activityCard = byClass(tree, 'dsse-card')[1]
+  const activityCard = byClass(tree, 'dsse-card')[0]
   const names = byClass(activityCard, 'dsse-name').map((node) => textOf(node))
   const kinds = byClass(activityCard, 'dsse-row-icon').map((node) => node.props['data-kind'])
   check('skills and MCP share one recency-ordered list', JSON.stringify(names) === '["mcp-new","skill-new","mcp-old","skill-old"]', JSON.stringify(names))
@@ -1394,7 +1596,7 @@ check(
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   // `Overlay` always returns *some* node — a display:none wrapper when it has
   // nowhere to draw — so lookups against a null tree are the vacuous case, and
@@ -1418,135 +1620,380 @@ check(
 }
 
 // ---------------------------------------------------------------------------
-// Geometry: the rail is placed from the measurement, never from the window
+// ---------------------------------------------------------------------------
+// Geometry: the column is placed from the measurement, never from the window
 // ---------------------------------------------------------------------------
 
 {
   // A 1920 frame with a 280px left sidebar. The prose is 920px centred in the
-  // 1640px column, so it spans 640..1560 and the column's own left edge is 280.
-  // The gutter is 360 — the prose's distance from the *column* edge, not from the
-  // window's. That difference of 280 is the whole bug this pins down: the earlier
-  // version measured from the window, placed the cards at x=16, and on a real
-  // screen they landed on top of the host's sidebar.
+  // 1640px column, and the monitor column hangs off the column's right edge.
+  // Only one number has to be derived: the column's left edge is the measured
+  // right edge minus its width. An earlier version measured from the window and
+  // put the cards at x=16, which on a real screen is on top of the host sidebar —
+  // that 280px difference is what this block pins down.
   const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
   const instance = boot({ rect, proseWidth: '920px', routes: panelRoutes() })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
-  const rail = firstByClass(tree, 'dsse-rail')
-  const expected = placeCards({
-    chatRect: { left: 640, top: 120, right: 1560, bottom: 900 },
-    columnRect: rect,
-    side: 'left',
-    cardWidth: 288,
-  })
-  check('the rail exists', rail !== undefined, String(tree?.type))
-  check('the rail is placed where the geometry says', rail?.props?.style?.left === `${expected.left}px`, `${rail?.props?.style?.left} vs ${expected.left}`)
-  check('the rail is as wide as the geometry says', rail?.props?.style?.width === `${expected.width}px`, String(rail?.props?.style?.width))
-  check('the rail starts below the conversation top', rail?.props?.style?.top === `${expected.top}px`, String(rail?.props?.style?.top))
-  check('the rail marks its side', rail?.props?.['data-side'] === 'left', String(rail?.props?.['data-side']))
-  // The behavioural assertion, independent of the arithmetic above: wherever the
-  // cards end up, they must be clear of the host sidebar on the left.
-  const railLeft = Number.parseFloat(String(rail?.props?.style?.left ?? 'NaN'))
+  const column = firstByClass(tree, 'dsse-monitor')
+  const expected = placeMonitor({ columnRect: rect, width: 300, proseWidth: 920 })
+  check('the column exists', column !== undefined, String(tree?.type))
+  check('the column starts at the measured left edge', column?.props?.style?.left === `${expected.left}px`, `${column?.props?.style?.left} vs ${expected.left}`)
+  check('the column is as wide as the geometry says', column?.props?.style?.width === `${expected.width}px`, String(column?.props?.style?.width))
+  check('the column starts below the conversation top', column?.props?.style?.top === `${expected.top}px`, String(column?.props?.style?.top))
+  check('the column reaches the conversation bottom', Number.parseFloat(String(column?.props?.style?.height ?? 'NaN')) === rect.height, String(column?.props?.style?.height))
+  // The behavioural assertion, independent of the arithmetic above: the column
+  // hangs off the conversation column's own right edge, which is not the
+  // window's right edge whenever the host draws a sidebar.
+  const colLeft = Number.parseFloat(String(column?.props?.style?.left ?? 'NaN'))
+  const colWidth = Number.parseFloat(String(column?.props?.style?.width ?? 'NaN'))
   check(
-    'the rail clears the host sidebar',
-    Number.isFinite(railLeft) && railLeft >= rect.left,
-    `${railLeft} vs column starts ${rect.left}`,
+    'the column is flush with the conversation column, not the window',
+    Number.isFinite(colLeft) && Number.isFinite(colWidth) && colLeft + colWidth === rect.right,
+    `${colLeft}+${colWidth} vs column ends ${rect.right}`
   )
+  check('the column reserves exactly its own width', instance.hostStyle.get('--dsse-monitor-reserve') === `${expected.width}px`, String(instance.hostStyle.get('--dsse-monitor-reserve')))
 }
 
 {
-  // The right side mirrors the left: 360 of gutter inside the column, so the cards
-  // sit immediately right of the prose rather than at the window's right edge. The
-  // distinction only matters on a right preference — the default layout has a left
-  // sidebar, so a window-relative measurement leaves the right gutter correct by
-  // accident while wrecking the left one.
-  const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
-  const instance = boot({
-    rect,
-    proseWidth: '920px',
-    routes: {
-      ...panelRoutes(),
-      '/api/ui-evolve/config': {
-        ok: true,
-        data: { panelSummary: true, panelSide: 'right', panelCollapsed: false },
-      },
-    },
-  })
+  // A body barely wider than the prose leaves no room for a column, and the
+  // column is drawn anyway. Degrading to the old floating cards is not an
+  // option: it is the layout the column replaced, and it made the panel vanish
+  // with no way back once the width had been saved. The prose reflows instead.
+  const rect = { left: 0, top: 120, right: 700, bottom: 900, width: 700, height: 780 }
+  const instance = boot({ rect, proseWidth: '680px', routes: panelRoutes() })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
+  const column = firstByClass(tree, 'dsse-monitor')
+  const gutter = rect.width - 680
+  check('a body with no gutter still draws the column', column !== undefined, textOf(tree).slice(0, 80))
+  check('and the column keeps its own minimum rather than a sliver', column?.props?.style?.width === `${MONITOR_MIN_WIDTH}px`, `${column?.props?.style?.width} with a ${gutter}px gutter`)
+  // The rail element survives as the card list, but it is a plain flow block
+  // inside the column now: no `data-side`, no absolute coordinates, and the
+  // collapse handle that used to stand in for a hidden panel is gone too.
   const rail = firstByClass(tree, 'dsse-rail')
-
-  const expected = placeCards({
-    chatRect: { left: 640, top: 120, right: 1560, bottom: 900 },
-    columnRect: rect,
-    side: 'right',
-    cardWidth: 288,
-  })
-  // What a window-relative rule would have said: the prose ends 360 from the right
-  // edge either way, but from the window it reads the same number for the wrong
-  // reason. The assertion below therefore checks the relationship, not the number:
-  // the cards begin exactly one gap after the prose, inside the column.
-  const proseRight = 1560
-  check('the rail honours the right setting', rail?.props?.['data-side'] === 'right', String(rail?.props?.['data-side']))
-  check(
-    'and is placed one gap right of the prose',
-    rail?.props?.style?.left === `${expected.left}px`,
-    `${rail?.props?.style?.left} vs computed ${expected.left}`,
-  )
-  const railLeft = Number.parseFloat(String(rail?.props?.style?.left ?? 'NaN'))
-  check(
-    'and clears the prose',
-    Number.isFinite(railLeft) && railLeft >= proseRight,
-    `${railLeft} vs prose ends ${proseRight}`,
-  )
-  const railWidth = Number.parseFloat(String(rail?.props?.style?.width ?? 'NaN'))
-  check(
-    'and stays inside the column',
-    Number.isFinite(railLeft) && Number.isFinite(railWidth) && railLeft + railWidth <= rect.right,
-    `${railLeft}+${railWidth} vs column ends ${rect.right}`,
-  )
-}
-
-{
-  // A body narrower than the prose cap leaves no gutter at all: the cards must
-  // fall back to the handle rather than draw a 10px column over the text.
-  const instance = boot({
-    frame: { left: 0, top: 0, width: 700, height: 1000 },
-    rect: { left: 0, top: 120, right: 700, bottom: 900, width: 700, height: 780 },
-    proseWidth: '680px',
-    routes: panelRoutes(),
-  })
-  instance.module.apply(instance.ctx)
-  const toggle = instance.seat('toggle')
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const tree = await instance.renderer.deepRender(cards)
-  check('no gutter means no rail', firstByClass(tree, 'dsse-rail') === undefined, textOf(tree).slice(0, 80))
+  check('and the rail is a flow block inside the column', rail?.props?.['data-embedded'] === 'true' && rail?.props?.style === undefined, String(rail?.props?.style))
+  check('and the collapse handle the old layout needed is gone', firstByClass(tree, 'dsse-handle') === undefined, textOf(tree).slice(0, 80))
 }
 
 {
   // No measurable prose width published by the host: the fallback clamp must be
   // used rather than a zero-width column.
+  const rect = { left: 0, top: 120, right: 1920, bottom: 900, width: 1920, height: 780 }
+  const instance = boot({ rect, proseWidth: 'not-a-number', routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(cards)
+  check('an unreadable width falls back to the documented clamp', firstByClass(tree, 'dsse-monitor') !== undefined, textOf(tree).slice(0, 80))
+}
+
+// The turn rail is not measured. Its room is spent out of the column's width
+// budget by `placeMonitor`, so a drawn column is a column that already left the
+// rail its 40px, and the attribute that reveals it is the reservation's own
+// value rather than a second opinion. The case below is the one that was broken
+// for three rounds: a default column on a 1440px window, where a measured
+// verdict said "no room" at every window size the panel was ever used at.
+// ---------------------------------------------------------------------------
+
+{
+  const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
+  const instance = boot({ rect, proseWidth: '742px', scrollWidth: rect.width, routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  // The toggle is the seat that carries the session id, and the overlay draws
+  // nothing until it has one; rendering the panel alone measures an empty page.
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+  check(
+    'the rail is shown while the column is',
+    instance.rootAttributes.get('data-dsse-turn-rail') === '1',
+    `${instance.rootAttributes.get('data-dsse-turn-rail')} with a ${rect.width}px column and 742px prose`,
+  )
+
+  // The reservation is on the area now, so `clientWidth` has it taken out. An
+  // earlier version subtracted the reservation from that width a second time and
+  // concluded there was no room; this pass is the one that caught it.
+  const resize = instance.listeners.filter((row) => row.type === 'resize').map((row) => row.handler)
+  for (const handler of resize) handler()
+  await instance.renderer.deepRender(cards)
+  check(
+    'and still is once the reservation is on the area',
+    instance.rootAttributes.get('data-dsse-turn-rail') === '1',
+    `${instance.rootAttributes.get('data-dsse-turn-rail')} after re-measuring with ${instance.hostStyle.get('--dsse-monitor-reserve')} reserved`,
+  )
+}
+
+{
+  // The deliberate half of the same decision: a window whose gutter is too tight
+  // for the rail still gets the rail, because the column's budget already paid
+  // for it and hiding it on a second opinion is what made it invisible. The rail
+  // overlapping the last few pixels of gutter is the cheaper wrong here — the
+  // alternative was no rail at all on most windows.
+  const rect = { left: 0, top: 120, right: 1000, bottom: 900, width: 1000, height: 780 }
+  const instance = boot({ rect, proseWidth: '960px', scrollWidth: rect.width, routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+  const resize = instance.listeners.filter((row) => row.type === 'resize').map((row) => row.handler)
+  for (const handler of resize) handler()
+  await instance.renderer.deepRender(cards)
+  check(
+    'a window with no gutter left still keeps the rail',
+    instance.rootAttributes.get('data-dsse-turn-rail') === '1',
+    `${instance.rootAttributes.get('data-dsse-turn-rail')} with ${instance.hostStyle.get('--dsse-monitor-reserve')} reserved`,
+  )
+}
+
+{
+  // The other side of the switch: with the column off we have taken no width, so
+  // the host's own 900px query is the correct answer and we stay out of its way.
+  // Without this the attribute could be hard-coded on and every case above would
+  // still pass.
+  const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
   const instance = boot({
-    rect: { left: 0, top: 120, right: 1920, bottom: 900, width: 1920, height: 780 },
-    proseWidth: 'not-a-number',
+    rect,
+    proseWidth: '742px',
+    scrollWidth: rect.width,
+    routes: { ...panelRoutes(), '/api/ui-evolve/config': { ok: true, data: { panelSummary: true, monitorColumn: false } } },
+  })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+  const resize = instance.listeners.filter((row) => row.type === 'resize').map((row) => row.handler)
+  for (const handler of resize) handler()
+  await instance.renderer.deepRender(cards)
+  check(
+    'a closed column leaves the rail to the host',
+    instance.rootAttributes.get('data-dsse-turn-rail') === '0',
+    `${instance.rootAttributes.get('data-dsse-turn-rail')} with the column off`,
+  )
+}
+
+// The host's own sidebar and this column want the same room. When the sidebar
+// opens, the column steps aside rather than squeezing the prose below the
+// reading floor — and it steps aside by closing, not by shrinking, because a
+// half-width panel would have to be re-learnt every time the sidebar opened.
+//
+// The signal is the frame's `data-rightbar-collapsed`, which React writes only
+// while the right column is closed: the attribute's presence is the closed state.
+// Reading the left column's flag instead (`data-sidebar-collapsed`) is the defect
+// this block replaced: that column is open by default, so it never said "closed"
+// and this panel never drew.
+// ---------------------------------------------------------------------------
+{
+  const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
+  const instance = boot({ rect, proseWidth: '920px', routes: panelRoutes(), sidebarOpen: true })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(cards)
+  check('an open sidebar costs the column its place', firstByClass(tree, 'dsse-monitor') === undefined, textOf(tree).slice(0, 60))
+  check('and the width goes back to the conversation', instance.hostStyle.get('--dsse-monitor-reserve') === '0px', String(instance.hostStyle.get('--dsse-monitor-reserve')))
+  check('and the rail is left to the host again', instance.rootAttributes.get('data-dsse-turn-rail') === '0', String(instance.rootAttributes.get('data-dsse-turn-rail')))
+}
+{
+  // The other side: with the sidebar closed the column is drawn as usual, so the
+  // assertion above cannot pass by drawing nothing ever.
+  const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
+  const instance = boot({ rect, proseWidth: '920px', routes: panelRoutes(), sidebarOpen: false })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(cards)
+  check('a closed sidebar leaves the column its place', firstByClass(tree, 'dsse-monitor') !== undefined, textOf(tree).slice(0, 60))
+  check('and it charges the conversation for it', Number.parseFloat(String(instance.hostStyle.get('--dsse-monitor-reserve') ?? '0')) > 0, String(instance.hostStyle.get('--dsse-monitor-reserve')))
+}
+{
+  // A host that renders no shell overlay at all is not evidence that its
+  // sidebar is open. Reading "unknown" as "open" would hide the column on every
+  // host whose shell we do not recognise, with nothing on screen to explain it.
+  const rect = { left: 280, top: 120, right: 1920, bottom: 900, width: 1640, height: 780 }
+  const instance = boot({ rect, proseWidth: '920px', routes: panelRoutes(), sidebar: false })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(cards)
+  check('a shell we cannot read is not a sidebar we can see', firstByClass(tree, 'dsse-monitor') !== undefined, textOf(tree).slice(0, 60))
+}
+
+// The structural CSS fallback covers a nav that appears late, but the inline
+// force is the belt-and-braces half: it finds the nav by structure, not by a
+// hashed class or a translated label, and pins a display that no host container
+// query can undo. It must leave the header breadcrumb nav alone and release
+// everything it pinned when the column closes.
+// ---------------------------------------------------------------------------
+
+{
+  const railNode = { style: { display: '', zIndex: '', visibility: '' }, getAttribute: (n) => (n === 'aria-label' ? '轮次导航' : null) }
+  const breadcrumbNode = { style: { display: '', zIndex: '', visibility: '' }, getAttribute: (n) => (n === 'aria-label' ? 'session.hierarchy' : null) }
+  const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
+  const instance = boot({
+    rect,
+    proseWidth: '742px',
+    scrollWidth: rect.width,
+    navNodes: [railNode, breadcrumbNode],
     routes: panelRoutes(),
   })
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+
+  check(
+    'the rail nav is forced to display with the column open',
+    railNode.style.display === 'block',
+    JSON.stringify(railNode.style),
+  )
+  check(
+    'and lifted above the overlay so the column cannot cover it',
+    railNode.style.zIndex === '21',
+    JSON.stringify(railNode.style),
+  )
+  // The desktop app proved a third property is needed. There the rail measured
+  // 28x192 with 19 marks and correct ::before colours, yet elementFromPoint fell
+  // through to the scroll body: an ancestor had it at visibility:hidden, and
+  // visibility inherits, so display:block alone still painted nothing. The rail
+  // declares its own visibility to win that inheritance back.
+  check(
+    'and made visible over an ancestor that hides the whole subtree',
+    railNode.style.visibility === 'visible',
+    'visibility was not forced',
+  )
+  check(
+    'and takes the pointer events the slot leaves to nobody',
+    railNode.style.pointerEvents === 'auto',
+    JSON.stringify(railNode.style),
+  )
+  check(
+    'the header breadcrumb nav is left alone',
+    breadcrumbNode.style.display === '' && breadcrumbNode.style.zIndex === '' && breadcrumbNode.style.visibility === '',
+    JSON.stringify(breadcrumbNode.style),
+  )
+
+  // Closing the column must give the nav back to the host, or a session that
+  // once opened the rail keeps a stray inline display after it closes.
+  // A raw click: pressToggle intentionally refuses to click an active toggle.
   firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const tree = await instance.renderer.deepRender(cards)
-  check('an unreadable width falls back to the documented clamp', firstByClass(tree, 'dsse-rail') !== undefined, textOf(tree).slice(0, 80))
+  await instance.renderer.deepRender(cards)
+  check(
+    'closing the column releases the forced rail',
+    !railNode.style.display && !railNode.style.zIndex && !railNode.style.visibility && !railNode.style.pointerEvents,
+    JSON.stringify(railNode.style),
+  )
 }
 
+// The host mounts its rail only once a conversation holds enough turns, which is
+// later than this overlay's first measurement. Nothing the plugin already
+// observes changes size at that moment, so a rail that arrives late used to wait
+// for an unrelated resize before its inline display was ever written — the
+// reported symptom was exactly that the rail came back only once the column was
+// dragged. The fix watches the scroll body's children, and this block pins it.
 // ---------------------------------------------------------------------------
+
+{
+  const railNode = { style: { display: '', zIndex: '' }, getAttribute: (n) => (n === 'aria-label' ? '轮次导航' : null) }
+  // Mutable on purpose: the point is a nav that did not exist at mount time.
+  const navs = []
+  const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
+  const instance = boot({
+    rect,
+    proseWidth: '742px',
+    scrollWidth: rect.width,
+    navNodes: navs,
+    routes: panelRoutes(),
+  })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+
+  // It has to watch children, not attributes: a nav that arrives is a new node,
+  // and the scroll body's own attributes are exactly what do not change when
+  // the host decides to draw the rail.
+  const railWatch = instance.mutationObservers
+    .flatMap((row) => row.targets)
+    .find((t) => t.target === instance.scrollArea)
+  check(
+    'the rail observer watches the scroll body rather than the frame',
+    railWatch !== undefined,
+    `${instance.mutationObservers.length} observers`,
+  )
+  check(
+    'and it watches the children that appear, not the body own attributes',
+    railWatch?.options?.childList === true && railWatch?.options?.subtree === true,
+    JSON.stringify(railWatch?.options),
+  )
+
+  // The nav arrives after the measurement that would have styled it.
+  navs.push(railNode)
+  const railObserver = instance.mutationObservers.find((row) => row.targets.some((t) => t.target === instance.scrollArea))
+  railObserver.trigger()
+  check(
+    'a late rail waits for a frame before being touched',
+    railNode.style.display === '' && instance.rafQueue.length > 0,
+    JSON.stringify(railNode.style),
+  )
+  instance.flushRaf()
+  check(
+    'a rail that arrives late is forced without waiting for a resize',
+    railNode.style.display === 'block' && railNode.style.zIndex === '21',
+    JSON.stringify(railNode.style),
+  )
+
+  // One pass per frame: a streaming conversation delivers mutations far faster
+  // than frames, and each pass reads layout.
+  railObserver.trigger()
+  railObserver.trigger()
+  railObserver.trigger()
+  check(
+    'repeated mutations collapse into one scheduled pass',
+    instance.rafQueue.length === 1,
+    `${instance.rafQueue.length} frames queued`,
+  )
+  instance.flushRaf()
+
+  // A closed column must not resurrect the rail.
+  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  await instance.renderer.deepRender(cards)
+  railNode.style.display = ''
+  railNode.style.zIndex = ''
+  railObserver.trigger()
+  instance.flushRaf()
+  check(
+    'a closed column does not force a late rail back on',
+    railNode.style.display === '' && railNode.style.zIndex === '',
+    JSON.stringify(railNode.style),
+  )
+
+  // An observer left attached to a body that the next session reuses would keep
+  // forcing a display onto a rail the plugin no longer owns.
+  instance.renderer.unmount()
+  check(
+    'teardown stops watching the scroll body',
+    railObserver.disconnected === true,
+    'still observing',
+  )
+}
+
+
 // Failures are surfaced, not swallowed
 // ---------------------------------------------------------------------------
 
@@ -1555,7 +2002,7 @@ check(
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
   check('a failed fetch is shown as an error', firstByClass(tree, 'dsse-err') !== undefined, textOf(tree).slice(0, 120))
   check('the error carries the message', textOf(tree).includes('answered 500'), textOf(tree).slice(0, 160))
@@ -1568,7 +2015,7 @@ check(
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
   check('a 200 with ok:false is an error, not data', textOf(tree).includes('queue unreadable'), textOf(tree).slice(0, 160))
 }
@@ -1582,7 +2029,7 @@ check(
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-settings-open').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
@@ -1608,7 +2055,7 @@ check(
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-settings-open').props.onClick()
   const tree = await instance.renderer.deepRender(cards)
@@ -1637,7 +2084,7 @@ check(
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
   await instance.renderer.render(toggle, { sessionId: 'session-a' })
-  firstByClass(instance.renderer.hooks && (await instance.renderer.render(toggle, { sessionId: 'session-a' })), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(instance.renderer.hooks && (await instance.renderer.render(toggle, { sessionId: 'session-a' })), 'dsse-toggle'))
   check('the cards open for the first conversation', (await instance.renderer.deepRender(cards)) !== null)
   // Switching conversation with the cards open keeps them open and re-points
   // them. Closing on switch would hide a panel the person just asked for, for a
@@ -1712,7 +2159,7 @@ check(
   instance.module.apply(makeCtx())
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   check('open before teardown', (await instance.renderer.deepRender(cards)) !== null)
   // Click a row while the channel is still bound. Without this the assertion
   // below cannot tell "the preview channel was released" from "nothing was ever
@@ -1755,7 +2202,7 @@ check(
   // Re-open the panel after the teardown and click the same row again. The
   // plugin is gone, so nothing may reach the sidebar a second time; a channel
   // left bound by an incomplete teardown would answer here.
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const afterTeardown = await instance.renderer.deepRender(cards)
   const rowAfter = firstByClass(afterTeardown, 'dsse-row-open')
   rowAfter?.props?.onClick?.()
@@ -1773,7 +2220,21 @@ check(
   // failure — and it also meant nothing tested the unmount path.
   instance.renderer.unmount()
   check('unmounting disconnects every observer the overlay opened', instance.mutationObservers.every((observer) => observer.disconnected), JSON.stringify(instance.mutationObservers.map((observer) => observer.disconnected)))
-  check('teardown removes host typography variables', instance.hostStyle.size === 0, JSON.stringify([...instance.hostStyle.entries()]))
+  // Every variable this plugin wrote to the host document is gone. The reservation
+  // is checked too: it narrows the conversation, so a leak here is a layout change
+  // nobody can undo once the plugin has unloaded.
+  const leftBehind = [...instance.hostStyle.entries()].filter(([, value]) => String(value) !== '0px')
+  check(
+    'teardown removes every variable it wrote to the host',
+    leftBehind.length === 0,
+    JSON.stringify(leftBehind),
+  )
+  check(
+    'teardown gives the conversation its width back',
+    instance.hostStyle.get('--dsse-monitor-reserve') === '0px' ||
+      instance.hostStyle.has('--dsse-monitor-reserve') === false,
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -1784,7 +2245,7 @@ check(
   // The list is transcribed from the host's own registrations; a typo in a slot
   // name is not a crash, it is a seat nothing ever draws into — the quietest
   // possible failure.
-  const published = new Set(['conversation.session.header.actions', 'shell.overlay'])
+  const published = new Set(['conversation.session.header.utilities', 'shell.overlay'])
   for (const name of booted.injectedNames) {
     check(`"${name}" is a slot the host publishes`, published.has(name), name)
   }
@@ -1808,7 +2269,7 @@ function deferred() {
 
 async function openReview(instance, sessionId = 'session-a') {
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-queue').props.onClick()
   await settle()
@@ -1837,7 +2298,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const closed = await instance.renderer.deepRender(cards)
   check('no dialog is shown before the review button is clicked', firstByClass(closed, 'dsse-dialog') === undefined)
   const closedTrigger = firstByClass(closed, 'dsse-queue')
@@ -2104,7 +2565,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   const baseline = instance.listeners.slice()
 
@@ -2134,7 +2595,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const closed = await instance.renderer.deepRender(cards)
   const closedButton = firstByClass(closed, 'dsse-queue')
   check('a closed dialog is not expanded', closedButton?.props?.['aria-expanded'] === false, JSON.stringify(closedButton?.props?.['aria-expanded']))
@@ -2240,7 +2701,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   check('the first panel payload is visible', textOf(first).includes('keep this summary'), textOf(first).slice(0, 120))
   firstByClass(first, 'dsse-refresh').props.onClick()
@@ -2248,7 +2709,7 @@ function byAction(node, action) {
   const failed = await instance.renderer.deepRender(cards)
   check('the refresh error is visible', textOf(failed).includes('panel temporarily offline'), textOf(failed).slice(0, 180))
   check('the last good summary remains visible', textOf(failed).includes('keep this summary'), textOf(failed).slice(0, 180))
-  check('all three cards remain visible', byClass(failed, 'dsse-card').length === 3, String(byClass(failed, 'dsse-card').length))
+  check('both cards remain visible', byClass(failed, 'dsse-card').length === 2, String(byClass(failed, 'dsse-card').length))
 }
 
 {
@@ -2300,7 +2761,7 @@ function byAction(node, action) {
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   await instance.renderer.deepRender(cards)
   await instance.renderer.render(toggle, { sessionId: 'session-b' })
   const fastB = await instance.renderer.deepRender(cards)
@@ -2326,7 +2787,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-queue').props.onClick()
   await instance.renderer.deepRender(cards)
@@ -2346,21 +2807,21 @@ function byAction(node, action) {
   const secondSave = deferred()
   const routes = panelRoutes()
   routes['/api/ui-evolve/config'] = (init) => {
-    if (init?.method !== 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
+    if (init?.method !== 'POST') return { ok: true, data: { panelSummary: true, monitorColumn: true } }
     const body = JSON.parse(String(init.body))
     return body.panelSummary === false ? firstSave.promise : secondSave.promise
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-settings-open').props.onClick()
   const settings = await instance.renderer.deepRender(cards)
   firstByClass(settings, 'dsse-check').props.onChange({ target: { checked: false } })
   const changedAgain = await instance.renderer.deepRender(cards)
   firstByClass(changedAgain, 'dsse-check').props.onChange({ target: { checked: true } })
-  secondSave.resolve({ ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } })
+  secondSave.resolve({ ok: true, data: { panelSummary: true, monitorColumn: true } })
   await settle()
   firstSave.resolve({ ok: true, data: { panelSummary: false, panelSide: 'left', panelCollapsed: false } })
   await settle()
@@ -2369,38 +2830,25 @@ function byAction(node, action) {
 }
 
 {
-  const instance = boot({ routes: panelRoutes() })
-  instance.module.apply(instance.ctx)
-  const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
-  const first = await instance.renderer.deepRender(cards)
-  firstByClass(first, 'dsse-settings-open').props.onClick()
-  const settings = await instance.renderer.deepRender(cards)
-  const right = byClass(settings, 'dsse-side-option').find((node) => textOf(node) === '右侧')
-  right.props.onClick()
-  const moved = await instance.renderer.deepRender(cards)
-  check('moving the panel keeps the loaded summary', textOf(moved).includes('Read three files and edited one'), textOf(moved).slice(0, 140))
-  check('moving the panel still changes its side', firstByClass(moved, 'dsse-rail')?.props?.['data-side'] === 'right', String(firstByClass(moved, 'dsse-rail')?.props?.['data-side']))
-}
-
-{
   const routes = panelRoutes()
   routes['/api/ui-evolve/config'] = (init) => {
-    if (init?.method === 'POST') return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false, ok: false, reason: 'settings are read only' } }
-    return { ok: true, data: { panelSummary: true, panelSide: 'left', panelCollapsed: false } }
+    if (init?.method === 'POST') return { ok: true, data: { panelSummary: true, monitorColumn: false, ok: false, reason: 'settings are read only' } }
+    return { ok: true, data: { panelSummary: true, monitorColumn: false } }
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const first = await instance.renderer.deepRender(cards)
   firstByClass(first, 'dsse-settings-open').props.onClick()
   const settings = await instance.renderer.deepRender(cards)
-  byClass(settings, 'dsse-side-option').find((node) => textOf(node) === '右侧').props.onClick()
+  firstByClass(settings, 'dsse-check').props.onChange({ target: { checked: false } })
   await settle()
   const refused = await instance.renderer.deepRender(cards)
-  check('a refused side change returns to the previous side', firstByClass(refused, 'dsse-rail')?.props?.['data-side'] === 'left', String(firstByClass(refused, 'dsse-rail')?.props?.['data-side']))
-  check('the refusal is shown to the user', textOf(refused).includes('settings are read only'), textOf(refused).slice(0, 180))
+  // The only setting left is the summary switch, so that is the one the host
+  // refuses here. What the block pins is unchanged by which setting it is: a
+  // rejected write must say so and must not take the loaded cards with it.
+  check('a refused write is shown to the user', textOf(refused).includes('settings are read only'), textOf(refused).slice(0, 180))
   check('the refusal does not clear the loaded cards', textOf(refused).includes('Read three files and edited one'), textOf(refused).slice(0, 180))
 }
 
@@ -2435,7 +2883,7 @@ function byAction(node, action) {
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'full-session' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'full-session' }), 'dsse-toggle'))
   const full = await instance.renderer.deepRender(cards)
   check('the filled session draws its card', textOf(full).includes('SESSION FULL'), textOf(full).slice(0, 100))
 
@@ -2482,7 +2930,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const settled = await instance.renderer.deepRender(cards)
   const beforeText = textOf(settled)
   check('the first answer is drawn before the refresh', beforeText.includes('Read three files and edited one.'), beforeText.slice(0, 120))
@@ -2515,7 +2963,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const overflowing = await instance.renderer.deepRender(cards)
   check('a summary taller than its box is marked as clipped', firstByClass(overflowing, 'dsse-clip')?.props?.['data-clipped'] === 'true', textOf(overflowing).slice(0, 120))
 }
@@ -2527,7 +2975,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const resting = await instance.renderer.deepRender(cards)
   check('a summary that fits is not marked as clipped', firstByClass(resting, 'dsse-clip')?.props?.['data-clipped'] === 'false', textOf(resting).slice(0, 120))
 }
@@ -2550,10 +2998,13 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
-  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+  // The 上一轮 block is the header's recap now, not a card. Everything these
+  // blocks assert about it -- clickable, tab stop, role, aria-expanded, hover --
+  // is unchanged; only where it is drawn has moved.
+  const turnCard = (tree) => firstByClass(tree, 'dsse-recap')
 
   // The harness renders a child component in a pass of its own, so the clip's
   // measurement reaches `Cards` one render after the clip reports it. React does
@@ -2611,16 +3062,25 @@ function byAction(node, action) {
   // the flow: the older strip grew a hovered card by twenty-six pixels and every
   // pointer that crossed the column nudged the text below it.
   const expandSheet = instance.styles.map((node) => String(node.textContent)).join('\n')
-  check('the offer is pinned to the bottom edge, out of the flow', /\.dsse-expand\{[^}]*position:absolute/.test(expandSheet), (expandSheet.match(/\.dsse-expand\{[^}]*\}/) ?? [''])[0].slice(0, 140))
-  check('and it hangs in the middle of that edge', /\.dsse-expand\{[^}]*left:50%/.test(expandSheet) && /\.dsse-expand\{[^}]*translateX\(-50%\)/.test(expandSheet))
+  check('the offer takes a line of its own under the list', /\.dsse-expand\{[^}]*margin:6px auto 0/.test(expandSheet), (expandSheet.match(/\.dsse-expand\{[^}]*\}/) ?? [''])[0].slice(0, 140))
+  // The row stays; only the circle fades. Collapsing the line would make the card
+  // grow by 32px the moment a pointer crossed it and shove every card below down.
+  check('and the row it needs is already there', /\.dsse-expand\{[^}]*margin:6px auto 0/.test(expandSheet) && /\.dsse-expand\{[^}]*max-height/.test(expandSheet) === false)
   check('and the card is the box it is pinned to', /\.dsse-card\{[^}]*position:relative/.test(expandSheet))
   check('the offer is round', /\.dsse-expand\{[^}]*border-radius:999px/.test(expandSheet))
   check('the offer takes no clicks of its own', /\.dsse-expand\{[^}]*pointer-events:none/.test(expandSheet))
   // An open card reserves room for the badge. Without the padding the badge would
   // sit on top of the last line of the summary it just revealed — the one part of
   // the card the click was for.
-  check('an open card keeps its last line clear of the badge', /\.dsse-card\[aria-expanded="true"\] \.dsse-card-body\{[^}]*padding-bottom:44px\}/.test(expandSheet), (expandSheet.match(/\.dsse-card\[aria-expanded="true"\][^}]*\}/) ?? [''])[0].slice(0, 120))
+  check('an open card gives the badge a line instead of padding for it', /\.dsse-card\[data-open="true"\] \.dsse-expand\{[^}]*opacity:1/.test(expandSheet), (expandSheet.match(/\.dsse-card\[data-open="true"\] \.dsse-expand\{[^}]*\}/) ?? [''])[0].slice(0, 160))
   check('a hovered card still reports itself closed', turnCard(hovered)?.props?.['aria-expanded'] === false, String(turnCard(hovered)?.props?.['aria-expanded']))
+
+  // The header's summary draws its own fade, and it is a different rule from the
+  // card's 34px one. Asserting only the card's text would still pass with the
+  // recap's rule mutated, because the card's selector is a substring of it --
+  // which is exactly how the mutation of the recap fade survived once.
+  check('the folded summary fades out where it is cut', /\.dsse-recap \.dsse-clip\[data-clipped="true"\]\[data-expanded="false"\]::after\{[^}]*height:30px/.test(expandSheet), (expandSheet.match(/\.dsse-recap \.dsse-clip[^}]*\}/) ?? [''])[0].slice(0, 160))
+  check('and the fade goes away once the summary is open', /\.dsse-recap \.dsse-clip\[data-clipped="true"\]::after\{/.test(expandSheet) === false, 'the recap fade is not gated on data-expanded')
 
   // Leaving takes the offer away with it, and only the offer: being able to open
   // the card is a fact about the text, not about the pointer. A card that lost
@@ -2654,6 +3114,20 @@ function byAction(node, action) {
   // glyph is a promise about the click rather than decoration.
   const openedPath = firstByClass(opened, 'dsse-expand')?.props?.children?.props?.children?.props?.d
   const closedPath = firstByClass(hovered, 'dsse-expand')?.props?.children?.props?.children?.props?.d
+  // The header block carries the same badge as the card it replaced, so the
+  // chevron's direction has to be pinned here too: the card copy is only reachable
+  // through the 产出文件 badge now, and a mutation of the turn's chevron would slip
+  // through otherwise.
+  const recapIcon = (tree) => firstByClass(firstByClass(tree, 'dsse-recap'), 'dsse-expand')?.props?.children
+  const recapUp = (tree) => {
+    const icon = recapIcon(tree)
+    if (icon?.props?.up !== undefined) return icon.props.up === true
+    const d = typeof icon?.props?.children?.props?.d === 'string' ? icon.props.children.props.d : ''
+    return d === '' ? undefined : d.startsWith('M6 15')
+  }
+  check('the header offers the way out with the same badge', firstByClass(opened, 'dsse-expand') !== undefined, String(firstByClass(opened, 'dsse-expand') === undefined))
+  check('and its chevron points up while the summary is open', recapUp(opened) === true, String(recapUp(opened)))
+  check('and down while it is folded', recapUp(hovered) === false, String(recapUp(hovered)))
   check('the open card points up', openedPath === 'M6 15l6-6 6 6', String(openedPath))
   check('and the closed card points down', closedPath === 'M6 9l6 6 6-6', String(closedPath))
 
@@ -2691,10 +3165,13 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
-  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+  // The 上一轮 block is the header's recap now, not a card. Everything these
+  // blocks assert about it -- clickable, tab stop, role, aria-expanded, hover --
+  // is unchanged; only where it is drawn has moved.
+  const turnCard = (tree) => firstByClass(tree, 'dsse-recap')
 
   // The harness renders a child component in a pass of its own, so the clip's
   // measurement reaches `Cards` one render after the clip reports it. React does
@@ -2731,7 +3208,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   // The harness renders a child component in a pass of its own, so the clip's
   // measurement reaches `Cards` one render after the clip reports it. React does
@@ -2742,11 +3219,18 @@ function byAction(node, action) {
     return instance.renderer.deepRender(cards)
   }
 
+  // The block being measured is the header's recap, not a card: since the last
+  // turn moved into the header there is no 上一轮 card to read, and the first
+  // `.dsse-card` is the file list, which never was clickable and so proved nothing.
   const tree = await settle()
-  const card = byClass(tree, 'dsse-card')[0]
+  const card = firstByClass(tree, 'dsse-recap')
   check('a summary that fits is not clickable', card?.props?.['data-clickable'] === 'false', String(card?.props?.['data-clickable']))
   check('and it takes no tab stop', card?.props?.tabIndex === undefined, String(card?.props?.tabIndex))
   check('and it claims no button role', card?.props?.role === undefined, String(card?.props?.role))
+  // A block that offers nothing must not answer a click either. Leaving the
+  // handler mounted hands the pointer a control whose only effect is a pin on a
+  // summary that cannot open, which is the same defect as a tab stop on nothing.
+  check('and it does not answer a click it cannot honour', card?.props?.onClick === undefined, String(typeof card?.props?.onClick))
 
   // The pointer handlers are attached whatever the measurement says — a card cannot
   // know it has nothing to reveal until after layout, and hover arrives before that.
@@ -2758,7 +3242,7 @@ function byAction(node, action) {
   card?.props?.onMouseEnter?.()
   const hovered = await settle()
   check('pointing at a card with nothing to reveal does not open it', expandedOf(hovered) === 'false', String(expandedOf(hovered)))
-  check('and it is still not offering a way to close', byClass(hovered, 'dsse-card')[0]?.props?.['data-clickable'] === 'false', String(byClass(hovered, 'dsse-card')[0]?.props?.['data-clickable']))
+  check('and it is still not offering a way to close', firstByClass(hovered, 'dsse-recap')?.props?.['data-clickable'] === 'false', String(firstByClass(hovered, 'dsse-recap')?.props?.['data-clickable']))
 }
 
 {
@@ -2769,7 +3253,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 900 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
   // The harness renders a child component in a pass of its own, so the clip's
@@ -2788,7 +3272,7 @@ function byAction(node, action) {
     // fail an assertion here. Calling it unguarded threw, and a thrown suite
     // prints no FAIL line — which made the mutation that removes the handler look
     // like a survivor.
-    const handler = byClass(tree, 'dsse-card')[0]?.props?.onKeyDown
+    const handler = firstByClass(tree, 'dsse-recap')?.props?.onKeyDown
     check(`the card answers ${name} at all`, typeof handler === 'function', String(typeof handler))
     if (typeof handler !== 'function') return { prevented, next: tree }
     handler({ key: name, preventDefault: () => { prevented = true } })
@@ -2840,10 +3324,13 @@ function byAction(node, action) {
   })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
-  const turnCard = (tree) => byClass(tree, 'dsse-card')[0]
+  // The 上一轮 block is the header's recap now, not a card. Everything these
+  // blocks assert about it -- clickable, tab stop, role, aria-expanded, hover --
+  // is unchanged; only where it is drawn has moved.
+  const turnCard = (tree) => firstByClass(tree, 'dsse-recap')
   const settle = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
@@ -2910,7 +3397,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300, overflowHeight: 300 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settleInto = async () => {
     await instance.renderer.deepRender(cards)
@@ -2947,14 +3434,14 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef(fakeNode({ left: 280, top: 120, width: 1640, height: 300 }))
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settleInto = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
   const expandedOf = (tree) => firstByClass(tree, 'dsse-clip')?.props?.['data-expanded']
-  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+  const cardOf = (tree) => firstByClass(tree, 'dsse-recap')
 
   // Turn 7 shows a long summary; the card is expandable and gets pinned open.
   turn = 7
@@ -3008,13 +3495,13 @@ function byAction(node, action) {
   })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settleInto = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
-  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+  const cardOf = (tree) => firstByClass(tree, 'dsse-recap')
 
   const measured = await settleInto()
   check('a measured overflow makes the card expandable', cardOf(measured)?.props?.['data-clickable'] === 'true', String(cardOf(measured)?.props?.['data-clickable']))
@@ -3054,13 +3541,13 @@ function byAction(node, action) {
   })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settleInto = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
-  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+  const cardOf = (tree) => firstByClass(tree, 'dsse-recap')
 
   const measured = await settleInto()
   check('the tall summary is expandable', cardOf(measured)?.props?.['data-clickable'] === 'true', String(cardOf(measured)?.props?.['data-clickable']))
@@ -3098,7 +3585,7 @@ function byAction(node, action) {
   instance.renderer.setNodeForRef({ ...fakeNode({ left: 280, top: 120, width: 1640, height: 300 }), scrollHeight: 900, clientHeight: 300 })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   await instance.renderer.deepRender(cards)
   const settled = await instance.renderer.deepRender(cards)
@@ -3140,14 +3627,14 @@ function byAction(node, action) {
   })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settleInto = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
   const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
-  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+  const cardOf = (tree) => firstByClass(tree, 'dsse-recap')
 
   const begin = await settleInto()
   check('the long summary measures as too tall for its box', clipOf(begin)?.props?.['data-clipped'] === 'true', String(clipOf(begin)?.props?.['data-clipped']))
@@ -3243,14 +3730,14 @@ function byAction(node, action) {
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
   const toggle = instance.seat('toggle')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
 
   const settle = async () => {
     await instance.renderer.deepRender(cards)
     return instance.renderer.deepRender(cards)
   }
   const clipOf = (tree) => firstByClass(tree, 'dsse-clip')
-  const cardOf = (tree) => byClass(tree, 'dsse-card')[0]
+  const cardOf = (tree) => firstByClass(tree, 'dsse-recap')
 
   const begin = await settle()
   check('the first conversation has more to show than the box holds', clipOf(begin)?.props?.['data-clipped'] === 'true', String(clipOf(begin)?.props?.['data-clipped']))
@@ -3362,7 +3849,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const open = await instance.renderer.deepRender(cards)
   firstByClass(open, 'dsse-settings-open').props.onClick()
   const withDialog = await instance.renderer.deepRender(cards)
@@ -3401,7 +3888,7 @@ function byAction(node, action) {
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
   check('a queue with work in it keeps the header visible', firstByClass(tree, 'dsse-queue') !== undefined, textOf(tree).slice(0, 120))
   check('the queue button reports how much work there is', textOf(firstByClass(tree, 'dsse-queue')).includes('3'), textOf(tree).slice(0, 120))
@@ -3433,7 +3920,7 @@ function byAction(node, action) {
     const instance = boot({ routes, phase })
     instance.module.apply(instance.ctx)
     const cards = instance.seat('cards')
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     return instance.renderer.deepRender(cards)
   }
 
@@ -3470,7 +3957,7 @@ function byAction(node, action) {
   // the page is open.
   const watched = boot({ routes })
   watched.module.apply(watched.ctx)
-  firstByClass(await watched.renderer.render(watched.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await watched.renderer.render(watched.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   await watched.renderer.deepRender(watched.seat('cards'))
   const phaseObserver = watched.mutationObservers.find((observer) =>
     observer.targets.some((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase')))
@@ -3515,7 +4002,7 @@ function byAction(node, action) {
 {
   const instance = boot({ routes: panelRoutes(), lang: 'en-GB' })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   await instance.renderer.deepRender(instance.seat('cards'))
   check(
     'the first ask carries no language',
@@ -3529,7 +4016,7 @@ function byAction(node, action) {
   // attribute before the bundle runs.
   const unnamed = boot({ routes: panelRoutes(), lang: '' })
   unnamed.module.apply(unnamed.ctx)
-  firstByClass(await unnamed.renderer.render(unnamed.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await unnamed.renderer.render(unnamed.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   await unnamed.renderer.deepRender(unnamed.seat('cards'))
   check(
     'a host that names no language asks the same way',
@@ -3601,7 +4088,7 @@ async function openPanel(routes, options) {
   instance.module.apply(instance.ctx)
   const toggle = instance.seat('toggle')
   const cards = instance.seat('cards')
-  firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(cards)
   return { instance, tree }
 }
@@ -3628,8 +4115,11 @@ async function openPanel(routes, options) {
 }
 
 {
-  // The row order is the requirement: the number sits between the two controls
-  // and the queue, so it can appear and disappear without moving a target.
+  // The row order is the requirement, and it runs from what you read to what you
+  // press: the queue first, then the three controls as one group (speed,
+  // refresh, settings). The number is between them so it can appear and
+  // disappear without moving a target — it is the only thing in the row whose
+  // width changes on its own.
   const { tree } = await openPanel({
     ...panelRoutes(),
     '/api/ui-evolve/speed': { ok: true, data: { tokens: 100, ms: 1000, tps: 42, active: true } },
@@ -3637,11 +4127,14 @@ async function openPanel(routes, options) {
   const top = firstByClass(tree, 'dsse-top-row')
   const children = (top?.props?.children ?? []).filter((node) => node !== null && node !== undefined && node !== false)
   const at = (name) => children.findIndex((node) => byClass(node, name).length > 0 || node.props?.className === name)
-  const settings = at('dsse-settings-open')
-  const speed = at('dsse-speed')
   const queue = at('dsse-queue')
-  check('the badge sits after the settings button', settings >= 0 && speed > settings, `${settings} then ${speed}`)
-  check('and before the queue', queue > speed, `${speed} then ${queue}`)
+  const speed = at('dsse-speed')
+  const refresh = at('dsse-refresh')
+  const settings = at('dsse-settings-open')
+  check('the queue comes first, where the eye lands', queue === 0, `${queue} then ${speed}`)
+  check('the badge sits between the queue and the controls', queue >= 0 && speed > queue, `${queue} then ${speed}`)
+  check('the refresh button follows the badge', refresh > speed, `${speed} then ${refresh}`)
+  check('and settings closes the row', settings > refresh, `${refresh} then ${settings}`)
 }
 
 {
@@ -4081,7 +4574,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   const list = firstByClass(card, 'dsse-files')
@@ -4158,7 +4651,7 @@ async function openPanel(routes, options) {
   // not to move it or reshape it, so the geometry is asserted on that rule alone.
   check('the badge is the same circle the other card draws', (() => {
     const shared = ruleOf('.dsse-expand')
-    return shared.includes('border-radius:999px') && shared.includes('width:26px') && shared.includes('height:26px') && shared.includes('left:50%') && shared.includes('translateX(-50%)') && shared.includes('bottom:8px')
+    return shared.includes('border-radius:999px') && shared.includes('width:26px') && shared.includes('height:26px')
   })(), ruleOf('.dsse-expand').slice(0, 160))
   // `width: 26px` on a 1px-bordered box is not one size, it is two. The 上一轮
   // badge is a `div`, so those 26px are the content box and the border sits
@@ -4172,12 +4665,37 @@ async function openPanel(routes, options) {
   check('and both badges measure the box the same way', ruleOf('.dsse-expand').includes('box-sizing:border-box'), ruleOf('.dsse-expand').slice(0, 160))
   // It is pressable now, so it has to take the pointer back from the shared rule
   // that switches it off for the card-level badge.
-  check('the badge takes the pointer back so it can be pressed', ruleOf('.dsse-expand-action').includes('pointer-events:auto'), ruleOf('.dsse-expand-action').slice(0, 160))
+  // The badge is drawn on hover and on an open card, and only then does it accept a
+  // press. Leaving `auto` on unconditionally made an invisible 26px circle eat the
+  // clicks meant for the row underneath it.
+  check(
+    'the badge takes the pointer back so it can be pressed',
+    /\.dsse-card:hover \.dsse-expand-action[^{]*\{[^}]*pointer-events:auto/.test(sheetOf()) && /\.dsse-card\[data-open="true"\] \.dsse-expand-action[^{]*\{[^}]*pointer-events:auto/.test(sheetOf()),
+    (sheetOf().match(/\.dsse-expand-action[^{]*\{[^}]*\}/) ?? [''])[0].slice(0, 160),
+  )
   check('and it looks pressable', ruleOf('.dsse-expand-action').includes('cursor:pointer'), ruleOf('.dsse-expand-action').slice(0, 160))
-  // The reserved strip follows the badge rather than the card's other state: a
-  // card with no badge needs no room, and an open card whose badge sits on top of
-  // its last line would hide the one thing the click was for.
-  check('and a badge reserves room for itself below the body', ruleOf('.dsse-card[data-badge="true"] .dsse-card-body').includes('padding-bottom:44px'), ruleOf('.dsse-card[data-badge="true"] .dsse-card-body').slice(0, 160))
+  // The badge floats over the content rather than reserving a strip under it.
+  // Reserving one drew a permanent empty row under a folded list — the same
+  // amount of blank whether or not the pointer ever arrived — and the row was
+  // the largest thing on a three-row card.
+  check('and a folded badge reserves no row of its own', ruleOf('.dsse-card[data-badge="true"] .dsse-card-body') === '', ruleOf('.dsse-card[data-badge="true"] .dsse-card-body').slice(0, 160))
+  // Open, the badge stops floating and becomes a row of its own. Floating is
+  // only right while there is a line under it for the fade to cover; over an
+  // open list the circle hangs mid-row and reads as a control that fell off.
+  // Keyed on data-open, not aria-expanded: the files card hands its expansion to
+  // a real button, so its own aria-expanded is never written. Rules hung on
+  // aria-expanded matched nothing on the one card that needed them.
+  check('and an open badge leaves the content alone', ruleOf('.dsse-card[data-open="true"] .dsse-card-body') === '', ruleOf('.dsse-card[data-open="true"] .dsse-card-body').slice(0, 160))
+  const openSpot = ruleOf('.dsse-card[data-open="true"] .dsse-expand')
+  check('and an open card gives it a row instead of a spot on the last file', openSpot.includes('position:static') && openSpot.includes('margin:6px auto 0'), openSpot.slice(0, 200))
+  const foldedSpot = ruleOf('.dsse-card[data-open="false"] .dsse-expand')
+  check('and a folded card floats it on the fade, where there is no room for a row', foldedSpot.includes('position:absolute') && foldedSpot.includes('bottom:6px'), foldedSpot.slice(0, 200))
+  // The files card hands its expansion to a real button, so it never carries
+  // aria-expanded itself. Keying placement on that attribute left the badge
+  // exactly where the shared rule put it, on the one card that needed the split.
+  const declared = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  check('the placement is keyed on an attribute every card carries', declared.includes("'data-open': (props.badgeAction === undefined ? props.expanded : props.badgeAction.open)"), 'data-open not published on the card')
+  check('and centres it on the fade rather than against a corner', foldedSpot.includes('left:50%') && foldedSpot.includes('translateX(-50%)'), foldedSpot.slice(0, 200))
 
   // Every row is a button, because clicking one opens a preview.
   const openRow = firstByClass(list, 'dsse-row-open')
@@ -4282,7 +4800,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   const names = () => byClass(card, 'dsse-name').map((node) => textOf(node))
@@ -4379,7 +4897,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   // The card used to fold here and draw nothing: the folded list is the first
@@ -4435,7 +4953,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes, sidebar: false })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const row = byClass(tree, 'dsse-row')[0]
   check('the file is still listed without a sidebar', row !== undefined && textOf(row).includes('only.md'), textOf(tree).slice(0, 160))
@@ -4469,7 +4987,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes, sidebarThrows: true })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const openRow = firstByClass(tree, 'dsse-row-open')
   check('the row still offers a preview', openRow !== undefined, JSON.stringify(byClass(tree, 'dsse-row').length))
@@ -4511,7 +5029,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const folded = await instance.renderer.deepRender(instance.seat('cards'))
   // Five rows no longer fit the folded list, and this block is about the states a
   // row can be in rather than about which rows survive folding. Expanding first
@@ -4625,7 +5143,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const row = firstByClass(tree, 'dsse-row')
   check('a row with no status is treated as present', row?.props?.['data-status'] === 'available', String(row?.props?.['data-status']))
@@ -4663,7 +5181,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   const meta = textOf(firstByClass(card, 'dsse-head-stats'))
@@ -4733,7 +5251,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
 
   const codeRow = rowNamed(tree, 'run.ts')
@@ -4820,7 +5338,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
 
   const docRow = rowNamed(tree, 'notes.md')
@@ -4871,7 +5389,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
 
   const rowOf = (name) => byClass(tree, 'dsse-name').find((node) => textOf(node) === name)?.props?.children
@@ -4917,7 +5435,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const where = firstByClass(tree, 'dsse-where')
   check('without a workspace the directory is the tail of the path', where !== undefined && textOf(where) === 'src/lib', String(textOf(where)))
@@ -4947,7 +5465,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const rows = byClass(tree, 'dsse-row')
   const inner = rows.find((row) => textOf(firstByClass(row, 'dsse-name')) === 'a.ts')
@@ -4981,7 +5499,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
   const dirRule = /\.dsse-where\{[^}]*\}/u.exec(sheet)?.[0] ?? ''
@@ -5036,9 +5554,18 @@ async function openPanel(routes, options) {
     const routes = withSweep(sweep)
     const instance = boot({ routes })
     instance.module.apply(instance.ctx)
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
-    return byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+    // The caveat is only drawn on an open list. A collapsed card that said
+    // "the directory was not read to the end" would be a line of small print about
+    // files the reader cannot see yet, so the note is behind the same disclosure
+    // as the remainder it warns about.
+    const badge = firstByClass(card, 'dsse-expand-action')
+    if (typeof badge?.props?.onClick === 'function') badge.props.onClick()
+    await instance.renderer.deepRender(instance.seat('cards'))
+    const opened = await instance.renderer.deepRender(instance.seat('cards'))
+    return byClass(opened, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   }
   const noteOf = (card) => {
     const note = firstByClass(card, 'dsse-note')
@@ -5094,7 +5621,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   check('a card that hides nothing offers no remainder', firstByClass(card, 'dsse-expand-action') === undefined, String(textOf(card).slice(0, 80)))
@@ -5139,7 +5666,7 @@ async function openPanel(routes, options) {
   const open = async (settings) => {
     const instance = boot(settings)
     instance.module.apply(instance.ctx)
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
     const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
     const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
@@ -5462,7 +5989,7 @@ async function openPanel(routes, options) {
     const navigator = { clipboard: { writeText: (value) => { written.push(value); return Promise.resolve() } } }
     const instance = boot({ routes, navigator })
     instance.module.apply(instance.ctx)
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     const tree = await instance.renderer.deepRender(instance.seat('cards'))
     const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
     check('a gone file still offers its path', byClass(card, 'dsse-row-copy').length === 1, String(byClass(card, 'dsse-row-copy').length))
@@ -5486,7 +6013,7 @@ async function openPanel(routes, options) {
     // or the plugin is applied: a boot with no render has an empty style list, and
     // every rule below would then be a regex against nothing.
     instance.module.apply(instance.ctx)
-    firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
     await instance.renderer.deepRender(instance.seat('cards'))
     const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
     check('the sheet this block asserts against is not empty', sheet.includes('dsse-row-copy'), `${instance.styles.length} sheets`)
@@ -5728,7 +6255,7 @@ async function openPanel(routes, options) {
   }
   const instance = boot({ routes })
   instance.module.apply(instance.ctx)
-  firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle').props.onClick()
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   // The main number leaves the old row out on purpose: the point of demoting it
   // is that it stops describing the session as it stands now. It is not lost —
@@ -5820,7 +6347,7 @@ async function openPanel(routes, options) {
   instance.module.apply(instance.ctx)
   const toggle = firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle')
   check('the panel has a handle to open it with', toggle !== undefined, String(toggle === undefined))
-  if (toggle !== undefined && typeof toggle.props?.onClick === 'function') toggle.props.onClick()
+  pressToggle(toggle)
   const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   // Five rows over a four-row fold, so the last one is not drawn yet. Expanding is
   // part of the fixture rather than an accident: reading a row that the card chose
@@ -5911,6 +6438,340 @@ async function openPanel(routes, options) {
     titleOf('gone.md') === 'F:\\work\\src\\gone.md\n文件已被删除或移动',
     JSON.stringify(titleOf('gone.md')),
   )
+}
+
+// ---------------------------------------------------------------------------
+// The monitor column is where the cards live now
+//
+// The cards used to be absolutely positioned into whichever gutter the prose
+// left over. That layout only existed when the window was wide enough to have a
+// gutter at all: on a 1440px window with the host sidebar open, each side got
+// 209px, which is narrower than the cards, so the panel was squeezed or absent
+// exactly where it was most wanted. The column is the replacement, and it is on
+// by default -- so the default has to be pinned here, not left to whichever
+// fixture happens to turn it off.
+// ---------------------------------------------------------------------------
+
+{
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/config'] = {
+    ok: true,
+    data: { panelSummary: true, monitorColumn: true },
+  }
+  const instance = boot({
+    rect: { left: 280, top: 120, right: 1920, bottom: 420, width: 1640, height: 300 },
+    proseWidth: '920px',
+    routes,
+  })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+
+  // No click: the point of the default is that the panel is already there.
+  const toggleTree = await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  check(
+    'the toggle starts pressed, because the panel starts open',
+    firstByClass(toggleTree, 'dsse-toggle')?.props?.['data-active'] === 'true',
+    String(firstByClass(toggleTree, 'dsse-toggle')?.props?.['data-active']),
+  )
+
+  const tree = await instance.renderer.deepRender(cards)
+  const column = firstByClass(tree, 'dsse-monitor')
+  check('the panel draws a column without being asked', column !== undefined, textOf(tree).slice(0, 80))
+
+  // The box must be a real rectangle. A missing width is the failure mode worth
+  // catching: an undefined or NaN width renders as `width: NaNpx`, which the
+  // browser drops, and the column collapses to the width of its content while
+  // still claiming to reserve 300px of the conversation.
+  const box = column?.props?.style ?? {}
+  const numbers = ['left', 'top', 'width', 'height'].map((key) => Number.parseFloat(String(box[key] ?? 'NaN')))
+  check(
+    'and gives the column four real edges',
+    numbers.every((value) => Number.isFinite(value) && value >= 0),
+    JSON.stringify(box),
+  )
+  // The fixture puts the conversation at x=280 and 1640 wide, so its right edge is
+  // 1920. The column is measured in the same space as the gutter rail (see "the
+  // rail clears the host sidebar"), which is why this number is the viewport one
+  // and not 1640.
+  check(
+    'and puts it against the right edge of the conversation',
+    Math.abs(numbers[0] + numbers[2] - 1920) <= 1 && numbers[0] > 920,
+    JSON.stringify({ left: numbers[0], width: numbers[2] }),
+  )
+
+  // The reservation is the whole point: without it the column would cover the
+  // conversation instead of sitting beside it.
+  const reserve = Number.parseFloat(String(instance.hostStyle.get('--dsse-monitor-reserve') ?? 'NaN'))
+  check(
+    'and takes that width away from the conversation',
+    Number.isFinite(reserve) && reserve === numbers[2],
+    JSON.stringify({ reserve, columnWidth: numbers[2] }),
+  )
+
+  // The rail no longer positions itself inside the column; the column is the box.
+  const rail = firstByClass(tree, 'dsse-rail')
+  check(
+    'the cards fill the column instead of positioning themselves',
+    rail?.props?.['data-embedded'] === 'true' && rail?.props?.style === undefined,
+    JSON.stringify(rail?.props?.['data-embedded'] ?? null),
+  )
+  // No column header. A title saying "monitor" on the column whose only content
+  // is the monitor is a caption on the obvious, and at 220px it costs a card's
+  // worth of height. The switch lives in the session header, so closing does not
+  // need a second control in here either.
+  check(
+    'the column draws no header of its own',
+    firstByClass(tree, 'dsse-monitor-head') === undefined && firstByClass(tree, 'dsse-monitor-title') === undefined,
+    textOf(tree).slice(0, 80),
+  )
+  check(
+    'the top row is the first thing in the column',
+    firstByClass(tree, 'dsse-monitor-body') !== undefined && firstByClass(tree, 'dsse-top-row') !== undefined,
+    textOf(tree).slice(0, 80),
+  )
+
+  // Closing the column has to hand the width back. A reservation left behind
+  // narrows the conversation for the rest of the session, which is worse than
+  // the layout it replaced. The close path is the header switch now: there is no
+  // control inside the column to press.
+  const openToggle = firstByClass(toggleTree, 'dsse-toggle')
+  check(
+    'the switch is the only way to close the column',
+    openToggle?.props?.['data-active'] === 'true' && typeof openToggle?.props?.onClick === 'function',
+    String(openToggle?.props?.['data-active']),
+  )
+  openToggle?.props?.onClick?.()
+  const closed = await instance.renderer.deepRender(cards)
+  check('closing the column removes it', closed === null, textOf(closed ?? {}).slice(0, 60))
+  check(
+    'and returns the width to the conversation',
+    instance.hostStyle.get('--dsse-monitor-reserve') === '0px',
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
+  )
+  check(
+    'and the toggle reports the panel is closed',
+    firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle')?.props?.['data-active'] === 'false',
+    String(firstByClass(await instance.renderer.render(toggle, { sessionId: 'session-a' }), 'dsse-toggle')?.props?.['data-active']),
+  )
+}
+
+{
+  // Turning the column off leaves no panel. There is no second layout to fall
+  // back to any more: the floating cards it used to fall back to are the layout
+  // the column replaced, and that fallback is exactly what made the panel
+  // disappear with no way back once a narrow width had been saved.
+  const instance = boot({
+    rect: { left: 280, top: 120, right: 1920, bottom: 420, width: 1640, height: 300 },
+    proseWidth: '920px',
+    routes: {
+      ...panelRoutes(),
+      '/api/ui-evolve/config': { ok: true, data: { panelSummary: true, monitorColumn: false } },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  await settle()
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  check('a saved off draws no column', firstByClass(tree, 'dsse-monitor') === undefined, textOf(tree).slice(0, 60))
+  check('and draws no cards either, because there is no other layout', firstByClass(tree, 'dsse-rail') === undefined, textOf(tree).slice(0, 60))
+  check(
+    'and reserves nothing',
+    instance.hostStyle.get('--dsse-monitor-reserve') === '0px',
+    JSON.stringify(instance.hostStyle.get('--dsse-monitor-reserve')),
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The monitor column's edges, and the turn rail it used to take with them
+//
+// Two things a person can see and no component assertion can: whether the column
+// has a top edge, and whether the host's turn rail is still drawn beside the
+// prose. Both are CSS, so they are asserted against the stylesheet text the
+// bundle installs — the same way the handle width is.
+// ---------------------------------------------------------------------------
+
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  const rule = /[.]dsse-monitor[{]([^}]*)[}]/.exec(source)
+  const body = rule === null ? '' : rule[1]
+  check('the monitor column has a rule of its own', rule !== null, 'no .dsse-monitor rule found')
+  // No edges and no shadow. The ruling made the panel read as a separate window
+  // floating over the conversation; without it the column is told apart by its own
+  // surface and by the cards' outlines. A `border-*` or a `box-shadow` reappearing
+  // here is the regression, so all three are asserted absent rather than present.
+  check('and draws no top edge', /border-top/.test(body) === false, body.slice(0, 120))
+  check('and no left edge', /border-left/.test(body) === false, body.slice(0, 120))
+  check('and casts no shadow', /box-shadow/.test(body) === false, body.slice(0, 120))
+  // The grab strip hangs outside the left edge, so the column must not clip it.
+  check('and does not clip the grab strip that hangs outside it', /overflow:hidden/.test(body) === false, body.slice(0, 120))
+}
+
+// The header holds the standing answer ("what happened last turn"), so it has to
+// stay put while the cards below it scroll. That is `position:sticky` on the
+// block that wraps the tools row and the recap — not `fixed`, which would need
+// the column's left edge recomputed by hand every time the column is resized.
+// ---------------------------------------------------------------------------
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  const rule = /[.]dsse-col-top[{]([^}]*)[}]/.exec(source)
+  const body = rule === null ? '' : rule[1]
+  check('the header is a block of its own', rule !== null, 'no .dsse-col-top rule found')
+  check('and it is stuck to the top of the scroller', /position:sticky/.test(body), body.slice(0, 120))
+  check('and it sticks at zero, not at some offset', /top:0/.test(body), body.slice(0, 120))
+  // Opaque, because the cards scroll underneath it. A translucent header would
+  // show the file rows sliding through the recap.
+  // Opaque and card-coloured: the header is the top card now, so its fill has to
+  // be the one the cards below use, not the column's page fill.
+  // Opaque is what matters here, and the wrapper is allowed the column's page
+  // fill: it is a band under the card, not the card. The card itself is what
+  // matches the list below.
+  check('and it hides what slides underneath it', /background:var\(--dsw-alias-bg-(base|layer-1)/.test(body), body.slice(0, 160))
+}
+
+// The badge on a folded card is a hint, not furniture: it fades in when the
+// pointer reaches the card. Two cards answer the same gesture with the same
+// shape, which is the whole point of the change that put it there.
+// ---------------------------------------------------------------------------
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  const rule = /[.]dsse-expand[{]([^}]*)[}]/.exec(source)
+  const body = rule === null ? '' : rule[1]
+  check('the badge still has a rule', rule !== null, 'no .dsse-expand rule found')
+  check('and starts invisible', /opacity:0/.test(body), body.slice(-160))
+  check('and keeps its line while it is hidden', /height:26px/.test(body) && /max-height/.test(body) === false, body.slice(0, 160))
+  const reveal = /[.]dsse-card:hover [.]dsse-expand[^{]*[{][^}]*opacity:1/.exec(source)
+  check('and appears when the pointer reaches the card', reveal !== null, 'no hover reveal rule')
+  const keyboard = /[.]dsse-card:focus-within [.]dsse-expand[^{]*[{][^}]*opacity:1/.exec(source)
+  check('and appears for a reader who never touches a mouse', keyboard !== null, 'no focus-within reveal rule')
+  const open = /[.]dsse-card\[data-open="true"\] [.]dsse-expand[^{]*[{][^}]*opacity:1/.exec(source)
+  check('and stays while the card is open', open !== null, 'no open-state reveal rule')
+  // The queue row and the summary are one card now. The pointer reaching the
+  // queue row has to reveal the summary's badge too, or the card answers only
+  // the half of itself that happens to be text and reads as one with nothing to
+  // offer -- which is what "hovering the summary shows no button" looked like.
+  const merged = /[.]dsse-col-top:hover [.]dsse-expand[^{]*[{][^}]*opacity:1/.exec(source)
+  check('and the merged header reveals it from anywhere in the card', merged !== null, 'no header-wide reveal rule')
+  check(
+    'and a hidden badge cannot swallow the click meant for the row under it',
+    /[.]dsse-expand-action[{]pointer-events:none/.test(source),
+    'the resting badge takes the pointer',
+  )
+}
+
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  // The host hides its turn rail with a container query on the scroll *area*,
+  // which is not the same as the gutter the rail occupies. Overruling that needs
+  // `!important` on the same element, and the bundle earns it from the column
+  // being open rather than from a second measurement — so the rule must be keyed
+  // on our own attribute and must not carry a width of its own to compare
+  // against.
+  const rule = /html\[data-dsse-turn-rail="1"\][^{]*\{[^}]*display:block !important[^}]*\}/.exec(source)
+  check('the turn rail rule is keyed on a measurement, not a width', rule !== null, 'no attribute-keyed rule found')
+  check(
+    'and it beats the host container query',
+    rule !== null && /display:block !important/.test(rule[0]),
+    rule === null ? 'no rule' : rule[0].slice(-40),
+  )
+  // The desktop app added a second half to this rule. An ancestor there holds
+  // the conversation subtree at visibility:hidden, and because visibility
+  // inherits, display:block alone still painted an invisible rail: the node had
+  // a real 28x192 box, 19 marks and correct colours, and elementFromPoint fell
+  // straight through it to the scroll body. The rule has to restore visibility
+  // on the nav itself, which does not disturb whatever else the ancestor means
+  // to hide.
+  check(
+    'and restores the visibility an ancestor took away',
+    rule !== null && /visibility:visible !important/.test(rule[0]),
+    rule === null ? 'no rule' : rule[0].slice(-60),
+  )
+  // A rail nobody can point at is still broken. The slot is pointer-events:none
+  // by design and the nav only becomes clickable because the host stylesheet
+  // sets auto on it; on the desktop build that computed to none, so hover
+  // previews appeared only for synthesized events and a real mouse went
+  // straight through to the scroll body.
+  check(
+    'and takes the pointer back from the slot that ignores it',
+    rule !== null && /pointer-events:auto !important/.test(rule[0]),
+    rule === null ? 'no rule' : rule[0].slice(-80),
+  )
+  // A theme can paint its own stand-in rail into the same slot after hiding the
+  // host's. Once we re-show the host rail, that stand-in becomes a second rail
+  // drawn over it, and the two disagree on geometry: in the desktop app they
+  // shared x 1263..1291 but ran 281..543 against 292..532, an 11px offset the
+  // reader sees as the rail being misaligned. The stand-in also carries its own
+  // 900px container query, so the doubling came and went as the column was
+  // dragged. Exactly one rail must survive.
+  const standIn = /html\[data-dsse-turn-rail="1"\] \[data-conversation-scroll\] \.dsh-claude-turn-rail\{display:none !important\}/.exec(source)
+  check(
+    'and retires a theme stand-in rail so only one is drawn',
+    standIn !== null,
+    standIn === null ? 'no stand-in rule' : standIn[0],
+  )
+  check(
+    'and retires it only while the column is on',
+    standIn !== null && source.indexOf('let typographyObserver') > source.indexOf('.dsh-claude-turn-rail{display:none !important}'),
+    'the stand-in rule is outside the stylesheet',
+  )
+  // The class is a CSS-module hash, so the aria-label is the stable half. Both
+  // are named, and matching neither costs only the rail.
+  check('and it knows the rail by its stable label', source.includes('nav[aria-label="轮次导航"]'), 'no zh label selector')
+  check('and by its English label', source.includes('nav[aria-label="Turn navigation"]'), 'no en label selector')
+  check('and still by the hashed class', source.includes('nav[class*="SNx2jG_frame"]'), 'no class selector')
+  // The scoping is load-bearing: with the column off we took no width, so the
+  // host's own threshold is right and we must stay out of its way.
+  check(
+    'and only fires while the column is on',
+    /html\[data-dsse-turn-rail="1"\]/.test(source) && /html\[data-dsse-turn-rail="1"\]/.test(source.slice(0, source.indexOf('let typographyObserver'))),
+    'the rule is not scoped to the column being on',
+  )
+}
+
+// ---------------------------------------------------------------------------
+// The two rules that let the column scroll, and the strip that lets it be dragged
+//
+// Both were deleted whole by the pass that removed the old gutter layout: what
+// survived were the derived rules (`.dsse-monitor-body .dsse-card`), which kept
+// looking right while the base rules they modify were gone. The symptom was a
+// column that cut its own content off at 220px with no scrollbar, and a card rail
+// that inherited `position:absolute` from the old overlay and collapsed inside
+// its parent. Neither is visible to a component assertion — the tree is correct,
+// the stylesheet is not — so they are asserted against the bundle text.
+// ---------------------------------------------------------------------------
+
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  const body = /[.]dsse-monitor-body[{]([^}]*)[}]/.exec(source)
+  check('the column has a body rule of its own', body !== null, 'no .dsse-monitor-body rule found')
+  const css = body === null ? '' : body[1]
+  // Without this the body is a plain block: `.dsse-monitor`'s own `overflow:hidden`
+  // clips everything past the first screenful and no scrollbar ever appears.
+  check('and it scrolls instead of clipping', /overflow-y:auto/.test(css), css.slice(0, 120))
+  check('and it takes the leftover height rather than its content height', /(^|;)\s*flex:1/.test(css), css.slice(0, 120))
+  check('and it may shrink below its content height', /min-height:0/.test(css), css.slice(0, 120))
+
+  const rail = /[.]dsse-rail\[data-embedded="true"\][{]([^}]*)[}]/.exec(source)
+  check('the embedded rail has its own rule', rail !== null, 'no .dsse-rail[data-embedded="true"] rule found')
+  const railCss = rail === null ? '' : rail[1]
+  // The base `.dsse-rail` is absolutely positioned for the old overlay. Inside the
+  // column it has to go back to being a flow block, or all the cards stack on top
+  // of each other in the column's top-left corner.
+  check('and goes back to a flow block', /position:static/.test(railCss), railCss.slice(0, 120))
+  check('and stops sizing itself to the window', /width:auto/.test(railCss) && /height:auto/.test(railCss), railCss.slice(0, 120))
+  // A leftover max-height would clip the cards a second time, below the body rule.
+  check('and drops the height cap it carried as an overlay', /max-height:none/.test(railCss), railCss.slice(0, 120))
+
+  // The grab strip is the only way to resize the column, and at its old 8px it
+  // sat exactly under the column's own border: the pointer had to land on a 1px
+  // line to find it, which is what "hard to drag" was. It now reaches outside the
+  // edge, so the assertion is a floor rather than an exact number.
+  const grip = /[.]dsse-monitor-grip[{]([^}]*)[}]/.exec(source)
+  check('the grab strip has a rule', grip !== null, 'no .dsse-monitor-grip rule found')
+  const gripCss = grip === null ? '' : grip[1]
+  const width = /width:(\d+)px/.exec(gripCss)
+  check('and is wide enough to hit without aiming', width !== null && Number(width[1]) >= 16, width === null ? 'no width' : width[1])
+  check('and reaches outside the column edge', /left:-\d+px/.test(gripCss), gripCss.slice(0, 120))
+  check('and still shows where the edge is', source.includes('.dsse-monitor-grip::after'), 'no visible line on the strip')
 }
 
 report()

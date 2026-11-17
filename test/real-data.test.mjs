@@ -568,7 +568,8 @@ check('the bundle registered both seats', toggleSeat !== undefined && cardsSeat 
 const toggleTree = await react.__render(toggleSeat.Component, { sessionId })
 const toggle = firstByClass(toggleTree, 'dsse-toggle')
 check('the toggle draws', toggle !== undefined)
-if (toggle !== undefined && typeof toggle.props?.onClick === 'function') toggle.props.onClick()
+// The panel opens on its own; pressing an open toggle would close it.
+if (toggle !== undefined && toggle.props?.['data-active'] !== 'true' && typeof toggle.props?.onClick === 'function') toggle.props.onClick()
 
 const tree = await react.__render(cardsSeat.Component, {})
 const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))

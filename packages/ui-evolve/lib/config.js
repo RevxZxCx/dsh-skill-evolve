@@ -52,23 +52,38 @@ export const Config = z.object({
   summaryModel: z.string().default(''),
 
   /**
-   * Which gutter the cards float in.
+   * Draw the monitor column.
    *
-   * The conversation column is centred and narrower than the window, so both
-   * sides have empty space. Cards live in one of them — never both — because two
-   * columns of small text either side of the prose competes with the prose. The
-   * left gutter is the default: the right one is where the host puts file
-   * previews, so parking cards there means they are hidden exactly when a person
-   * is reading something and most likely to want them.
+   * The monitor column is a reserved strip inside the conversation region: the
+   * prose gives up width so the column can sit beside it, and the column stays
+   * put for as long as the conversation is open. That is the arrangement this
+   * panel was asked to match — something to glance at while working, not a
+   * drawer that covers what is underneath.
+   *
+   * On by default. The gutter layout it replaces only appeared when the window
+   * was wide enough to have empty space beside the prose, which on a 1440px
+   * window with the sidebar open left 209px — narrower than the cards, so the
+   * panel was squeezed or absent exactly where it was most wanted.
+   *
+   * This is the only layout there is: the gutter cards it replaced were removed,
+   * because a panel that changes shape when a window is dragged has to be
+   * learned twice. Turning the column off leaves no panel, which is what the
+   * switch in the session header already means.
    */
-  panelSide: z.union(['left', 'right']).default('left'),
+  monitorColumn: z.boolean().default(true),
 
   /**
-   * Start with the cards collapsed to a handle.
+   * Width of the monitor column, in pixels.
    *
-   * Off by default so the panel is discoverable, but a person who has decided
-   * they do not want it on screen can leave it collapsed permanently without
-   * losing the toggle.
+   * 300 is the width the column was designed at: enough for a file path plus
+   * its state, and enough for the two-line summaries, without reading as a
+   * second conversation. The drag handle beside it writes back here, so this is
+   * both the starting width and the value a person last landed on.
+   *
+   * Clamped at both ends when used: below `MONITOR_MIN_WIDTH` the cards wrap to
+   * unreadable, and past `MONITOR_MAX_WIDTH` the column stops being something
+   * glanced at. The clamp lives in `gutter.js` beside the arithmetic that
+   * depends on it, not here, so the two cannot drift.
    */
-  panelCollapsed: z.boolean().default(false)
+  monitorWidth: z.number().default(300)
 })

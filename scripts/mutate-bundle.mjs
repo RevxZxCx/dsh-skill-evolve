@@ -61,28 +61,19 @@ const mutations = [
     to: 'return Number.isFinite(rect.left) && Number.isFinite(rect.right)',
   },
   {
-    label: 'inlined MIN_CARD_WIDTH drifts to 176',
-    from: 'const MIN_CARD_WIDTH = 168',
-    to: 'const MIN_CARD_WIDTH = 176',
+    label: 'inlined MONITOR_MIN_WIDTH drifts to 210',
+    from: 'const MONITOR_MIN_WIDTH = 220',
+    to: 'const MONITOR_MIN_WIDTH = 210',
   },
   {
-    label: 'inlined CARD_GAP drifts to 20',
-    from: 'const CARD_GAP = 16',
-    to: 'const CARD_GAP = 20',
+    label: 'inlined column gives up its floor instead of the prose',
+    from: 'if (width < MONITOR_MIN_WIDTH) width = MONITOR_MIN_WIDTH',
+    to: 'if (width < 0) width = 0',
   },
   {
-    label: 'inlined width guard drops the finiteness check',
-    from: 'if (!Number.isFinite(width) || width <= 0) continue',
-    to: 'if (width <= 0) continue',
-  },
-  {
-    label: 'inlined gutters defaults a missing right edge to 0',
-    from: 'const proseRight = chatRect.right',
-    to: 'const proseRight = chatRect.right ?? 0',
-    // Equivalent: `usableRect(chatRect, HORIZONTAL)` already returned for that
-    // input, so this line never sees undefined. Listed to prove it is dead, not
-    // to claim coverage.
-    equivalent: true,
+    label: 'inlined reserve charges the prose twice',
+    from: 'reserve: width,',
+    to: 'reserve: width * 2,',
   },
 ]
 

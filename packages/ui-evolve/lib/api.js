@@ -1315,11 +1315,12 @@ function readConfig(deps) {
     panelSummary: config.panelSummary === true,
     panelSummaryProvider: config.summaryProvider ?? '',
     panelSummaryModel: config.summaryModel ?? '',
-    // The panel reads these to decide where to draw and whether to start
-    // collapsed. Leaving them out of the payload made both settings inert: the
-    // client's guards never fired, so `side` stayed 'left' for everyone.
-    panelSide: config.panelSide === 'right' ? 'right' : 'left',
-    panelCollapsed: config.panelCollapsed === true,
+    // The monitor column. `monitorWidth` goes out as `null` rather than `0` when
+    // the setting is not a number: the client treats a finite value as "start at
+    // this width" and anything else as "use the designed default", and `0` is a
+    // finite value that would collapse the column on the first measurement.
+    monitorColumn: config.monitorColumn !== false,
+    monitorWidth: Number.isFinite(config.monitorWidth) ? config.monitorWidth : null,
   }
 }
 
@@ -1386,11 +1387,14 @@ function writeConfig(deps, body) {
   if (typeof body?.summaryProvider === 'string') patch.summaryProvider = body.summaryProvider
   if (typeof body?.summaryModel === 'string') patch.summaryModel = body.summaryModel
   // Like every other panel switch these land in the process-local override, so
-  // they apply immediately and last until the host restarts. To persist them,
-  // set `panelSide` / `panelCollapsed` in the plugin's own settings. Writing the
-  // host's config file from here would let one plugin rewrite another's settings.
-  if (body?.panelSide === 'left' || body?.panelSide === 'right') patch.panelSide = body.panelSide
-  if (typeof body?.panelCollapsed === 'boolean') patch.panelCollapsed = body.panelCollapsed
+  // they apply immediately and last until the host restarts. Writing the host's
+  // config file from here would let one plugin rewrite another's settings.
+  // The monitor column's width is dragged, so it changes far more often than the
+  // other switches and has to survive a restart to be worth anything. It still
+  // goes through the same override as its neighbours: writing the host's config
+  // file from here would let one plugin rewrite another's settings.
+  if (typeof body?.monitorColumn === 'boolean') patch.monitorColumn = body.monitorColumn
+  if (Number.isFinite(body?.monitorWidth)) patch.monitorWidth = body.monitorWidth
   if (Object.keys(patch).length === 0) {
     return { ...readConfig(deps), ok: false, reason: 'nothing to change' }
   }

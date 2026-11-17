@@ -13,35 +13,6 @@
  * pinned down as assertions instead of trusted to a screenshot.
  */
 
-/** Narrowest column worth drawing. Below this the text wraps to unreadable. */
-export const MIN_CARD_WIDTH = 168
-
-/** Widest column. Wider than this and it stops reading as a sidebar. */
-export const MAX_CARD_WIDTH = 300
-
-/** Space kept between the prose and the cards, and between cards and the edge. */
-export const CARD_GAP = 16
-
-/** Space kept above the cards, so they never touch the tab strip. */
-export const TOP_INSET = 12
-
-/** Space kept below the cards, so they never sit on the composer. */
-export const BOTTOM_INSET = 12
-
-/**
- * Width of the collapsed handle, matching `.dsse-handle` in the bundle.
- *
- * It has its own placement rule rather than reusing the cards' edge, because it
- * is wider than the gap between the cards and the prose: anchored on the cards'
- * edge it would either land on the text (left side) or float in the middle of
- * nothing (right side). Anchored to the prose it reads as a tab attached to the
- * card and can never cover a word.
- *
- * Kept equal to the CSS width: the number is used for geometry, so a drift here
- * is a visible misalignment that no other assertion would catch.
- */
-export const HANDLE_WIDTH = 16
-
 /**
  * Space kept between any popover and the edge of the viewport.
  *
@@ -99,9 +70,6 @@ function usableRect(rect, edges) {
   return edges.every((edge) => Number.isFinite(rect[edge]))
 }
 
-/** The horizontal pair, which is all a gutter measurement needs. */
-const HORIZONTAL = ['left', 'right']
-
 /** All four edges, which is what a placement needs. */
 const ALL_EDGES = ['left', 'right', 'top', 'bottom']
 
@@ -146,212 +114,6 @@ function snap(rect, column) {
   }
 }
 
-/**
- * Measure the two gutters beside the prose, within the conversation column.
- *
- * The column is the outer bound, not the frame: everything outside the
- * conversation column belongs to the host (its sidebar, its tab strip), and
- * drawing there puts plugin UI on top of host UI. The prose is centred inside
- * the column, so the usable space on a side is the gap between the two.
- *
- * Both arguments are expected to be already snapped by {@link snap}; treated as
- * integers the two subtractions are exact, and flooring them again is a no-op
- * that only documents the intent.
- *
- * @param {{ left: number, right: number }} chatRect - the prose's horizontal extent.
- * @param {{ left: number, right: number }} [columnRect] - the conversation column; defaults to the prose when absent.
- * @returns {{ left: number, right: number }} empty space on each side, never negative.
- */
-export function gutters(chatRect, columnRect) {
-  const clean = (value) => (Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0)
-  // No usable prose means no space that is provably ours. Returning a zero gutter
-  // rather than guessing keeps the failure mode "no panel" instead of "panel on
-  // top of the sidebar".
-  if (!usableRect(chatRect, HORIZONTAL)) return { left: 0, right: 0 }
-  const proseLeft = chatRect.left
-  const proseRight = chatRect.right
-  // Falling back to the prose rather than to the window keeps the failure mode
-  // "no room" instead of "draw over the sidebar": with no column known there is
-  // no space that is provably ours.
-  const columnLeft = Number.isFinite(columnRect?.left) ? columnRect.left : proseLeft
-  const columnRight = Number.isFinite(columnRect?.right) ? columnRect.right : proseRight
-  return {
-    left: clean(proseLeft - columnLeft),
-    right: clean(columnRight - proseRight),
-  }
-}
-
-/**
- * Decide where a card column goes, or that it cannot go anywhere.
- *
- * Deliberately picks one side and never both: two columns of small text flanking
- * the prose compete with the prose, and the point of these cards is to be
- * glanceable, not to be a second reading surface.
- *
- * @param {object} input - the measurement.
- * @param {{ left: number, top: number, right: number, bottom: number }} input.chatRect - the prose block.
- * @param {{ left: number, top: number, right: number, bottom: number }} [input.columnRect] - the conversation column; defaults to the prose.
- * @param {'left'|'right'} [input.side] - the preferred side; ignored when it has no room.
- * @param {number} [input.cardWidth] - desired width before clamping.
- * @returns {{ visible: boolean, side: 'left'|'right', left: number, top: number, width: number, height: number, reason?: string }} the box, or `visible: false` with a reason.
- */
-export function placeCards(input) {
-  const chatRect = input?.chatRect
-  const columnRect = input?.columnRect ?? chatRect
-  const side = input?.side === 'right' ? 'right' : 'left'
-  const wanted = Number(input?.cardWidth ?? MAX_CARD_WIDTH)
-
-  // Every edge must be a real number. A rect missing one of them is a failed
-  // measurement, not a box at zero — and treating it as the latter put a card at
-  // x=16 while the gutter arithmetic believed there was room to the right.
-  if (!usableRect(chatRect, ALL_EDGES)) {
-    return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }
-  }
-  if (columnRect !== null && columnRect !== undefined && !usableRect(columnRect, ALL_EDGES)) {
-    return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-conversation' }
-  }
-
-  const { prose, column } = snap(chatRect, columnRect ?? chatRect)
-  const room = gutters(prose, column)
-  const preferred = side
-  const other = side === 'left' ? 'right' : 'left'
-
-  // The requested side wins while it fits; the other side is only a fallback for
-  // when it does not. Ordering by "whichever is wider" looked reasonable and was
-  // wrong: the left gutter is wider than the right on any window with a left
-  // sidebar, which is the default, so a 'right' preference was silently flipped
-  // back to 'left' almost everywhere. Cards that vanish when the window shrinks
-  // still look like a bug, hence the fallback rather than nothing.
-  const order = [preferred, other]
-
-  for (const candidate of order) {
-    // Both gaps come out of the gutter, not one:
-    //
-    //   [ column edge | CARD_GAP | card | CARD_GAP | prose ]
-    //
-    // An earlier version of this line subtracted a single gap, which let the card
-    // grow until it touched the column edge: on 1100–1400px windows the card sat
-    // at x=0 with a 0px margin, contradicting both the `CARD_GAP` doc comment and
-    // the "cards do not touch the column edge" assertion.
-    const usable = room[candidate] - CARD_GAP * 2
-    if (usable < MIN_CARD_WIDTH) continue
-    // `wanted` is caller input, so it cannot be trusted to be a width. A NaN
-    // passes `usable < MIN_CARD_WIDTH` untouched (NaN compares false to
-    // everything), and a negative number survives Math.min — both then reach the
-    // DOM as `width:NaNpx` / a negative width, which the browser discards, leaving
-    // a card that collapsed to its content. The left side was accidentally immune
-    // because a `left` finiteness check caught the NaN; the right side was not,
-    // which is exactly the kind of one-sided accident that hides until the caller
-    // changes. Rejecting a non-width here makes both sides agree.
-    //
-    // A *positive* width below MIN_CARD_WIDTH is honoured rather than rejected:
-    // the gutter check above already guarantees the card fits, and a caller asking
-    // for something narrower than the default is asking for something narrower than
-    // the default. Only values that cannot be a width are refused.
-    //
-    // `Math.floor` rather than a round: the width must not exceed the budget, or
-    // the card grows past the column edge the budget came from.
-    const width = Math.floor(Math.min(MAX_CARD_WIDTH, wanted, usable))
-    if (!Number.isFinite(width) || width <= 0) continue
-    // Hugging the prose, not the frame edge. The gap is the only thing between
-    // the cards and the text, which is what makes them read as an annotation of
-    // the conversation rather than as a second sidebar.
-    //
-    // The prose edges are already rounded outward, so `prose.left - CARD_GAP -
-    // width` is at most the real value: the card cannot reach the text. On the
-    // right, `prose.right + CARD_GAP` is at least the real value for the same
-    // reason.
-    const left = candidate === 'left' ? prose.left - CARD_GAP - width : prose.right + CARD_GAP
-    const top = prose.top + TOP_INSET
-    const bottom = prose.bottom - BOTTOM_INSET
-    return {
-      visible: true,
-      side: candidate,
-      // Not clamped to zero: a negative `left` would mean the column starts off
-      // screen, and silently moving the card to 0 is what put it over the host's
-      // sidebar. If the arithmetic says negative, the measurement was wrong.
-      left,
-      top: Math.max(0, top),
-      width,
-      height: Math.max(0, bottom - top),
-    }
-  }
-
-  return { visible: false, side, left: 0, top: 0, width: 0, height: 0, reason: 'no-room' }
-}
-
-/**
- * Where the collapsed handle goes: the same edge as the cards, hugging the prose.
- *
- * The handle is anchored to the prose edge rather than to the cards' edge. While
- * `HANDLE_WIDTH` equals `CARD_GAP` the two rules agree, but they stop agreeing the
- * moment either constant moves: anchored to the cards, a wider handle would sit on
- * the text and a narrower one would leave a gap that reads as a misalignment.
- * Anchored to the prose, the handle's outer edge *is* the text's edge at any width,
- * so the one thing that must never happen — a control on top of a paragraph —
- * cannot.
- *
- * With no cards at all there is no card edge to tuck under, so the handle needs its
- * full width of clear gutter — otherwise a narrow window would strand the panel
- * with no way to reopen it. That is why the fallback checks *both* gutters: on an
- * asymmetric window the requested side can be too narrow while the other is not,
- * and refusing outright would leave the panel unreachable.
- *
- * @param {object} input - the same measurement `placeCards` takes.
- * @returns {{ visible: boolean, side: 'left'|'right', left: number, top: number }} the handle's box.
- */
-export function placeHandle(input) {
-  const chatRect = input?.chatRect
-  const columnRect = input?.columnRect ?? chatRect
-  const preferred = input?.side === 'right' ? 'right' : 'left'
-  const other = preferred === 'left' ? 'right' : 'left'
-
-  // Same rule as `placeCards`, for the same reason: a rect missing an edge is a
-  // failed measurement, not a box at zero. Diverging here meant one function
-  // refused an incomplete rect while the other silently drew a handle at top 60.
-  if (!usableRect(chatRect, ALL_EDGES)) {
-    return { visible: false, side: preferred, left: 0, top: 0 }
-  }
-  if (columnRect !== null && columnRect !== undefined && !usableRect(columnRect, ALL_EDGES)) {
-    return { visible: false, side: preferred, left: 0, top: 0 }
-  }
-
-  // The same rounding the cards used, so the fallback gutter check and the anchor
-  // below divide the same integers.
-  const { prose, column } = snap(chatRect, columnRect ?? chatRect)
-  const room = gutters(prose, column)
-
-  const placed = placeCards(input)
-  let side = preferred
-  if (placed.visible) {
-    side = placed.side
-  } else if (room[preferred] >= HANDLE_WIDTH) {
-    side = preferred
-  } else if (room[other] >= HANDLE_WIDTH) {
-    side = other
-  } else {
-    return { visible: false, side: preferred, left: 0, top: 0 }
-  }
-
-  // Anchored to the prose: the handle's outer edge *is* the prose edge, so it can
-  // never cover a word. On the left that means starting HANDLE_WIDTH before the
-  // text; on the right it means starting exactly at the text.
-  //
-  // Containment is a consequence of the gutter check above rather than a clamp
-  // here, and that is worth stating because a clamp used to be here. On integers
-  // `room.left >= HANDLE_WIDTH` means `prose.left - column.left >= HANDLE_WIDTH`,
-  // so `prose.left - HANDLE_WIDTH >= column.left`: the anchor is inside the
-  // column by construction. The clamp was unreachable then and is unreachable now,
-  // so the invariant is asserted in the sweeps instead of guarded by dead code.
-  const left = side === 'left' ? prose.left - HANDLE_WIDTH : prose.right
-
-  return {
-    visible: true,
-    side,
-    left,
-    top: Math.max(0, placed.visible ? placed.top + 48 : prose.top + TOP_INSET + 48),
-  }
-}
 
 /**
  * Settle a vertical position inside the viewport.
@@ -508,3 +270,143 @@ export function placeNear(input) {
 }
 
 
+/**
+ * The narrowest monitor column that still reads.
+ *
+ * Below this the cards' own padding and a file path's two halves stop fitting on
+ * one line each, and a column that wraps every row is worse than no column: it
+ * costs the prose width and gives back noise. Higher than `MIN_CARD_WIDTH`
+ * because this column also carries its own header row.
+ */
+export const MONITOR_MIN_WIDTH = 220
+
+/**
+ * The widest monitor column before it stops reading as an annotation.
+ *
+ * Past this the column competes with the prose for attention, which is the thing
+ * the gutter layout was already careful about. 460 is the widest the prototype
+ * was measured at.
+ */
+export const MONITOR_MAX_WIDTH = 460
+
+/**
+ * The prose width the column refuses to go below.
+ *
+ * The host's own clamp bottoms out at 680px (`--dsh-chat-content-width:
+ * clamp(680px, ...)`), and 560 is deliberately under that: on a window narrow
+ * enough to matter, taking the column down to its minimum and keeping 560 of
+ * prose is a better trade than dropping the column, because dropping it is what
+ * left the panel invisible on the windows where it was wanted.
+ */
+export const MONITOR_MIN_PROSE = 560
+
+/**
+ * The width the host's own turn rail takes at the right edge of the scroll area.
+ *
+ * The rail's frame is 28px wide and sits 12px in from that edge, so its left
+ * edge is 40px from it. The prose is centred in the scroll area, so each side
+ * gets half of what the prose does not use and the rail sits on the right one —
+ * which is why the column's budget below subtracts twice this number.
+ *
+ * This is a budget, not a measurement. The rail's visibility is not decided from
+ * it: see the note on `placeMonitor`.
+ */
+export const TURN_RAIL_WIDTH = 40
+
+/**
+ * Work out the monitor column's box, and how much the prose must give up.
+ *
+ * The column is pinned to the conversation column's right edge and the prose is
+ * asked to narrow by exactly the column's width, so the two never compete.
+ *
+ * The prose is measured by its *centred box*, so the caller implements the
+ * reservation as `margin-right` on the scrolling container rather than as
+ * padding: padding on a centred box only moves it left by half the amount, which
+ * made an earlier version subtract the width twice and look correct in one
+ * screenshot while being wrong at every other width. `reserve` below is the
+ * number that goes into that margin, and it is the column width — not double.
+ *
+ * Three budgets decide the width, and the column takes the smallest:
+ *
+ * 1. What the person asked for, clamped to `[MONITOR_MIN_WIDTH, MONITOR_MAX_WIDTH]`.
+ * 2. `MONITOR_MIN_PROSE` — the prose keeps a floor.
+ * 3. The turn rail. The host's rail sits at the scroll area's right edge, which
+ *    is exactly where this column starts, so a column that eats the whole area
+ *    leaves the rail nowhere regardless of what the host's own query says. Where
+ *    the two disagree, the rail wins the argument down to `MONITOR_MIN_WIDTH`:
+ *    a slightly narrower column is worth having and a missing rail is not.
+ *
+ *    This is a *budget*, not a verdict: it decides how wide the column may be,
+ *    never whether the rail is shown. The rail's visibility is decided in the
+ *    bundle, which forces it on whenever this column is; asking here whether it
+ *    "fits" and then hiding it on a no was the bug that kept it invisible.
+ *
+ * The column is *not* dropped when the budgets run out. It used to be, and that
+ * was wrong twice over: it made the panel disappear on the windows where a
+ * narrow column would still have been readable, and it handed the user a second
+ * layout to be confused by — the one this column replaced. Below
+ * `MONITOR_MIN_WIDTH` of available area there is genuinely nothing to draw, and
+ * that is the only case that reports `visible: false`.
+ *
+ * @param {object} input - the measurement.
+ * @param {{ left: number, top: number, right: number, bottom: number }} input.columnRect - the conversation column.
+ * @param {number} [input.width] - the width the person last chose.
+ * @param {number} [input.proseWidth] - the prose's measured width, if known.
+ * @param {number} [input.scrollbarWidth] - the scroll area's scrollbar, if any.
+ * @returns {{ visible: boolean, left: number, top: number, width: number, height: number, reserve: number, reason?: string }}
+ *   the column's box relative to its own origin, and the width the prose must give up.
+ */
+export function placeMonitor(input) {
+  const column = input?.columnRect
+  const idle = { visible: false, left: 0, top: 0, width: 0, height: 0, reserve: 0 }
+
+  // A column missing an edge is a failed measurement, not a box at zero — the
+  // same rule the placement functions above follow, for the same reason.
+  if (!usableRect(column, ALL_EDGES)) return { ...idle, reason: 'no-conversation' }
+
+  const { column: snapped } = snap(column, column)
+  const full = Math.max(0, snapped.right - snapped.left)
+  const height = Math.max(0, snapped.bottom - snapped.top)
+  if (full <= 0 || height <= 0) return { ...idle, reason: 'no-conversation' }
+  // The one case with no answer: an area narrower than the narrowest column.
+  if (full < MONITOR_MIN_WIDTH) return { ...idle, reason: 'too-narrow' }
+
+  // What the person asked for. `wanted` cannot be trusted to be a width: a NaN
+  // passes every comparison untouched and reaches the DOM as `width:NaNpx`, which
+  // the browser discards, leaving a column that collapsed to its content.
+  const asked = Number(input?.width)
+  const wanted = Number.isFinite(asked) && asked > 0 ? asked : MONITOR_MAX_WIDTH
+
+  // The prose's own width when it was measurable, and the floor when it was not.
+  // The larger of the two is the one the column has to respect.
+  const measured = Number(input?.proseWidth)
+  const prose = Math.max(MONITOR_MIN_PROSE, Number.isFinite(measured) && measured > 0 ? measured : 0)
+  const scrollbar = Number(input?.scrollbarWidth)
+  const bar = Number.isFinite(scrollbar) && scrollbar > 0 ? scrollbar : 0
+
+  // Budget 2 and budget 3, both as the widest column that leaves what they need.
+  const forProse = full - prose
+  const forRail = full - bar - prose - TURN_RAIL_WIDTH * 2
+
+  let width = Math.floor(Math.min(MONITOR_MAX_WIDTH, wanted, forProse))
+  // Give the rail its room back. Only downwards: a column narrower than the rail
+  // needs does not make the rail need more.
+  if (Number.isFinite(forRail) && width > forRail) width = Math.floor(forRail)
+  // The floor wins over both budgets. A column at its minimum that pushes the
+  // prose under its own floor is the lesser evil: the prose re-wraps, the panel
+  // would otherwise vanish. At that size the rail may well sit on the gutter's
+  // last few pixels, which is the trade the caller makes deliberately — see the
+  // turn-rail rule in the bundle.
+  if (width < MONITOR_MIN_WIDTH) width = MONITOR_MIN_WIDTH
+
+  return {
+    visible: true,
+    left: snapped.right - width,
+    top: snapped.top,
+    width,
+    height,
+    // Not `width * 2`. See the doc comment: the prose is centred, so one
+    // margin of exactly this much is what actually narrows it by this much.
+    reserve: width,
+  }
+}

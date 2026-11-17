@@ -383,7 +383,10 @@ for (const [name, expected] of [
   // One number, spelled once. The floor and the sentence that reports it drift
   // apart the moment the mutation table grows, and a failure message naming a
   // lower floor than the assertion uses sends the next reader after the wrong gap.
-  const minimum = 128
+  // 127 rather than 128 because the refused-side-change entry went with the
+  // side setting itself: there is one panel layout now, so a refused write has
+  // no side to return to.
+  const minimum = 127
   check(`${name} declares the anchors it is supposed to`, anchors.length >= minimum, `found ${anchors.length}, expected at least ${minimum}`)
   const contents = new Map()
   const text = (file) => {

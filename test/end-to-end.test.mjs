@@ -666,7 +666,9 @@ async function openPanel(routes, sessionId) {
   if (button === undefined || typeof button.props?.onClick !== 'function') {
     throw new Error('the toggle rendered no clickable button')
   }
-  button.props.onClick()
+  // The panel opens on its own; pressing an open toggle would close it and these
+  // files would draw nothing. Press only when the toggle says it is closed.
+  if (button.props['data-active'] !== 'true') button.props.onClick()
   const tree = await react.__render(cards.Component, {})
   return { tree, requests, registrations, opened }
 }

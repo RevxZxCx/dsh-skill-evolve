@@ -42,7 +42,7 @@ does not match, and throws on a duplicate. A new or renamed client bundle needs 
 
 ## Configuration
 
-Five keys, all optional. They are the panel's own; the detection settings live in
+Seven keys, all optional. They are the panel's own; the detection settings live in
 `@revxz/dsh-skill-evolve`.
 
 | Key | Default | Meaning |
@@ -50,8 +50,8 @@ Five keys, all optional. They are the panel's own; the detection settings live i
 | `panelSummary` | `true` | Summarise the previous turn in the cards. Turning this off stops the panel from spending any model call |
 | `summaryProvider` | `""` | Provider for the summary. Empty means borrow the session's own route — the one already proven to work for this account |
 | `summaryModel` | `""` | Model for that summary. Only read together with `summaryProvider`; setting one alone pins nothing |
-| `panelSide` | `left` | Which side of the conversation column the cards occupy. Measured against the column, not the window, so the host sidebar is never covered |
-| `panelCollapsed` | `false` | Start folded into a handle instead of showing the cards |
+| `monitorColumn` | `true` | Draw the cards in the column. This is the only layout there is: turning it off leaves no panel, which is what the header switch does |
+| `monitorWidth` | `300` | Width of that column in px. The grip writes it back; the ends are clamped to 220–460 in `lib/gutter.js` |
 
 ## The routes
 
@@ -148,30 +148,168 @@ only looked correct until someone switched the theme.
 ### The cards beside the conversation
 
 This package is that client half. It is a real panel built from the host's own
-components — not a drawn mock — floating in the empty space on one side of the
-conversation column, so it moves with the column instead of covering it.
+components — not a drawn mock — in a reserved strip on the right of the conversation
+column, so it moves with the column instead of covering it.
 
-**Why cards and not a sidebar.** The host exposes a right-hand sidebar, but it is
-already the place file previews open, and taking it would mean the panel and a
-preview cannot be on screen together. There is no extension point *inside* the
-conversation column either — the host's only conversation-scoped slots are the
-header and the composer. So the panel is mounted in `shell.overlay` and positions
-itself against the measured conversation body: it reads the column's rectangle and
-the host's own `--dsh-chat-content-width`, then places itself in whichever gutter
-fits. Nothing about the layout is hard-coded, because a fixed offset is wrong the
-next time the window resizes or the width handle is dragged.
+**Why cards and not a sidebar tab.** The host exposes a right-hand sidebar, but it
+is already the place file previews open, and taking it would mean the panel and a
+preview cannot be on screen together. A tab would also page the cards out of sight,
+and this panel is meant to be watched, not visited.
 
-Three consequences worth knowing, because each one is a deliberate choice:
+**So the column is reserved rather than overlaid.** The panel is still mounted in
+`shell.overlay`, but it no longer floats in whatever gap is left over. The
+conversation body hands over a strip on its right — `margin-right` on the host's
+own scroll container, sized by `--dsse-monitor-reserve` — and the cards draw inside
+that strip. `placeMonitor()` in `lib/gutter.js` decides the geometry from the
+measured column rectangle; nothing is hard-coded, because a fixed offset is wrong
+the next time the window resizes. There is no fallback layout: if the column does
+not fit, the prose reflows instead. An earlier version degraded to the old floating
+cards below a threshold, and because the degraded width had been saved to the
+config, dragging the grip narrow once left the panel stuck in that layout with no
+way back.
 
-- **It never covers the top bar.** The overlay starts below the host's top
-  clearance and the cards are placed in the horizontal band the conversation body
-  occupies, not in the frame's full height.
-- **It is covered by the sidebar, not on top of it.** The cards set no `z-index`,
-  so the host decides the order and an opened sidebar naturally hides them. A
-  panel that punched through the sidebar would be a bug, not a feature.
-- **It can be collapsed to a handle.** Clicking the handle, or the header button,
-  folds the cards into a narrow strip against the same edge. The side
-  (`left`/`right`) and the starting collapsed state are plugin settings.
+Five consequences worth knowing, because each one is a deliberate choice:
+
+- **It never covers the top bar.** The column spans the conversation body's own
+  band, not the frame's full height.
+- **It borrows width instead of covering it.** The prose is a centred
+  `max-width` box, so narrowing the container by W narrows the text by exactly W
+  and re-centres it. That is why the reserve is a plain `margin-right` and not
+  padding: padding would have moved the text by half and left the scrollbar under
+  the column.
+- **It gives the width back.** Closing the column, tearing the plugin down, and
+  every path that draws nothing all set the reserve to `0px`. Forgetting that on
+  any one path means a user who merely tried the switch gets a permanently
+  narrower conversation — this was a real defect, caught by an assertion.
+- **The host's own right width handle is hidden while the column is on.** It is
+  positioned from `--dsh-chat-content-width` against the frame centre, so it would
+  drift on top of the cards. The host already does the same thing when a composer
+  overlay is present.
+- **The column draws no edges at all.** It used to rule its left and top sides and cast a
+  shadow leftwards over the gutter. The verdict was that the ruling makes the panel read as a
+  separate window rather than part of the conversation, so both borders and the shadow are
+  gone; the column is told apart by its own surface and the cards' outlines. It keeps a
+  `border-radius` on the two corners that face the conversation, and deliberately keeps
+  `overflow` visible so the grab strip that hangs 12px outside the left edge is not clipped.
+- **The last turn is in the header card, not in a card of its own.** It used to be the first
+  card, with a title and three counters beside it (calls, commands, files). It is now the
+  second line of the column's sticky header card: the queue row is the first line, a
+  `border-top` divides them, and the summary is a quiet "written when" line followed by the
+  text — five lines of it, which is five times the line height and no magic number.
+  The header and the card list share one scroll container, and the header is its first child
+  with `position:sticky; top:0`, so it stays put while the cards scroll under it — and there
+  is still only one scrollbar.
+  The surface sits on an **inner** box, not on the sticky wrapper. The wrapper carries the
+  column's own background so it can cover the cards sliding beneath it, and that background
+  has to reach the column's edges; a border and a radius on the same element would draw a
+  band of card floating over a strip of page. So the wrapper is edge to edge and the card is
+  inside it, which is what makes its width match the cards below it instead of being 20px
+  wider than them.
+- **The expand badge waits to be looked at, and changes places with the state.** It starts
+  invisible and fades in when the pointer reaches the card, when the card has keyboard focus,
+  or once the card is open. Folded, it floats on the fade at the list's foot — a folded list
+  has no spare line to give it, and the disc marks how many rows are behind the fold. Open, it
+  becomes a centred row under the revealed content, because floating there would park it on
+  the last file name and a row that shifts down reads as the list having gained an item.
+  One shared placement for both states is what kept putting the circle on a file name.
+  The placement is keyed on `data-open`, which every card publishes, and not on
+  `aria-expanded`: the files card hands its expansion to a real button, so it never carries
+  `aria-expanded` itself, and rules hung on that attribute matched nothing on the one card
+  that needed them.
+  While hidden it also gives up `pointer-events`, because a disc at `opacity:0` would
+  otherwise swallow the click meant for the file row underneath it. The reveal covers
+  `.dsse-col-top` as well as `.dsse-card`, since the summary now lives inside the header card
+  and a pointer on the queue row is still a pointer on the card that answers it.
+- **A folded file list says it is folded.** Four rows and a fade under them, then the badge.
+  The `max-height` only became a fold once it came with `overflow:hidden`: before that the
+  cap cut nothing, every row was still drawn, and the badge landed on the last one. The fade
+  is a `::after` on the list itself, on `bg-layer-1` so it reads as the card turning
+  transparent rather than a grey bar.
+- **A folded card says nothing about a partial directory listing.** The note about the
+  directory not being read to the end is about a list the reader cannot see yet, so it is
+  drawn only while the card is open — or when the folded card really does have rows left over.
+- **The host's turn rail rides on the column, not on a measurement.** The rail is hidden by
+  `@container (width<=900px)`, a query on the scroll *area* — which is a different number from
+  the *gutter* the rail actually needs (40px). On a 1440px window with the sidebar open, the
+  area is 1160px and the prose 742px, so 209px a side stands empty and the host hides the rail
+  anyway. Measuring that area to decide "is there room" answered the wrong question and kept
+  the rail invisible through two fixes; it is gone. Instead `placeMonitor()` spends the rail's
+  80px out of the column's width budget up front, and a drawn column *is* the promise that the
+  rail has its room. `applyMonitorReserve()` writes `html[data-dsse-turn-rail]` from the same
+  number as the column's own flag, so the two can never disagree. With the column off we took
+  no width, so the attribute drops and the host's own threshold applies.
+  (Qoder calls the same feature "message anchors": `hidden md:flex` on viewport width alone,
+  never a width measurement — which is why a right-hand column never crowds it there.)
+  **The attribute-driven CSS rule alone was not enough.** Three selectors keyed on a CSS
+  module hash (`SNx2jG_frame`) and two locale translations; all matched in an isolated Chrome
+  but none matched the running build, so the rail stayed hidden until the column narrowed.
+  Two drift-proof backstops now carry it: a structural CSS selector
+  (`[data-conversation-scroll] nav` — TurnNavigator is the only nav in the scroll body; the
+  breadcrumb nav lives in the header) and a `forceTurnRail()` JS pass that sets inline
+  `display:block` on that nav while the column is open. Inline style beats the host's
+  non-important container query regardless of hashing or locale, and the inline hold is
+  released again when the column closes.
+  **The rail also mounts later than the first measurement.** The host gates it behind
+  `scroll.initialized && items.length >= 2`, and a nav appearing changes neither the
+  conversation body nor the overlay's size — so `ResizeObserver` never saw it, the inline hold
+  was never written, and the rail only showed up after some unrelated resize. A
+  `MutationObserver` on `[data-conversation-scroll]` (`childList`, `subtree`) now replays the
+  pass, coalesced to one `requestAnimationFrame` per frame so a streaming conversation costs a
+  variable check per token rather than a layout read. It attaches lazily — the overlay mounts
+  before the conversation does — and is disconnected on teardown.
+  **The rail also has to declare its own `visibility`.** In the desktop app the nav was
+  present with a real 28×192 box, 19 marks and correct `::before` colours, yet
+  `elementFromPoint` fell straight through it: an ancestor held the conversation subtree at
+  `visibility:hidden`, which inherits down and that `display` and `z-index` cannot override.
+  Both the structural CSS rule and the inline hold now set `visibility:visible`, which beats
+  the inherited value without touching an ancestor that may be hiding other things on purpose.
+  (A `z-index` bump on the nav's slot was tried and removed: it rested on a probe where the
+  column had been resized by hand without moving the reservation, which manufactured an
+  overlap. Measured cleanly the two never overlap — `scroll 280..475`, `rail 425..453`,
+  `column 475..695`.)
+  **A theme's stand-in rail is retired, not realigned.** The claude-style theme can hide the
+  host nav and paint its own `.dsh-claude-turn-rail` into the same slot. Re-showing the host
+  nav leaves two rails drawn on top of each other, and they disagree: measured together they
+  shared x `1263..1291` but ran y `281..543` against `292..532` — an 11px offset that reads as
+  the rail being misaligned. The stand-in also carries its own `@container (width<=900px)`, so
+  the doubling appeared exactly when the column was dragged narrow (slot 978 − 64 padding =
+  914, just over its threshold) and vanished when it went under. While our column is open the
+  stand-in is hidden, leaving exactly one rail at every width; its markup is `aria-hidden`, so
+  nothing is lost for screen readers.
+  **When the sidebar opens, the column steps aside.** The host frame carries
+  `data-sidebar-collapsed` only while the sidebar *is* collapsed (React drops a `false`/`undefined`
+  attribute), so its absence means "open". While it is open the column is not drawn at all and
+  the width goes back to the conversation: the prose is already at its 560px floor, and a
+  half-width panel would have to be re-learned every time. Reading the attribute needs the frame
+  element, which is found through its `[data-shell-overlay]` child — the layer this overlay
+  lives in. If that fails, the plugin assumes the sidebar is closed and keeps drawing, because a
+  blank column with no visible reason is worse than one that occupies space.
+  **And it has to take the mouse back.** The host's slot is `pointer-events:none` on purpose
+  — it spans the whole scroll area and must not swallow clicks meant for the conversation —
+  and the nav only becomes clickable because the host stylesheet sets `auto` on it. On the
+  desktop build that computed to `none` anyway: the rail measured 28×222, `elementFromPoint`
+  fell through to the scroll body, and hover previews appeared only for synthesized events.
+  Both the structural rule and the inline hold now declare `pointer-events:auto` on the nav
+  itself, which is the element that should be clickable — raising it on the slot instead
+  would make the full-width transparent layer eat the conversation's clicks.
+- **The column scrolls its own body, and the resize strip is wider than it looks.**
+  `.dsse-monitor-body` owns `overflow-y:auto` and the leftover height, and the embedded rail
+  goes back to `position:static` inside it — otherwise the column's own `overflow:hidden`
+  clips the cards and the rail inherits the old overlay's absolute positioning. The grab strip
+  reaches 12px outside the edge and is 20px wide, with the visible 3px line drawn by `::after`;
+  at 8px it sat under the 1px border and was nearly impossible to hit.
+- **One switch, and it is in the session header.** A 24×24 glyph (monitor screen
+  plus a trace) sits in the header's `utilities` run, the right-aligned group whose
+  slot contract calls it "session utilities in ascending order". After that run
+  comes the corner seat the sidebar-right package took for its expand button, and
+  after that the native window buttons — which are drawn by Electron's
+  `titleBarOverlay` and are not elements in the document, so no renderer-side
+  plugin can get between them. `utilities` is the closest seat that exists.
+- **The column has no header of its own.** Its top row of cards starts flush at the
+  top: a title saying "monitor" over the monitor, in a 220px column, costs a card's
+  height to state the obvious, and closing does not need a control in there when
+  the switch is already in the session header. Turning `monitorColumn` off leaves
+  no panel at all — there is no second layout behind this one.
 
 Three modules, top to bottom:
 
@@ -388,14 +526,16 @@ arrives. The distinction it relies on is `data === undefined` versus a data obje
 with nothing in it: "has not answered" and "answered, and the answer is empty" are
 different states and must not share a rendering.
 
-The header row is ordered **refresh, settings, speed, review**. The review entry is
-labelled with the word 建议 rather than an icon, and it carries the pending count
-as a badge; it is the only way into the queue from the panel, so a session whose
-cards are all empty but whose queue holds work still draws the header. Its
-accessible name starts with the visible word (`建议 候选审核`), because a name that
-replaces the label rather than containing it fails WCAG's label-in-name rule. The
-whole row sits on its own card surface — border, radius, background — instead of
-three bare buttons floating over the conversation.
+The header row is ordered **review, speed, refresh, settings**, reading from what
+you look at to what you press. The review entry is labelled with the word 建议
+rather than an icon, and it carries the pending count as a badge; it is the only
+way into the queue from the panel, so a session whose cards are all empty but
+whose queue holds work still draws the header. Its accessible name starts with the
+visible word (`建议 候选审核`), because a name that replaces the label rather than
+containing it fails WCAG's label-in-name rule. The whole row sits on its own card
+surface — border, radius, background — instead of bare buttons floating over the
+conversation, and in the monitor column it sticks to the top: a column that is
+always on screen should not scroll its controls away with the cards.
 
 Between settings and review sits the **output-speed readout**. It answers one
 question at a time and always answers it about something the reader just watched.

@@ -42,8 +42,8 @@ const mutations = [
   {
     label: 'the header stats fall back to the old title-only metadata',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "                head: jsxs('div', {\n                  className: 'dsse-head-stats',\n                  children: [\n                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),",
-    to: "                head: jsxs('div', {\n                  className: 'dsse-head-stats-gone',\n                  children: [\n                    jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(data?.calls ?? 0) }), jsx('span', { children: '调用' })] }),",
+    from: "                head: jsxs('div', {\n                  className: 'dsse-head-stats',\n                  children: [\n                    current.length > 0",
+    to: "                head: jsxs('div', {\n                  className: 'dsse-head-stats-gone',\n                  children: [\n                    current.length > 0",
     suites: ['test/client.test.mjs'],
   },
   {
@@ -259,13 +259,6 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'a refused side change leaves the panel on the refused side',
-    file: 'packages/ui-evolve/lib/client.js',
-    from: "bridge.side = prior?.panelSide === 'right' ? 'right' : 'left'",
-    to: 'bridge.side = patch.panelSide',
-    suites: ['test/client.test.mjs'],
-  },
-  {
     label: 'the decide request forgets which row it came from',
     file: 'packages/ui-evolve/lib/client.js',
     from: 'body: JSON.stringify({ id, name, action }),',
@@ -336,9 +329,9 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'the command count is reported as the file count',
+    label: 'the file count is reported as the folded count',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "jsx('b', { children: String(commands) })",
+    from: "jsx('b', { children: String(current.length) })",
     to: "jsx('b', { children: String(ordered.length) })",
     suites: ['test/client.test.mjs'],
   },
@@ -701,39 +694,44 @@ const mutations = [
     // label would still look right and would announce nothing.
     label: 'the expand button carries no words for a screen reader',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                'aria-label': props.expandHint,`,
+    from: `                'aria-label': props.hint,`,
     to: `                'aria-label': '',`,
     suites: ['test/client.test.mjs'],
   },
   {
+    // The turn's badge moved into the header block with the summary, so the
+    // chevron whose direction says "open" or "closed" lives on the recap now.
+    // Mutating the card copy would change a control no test in this file renders
+    // for the turn any more.
     label: 'the expand button is a line of text again',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `                children: jsx(Icon, { name: 'chevron', up: props.expanded === true }),`,
-    to: `                children: props.expandHint,`,
+    from: `                children: jsx(Icon, { name: 'chevron', up: expanded }),`,
+    to: `                children: props.hint,`,
     suites: ['test/client.test.mjs'],
   },
   {
-    // Positioned against the card, so showing it costs no layout. Putting it back
-    // in the flow is the change that used to grow a hovered card by twenty-six
-    // pixels and nudge the text below it.
-    label: 'the expand button pushes the card taller when it appears',
+    // The row is centred under the list it belongs to. Left-aligned it reads as
+    // another row of the list — a file with no name.
+    label: 'a folded card floats the badge off-centre',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand{box-sizing:border-box;position:absolute;left:50%;`,
-    to: `.dsse-expand{box-sizing:border-box;position:static;`,
+    from: `.dsse-card[data-open="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}`,
+    to: `.dsse-card[data-open="false"] .dsse-expand{position:absolute;left:8px;bottom:6px}`,
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'the expand button is pushed back to the corner',
+    // Floating is where it started, and where it drew a circle on top of a file
+    // name. Any state that puts it back over the content is the defect again.
+    label: 'a folded card takes a line away from its list to park the badge',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand{box-sizing:border-box;position:absolute;left:50%;transform:translateX(-50%);`,
-    to: `.dsse-expand{box-sizing:border-box;position:absolute;right:8px;`,
+    from: `.dsse-card[data-open="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}`,
+    to: `.dsse-card[data-open="false"] .dsse-expand{position:static;margin:6px auto 0}`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'the expand button is a square',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;`,
-    to: `display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:4px;`,
+    from: `width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:999px;`,
+    to: `width:26px;height:26px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.12));border-radius:4px;`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -741,8 +739,8 @@ const mutations = [
     // Without it the badge is a dead patch inside the one target the card offers.
     label: 'a click on the expand button lands on nothing',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none;pointer-events:none}`,
-    to: `box-shadow:0 1px 3px rgba(15,17,21,.10);user-select:none}`,
+    from: `user-select:none;pointer-events:none;opacity:0`,
+    to: `user-select:none;opacity:0`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -814,35 +812,34 @@ const mutations = [
     // pointer back — without it the badge is a dead patch on a live card.
     label: 'the badge never takes the pointer back',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand-action{pointer-events:auto;`,
-    to: `.dsse-expand-action{`,
+    from: `.dsse-card[data-open="true"] .dsse-expand-action{pointer-events:auto}`,
+    to: `.dsse-card[data-open="true"] .dsse-expand-action{`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'the badge does not look pressable',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-expand-action{pointer-events:auto;cursor:pointer;`,
-    to: `.dsse-expand-action{pointer-events:auto;`,
+    from: `.dsse-expand-action{pointer-events:none;cursor:pointer;padding:0;font:inherit}`,
+    to: `.dsse-expand-action{pointer-events:none;padding:0;font:inherit}`,
     suites: ['test/client.test.mjs'],
   },
   {
-    // Same defect as the 上一轮 card's reservation, wearing the new selector: the
-    // badge hangs on the bottom edge, which is where the last row of the list it
-    // just revealed ends.
-    label: 'a card with a badge lets the badge cover its last row',
+    // An open card is the one place the badge must stay on screen without the
+    // pointer: the way back out is not something a reader should have to hunt for.
+    label: 'an open card hides the way out until the pointer comes back',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}`,
-    to: ``,
+    from: `.dsse-card[data-open="true"] .dsse-expand{opacity:1;pointer-events:auto}`,
+    to: `.dsse-card[data-open="true"] .dsse-expand{opacity:0;pointer-events:auto}`,
     suites: ['test/client.test.mjs'],
   },
   {
-    // The badge hangs on the bottom edge of the card, which is exactly where the
-    // last line of a summarised paragraph ends. The open card reserves room for it;
-    // without the reservation the badge sits on top of the line it just revealed.
-    label: 'an open card lets the badge cover its last line',
+    // A folded file list has to look folded. Without the fade the rows simply
+    // stop after four and the only hint is a badge that is invisible until the
+    // pointer arrives.
+    label: 'a folded file list stops without saying so',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}`,
-    to: ``,
+    from: `.dsse-files[data-open="false"]{max-height:calc(4 * 31px - 3px);overflow:hidden}`,
+    to: `.dsse-files[data-open="false"]{max-height:calc(4 * 31px - 3px)}`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -857,19 +854,8 @@ const mutations = [
   {
     label: 'an open card offers to open itself again',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `expandHint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,`,
-    to: `expandHint: turnHinted === true ? '点击展开全文' : undefined,`,
-    suites: ['test/client.test.mjs'],
-  },
-  {
-    // The row beside the title describes the turn that just ended, so its file
-    // count has to come from `turnFiles`. Reading the cumulative list instead is
-    // what shipped the first time, and it made the three numbers beside the title
-    // look like one set while one of them was about the whole session.
-    label: "the turn header counts the whole session's files",
-    file: 'packages/ui-evolve/lib/client.js',
-    from: `const turnFiles = Number.isFinite(data?.turnFiles) ? data.turnFiles : 0`,
-    to: `const turnFiles = Array.isArray(data?.files) ? data.files.length : 0`,
+    from: `                    hint: turnHinted === true ? (expanded === true ? '点击收起全文' : '点击展开全文') : undefined,`,
+    to: `                    hint: turnHinted === true ? '点击展开全文' : undefined,`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -898,8 +884,8 @@ const mutations = [
   {
     label: 'the fade is drawn over an expanded summary too',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '.dsse-clip[data-clipped="true"][data-expanded="false"]::after{',
-    to: '.dsse-clip[data-clipped="true"]::after{',
+    from: '.dsse-recap .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:30px;',
+    to: '.dsse-recap .dsse-clip[data-clipped="true"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:30px;',
     suites: ['test/client.test.mjs'],
   },
   {
@@ -945,19 +931,19 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
-    label: 'the keyboard cannot reach the card',
+    label: 'the keyboard cannot reach the last turn',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return",
-    to: 'return',
+    from: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: interactive === true ? props.onClick : undefined,\n        onKeyDown: interactive === false\n          ? undefined\n          : (event) => {\n              if (event === null || event === undefined) return\n              if (event.key !== 'Enter' && event.key !== ' ' && event.key !== 'Spacebar') return",
+    to: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: interactive === true ? props.onClick : undefined,\n        onKeyDown: interactive === false\n          ? undefined\n          : (event) => {\n              if (event === null || event === undefined) return\n              return",
     suites: ['test/client.test.mjs'],
   },
   // Round three: what the first review found. A control that looks inert has to be
   // inert, and the click's reason for being open has to belong to one turn.
   {
-    label: 'an inert card still swallows the click and flips a pin nobody can see',
+    label: 'an inert last-turn block still swallows the click and flips a pin nobody can see',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '        onClick: interactive === true ? props.onClick : undefined,',
-    to: '        onClick: props.onClick,',
+    from: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: interactive === true ? props.onClick : undefined,",
+    to: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: props.onClick,",
     suites: ['test/client.test.mjs'],
   },
   {
@@ -1013,6 +999,39 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The right column and this one want the same width. When the host opens
+    // its right column this column has to step aside, and the signal the page
+    // offers is the frame's `data-rightbar-collapsed` — written while closed,
+    // absent while open. Dropping the check keeps the panel on screen on top of
+    // a preview that now owns the space.
+    label: 'the column ignores whether the sidebar is open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: 'const on = bridge.open === true && column.visible === true && sidebarOpen() === false',
+    to: 'const on = bridge.open === true && column.visible === true',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A host whose shell we cannot find is not a host with an open sidebar.
+    // Returning true here would hide the column everywhere the overlay is named
+    // differently, with nothing on screen to explain the absence.
+    label: 'a shell the plugin cannot read counts as an open sidebar',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '      if (overlay === null || overlay === undefined) return false',
+    to: '      if (overlay === null || overlay === undefined) return true',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The header only behaves as a header while it is stuck to the scroller's
+    // top. `position:static` puts it back in the flow, where it scrolls away with
+    // the cards and the recap stops being a standing answer to "what happened
+    // last turn".
+    label: 'the header scrolls away with the cards',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-col-top{position:sticky;top:0;z-index:2',
+    to: '.dsse-col-top{position:static;top:0;z-index:2',
+    suites: ['test/client.test.mjs'],
+  },
+  {
     // The watchdog for the defect the two cards above keep coming back to: a card
     // that renders open has to be closable. It reached the point of passing for a
     // round while checking nothing at all, because the pairs it compared were both
@@ -1020,8 +1039,8 @@ const mutations = [
     // premise, so removing the way out has to fail rather than skip.
     label: 'an open card renders without the click that would close it',
     file: 'packages/ui-evolve/lib/client.js',
-    from: '        onClick: interactive === true ? props.onClick : undefined,',
-    to: '        onClick: undefined,',
+    from: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: interactive === true ? props.onClick : undefined,",
+    to: "        onMouseLeave: typeof props.onMouseLeave === 'function' ? props.onMouseLeave : undefined,\n        onClick: undefined,",
     suites: ['test/client.test.mjs'],
   },
   {
@@ -1068,6 +1087,49 @@ const mutations = [
         return () => clearInterval(timer)`,
     to: `        const timer = setInterval(() => load(true), REFRESH_MS)
         return () => {}`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The turn rail's visibility rides on the column's own number. Wiring it to
+    // a second, independent answer is how it went hidden for three rounds: every
+    // measured verdict said "no room" at the default column width, and the rail
+    // stayed invisible while 59px of gutter stood empty beside the prose.
+    label: 'the rail stops riding on the column and answers alone',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        if (typeof root.getAttribute !== "function" || root.getAttribute("data-dsse-turn-rail") !== wanted) {
+          root.setAttribute("data-dsse-turn-rail", wanted)
+        }`,
+    to: `        if (typeof root.getAttribute !== "function" || root.getAttribute("data-dsse-turn-rail") !== "0") {
+          root.setAttribute("data-dsse-turn-rail", "0")
+        }`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Both rules were deleted whole by the pass that removed the old gutter
+    // layout, and the derived rules that survived kept the stylesheet looking
+    // right. Without the body rule the column clips its own content at the first
+    // screenful; without the rail rule every card collapses into the corner.
+    label: 'the column body goes back to clipping instead of scrolling',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-monitor-body{flex:1;min-height:0;overflow-y:auto;',
+    to: '.dsse-monitor-body{flex:1;min-height:0;overflow-y:hidden;',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'the embedded rail keeps the old overlay positioning',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-rail[data-embedded="true"]{position:static;',
+    to: '.dsse-rail[data-embedded="true"]{position:absolute;',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The grab strip is the only way to resize the column. At its old 8px it sat
+    // under the column's own border: finding it meant landing the pointer on a
+    // 1px line, which is the "hard to drag" report this pins.
+    label: 'the grab strip shrinks back under the border',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-monitor-grip{position:absolute;left:-12px;top:0;bottom:0;width:20px;',
+    to: '.dsse-monitor-grip{position:absolute;left:-4px;top:0;bottom:0;width:8px;',
     suites: ['test/client.test.mjs'],
   },
 ]

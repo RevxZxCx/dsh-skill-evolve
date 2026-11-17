@@ -229,6 +229,10 @@
 
 **理由**：右栏是宿主放文件预览的地方，占了它意味着面板与预览不能同时出现。宿主也**没有**提供"对话列内部"的扩展点（会话级插槽只有 header 与 composer）。所以唯一的空间是对话列两侧的空隙。卡片**故意不设 `z-index`**，让宿主决定层级，侧栏展开时自然遮挡。
 
+> **已被 D-183 取代（浮层形态部分）**：上面「宿主没有提供对话列内部扩展点」这句是错的——
+> `conversation.input.dock` 存在，且对话列内的宽度轴可以由插件通过 CSS 变量干预。
+> 「不占用宿主右栏」这个结论仍然成立，被否的三条替代方案也仍然成立。现行走的是 D-183 的常驻列。
+
 **被否决的替代方案**：
 - 宿主右栏 tab —— 与文件预览互斥。
 - `conversation.content` 全接管 —— 官方指引禁止，等于替换整个会话体。
@@ -3206,3 +3210,550 @@ nothingStillStands : filesOpen === true`。
 
 **代价**：多一个状态值要在断言里区分。三处注入验证证明它可区分：
 强制 `true` 红 3 条、退回布尔红 6 条。
+
+## D-183 · 面板从「空隙里的浮层」改成「对话列内的常驻监控列」，默认开启
+
+**决定**：卡片不再是绝对定位塞进正文两侧空隙的浮层。对话列内右侧划出一条**常驻、真实占宽**的列
+（默认 300px，可拖拽 220–460），正文让出等宽并重新居中；列由会话头部 `utilities` 座位上一个
+24×24 图标按钮（监控屏 + 波形）开关，**默认开启**。几何在 `lib/gutter.js` 的 `placeMonitor()`，让宽靠
+`html[data-dsse-monitor="1"] [data-conversation-scroll]{margin-right:var(--dsse-monitor-reserve)}`。
+
+**为什么**：D-06 的空隙方案只在窗口够宽时才成立。1440px 且左栏展开时，正文两侧各只剩 209px，
+比卡片本身还窄——**恰恰在最需要它的时候被压没或干脆不画**（原型实测：列被压到 220px，低于
+`MIN_CARD_WIDTH` 时整块不画）。用户对着 Qoder 的截图指出的正是这一点：它那一列是真的占位、
+对话内容真的变窄。所以问题不是"卡片放得不够好看"，是**旧方案在主流窗口尺寸下根本不成立**。
+
+**否决的方案**：
+- *继续调浮层的偏移/尺寸*：空隙本身不够宽，调参只是在更小的窗口上失败得更慢；
+- *收进宿主右栏做页签*：与文件预览互斥，`R-04` 记着这个形态被用户否定过一次；且分页侧栏不是实时监控；
+- *用 `padding-right` 让宽*：正文是 `max-width + margin:0 auto` 居中，padding 只让它左移一半（吃两倍宽度），且滚动条会留在列底下；
+- *默认关闭*：用户明确要求默认开启（m01099）——一个需要先被发现才存在的东西，等于不存在。
+
+**代价**：三条。① 宿主的右侧宽度把手（`[data-width-handle="right"]`）会与列重叠，只能在我们自己的
+CSS 里隐藏它；② `--dsse-monitor-reserve` 是对宿主 DOM 的写入，**卸载与关闭面板都必须归还**
+（曾经漏了关闭这一路，被新断言抓住——用户点一次开关对话就永久变窄）；③ 视口小于
+`MONITOR_MIN_PROSE + MONITOR_MIN_WIDTH` = 780px 时列不画，`monitorColumn:false` 可整条回退旧行为。
+
+## D-184 · 监控列不画自己的列头，顶部行接管；开关挂在 `utilities` 而不是 `actions`
+
+**决定**：两条一起改。
+
+① **列内不画列头。** 原先列顶有一条 38px 的标题栏（「任务监控」+ 收起按钮）。删掉整条，顶部那行
+（建议 / 速度 / 刷新 / 设置）直接成为列的第一个元素，并用 `position:sticky; top:0` 固定在列顶。
+它保留浮层时期的卡片框（边框、圆角、底色），因为列头去掉后，它是这一列**唯一的外框**——把它压平，
+列就彻底没有上边缘了。行内顺序从「刷新 → 设置 → 速度 → 建议」改成「**建议 → 速度 → 刷新 → 设置**」：
+队列是面板存在的理由，贴左给视线落点；速度和三个按钮归到右侧成为一组，不让一个宽度会变的数字夹在
+两个要点的按钮之间。`.dsse-top-row .dsse-queue` 的 `margin-left:auto` 随之删掉（换序后它会把自己推到
+右边），改由速度徽标的 `margin-left:auto` 把整组控件顶到右端。
+
+② **开关从 `conversation.session.header.actions` 迁到 `conversation.session.header.utilities`。**
+`actions` 在会话头部的左半段、紧挨会话页签，注册在那里读起来像会话自己的控件；`utilities` 的座位
+契约原文是「Right-aligned Session utilities in ascending order」，它之后依次是 `corner` 座位
+（已被 `dsh-client-ui-sidebar-right` 的展开按钮 `▯` 占用，single 槽，插件不能注册）和原生窗口按钮。
+在 `utilities` 里用较高 `order` 注册，开关就落在文档的最右端，离窗口按钮只剩 `▯` 一个座位。
+
+**为什么**：用户要求顶部不要那句「任务监控」——在 220px 宽的列里，一行标题等于一张卡的高度，而它
+只说明了一件显而易见的事；关掉列也不需要列内按钮，开关已经在会话头部。位置同理：用户指出的落点是
+右上角窗口按钮旁边。**插件到不了那里**——最右的 `—` `⧉` `✕` 由 Electron 的 `titleBarOverlay` 绘制，
+不在 DOM 里（`F:\DSH\resources\app.asar` 的 `lib/main.js`：`titleBarStyle:"hidden"` +
+`titleBarOverlay:{height:40,...}`），`corner` 座位又被右栏包独占。`utilities` 的最右端是一个渲染层插件
+能到达的最近位置。
+
+**否决的方案**：
+- *保留列头但只删标题文字*：仍占 38px，且剩下的收起按钮与头部开关重复；
+- *注册到 `corner`*：single 槽，已被 `dsh-client-ui-sidebar-right` 占用，注册会与之冲突；
+- *不 sticky 的顶部行*：列常驻屏上，控件随卡片滚走等于每次都要滚回去才能刷新。
+
+**代价**：① 顶部行 `sticky` 需要一个不透明底色，否则卡片从它下面穿过去会透出来——底色用
+`--dsw-alias-bg-base`，与列的底色一致；② 开关在 `utilities` 里排在 `open-in-app`、`schedule-catalog`、
+`session-log-download` 三个座位之后（它们都没写 `order`，默认 0，我们写 40），因此在最右；若宿主日后
+给某个座位写更大的 `order`，我们的开关会左移一位，但仍在同一组内。
+
+## D-185 · 监控列自己画上下左右四条边；轮次导航的可见性由测量决定，不由宽度决定
+
+**决定**：两条一起改。
+
+① **列自己画边界。** `.dsse-monitor` 补 `border-top`（与 `border-left` 同用 `--dsw-alias-border-l2`），
+并加 `box-shadow:-1px 0 0 0 var(--dsw-alias-border-l1), -14px 0 22px -16px rgba(15,17,21,.38)` ——
+**阴影朝左**，落在正文右侧的空白里。
+
+② **轮次导航按测量恢复，不按宽度。** 宿主的隐藏规则是
+`@container (width<=900px){nav.display:none}`，容器是导航自己的 slot（滚动区宽 − 每侧 32px 内边距）。
+改为：`lib/gutter.js` 新增 `TURN_RAIL_WIDTH = 40` 与 `turnRailFits({scrollWidth, proseWidth})`，
+判据是 `(scrollWidth - proseWidth) / 2 >= 40`（两侧 gutter 各占一半，导航在右侧那个）。答案通过
+`html[data-dsse-turn-rail=1]` 发布，CSS 只在带上这个属性时把 `nav` 重新显示（`display:block !important`）。
+
+**为什么**：
+
+① 列从 `[data-conversation-content]` 顶部起算，就在会话头部下方。只有 `border-left` 时，那条竖线
+从列顶一路向上越过 header、停在空中——用户报的正是这条没有交代的接缝。阴影同理：拖拽把手在左缘，
+列看起来应该浮在对话之上，而朝右的阴影会压在正文上，所以它必须朝左、且只朝左。
+
+② 宿主量的是**面积**，导航需要的是**空白**，二者在主流窗口上差五倍。1440px 且左栏开：滚动区 1160、
+正文 742、单侧 blank 209px——导航只需 40px，宿主照样把它藏了。我们再让出 300px，滚动区掉到 860，
+就更藏。这就是用户看到的列一开导航就没了、列拉窄又回来。用户说默认宽度下空间完全够是对的：
+**这就是宿主的判断有错，不是我们的列太宽**。所以修法不是把列调窄（那是拿产品功能去迁就一个 bug），
+而是把我们自己已经量到的两个数（滚动区宽、正文宽）代进去算一次，够就让导航出来。
+
+**否决的方案**：
+- *用容器查询覆盖*（`@container (width<=900px) and (width>=700px){...!important}`，本段先写过、后推翻）：
+  单参数容器查询表达不了「滚动区 − 正文」，只能拿面积当代理。算一下就知道会错：正文由
+  `clamp(680px, 列宽*.64, 920px)` 决定，**列宽是外层容器**，加 margin 不改它，所以 1440 窗口正文恒 742；
+  要留 40px 单侧就得滚动区 ≥ 822，而不是容器 700。按 700 放行，1366 窗口（滚动区 722）会让导航直接压在正文上。
+- *把 `monitorWidth` 默认值调小*：见上，宿主在 1160px 面积上就已经藏导航了，调窄列只是延后触发点；
+- *直接 `nav{display:block!important}` 无条件覆盖*：窄窗口上导航会盖住正文。导航是辅助控件，
+  为它牺牲正文可读性是本末倒置；
+- *用 `--dsw-elevation-panel` 做阴影*：该 token 自带 `stroke`（上/下/右各画一条），会给列的右边缘——
+  也就是窗口边——画一条线。
+
+**代价**：三条。① `SNx2jG_frame` 是 CSS module hash，宿主重建就会变，所以配 `aria-label="轮次导航"` 与
+`"Turn navigation"` 两条稳定选择器兜底；三条都不匹配只丢导航，不伤对话。② 覆盖只在监控列开启时生效
+（`data-dsse-turn-rail` 也只在 `reserve > 0` 时才可能为 `"1"`），列关着时我们没占宽度，宿主自己的阈值才是对的。
+③ 测量失败一律判 `false`——猜够正是这个函数存在的目的的反面。
+
+**变异验证**：删 `border-top` 红 1；阴影换 `--dsw-elevation-panel` 红 2；三条导航选择器改废红 3。
+
+## D-186 · 监控列只有一个布局；空间不够时重排正文，不降级；轮次导航按「预留之后的余量」判断
+
+> **状态（2026-11-16）：第 3 条「轮次导航按预留之后的余量判断」已被 D-187 取代。**
+> 修好了双扣公式之后，导航在真实窗口里仍然不显示——问题不在算错，而在「二次测量」这件事本身。
+> 现在导航的可见性与列的开关是同一个事实，不再测量。第 1、2、4 条仍然有效。下文保留原始决策记录以便追溯。
+
+**决策**
+
+1. **旧 gutter 卡片布局整套删除**：`gutters()`、`placeCards()`、`placeHandle()`、`MIN_CARD_WIDTH`/`MAX_CARD_WIDTH`/`CARD_GAP`/`TOP_INSET`/`BOTTOM_INSET`/`HANDLE_WIDTH`，`client.js` 里的内联副本、`.dsse-handle` 与 `.dsse-side-option*` 样式、`bridge.side`/`bridge.collapsed`、config 的 `panelSide`/`panelCollapsed` 两键，以及两个专项测试文件（`test/gutter.test.mjs`、`test/gutter-fractional.test.mjs`）。`placeMonitor()` 成为唯一布局函数。`placeNear()` 保留（面板详情的定位还用它，有两个独立测试面）。
+2. **`placeMonitor()` 不再有「不画」的宽度分支**。只有「列区域本身窄于 `MONITOR_MIN_WIDTH`（220）」才返回 `visible:false`；宽度预算不足时把列压在 220，让正文跌破 `MONITOR_MIN_PROSE`（560）自己重排。拖拽在列自身量程 `[220,460]` 内夹取后再持久化。
+3. **轮次导航的余量按「预留之后」算**：`after = area + appliedReservePx - column.reserve`，`area` 是 `[data-conversation-scroll]` 的 `clientWidth`（已扣滚动条、**也已被当前预留的小 `margin-right` 缩小**）。
+4. **`.dsse-monitor` 加左侧圆角**：`border-radius: var(--dsw-radius-md) 0 0 var(--dsw-radius-md)`，靠窗一侧不圆。
+
+**为什么**
+
+第 2 条是被用户报出来的：拖到最小宽度时列消失、退回旧卡片布局，而 `bridge.monitorWidth` 已经把小值存进 config，于是再也拖不回来。根因是 `placeMonitor()` 把「宽度不够」当成「不该画」，而宽度又是它自己持久化下来的——一个能把产品永久锁死在错误布局里的自反馈。旧布局整套删除是同一个决定的下半截：只要降级目标还在，就还会有下一次「掉进去出不来」。
+
+第 3 条是「默认宽度下看不到轮次导航」的真根因。原式是 `area - appliedReservePx`，而 `area` 已经少了一个预留，于是 860 的客户区被当成 560 去和 742 的正文比，判「没地方」。它只在**第一次**测量时是对的（那时还没预留），之后每一次都错——这也是为什么纯函数测试全绿、真实界面却不显示。
+
+**否决的方案**
+
+- **保留降级并加一个「恢复默认宽度」按钮**：多一个用户得先知道要去按的按钮，而症状本身就是「面板不见了」，按钮跟着面板一起不见了。
+- **在窄窗口下把列宽算成 `full - prose` 而不夹 220**：会得到 0 宽甚至负数，列变成一条缝，比不画更糟。
+- **把 `monitorWidth` 的持久化去掉**：拖拽结果就不再生效，等于取消这个功能。
+- **用容器查询或 `@media` 判轮次导航**：容器查询只能拿到容器自己的宽度，拿不到「滚动区 − 正文」这个真正的余量，而正文宽度由宿主的 `clamp(680, 列宽×0.64, 920)` 决定，与外层宽度不是线性关系。
+- **改 slot 的 `padding-inline` 把 32px 收回来**：在真实 Chrome 里实测过，八组几何数据一字未变——那条 padding 只影响容器查询的查询宽度，不影响 `nav` 的绝对定位。
+
+**代价**
+
+- 窗口很窄时正文会跌破 560px 并重排；这是刻意的取舍——面板不消失优先于正文舒适宽度。
+- 列区域窄于 220px 时（约 <780px 窗口）仍然什么都不画，因为那时连列的最小宽度都放不下。
+- `data-dsse-turn-rail` 依赖 `nav[class*="SNx2jG_frame"]` 这个 CSS module hash，宿主重建后会变；两个 `aria-label` 是兜底，三条都不匹配只丢导航、不伤对话。
+- 拖拽结果被夹在列量程内，用户不能拖出一列比 460 更宽的监控列；要更宽得改 `monitorWidth`。
+
+**变异验证**
+
+- `after` 公式退回 `area - appliedReservePx`：`test/client.test.mjs` 红 2（`the rail is told it has room on the first pass`、`and still has it once the reservation is on the area`）。已加进 `scripts/mutate-checklist-panel.mjs`，128 条变异全杀。
+- 这个 bug 只在**第二次及以后**的测量里显形（第一次还没有预留可减）。两条新断言因此都走「渲染 → 挂上预留 → 再触发一次 resize 重测」的路径；只断首帧的写法在旧公式下同样是绿的，抓不到它。
+
+
+## D-187 · 轮次导航不再测量，随监控列的开关显示；列自身补回滚动区与可拖的把手
+
+**决策**
+
+1. **删除 `turnRailFits()`**：从 `lib/gutter.js`、bundle 的内联副本、以及三个测试文件（`client` / `monitor` / `gutter-drift`）里彻底移除。`TURN_RAIL_WIDTH = 40` 保留，但作为 `placeMonitor()` 的**宽度预算**而非显示判据：`forRail = full - bar - prose - TURN_RAIL_WIDTH * 2`。
+2. **轮次导航的可见性 = 监控列是否开启**：`applyMonitorReserve(reserve)` 收回 `railFits` 参数，用同一个 `wanted`（`width > 0 ? "1" : "0"`）同时写 `data-dsse-monitor` 与 `data-dsse-turn-rail`，两者不可能互相矛盾。CSS 规则 `html[data-dsse-turn-rail="1"] … nav{display:block !important}` 不变，仍只在列开着时覆盖宿主的容器查询。
+3. **补回删旧布局时被连根删除的两条基础 CSS**：`.dsse-monitor-body{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;...}` 与 `.dsse-rail[data-embedded="true"]{position:static;width:auto;height:auto;max-height:none;...}`。派生规则（`.dsse-monitor-body .dsse-card` 等）此前一直看着正常，但它们修改的基础规则已经不存在——这是「拉窄时展示不完全」的真因：列没有滚动容器，内容被 `.dsse-monitor` 的 `overflow:hidden` 直接裁掉；卡栏则继承 `.dsse-rail` 的 `position:absolute` 缩成一团。
+4. **拖拽把手从 8px 加宽到 20px，并向外探出 12px**（`left:-12px`）：旧把手正好压在列的 1px 边框底下，指针必须精确落在那条线上才能命中，这就是「不好拖动」。可见的横线改由 `::after` 画（3px 宽、34px 高），命中区与视觉分离。
+
+**为什么**
+
+用户连续三轮报告「默认宽度下依然不显示轮次导航」。D-183 用 CSS 属性覆盖，D-186 修了双扣公式（`area - applied` → `area + applied - reserve`），导航仍不出现。根因不是算错一次，而是**二次测量这件事本身**：宿主用 `@container (width<=900px)` 量滚动区面积，我们却拿「滚动区 − 正文」判余量——两个量根本不是一回事，而且正文宽度由宿主的 `clamp(680, 列宽×0.64, 920)` 决定，加 margin 不改外层列宽，于是任何基于当前几何的判据都会在真实窗口里算出"没空间"。
+
+调研 Qoder 给出了答案：Qoder 把这个功能叫**「消息锚点」`chatTimeline.anchorNav`**（`_qoder_rev/assets/BkeoGa4m.js` i18n；渲染在 `gtdG4YpP.js` offset 9567326），类名 `hidden … md:flex` + `items.length < 3 return null`——**只判视口 ≥768px 与条目数，完全不测量空间**，宽度固定 `!w-5`（20px），贴 `right-2`（8px）浮在消息列内边距里，不参与让宽。它从不问「右边有没有空间」，因此也就不存在「被右侧任务监控列挤掉」的问题。借鉴这一点：把导航当作列的伴生物,列开着就显示,不再自作聪明地判断。
+
+**否决的方案**
+
+- **继续修 `turnRailFits` 的公式**：已经修过两轮（`area - applied` → `area + applied - reserve`），每一轮纯函数测试全绿、真实界面依旧不显示。判据本身问错了问题。
+- **把列宽默认值调小到 260 以下**：牺牲监控列的可用性去迁就一个保守的宿主阈值；正文只从让宽里拿到一半,列窄 40px 正文几乎不变。
+- **继续用容器查询 `@container (width<=900px) and (width>=700px)`**：算术错误——正文由 `clamp(680, 列宽×0.64, 920)` 决定,加 margin 不改外层列宽;1440 窗口正文恒 742,要 40px 单侧需滚动区 ≥822 而非容器 ≥700。
+- **给 `.dsse-monitor` 全局去掉 `overflow:hidden` 来"修"裁切**：圆角需要它,而且内容还会因为卡栏的 `position:absolute` 挤在角落——两个独立缺陷,不能靠去掉一个约束掩盖。
+
+**代价**
+
+- 极窄窗口下列宽触到 220 下限时,导航条会压在 gutter 最后几像素上。这是刻意接受的:另一个选择是导航在绝大多数窗口都不显示。
+- 关闭监控列后 `data-dsse-turn-rail` 归 0,导航完全交给宿主自己的 900px 查询——此时我们没占宽度,宿主的阈值是对的。
+- 依赖 `nav[class*="SNx2jG_frame"]` 这个 CSS module hash,宿主重建后会变;两个 `aria-label` 是稳定兜底,三条都不匹配只丢导航、不伤对话。
+
+**变异验证**
+
+- `data-dsse-turn-rail` 从跟列开同步改成硬编码 `"0"`:`test/client.test.mjs` 红 3。
+- 列滚动区 `overflow-y:auto → hidden`:红 1;嵌入卡栏 `position:static → absolute`:红 1;把手 `20px/-12px → 8px/-4px`:红 1。
+- `scripts/mutate-checklist-panel.mjs` 现 131 条变异全杀、0 存活。全量测试 3872 passed / 0 failed。
+
+---
+
+## D-188 · 轮次导航的覆盖改用结构选择器 + JS 内联强制，不再赌 CSS module hash 与译文
+
+> **状态（2026-11-16）：D-187 第 2 条「用属性驱动 CSS 覆盖」被证明在真实 GUI 里不生效，本条取代其内容；D-187 的删除测量、补滚动区、加宽把手三条不变。**
+
+**决策**
+
+1. **CSS 增加一条结构兜底选择器**：在三条 `nav[class*="SNx2jG_frame"]` / 两个 `aria-label` 之后，追加 `html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !important}`。它不依赖任何会 drift 的东西：TurnNavigator 是会话滚动体里**唯一的 nav**，面包屑 `nav[aria-label=t("session.hierarchy")]` 在 `<header>` 里（`dsh-client-ui-conversation/lib/client.js:685616`），不在 `[data-conversation-scroll]` 内，所以结构选择器只命中轮次导航。
+2. **新增 `forceTurnRail(visible)` JS 内联强制**：`document.querySelectorAll('[data-conversation-scroll] nav')` 找节点，跳过 `aria-label` 匹配 `/hierarchy|breadcrumb/` 的面包屑，列开时写 `node.style.display = 'block'` 与 `node.style.zIndex = '21'`，列关时 `delete` 掉两个 inline 属性还原给宿主。返回触碰节点数便于测试。5 处调用：`remeasure` 的开启分支、无几何分支、关闭分支、`bridge.open !== true` 的渲染出口、teardown。
+3. 保留 D-187 的三条属性覆盖 CSS 作第一道，结构选择器与 JS 强制作第二、第三道——三道都在列关时自动让位。
+
+**为什么**
+
+用户第四次报告「轮次导航依旧不显示，拖窄后才显示」。这一轮不再猜，用 headless Chrome + CDP 做四组隔离实验，逐项证伪：
+
+- **级联**：800px 容器（宿主 `@container width<=900` 命中）下加载宿主隐藏规则 + 我方覆盖 → `navDisplay:"block"`。`!important` 确实赢 `@container`。
+- **选择器与解析**：加载插件 CSS 全文（29279 字符）→ 浏览器解析出 182 条规则、turn-rail 规则存在、`navDisplay:"block"`。
+- **语法**：CSS 全文 `/*` 与 `*/` 各 20 个配对，唯一插值 `${FILE_LIST_MAX_PX}` 与导航无关。
+- **层级与宿主声明**：整个 chat bundle（592171 字符）里 `!important` 计数 **0**、`@layer` 计数 **0**；`SNx2jG_frame` 只出现 4 次（CSS 定义、`@container` 隐藏、reduced-motion、className 映射）；nav 确在 `[data-conversation-scroll]` 子树内（宿主自己的 `[data-conversation-scroll] .SNx2jG_slot{position:sticky}` 即证明）。
+
+四项全对，真实 GUI 依旧不生效。剩下唯一解释是**运行时 drift**：bundle 里写死的 CSS module hash `SNx2jG_frame`（`dsh-client-ui-chat/lib/client.js:12013` 的 `TurnNavigator_module_css_default.frame`）或译文「轮次导航」/「Turn navigation」，与实际运行的构建不一致（web 前端是另一组 61 个 bundle，未搜到同样的 `turnNavigation` 字符串），三条规则一个都没命中，只剩宿主 900px 查询生效。「拖窄后才显示」还指向第二个因素：即便 `display:block`，nav 的 slot z-index 7 仍可能被监控列所在 overlay 层（z-index 20）盖住，列变窄露出被盖住的部分才显形。
+
+修复按 Qoder 的思路走到底——它从不测量、不比对空间，只按视口和条目数决定显隐（见 D-187）。我们做不到「只按视口」，但要去掉一切会 drift 的中间量：结构选择器无可 drift，JS 内联样式胜过宿主的非 important 查询（已实测），`z-index:21` 抬过 overlay 层。
+
+**否决的方案**
+
+- **继续猜 hash / 译文变体**：`SNx2jG_frame` 是构建产物，web 与 asar 桌面端可能不同；译文随 locale 变。穷举只把同一个 drift 换一种形式。
+- **只靠 CSS 属性覆盖（D-187 原方案）**：隔离环境 100% 有效，真实环境失效——四组实验证明问题不在 CSS 本身，加更多 CSS 断言无帮助。
+- **只抬 z-index 不改 display**：`display:none` 来自 `@container`，层级再高也不渲染；两个问题必须分别修。
+- ~~**用 `childList` MutationObserver 反复重施 JS**：结构 CSS 对未来出现的 nav 自动生效（nav 受 `scroll.initialized` 与 `items.length>=2` 门控、可能晚于插件挂载），JS 强制在每次 `remeasure` 里重放即可，不必给每个 streamed token 付观察器代价。~~ **已被 D-189 推翻**：结构 CSS 确实能管住「未来的 nav」，但管不住「首次从未写过 inline、且之后没有任何事件再触发 remeasure」的情形，而这正是用户报的症状。现已按 D-189 挂 observer（rAF 合并，每帧一次，不是每 token 一次）。
+
+**代价**
+
+- `forceTurnRail` 直接改宿主 DOM 节点的内联样式，teardown 与关闭路径必须逐处 `delete` 还原，否则关了列还留着 `display:block`。已由「closing the column releases the forced rail」断言守住。
+- 依赖「滚动体里唯一的 nav 是 TurnNavigator」这个结构事实。宿主若在滚动体里再加一个 nav，会被一并强制显示；跳过 `hierarchy|breadcrumb` 只挡住已知的那一个。
+- `zIndex:21` 是硬编码层级，宿主若调整 overlay 的 z-index 需同步。取 21 因为 overlay 层是 20，刚好压过一层。
+
+**变异验证**
+
+- `forceTurnRail(true) → false`：红 2（display 与 zIndex 两条断言）。
+- `zIndex '21' → '1'`：红 2（层级断言 + 还原断言）。
+- 删掉面包屑跳过分支：红 1（面包屑被误改）。
+- 全量测试 **3876 passed / 0 failed**。
+
+## D-189 · 轮次导航晚于首次测量出现，必须盯住它出现的那一刻；D-188 的 `z-index:21` 只解决层级
+
+**背景**：D-188 交付后用户第五次报告「依然不显示轮次导航」。这一次没有继续改代码，而是先用 ego 浏览器进入真实 Web GUI（LAN 配对链接 `/pair-accept?pair=...` → `/pair-app?device=...`，数据面 API 只在非 loopback 源认设备凭据）读到了真实 DOM，才动手。
+
+**先纠正一处错误结论**：排查中我曾宣布「默认宽度下监控列在物理上遮挡轮次导航」，并据此加了 `html[data-dsse-turn-rail="1"] [data-conversation-scroll] :has(> nav){z-index:30 !important}`。这个观测是**我自己污染的实验**造成的：为了在 ego 固定 1264px 的窗口里复现 1440 的默认列宽，我手动写了列的 `style.width` 与 `style.left`，却没有同步 `--dsse-monitor-reserve` 和正文的 `margin-right`，于是量出「列左缘 395 < nav 右缘 453，重叠 58px」。重新加载取干净基线后实测是 `scroll=[280..475]`、`nav=[425..453]`、`col=[475..695]`——**nav 右缘恰好停在列左缘之前，两者从不重叠**。那条 `:has(> nav)` 规则及其 5 条断言已全部撤销。教训：改 DOM 几何来做对照实验时，必须把派生量（让宽属性、正文 margin）一起改，否则测出来的是自己的改动。
+
+**真正的缺陷（有独立证据）**：清掉 nav 的内联 `display`/`z-index` 后等 2.5 秒，computed 仍是 `block`（结构 CSS 兜底生效），但**内联样式不会自己回来**；只有 `window.dispatchEvent(new Event('resize'))` 之后才恢复。原因：`forceTurnRail` 只在 `remeasure` 里被调用，而宿主把 TurnNavigator 门控在 `scroll.initialized && items.length >= 2` 之后——它通常晚于本插件对 overlay 的第一次测量。nav 出现不改变 `[data-conversation-content]` 或 overlay 的尺寸，因此 `ResizeObserver` 看不见。用户拖窄列 → resize → `remeasure` → `forceTurnRail`，导航才出现，这正是「拖窄之后才能显示」。
+
+**决策**
+
+1. **给 `[data-conversation-scroll]` 挂 `MutationObserver({childList:true, subtree:true})`**，用 `requestAnimationFrame` 合并成每帧一次，在列开启时重放 `forceTurnRail(true)`。这是唯一能在「nav 晚出现」那一刻得到通知的观察面。
+2. **惰性挂载**：观察器第一次尝试时 overlay 可能还没等到会话、滚动体还不存在，所以在 effect 里试一次、并在既有的 1 秒轮询里继续重试，成功后不再重复挂。
+3. **帧合并而非节流**：流式会话每帧会产生大量 mutation，观察回调本身要便宜（只查 `railFrame`），真正的 DOM 读写在 rAF 里做一次。
+4. **关闭态不重施**：rAF 回调里先判 `bridge.open !== true` 就返回，避免列关闭后仍被 mutation 事件把导航点亮。
+
+**否决的方案**
+
+- **继续靠结构 CSS 兜底就够了**：CSS 能处理「未来的 nav」，但处理不了「已经存在、inline 被 delete 过或首次从未写过」的 nav。用户的症状是后者。
+- **`setInterval` 无脑重放 `forceTurnRail`**：简单，但会在列长期开启时每秒做一次 `querySelectorAll`，且无法保证「出现的那一帧」就被覆盖。
+- **观察整个 body / 整个 conversation**：`childList+subtree` 挂在滚动体上已经足够窄，再往上会连带流式内容与卡片栏自身。
+- **保留 `:has(> nav){z-index:30}`**：前提被证伪，规则会无故改变宿主层叠顺序。已删。
+
+**代价**
+
+- 多一个 observer 的生命周期需要管理：teardown 必须 `disconnect()` 并 `cancelAnimationFrame`，否则下一个会话复用同一滚动体时会继续被强制点亮。已由「teardown stops watching the scroll body」断言守住。
+- 依赖宿主把滚动体挂在 `[data-conversation-scroll]` 上（该属性已被本插件用于让宽，属于同一处依赖）。
+- 测试 harness 必须提供 `requestAnimationFrame`，否则观察器永远挂不上、断言空转。已补 `windowStub.requestAnimationFrame/cancelAnimationFrame`、`flushRaf()`、`MutationObserverStub.trigger()`。
+
+**变异验证**（全部打红，证明断言非空转）
+
+- 观察选项 `childList+subtree` → `{attributes:true}`：红 1（「and it watches the children that appear」）。
+- 去掉 rAF 合并、直接同步调用：红 2（「waits for a frame before being touched」、「repeated mutations collapse into one scheduled pass」）。
+- rAF 回调里去掉 `bridge.open` 判断：红 1（「a closed column does not force a late rail back on」）。
+
+全量测试 **3883 passed / 0 failed**。
+
+## D-190 · 轮次导航还要自己声明 `visibility`：宿主能把整个会话子树设成 hidden
+
+**决策**：`html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav` 这条规则除 `display:block !important` 外再带 `visibility:visible !important`；`forceTurnRail` 在 nav 的 inline 样式里除 `display`/`z-index` 外再写 `visibility:visible`，关闭时一并 `delete`。
+
+**为什么**
+
+桌面端（1536×816、`devicePixelRatio` 1.25、列 `reserve` 正好 300 的默认宽度）实测：
+
+```
+nav  rect [1185,311,1213,513]  28x192  19 条横条
+     display:"block"  inline:"block"   marks 19   aria"轮次导航"
+     visibility:"hidden"
+     markBefore{ bg rgba(0,0,0,.16), w 20px, h 2px, opacity .6 }
+scroll [280..1236]   col [1236..1536]   两者不重叠
+elementFromPoint(中心) → V4vHZW_scroll      ← 穿透了导航本身
+```
+
+节点在、盒子是真实的、横条的 `::before` 颜色和尺寸都对，只有 `visibility` 是 `hidden`。`visibility` 是**继承属性**：某个祖先把它设成 hidden，所有后代一起不可见，而 `display`/`z-index` 都管不了这件事。这就是「web 端正常、桌面端看不见」的分水岭 —— 两端同一服务端、同一份 bundle，差别只在各自渲染时祖先元素的 `visibility`。
+
+宿主自己的 TurnNavigator CSS 里没有任何 `visibility` 规则（全文 3542 字符已导出核对），插件 CSS 里唯一一处 `visibility:hidden` 是 `.dsse-row[data-actions="true"]:hover .dsse-size`，与导航无关。所以隐藏来自别处，而**在 nav 自己身上声明 `visible` 就能把继承来的 hidden 覆盖掉**，这是 CSS 规范行为，不需要动那个祖先 —— 它可能正当地隐藏着别的东西。
+
+**否决的方案**
+
+- **找出并改掉那个祖先**：它是宿主的 DOM，不是我们的；改它可能一并显示宿主有意隐藏的内容，且要依赖具体的祖先结构。
+- **给 nav 加 `opacity` 或 `filter`**：`visibility:hidden` 的后代无论 opacity 多少都不可见，这两个属性解决不了。
+- **只在 CSS 里修，不动 inline**：结构 CSS 能兜住「未写过 inline」的情形，但 nav 一旦带过 inline `display:block`（`delete` 之后仍继承祖先 hidden），CSS 兜底与 inline 各管一半，`visibility` 必须有明确来源。两条都写才稳。
+
+**代价**
+
+- 多一个需要配平恢复的 inline 属性：关闭列时必须 `delete node.style.visibility`，否则会话切走后导航仍是 visible。已由「closing the column releases the forced rail」断言守住（该断言现在同时校验 display/zIndex/visibility）。
+- 依赖 `visibility` 的继承语义（稳定，CSS2 起未变）。
+
+**变异验证**（全部打红）
+
+- 删 `node.style.visibility = "visible"`：红 1（「and made visible over an ancestor that hides the whole subtree」）。
+- CSS 规则去掉 `visibility:visible !important`：红 1（「and restores the visibility an ancestor took away」）。
+- 关闭时不 `delete node.style.visibility`：红 1（「closing the column releases the forced rail」）。
+
+全量测试 **3885 passed / 0 failed**。
+
+全量测试 **3885 passed / 0 failed**。
+
+## D-191 · 轮次导航还要自己把鼠标接回来：宿主把 slot 设成 `pointer-events:none`，nav 的 `auto` 在桌面端算成了 `none`
+
+**决策**：结构 CSS 规则与 `forceTurnRail` 的内联写入里，**各自**补 `pointer-events:auto`（CSS 带 `!important`，内联加在 `display`/`z-index`/`visibility` 之后），关闭与卸载时一并 `delete`。
+
+**为什么**。D-190 之后导航终于看得见了，但用户报「鼠标 hover 没有交互反应」。桌面端 Console 实测：
+
+```
+nav=[1185,301,28,222]  hitCenter="DIV.V4vHZW_scroll"  hitMark="DIV.V4vHZW_scroll"  markPE="none"
+beforeNow = matrix(0.4,0,0,1,0,-1) / rgba(0,0,0,0.16)
+afterHover= matrix(0.9,0,0,1,0,-1) / rgb(132,136,145)      ← 合成事件能让它变化
+previewNodes = 3
+chain = [NAV pe=none, DIV.SNx2jG_slot pe=none, 其余 7 层 pe=auto]
+```
+
+三条同时成立，指向同一个原因：
+
+1. `elementFromPoint` 在导航中心与横条中心都落到 `DIV.V4vHZW_scroll` —— 真实鼠标**穿透**过去了。
+2. 合成的 `pointerover/pointerenter/pointermove` 能让 `::before` 从 `scaleX(0.4)` 变到 `scaleX(0.9)`、预览节点出现 —— 说明 **React 的事件处理本身没问题**，坏的只有「鼠标能不能到」。
+3. nav 自己的 `computed pointer-events` 是 `none`，而宿主 `css$17` 里 `.SNx2jG_frame` 明写 `cursor:pointer;pointer-events:auto`。
+
+宿主的意图是：`.SNx2jG_slot` 铺满整个滚动区，所以设 `pointer-events:none` **不挡对话**；再让 nav 自己 `auto`，只有那 28px 能点。这在 web 端成立，在桌面端 nav 的 `auto` 没有赢下来（同一份 bundle，说明差异来自运行时的层叠环境，不是代码）。既然 D-190 已经在 nav 上声明了 `visibility`，把 `pointer-events` 一起声明是同一笔账，且**不需要**去改 slot —— 改 slot 会让整条铺满滚动区的透明层重新吃鼠标，那会把对话本身挡住。
+
+**否决的方案**：
+
+- ~~**给 `.SNx2jG_slot` 设 `pointer-events:auto`**~~：slot 是铺满滚动区的 0 高度容器，`auto` 会让它抢走对话区的点击。
+- ~~**只加 CSS、不加内联**~~：D-188/D-190 的教训是 CSS 与内联是两条独立路径，桌面端已证明「写了 CSS 仍算成 none」，只留一条等于把问题押在没验证过的那条上。
+- ~~**在 hover 时临时抬高 z-index 再转发事件**~~：`elementFromPoint` 已经证明不是层级问题（层级够，nav 在上面），转发只会把一个纯粹的可命中性问题变成两套事件系统。
+
+**代价**：
+
+- 关闭与卸载必须**逐个** `delete` 掉 `display`/`z-index`/`visibility`/`pointer-events` 四个内联属性，漏一个就把宿主原本的样式永久改写掉。断言改成一次性检查四个都清空。
+- CSS 那里用 `!important`，因为要压过 `@container` 里的 `display:none` 同层的竞争；这也意味着如果宿主将来故意把 nav 设成不可交互，我们会覆盖它 —— 只在 `html[data-dsse-turn-rail="1"]`（监控列开着）时生效，列关掉即失效。
+
+**变异验证**（每个都单独打红，证明断言不是空转）：
+
+- CSS 去掉 `pointer-events:auto !important`：红 1（「and takes the pointer back from the slot that ignores it」）。
+- 内联删 `node.style.pointerEvents = "auto"`：红 1（「and takes the pointer events the slot leaves to nobody」）。
+- 关闭时不 `delete node.style.pointerEvents`：红 1（「closing the column releases the forced rail」）。
+
+全量测试 **3887 passed / 0 failed**。
+
+## D-192 · 主题画了替身轨道时，把它收起来：两条轨道叠着画，几何还不一致
+
+**决策**：监控列开着时，除了把宿主的 `nav` 恢复出来，还要把主题自己画的替身轨道 `.dsh-claude-turn-rail` 收起来（`display:none !important`），保证任何宽度下只有**一条**轮次导航。
+
+**为什么**。D-190/D-191 之后用户报「桌面端调整侧栏宽度时，轮次导航条会呈现一种错位的状态」。桌面端 CDP（9222）实测，同一时刻画面上有两条：
+
+| | 宿主 `nav` | 主题替身 `.dsh-claude-turn-rail` |
+|---|---|---|
+| 横向 | `1263..1291` | `1263..1291`（同一 slot，完全重合） |
+| 纵向 | `281..543` | `292..532` |
+| 可见性 | 我们强制 `visible` | 它自己的容器查询放行时才显示 |
+
+横向重合、纵向差 11px，读起来就是「导航错位」。触发条件也由此解释清楚：替身自带 `@container (width<=900px){display:none}`，而它所在的 slot 内容盒 = slot 宽 − 64px（`padding-inline` 每侧 32）。实测 `slotW=978` → 内容盒 **914 > 900** → 替身显示、与宿主轨道重叠；把列**拖窄**后 `slotW` 掉到 964 以下、内容盒回到 900 以内 → 替身重新隐藏，错位消失。这正对应用户描述的「调整宽度时错位」。
+
+替身的标记是 `aria-hidden`，收起它不损失无障碍语义；宿主的 `nav` 才是带 `aria-label="轮次导航"`、可 hover、可点击的那一条。
+
+**否决的方案**：
+
+- ~~**让替身留着、把它也对齐宿主轨道**~~：替身的纵向位置由它自己的 `--dsh-claude-turn-rail-*` 变量和 900px 阈值决定，跟宿主的 `--turn-rail-band` 是两套算法；对齐等于把两个插件的内部几何焊在一起，任一方升级就散。
+- ~~**把替身的 `@container` 阈值改成同一个数**~~：改别人的阈值只解决这一次的重叠，两条轨道依然都画，hover 预览、点击跳转仍会各响一次。
+- ~~**关掉 claude-style 的「重绘消息导航」子功能**~~：用户 m05686 已明确「先暂时保持现状」，插件侧不应替用户改别人的开关。
+- ~~**不恢复宿主 nav、改用替身**~~：替身没有 `aria-label`，hover 预览与点击都走它自己的实现，且它依赖 900px 阈值，窄窗口下两条都没有。
+
+**代价**：
+
+- 这条规则按**类名**匹配 `dsh-claude-turn-rail`，属于对第三方插件内部类名的依赖。取不到时只是回到「两条叠着」，不会更差；类名变了由用户报告再修。
+- 只在 `html[data-dsse-turn-rail="1"]`（监控列开着）时生效。列关掉时我们不占宽度、也不该替主题决定它自己的轨道画不画。
+
+**变异验证**（每个都单独打红）：
+
+- 规则改成 `display:block !important`：红 2（含「and retires a theme stand-in rail so only one is drawn」）。
+- 去掉 `html[data-dsse-turn-rail="1"]` 前缀（不再受列开关约束）：红 2（含「and retires it only while the column is on」）。
+
+**桌面端验证**：`slotW=946`（内容盒 882）与 `slotW=1023`（内容盒 959，已越过 900）两种状态下，替身均为 `display:none`、rect `[0,0,0,0]`，`visibleRails` 恒为 `["host"]`；注入样式标签 len 31643，含该规则。
+
+全量测试 **3889 passed / 0 failed**。
+
+## D-193 · 面板读起来应该像对话的一部分：去边框、顶栏收口、徽标让位，以及侧栏展开时让出地方
+
+**决策**（四条外观 + 一条行为）：
+
+1. 监控列**不画自己的边**：无 `border-left`、无 `border-top`、无 `box-shadow`，只保留靠窗一侧不圆的 `border-radius`。列和对话靠各自的底色与卡片自身的描边区分。
+2. 「上一轮」不再是一张卡，**收进顶栏**：去掉标题与 `calls / commands / files` 三个计数，只留一行「更新于 …」加正文。顶栏与正文之间用一条 `--dsw-alias-border-l1` 分隔。
+3. 顶栏是滚动容器的**第一个孩子 + `position:sticky; top:0`**，所以它常驻而不随卡片滚走；一个滚动容器、一条滚动条。
+4. 产出文件卡收起时**不再说「目录没读完」**（仅在「收起且确实还有隐藏行」时说），溢出用 30px 渐隐，展开徽标默认不可见、hover / `:focus-within` / 展开态才浮现。
+5. 宿主侧栏展开时，监控列**整个让位**（不画、不占宽度），并把轮次导航交还给宿主。
+
+**为什么**。用户的原话是「这个侧栏的边界应该去除掉，不需要明显的边界，也不需要阴影」和「顶栏作为常驻栏，不会随着滚动而向上」。边框加投影让这一列看起来像一个**独立的窗口**，而不是对话的一部分；常驻顶栏则是因为「上一轮」恰恰是滚动时最想一直看见的那一段，把它放在列表里等于每次都要滚回去找。
+
+**「展开侧栏自动关闭监控列」是新增行为，不是修坏的功能**。用户报的是「这部分的代码似乎不生效了」，但改动前整个 bundle 里只有 6 处 `bridge.open` 的引用，没有一处读宿主侧栏状态——这段逻辑**从未存在**。早期版本看起来「会关闭」，是旧卡片栏的布局副作用：空间不足时 `placeCards` 返回 `visible:false`。D-183 把卡片栏换成常驻让宽列之后，那个副作用就消失了，行为也就跟着没了。所以这里没有可修的回归，只有需要新写的行为。
+
+**判据为什么是 `data-sidebar-collapsed` 的有无**。`AppFrame`（`_probe2/layout.js`）渲染时带 `"data-sidebar-collapsed": sidebarCollapsed || void 0`——React 传 `undefined` 会移除属性，所以**侧栏展开时属性不存在、收起时才存在**。这是一个增删而非取值的问题，用 `hasAttribute("data-sidebar-collapsed") === false` 就能答，不必碰 CSS module hash。frame 自身没有稳定属性，靠它的子节点 `[data-shell-overlay]`（字面属性，本 overlay 就挂在那层）取 `parentElement` 定位。
+
+**拿不到 frame 时一律当作「侧栏没开」**，也就是继续画列。理由：这个 overlay 本身就在那一层里，读不到说明不是已知的宿主结构；据此把面板关掉，会让读者看到一个空白的右侧却找不到任何原因。
+
+**否决的方案**：
+
+- ~~**侧栏展开时把列变窄而不是关掉**~~：正文已经贴着 `MONITOR_MIN_PROSE` 的下限，再窄就压字；而且半宽的面板每次开侧栏都要重新认一遍，不如直接让位——会话头部的开关还在，一按就回来。
+- ~~**用 `ctx.layout` 读侧栏状态**~~：`LayoutController` 只有 `openRightbar / closeRightbar / toggleSidebar / selectPanel`，没有读的方法。
+- ~~**监听某个 CSS 变量的变化来判断**~~：宿主没有把侧栏开合曝光成变量，能读到的只有布局宽度，而宽度在动画中间态是连续变化的，判不出「开」与「合」。
+- ~~**保留边框、只把阴影调淡**~~：用户要的是「不需要明显的边界」，调淡仍是边界。
+- ~~**顶栏放在滚动容器外面、卡片区自己滚**~~：那样卡片区会多一层裁剪边界，视觉上不如共用一个滚动容器自然，而且会出现第二条滚动条。
+- ~~**让 `Card` 与 `Recap` 各写一套展开逻辑**~~：两块徽标必须是同一个物体在不同位置，否则同一次交互在列里会有两种手感。
+
+**代价**：
+
+- 顶栏 `sticky` 需要不透明底色，否则内容会从它下面透出来；底色取自 `--dsw-alias-bg-base`，与列同色，去边框之后这一点尤其重要（否则列和正文会连成一片）。
+- `.dsse-monitor` 的 `overflow` 必须保持 `visible`：把手外探 12px，`overflow:hidden` 会把它裁掉一半，20px 的命中区只剩 8px。
+- 徽标 `opacity:0` 时**同时**要 `pointer-events:none`，否则它会在看不见的状态下吃掉下面那行的点击。
+- 侧栏开合的判定依赖宿主 frame 的 `data-sidebar-collapsed`。宿主改了这个属性的语义，面板会在侧栏开着时继续占宽——可见、不致命，也不会破坏对话。
+
+**变异验证**（每个都单独打红）：
+
+- `sidebarOpen()` 恒返回 `true`：红 3（「an open sidebar costs the column its place」/「and the width goes back to the conversation」/「and the rail is left to the host again」）。
+- 删掉 `&& sidebarOpen() === false`：同样红 3。
+- 判据反向成 `=== true`：红 101（大面积反转，说明方向被钉住）。
+- 顶栏 `position:sticky` 改成 `static`：红 1（「the header scrolls away with the cards」）。
+- `blindNote` 的收起条件删掉：红 1（收起态又说起「目录没读完」）。
+- `.dsse-expand` 去掉 `opacity:0`：红 1（徽标默认可见）。
+- recap 的 30px 渐隐改成不分展开态：红 1。
+- 徽标 `chevron` 的方向写死：红 2（开/合两个方向各一条）。
+
+全量测试 **3912 passed / 0 failed**；`mutate-checklist-panel.mjs` **133 killed / 0 survived**；`mutate-language-and-files.mjs` **195 killed / 0 survived**。
+
+---
+
+## D-194 · 顶行与总结合成一张卡；徽标浮在内容上，不再自己占一行
+
+**决策**：
+
+1. 卡面（边框、圆角、阴影、底色）从 `.dsse-top-row` 移到 `.dsse-col-top`。顶行退化成卡内一行：`min-height:34px`、无边框、无阴影、无底色。
+2. 徽标揭示规则增加 `.dsse-col-top:hover .dsse-expand` 与 `.dsse-col-top:focus-within .dsse-expand`。
+3. 删除 `.dsse-card[data-badge="true"] .dsse-card-body{padding-bottom:44px}`。展开态那条 `.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}` **保留**。
+4. `.dsse-recap` 的 30px 渐隐底色从 `--dsw-alias-bg-base` 改为 `--dsw-alias-bg-layer-1`。
+
+**为什么**：
+
+- 顶行和总结原本是 `.dsse-col-top` 里的两个并列盒子，各自带边框和阴影。真实界面实测（ego，1264×805，收起右栏）：顶行 `y=93 h=46`、总结 `y=147 h=95`——两块中间还有 8px 空隙，读起来是「一张小卡 + 一段漂浮的文字」。合成一张卡之后，队列行是卡内第一行，总结是第二行，中间那条 `border-top` 就是卡内的分隔线。
+- 徽标原本只在 `.dsse-card:hover` / `.dsse-recap:hover` 时浮现。合并后总结住在 `.dsse-col-top` 里，指针落在队列行上是「悬停了这张卡」但两条规则都不匹配——用户看到的就是「hover 总结时没有展开按钮」。真实界面里那次会话的总结只有 41 字（`scrollHeight 64 == clientHeight 64`，未被裁剪），本来就不该有徽标，所以那个按钮「消失」是两件事叠在一起：不裁剪 + hover 不覆盖整卡。合并后 hover 任何位置都揭示，按钮的有无就只由「是否溢出」决定。
+- `padding-bottom:44px` 是收起态就预留的一条空行。原型里只有 `[data-expanded="true"]` 那条（`padding-bottom:40px`），收起态徽标直接浮在最后一行上。真实界面实测：产出文件卡 `bodyPB:"44px"`、`cardH:214`，一条空行占掉卡片近五分之一的高度，而徽标 `opacity:"0"` 时那行什么都看不到。用户的原话是「不要另开一行，而是浮在界面上面」。
+- 渐变底色必须跟着卡面走。总结原来在列的页面底色上，现在在 `bg-layer-1` 的卡面上；沿用 `bg-base` 会在卡面里透出一道更白的斜带。
+
+**被否决的方案**：
+
+- 保留 `.dsse-top-row` 的边框、只在中间去掉空隙。两块边框贴在一起会画出一条双线，比分开放更糟。
+- 给 `.dsse-recap` 单独加一层卡面。三张纸叠在 220px 宽的列里，每张都在缩内容。
+- 把徽标改成 `position:static` 的卡内 flex 行（「另开一行」的字面解法）。这正是要被去掉的形态；而且它会把内容往上推。
+- 收起态也保留 `padding-bottom`，只把值调小（如 20px）。空行仍然是空行，只是在更小的卡上占了更大的比例。
+- 用 `data-hint` 作为留白条件。`turnHinted` 只在 hover 或钉住时为 `true`，拿它做布局会让卡片一悬停就跳一下；留白必须挂在稳定的 `data-clickable`（是否溢出）上。
+
+**代价**：
+
+- `.dsse-col-top` 现在有 `border-radius:11px` 和 `box-shadow`，而它是 `position:sticky` 且 `margin:0 -10px 8px` 负边距外扩——圆角会贴着列的左右边缘，列再窄时视觉上几乎贴边。
+- 徽标浮在内容上意味着它可能压住最后一行的一两个字。这是原型的选择，展开态的 `padding-bottom:44px` 就是为此保留的出口。
+- 顶行不再有自己的底色，卡片滑动到它下面时靠 `.dsse-col-top` 的不透明底色遮挡；那个底色现在必须是 `bg-layer-1`（与卡面同色），不能再是列的 `bg-base`。
+
+**变异验证**（每个都单独打红）：
+
+- `.dsse-card[aria-expanded="true"] .dsse-card-body{padding-bottom:44px}` 后面追加一条 `[data-badge="true"]` 的同名规则：红 1（「and a folded badge reserves no row of its own」）。
+- 给 `.dsse-top-row` 加回 `border:1px solid`：红 1（「the top row no longer wears a surface of its own」）。
+- 删掉 `.dsse-col-top` 的 `border:1px solid`：红 1（「and the header it sits in wears it instead」）。
+- 删掉 `.dsse-col-top:hover .dsse-expand`：红 1（「and the merged header reveals it from anywhere in the card」）。
+- `.dsse-col-top` 底色改回 `bg-base`：红 1（「and it hides what slides underneath it」）。
+
+全量测试 **3915 passed / 0 failed**（`test/client.test.mjs` 898 条）；`mutate-checklist-panel.mjs` **133 killed / 0 survived**。
+
+**真实界面复核**（ego，1264×805，收起右栏）：顶行与总结同属一张带边框圆角阴影的卡；产出文件卡收起态无空行；hover 卡片时徽标浮在最后一行之上。
+
+## D-195 · 顶卡与下方卡同宽；总结五行；折叠的文件列表要看起来是折叠的
+
+**决策**
+1. 卡面从 sticky 外层移到内层 `.dsse-col-card`；外层 `.dsse-col-top` 退回成贴边带（`margin:0 0 8px`、`padding:0`、只留 `background:var(--dsw-alias-bg-base)`）。
+2. 总结裁切从 `6.6em` 改为 `calc(5 * 1.55 * 1em)`，并删掉 `[data-clickable="true"]` 上的 `padding-bottom:24px`。
+3. 徽标从「绝对定位浮在卡底」改为「流内居中的一行」：`margin:6px auto 0`，去掉 `position:absolute`/`left:50%`/`transform`。这一行常驻占位，只让圆点 `opacity` 淡入淡出（不做 `max-height` 折叠）。
+4. 折叠的文件列表：`max-height:calc(4 * 31px - 3px)` + `overflow:hidden` + 底部 `::after` 渐隐（`bg-layer-1`）。展开态取消两者。
+
+**为什么**
+
+宽度不统一是负 margin 的直接后果：外层为了当 sticky 遮罩条必须贴满列边（`margin:0 -10px`），卡面挂在它身上就比下方卡片宽 20px。把卡面下沉一层，两者都变成「列宽 − 20px」，而外层仍能盖住滑过的卡片。
+
+总结「只显示四行」是因为 `6.6em` 是按正文 `13px` 算的，但 `.dsse-tiny` 把字号缩到 `11.18px`、行高 `17.33px`，`6.6 × 13 = 85.8px` 只装得下 4 行（69.3px）。改成按倍数写 `calc(5 * 1.55 * 1em)`，量到 `86.6px` = 5 × 17.33。底部那块「空白」是 `padding-bottom:24px`，原本给浮动徽标让位；徽标改成流内一行后，它就是纯浪费。
+
+折叠感缺失分两层：折叠时列表确实没有 `max-height`（`.dsse-files` 只有展开态才被限高），以及徽标压在最后一行上。这一轮两条一起修。
+
+**被否决的方案**
+- 保留外层卡面、把下方卡片撑宽 20px —— 那等于让所有卡片都跟着一个 sticky 遮罩的负 margin 走，列边界会贴到面板外面。
+- 用 `data-hint` 做留白/显示条件 —— 它跟 hover 绑定（`turnHinted` 只在悬停或展开时为真），拿它控布局会让卡片一悬停就跳。
+- 徽标用 `max-height:0 → 26px` 折叠 —— 展开的瞬间卡片长高 32px，下面的卡整体下移；改成常驻一行只淡入。
+- 折叠列表只给 `max-height` —— 实测无效：`overflow` 仍是 `visible`，6 行照画，徽标落在第 4 行之后却被 5、6 行盖住。
+- 折叠列表用 `display:none` 砍掉多余行 —— 行数由 JS 算，CSS 侧的 `nth-child` 一遇到缺失行（`data-status="missing"`）就错位。
+
+**代价**
+- 徽标常驻一行，收起态的卡片比之前高 32px（换来的是 hover 不再抖动）。
+- 折叠列表的行数上限写死在 CSS（`4 * 31px - 3px`），行的实际高度（28px + 3px gap）改了要同步。
+- 卡面下沉一层后 `.dsse-col-top` 与 `.dsse-col-card` 的分工必须记住：外层只管遮罩与贴边，内层才是卡。
+
+**变异验证**
+- 徽标回到 `position:absolute;left:50%;bottom:8px` → 红 2（`the expand button floats over the list again`、`the offer takes a line of its own under the list`）。
+- 徽标行 `margin:6px auto 0` 改 `margin:6px 0 0` → 红 1（`the expand button lines up with the rows instead of the card`）。
+- 折叠列表去掉 `overflow:hidden` → 红 1（`and a folded list actually stops drawing rows`）。
+- 展开态徽标规则拆成两行后，把 `.dsse-card[...]` 那行的 `pointer-events:auto` 删掉 → 红 1。
+- 五行上限改回 `6.6em` → 红 1（`the summary shows five lines, not four`）。
+
+**实测**
+headless Chrome（292×680，dpr 2）：总结 `max-height:86.645px`、`clientHeight 69 → 86.6`、徽标 `position:static` `margin-top:6px`、折叠列表 `max-height:121px` `overflow:hidden` `::after:linear-gradient(rgba(0,0,0,0), rgb(255,255,255))`、`bodyPaddingBottom:11px`（不再是 44px）、顶行 `border-top-width:0`。
+
+全量测试 **3921 passed / 0 failed**；`mutate-checklist-panel.mjs` 全杀。
+
+## D-196 · 徽标的落点由状态决定，而状态挂在 data-open 上
+
+**决策**
+1. 徽标在折叠态与展开态各有一条自己的规则：`.dsse-card[data-open="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}`、`.dsse-card[data-open="true"] .dsse-expand{position:static;left:auto;bottom:auto;transform:none;margin:6px auto 0}`。基础规则里不再带 `margin`。
+2. `Card` 发布 `'data-open': (props.badgeAction === undefined ? props.expanded : props.badgeAction.open) === true ? 'true' : 'false'`，作为唯一的布局状态来源。
+3. 三条揭示/命中规则（`:hover`、`:focus-within`、`[data-open="true"]`）与 `.dsse-expand-action` 的 `pointer-events:auto` 全部从 `aria-expanded` 改挂 `data-open`。
+4. 折叠列表的渐隐带 `height:34px`、渐变终点 `var(--dsw-alias-bg-layer-1,#fff) 70%`。
+
+**为什么**
+
+上一版把两种状态写进同一条 `.dsse-expand` 规则（`position:static;margin:6px auto 0`），于是折叠态也另起一行 —— 用户看图后直接指出「展开和折叠按钮的逻辑一样，导致表现一样，我认为应该分开」。这是对的：折叠态需要的是一枚骑在渐隐带上的浮徽标（折叠列表没有余行可以给它），展开态需要的是一行（浮着就压在最后一个文件名上）。一个规则同时服务两种需求，只可能满足一种。
+
+更关键的是**状态从哪里读**。第一版用手指写 `aria-expanded` 的注入节点验证通过，但真实卡片上这个属性根本不存在：`Card` 的 `aria-expanded` 带 `interactive === true` 守卫，而产出文件卡由真按钮接管，`interactive` 为 false。两条规则在唯一的真实场景里一条都没命中——注入测试之所以绿，是因为我给它补了属性。**测试替身不能替我发明真实 DOM 不会有的属性。** `data-open` 在两条分支上都能算出来，且与 `data-badge` 同级。
+
+**被否决的方案**
+- 在非 `role=button` 的卡片上无条件写 `aria-expanded` —— 那是给读屏软件的一句谎话：元素既不是按钮，也没有可展开的语义。
+- 用 `:has(.dsse-expand)` 或 `:has(.dsse-list[data-open="true"])` 推断状态 —— `:has` 在列表内部结构变化时会跟着抖动，而状态本就该由组件自己说出来。
+- 折叠/展开用两个不同组件 —— 它们共享卡片外壳、标题行、悬停揭示与键盘路径，拆开只会让两处漂移。
+- 让折叠态也占一行、只用渐隐区分 —— 用户明确说折叠态「不要另开一行」。
+- 渐隐带加高到 52px 让徽标更明显 —— 实测会把整行文件名糊掉，34px 正好覆盖被裁掉的半行。
+
+**代价**
+- 组件多发布一个 `data-open`；`data-open` 同时出现在 `.dsse-card` 与内部 `.dsse-files` 上（选择器各自带类名前缀，互不冲突），读 DOM 时要看清是哪一层。
+- 折叠态徽标是绝对定位，`bottom:6px` 与渐隐带 `34px` 是两个独立数字，改其一要同时看另一个。
+
+**变异验证**
+- 折叠规则 `position:absolute` 改 `static` → 红 2（`a folded card takes a line away from its list to park the badge`、`and a folded card floats it on the fade`）。
+- 折叠规则去掉 `left:50%`/`translateX(-50%)` → 红 1（`and centres it on the fade rather than against a corner`）。
+- 展开规则 `position:static` 改 `absolute` → 红 2。
+- `data-open` 不发布 → 红 1（`the placement is keyed on an attribute every card carries`）。
+- 展开态隐藏徽标 → 红 1（`an open card hides the way out until the pointer comes back`）。
+- 徽标圆角改 4px → 红 1（`the expand button is a square`）。
+
+**实测**
+真实 GUI（ego，1264×805，右栏收起）页面内注入带 `data-open` 的真实结构、用已加载的真实样式表测量：
+折叠 `{position:absolute, bottom:6px, left:109px, transform:matrix(1,0,0,1,-13,0), inList:true, listH:121, listOverflow:hidden, cardH:177}`；展开 `{position:static, marginTop:6px, belowList:true, listOverflow:auto, cardH:209}`。
+
+全量 **3924 passed / 0 failed**；`mutate-checklist-panel.mjs` 133 条全杀。
