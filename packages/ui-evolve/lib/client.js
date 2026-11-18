@@ -630,7 +630,7 @@ window.__ModuleLoader__.load({
 .dsse-card[data-open="true"] .dsse-expand,
 .dsse-recap:hover .dsse-expand,
 .dsse-recap:focus-visible .dsse-expand,
-.dsse-recap[aria-expanded="true"] .dsse-expand,
+.dsse-recap[data-expanded="true"] .dsse-expand,
 /* The summary and the queue row are one card now, so the pointer reaching any
    part of it has to reveal the summary's badge. Without this the badge only
    answers a pointer that lands on the summary text itself, which reads as a
@@ -641,10 +641,15 @@ window.__ModuleLoader__.load({
 /* Open, it stays visible without the pointer: closing is the one thing a reader
    should not have to hunt for. */
 .dsse-card[data-open="true"] .dsse-expand{opacity:1;pointer-events:auto}
-.dsse-recap[aria-expanded="true"] .dsse-expand{opacity:1}
-/* The header's own badge has no folded/open split -- the summary is either cut
-   short or it is not -- so it takes the row placement in both states. */
-.dsse-recap .dsse-expand{margin:6px auto 0}
+/* The summary gets the same two placements as the file card, and for the same
+   reason. A cut-off summary is a folded list of lines: it already owns a fade
+   over its last visible line, and there is no spare row under the text to park
+   a circle in. Giving it a static row made every summary one line taller than
+   the text it held, which is exactly the empty band this card was just rid of. */
+.dsse-recap[data-expanded="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}
+/* Open, the text is no longer clipped, so the badge steps out of the fade and
+   becomes a row under what it revealed. */
+.dsse-recap[data-expanded="true"] .dsse-expand{position:static;left:auto;bottom:auto;transform:none;margin:6px auto 0}
 /* Hidden means unreachable too: at opacity 0 a live button would still eat the
    clicks of the row underneath it, and the row underneath it is a file. */
 .dsse-expand-action{pointer-events:none;cursor:pointer;padding:0;font:inherit}

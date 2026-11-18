@@ -882,6 +882,24 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The regression this pair exists to kill. Before the split the summary badge
+    // carried one unconditional margin rule, so every summary was a line taller
+    // than the text it held -- the same empty band the file card had just been rid
+    // of, reintroduced on the element the card rules do not reach.
+    label: 'the summary badge goes back to one placement for both states',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-recap[data-expanded="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}',
+    to: '.dsse-recap .dsse-expand{margin:6px auto 0}',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    label: 'an open summary keeps the badge floating on its last line',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: '.dsse-recap[data-expanded="true"] .dsse-expand{position:static;left:auto;bottom:auto;transform:none;margin:6px auto 0}',
+    to: '.dsse-recap[data-expanded="true"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}',
+    suites: ['test/client.test.mjs'],
+  },
+  {
     label: 'the fade is drawn over an expanded summary too',
     file: 'packages/ui-evolve/lib/client.js',
     from: '.dsse-recap .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:30px;',

@@ -4697,6 +4697,17 @@ async function openPanel(routes, options) {
   check('the placement is keyed on an attribute every card carries', declared.includes("'data-open': (props.badgeAction === undefined ? props.expanded : props.badgeAction.open)"), 'data-open not published on the card')
   check('and centres it on the fade rather than against a corner', foldedSpot.includes('left:50%') && foldedSpot.includes('translateX(-50%)'), foldedSpot.slice(0, 200))
 
+  // The summary in the header is a .dsse-recap, not a .dsse-card, so none of the
+  // card rules above reach it. It carried one unconditional margin rule instead
+  // and that is what turned into a permanent extra row under every summary --
+  // the same regression the card split was written to fix, on the other element.
+  // Both halves are pinned here so a single shared rule cannot come back.
+  const recapFolded = ruleOf('.dsse-recap[data-expanded="false"] .dsse-expand')
+  const recapOpen = ruleOf('.dsse-recap[data-expanded="true"] .dsse-expand')
+  check('the summary badge floats while the summary is cut off', recapFolded.includes('position:absolute') && recapFolded.includes('bottom:6px') && recapFolded.includes('left:50%'), recapFolded.slice(0, 200))
+  check('and becomes a row once the summary is open', recapOpen.includes('position:static') && recapOpen.includes('margin:6px auto 0'), recapOpen.slice(0, 200))
+  check('and no unconditional rule parks it in a row in both states', ruleOf('.dsse-recap .dsse-expand') === '', ruleOf('.dsse-recap .dsse-expand').slice(0, 200))
+
   // Every row is a button, because clicking one opens a preview.
   const openRow = firstByClass(list, 'dsse-row-open')
   check('a row is a button, not a div with a handler', openRow?.type === 'button', String(openRow?.type))
