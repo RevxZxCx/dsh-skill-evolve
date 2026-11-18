@@ -216,6 +216,12 @@ Five consequences worth knowing, because each one is a deliberate choice:
   `aria-expanded`: the files card hands its expansion to a real button, so it never carries
   `aria-expanded` itself, and rules hung on that attribute matched nothing on the one card
   that needed them.
+  The summary block is a twin, not a card: it is `.dsse-recap` and carries `data-expanded`
+  instead of `data-open`, so the card's rules never reached it and it kept drifting back to
+  one placement for both states. It now has the same pair of rules under its own attribute.
+  Two elements holding the same state is exactly where a rule set goes half-missing -- the
+  assertion that guards it is `ruleOf('.dsse-recap .dsse-expand') === ''`, because both of
+  the two-state rules can be correct while a leftover unconditional rule still wins.
   While hidden it also gives up `pointer-events`, because a disc at `opacity:0` would
   otherwise swallow the click meant for the file row underneath it. The reveal covers
   `.dsse-col-top` as well as `.dsse-card`, since the summary now lives inside the header card

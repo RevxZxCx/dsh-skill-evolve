@@ -3758,6 +3758,33 @@ headless Chrome（292×680，dpr 2）：总结 `max-height:86.645px`、`clientHe
 
 全量 **3924 passed / 0 failed**；`mutate-checklist-panel.mjs` 133 条全杀。
 
+### D-196 补记 · 孪生元素漏掉了同一条规则
+
+**用户 m08153**：「总结文案的展开按钮又变成另起一行了，重复引入的回归为什么没有被测试抓到」。答案很难看：**总结块是 `.dsse-recap`，不是 `.dsse-card`，上面那条决策的 `[data-open]` 规则一条都不作用于它。** 它只剩一条无条件规则 `.dsse-recap .dsse-expand{margin:6px auto 0}`，把徽标恒成独立一行。
+
+修法与 card 完全对称，但状态属性是 recap 自己的 `data-expanded`：
+
+```css
+.dsse-recap[data-expanded="false"] .dsse-expand{position:absolute;left:50%;bottom:6px;transform:translateX(-50%)}
+.dsse-recap[data-expanded="true"] .dsse-expand{position:static;left:auto;bottom:auto;transform:none;margin:6px auto 0}
+```
+
+同时删掉旧的无条件规则，以及一条重复的 `.dsse-recap[data-expanded="true"] .dsse-expand{opacity:1}` —— `ruleOf()` 取首个匹配，重复会让断言读到错的那一条。
+
+**为什么测试没抓到（这是要记住的那一条）**
+`grep -c "dsse-recap .dsse-expand" test/client.test.mjs` → **0**。recap 的断言只覆盖渐隐带高度（`test/client.test.mjs:3082`）与 chevron 方向（`:3121`），**没有一条问徽标的位置**。规则集覆盖了一个元素却漏掉它的孪生元素时，测试对孪生元素的行为完全无感——这和 D-196 正文里「测试替身不能替我发明真实 DOM 不会有的属性」是两种不同形状的同一类失效：**测试测的不是用户看的那个元素。**
+
+**新增断言**
+- `the summary badge floats while the summary is cut off`（折叠态 `position:absolute` + `bottom:6px` + `left:50%`）
+- `and becomes a row once the summary is open`（展开态 `position:static` + `margin:6px auto 0`）
+- `and no unconditional rule parks it in a row in both states`（`ruleOf('.dsse-recap .dsse-expand') === ''`）——这条专杀「旧规则回来了」，因为两态规则都正确时旧无条件规则仍会赢。
+
+**变异验证**
+- `the summary badge goes back to one placement for both states`（两态规则合并成 `.dsse-recap .dsse-expand{margin:6px auto 0}`）→ 红 3。
+- `an open summary keeps the badge floating on its last line`（展开态改 `position:absolute`）→ 红 1。
+
+**实测**：真实 GUI 折叠 `{pos:absolute, bottom:6px, badgeInside:true}`、recapH 138；展开 `{pos:static, mt:6px, badgeBelowText:true}`、recapH 298。提交 `1331a3b`。
+
 ## D-197 · 关掉监控列之后还剩两条轮次导航：一条没被松开，一条被错误地松开了
 
 **背景.** 用户 m08319：「当任务监控栏被收起时，又会出现两条轮次导航条，这应该是之前bug的遗留问题，是修复的缺口」。D-192 的替身轨道去重与 D-190/D-191 的强制显示各自都成立，但它们的边界条件在「列关闭」这个状态上刚好互补地错开了。
