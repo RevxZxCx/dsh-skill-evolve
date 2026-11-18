@@ -5009,7 +5009,7 @@ Qoder 把该功能叫**「消息锚点」`chatTimeline.anchorNav`**，`className
 - 轮次导航：随列开关，替身轨道无条件收起，内联样式用 `removeProperty` 清理。
 - 全量 **4053 passed / 0 failed**（性能 P0/P1/P2、第三位审查的补强、`statTouchedFiles` 内部上限，以及 R-101 第五轮审查的修复之后；在此之前是 3928）；
   `mutate-checklist-panel.mjs` **137 killed / 0 survived**，`mutate-language-and-files.mjs` **195 killed / 0 survived**。
-- 决策记录：D-183 ~ D-197（含 D-196 补记），以及性能批次的 D-198 ~ D-211。
+- 决策记录：D-183 ~ D-197（含 D-196 补记），以及性能批次的 D-198 ~ D-215。
 
 ### 性能 P0（2026-11-18，已完成待体感验收）
 
@@ -5184,4 +5184,30 @@ GET /api/ui-evolve/panel?agent=session-517e1902-…   → 1838 / 545 / 488 / 537
 > 真正没失败过、且没有已完成回合的会话，冷启动是毫秒级的。**这个 2.1 秒是坏路由的失败重算，
 > 不是「新会话首次」的成本。** 详见 `04-reviews.md` R-101「第六轮更正」。
 
-详见 `04-reviews.md` R-101「第六轮」与 R-98「真机验收」两节。决策记录范围 **D-198 ~ D-211**。
+详见 `04-reviews.md` R-101「第六轮」与 R-98「真机验收」两节。决策记录范围 **D-198 ~ D-215**。
+
+## 缺陷 11：切换会话后监控列偶发不跟随（2026-11-18，用户报障，已修复，验证暂定未收束）
+
+用户原话：「切换会话的时候，偶尔监控侧栏的内容没有进行切换。这个 bug 出现时，会话记录加载的很快（不太确定）」。
+
+**根因**：`bridge.sessionId` 的写入点是会话头 `Toggle` 里依赖 `[sessionId]` 的 effect，而监控列 `Cards` 用 `useCallback(..., [sessionId])` 消费它。两者不同步时，闭包停在旧会话上一直问旧 id，响应回来又被判成「已离开」而静默丢弃 —— 数据是新的，屏幕上永不换。点一次 `.dsse-toggle` 会自愈（它的 onClick 直接写 `bridge.sessionId`）。
+
+**真机复现**：页面内 patch `window.fetch` 后切换会话，标题、`aria-selected`、`data-conversation-session` 全变成新 id，而 `/panel` 请求的 `agent=` 仍是旧 id，等两轮 8 秒轮询仍是旧 id。
+
+**修复**（`packages/ui-evolve/lib/client.js`）：
+1. 新增 `liveSessionId()`，读宿主自己发布的 `[data-conversation-session]`
+2. `load` 每次请求都用当下的页面身份，请求与三条丢弃判定全部以它为准
+3. `syncSession()` + `attachSlotObserver()`：在 `[data-slot]` 祖先上装 `childList` 观察器（真机上切换是**整体替换子树**，只盯属性的观察器一次都不会触发）
+
+**测试**：新增 14 条，全量 **4067 passed / 0 failed**；两套变异脚本 137 / 195 全 killed。
+
+**一处被真机推翻的设计**：第一版只监听 `data-conversation-session` 属性变化。测试替身会主动触发它所以全绿，真机上一次都没触发过（`sameNode: false`，节点被整体换掉）。已改为观察 `[data-slot]` 的 childList。**教训：替身要按真机的行为做事，不是按我们的实现做事。**
+
+**独立审查**（subagent 8b4b2029，0 must-fix / 3 should-fix）确认核心修复正确且被真正测住，同时指出我三处与代码不符的说法：载荷自证守卫在生产中恒不成立（服务端只是回显查询串）、一条顺序用例在未修复代码上也通过、`notify()` 与挂载时发布没有测试钉住。三条已全部修正/如实记录。
+
+详见 `04-reviews.md` R-102。决策记录范围 **D-198 ~ D-215**。
+
+**验证状态：暂定未收束（2026-11-18，用户决定）。** 这个 bug 是偶现，单次复测"没再出现"不构成证据；
+用户会在日常使用中继续观察，若再遇到会重新打开。写在这里是为了不让"已修复"三个字被读成"已验证"。
+
+**尚未做**：`liveSessionId()` 的「文档里第一个匹配」在多对话根场景下的加固（宿主若同时挂载带 `variant: "embedded"` 的子代理对话根且它排在前，会跟错会话；真机未观测到，方案是收窄到 `[data-conversation-region="chat"][data-conversation-session]` 并保留旧选择器回退）。

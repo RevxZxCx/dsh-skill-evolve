@@ -1143,6 +1143,38 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     }
 
     /**
+     * Which conversation the host is actually showing, read from the page.
+     *
+     * `bridge.sessionId` is written by the header button, which is a
+     * session-scoped seat: its effect runs when its `sessionId` prop changes.
+     * That is one render behind whatever the reader just clicked, and the
+     * column reads the same variable from its own closure — so a switch that
+     * did not produce a fresh render of the column left it polling the session
+     * the reader had already left. The symptom is specific and was reproduced
+     * on a live host: the conversation changes, the column keeps showing the
+     * old one, and clicking the header button once fixes it (that click writes
+     * `bridge.sessionId` directly).
+     *
+     * The host publishes the answer itself: the conversation body carries
+     * `data-conversation-session`. Reading it is one `querySelector` on the
+     * path that is about to make a request, which is the cheapest possible
+     * place to be correct, and it does not depend on any effect having run.
+     *
+     * Returns `""` when the attribute is absent (launcher, a settling
+     * conversation, or a test harness), which callers treat as "no opinion"
+     * and fall back to `bridge.sessionId`.
+     *
+     * @returns {string} the session id on screen, or `""`.
+     */
+    function liveSessionId() {
+      if (typeof document === "undefined" || typeof document.querySelector !== "function") return ""
+      const node = document.querySelector("[data-conversation-session]")
+      if (node === null || typeof node.getAttribute !== "function") return ""
+      const value = node.getAttribute("data-conversation-session")
+      return typeof value === "string" ? value : ""
+    }
+
+    /**
      * Hand prose width to the monitor column, or take it back.
      *
      * The column is drawn in `shell.overlay`, which the host lays *over* the
@@ -2810,7 +2842,14 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             return
           }
           const request = ++panelRequest.current
-          if (sessionId === "") {
+          // Read the session now, not from the render that built this closure.
+          // `sessionId` below is the value captured when this callback was
+          // created; a switch that re-rendered the header but not this column
+          // would leave it asking about the session the reader already left.
+          // The host's own attribute is the authority; `bridge.sessionId` is
+          // the fallback for a page that does not publish one.
+          const target = liveSessionId() || bridge.sessionId
+          if (target === "") {
             setState({ status: "no-session" })
             return
           }
@@ -2835,11 +2874,25 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             const deadline = setTimeout(() => flight.abort(), PANEL_TIMEOUT_MS)
             let data
             try {
-              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`, { signal: flight.signal })
+              data = await call(`/panel?agent=${encodeURIComponent(target)}`, { signal: flight.signal })
             } finally {
               clearTimeout(deadline)
             }
-            if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
+            // Two independent reasons to drop an answer. The first is that a
+            // newer request has been issued. The second is that the reader has
+            // moved to another conversation while this one was out — and that
+            // is checked against the page, not against the variable this
+            // closure captured, because the whole point is that the captured
+            // value can be stale.
+            if (request !== panelRequest.current) return
+            if ((liveSessionId() || bridge.sessionId) !== target) return
+            // A sanity assert, not the cross-session guard — that is the check
+            // above. This server echoes the query string back as `agent`
+            // (`api.js` reads `searchParams.get('agent')` and returns it as
+            // `id`), so today the two always agree and this never fires. It is
+            // kept for a server that normalises ids: silently painting such an
+            // answer would be worse than dropping it.
+            if (typeof data?.agent === "string" && data.agent !== "" && data.agent !== target) return
             // An unchanged answer keeps the object it already had. React compares
             // state by identity, so a fresh object with identical contents
             // re-renders the whole column: one hundred and fifty `jsx` calls every
@@ -2865,7 +2918,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             setState({ status: "ready", data })
             setError("")
           } catch (failure) {
-            if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
+            // Same two checks as the success path, for the same reason: this
+            // closure's `sessionId` may name a conversation the reader left.
+            // Reporting its failure would put an error banner over a session
+            // that is working.
+            if (request !== panelRequest.current) return
+            if ((liveSessionId() || bridge.sessionId) !== target) return
             // A failed poll invalidates the signature: the next success must be
             // rendered even if it happens to match the last good payload, because
             // the error banner in between is what changed.
@@ -4005,15 +4063,90 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // element above, so `subtree` is what makes it visible from here — and
         // its arrival and removal are the two moments the panel has to change,
         // neither of which changes any box this overlay measures.
+        // `data-conversation-session` is the host's own statement of which
+        // conversation is on screen, and it is the only one that is always
+        // current: the header button publishes `bridge.sessionId` from an
+        // effect, so a switch that does not re-render that button leaves the
+        // whole column on the previous session. Reading the attribute here,
+        // in root scope and on every change of it, puts the authority where
+        // the fact lives. The observer is attributes-only and clustered with
+        // the phase observer below for the same reason: a `childList`
+        // observer would fire on every streamed token.
+        //
+        // Publishing through `notify()` (rather than only assigning) is what
+        // makes the switch reach the column's session-scoped effects, which
+        // key on this value. `anchor` starts empty on purpose: seeding it with
+        // `liveSessionId()` would make the mount-time call below compare the
+        // attribute with itself and return, so the first publish could never
+        // happen — every observer after it would be the only way in, and there
+        // is no observer until a switch replaces the subtree.
+        let anchor = ""
+        const syncSession = () => {
+          const now = liveSessionId()
+          if (now === "" || now === anchor) return
+          anchor = now
+          if (bridge.sessionId !== now) {
+            bridge.sessionId = now
+            notify()
+          }
+        }
+
         let phaseObserver = null
         if (typeof MutationObserver !== "undefined" && typeof document !== "undefined" && document.documentElement) {
-          phaseObserver = new MutationObserver(() => remeasure())
+          phaseObserver = new MutationObserver(() => {
+            syncSession()
+            remeasure()
+          })
           phaseObserver.observe(document.documentElement, {
             attributes: true,
-            attributeFilter: ["data-content-phase", "data-rightbar-collapsed"],
+            attributeFilter: ["data-content-phase", "data-rightbar-collapsed", "data-conversation-session"],
             subtree: true,
           })
         }
+
+        // The attribute observer above only fires if the host *edits* the
+        // conversation element in place. The live host does not: it unmounts
+        // the whole `[data-conversation-content]` tree and mounts a new one, so
+        // a switch is two `childList` records on the slot that owns it and zero
+        // attribute records anywhere. A column that watched only the attribute
+        // kept asking the previous session until something else re-rendered it
+        // — the reported bug, and the reason this second observer exists.
+        //
+        // It watches the slot rather than the document: the slot is the nearest
+        // ancestor the host does not replace, so a swap is one record instead of
+        // one per streamed token. `subtree` stays off for the same reason, and
+        // `childList` alone is what an unmount/remount produces.
+        let slotObserver = null
+        let slotNode = null
+        const attachSlotObserver = () => {
+          if (typeof MutationObserver === "undefined" || typeof document === "undefined") return
+          const content = document.querySelector("[data-conversation-content]")
+          if (content === null) return
+          let slot = content
+          // `hasAttribute` is not on every node a test double exposes, and a
+          // missing one must mean "keep climbing", not "throw out of a mutation
+          // callback" — the column would then never recover from the switch.
+          while (slot !== null && slot !== undefined && typeof slot.hasAttribute === "function" && slot.hasAttribute("data-slot") !== true) {
+            slot = slot.parentElement
+          }
+          if (slot === null || slot === undefined || typeof slot.hasAttribute !== "function") return
+          if (slot === null || slot === slotNode) return
+          if (slotObserver !== null) slotObserver.disconnect()
+          slotNode = slot
+          slotObserver = new MutationObserver(() => {
+            syncSession()
+            // The replacement also invalidates every measurement and both
+            // observers attached to the old node, so the next pass has to
+            // re-find them rather than trust what it attached before.
+            remeasure()
+            attachSlotObserver()
+          })
+          slotObserver.observe(slot, { childList: true })
+        }
+        // The attribute can also be right already at mount — a reload, or a
+        // conversation that was open before this overlay existed.
+        syncSession()
+        attachSlotObserver()
 
         // The conversation can appear after this mounts (launcher -> session),
         // and `ResizeObserver` cannot watch an element that did not exist yet.
@@ -4022,6 +4155,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         let timer = setInterval(() => {
           remeasure()
           attachRailObserver()
+          attachSlotObserver()
           if (observer !== null) {
             // Nothing left to wait for: the conversation exists and is observed,
             // so the per-second layout read has done its job.
@@ -4076,6 +4210,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         return () => {
           if (observer !== null) observer.disconnect()
           if (phaseObserver !== null) phaseObserver.disconnect()
+          if (slotObserver !== null) slotObserver.disconnect()
           if (railObserver !== null) railObserver.disconnect()
           if (railFrame !== 0 && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
             window.cancelAnimationFrame(railFrame)

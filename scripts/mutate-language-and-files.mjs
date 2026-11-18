@@ -211,8 +211,8 @@ const mutations = [
     file: client,
     label: 'the panel asks for interface language again',
     suites: ['test/client.test.mjs'],
-    from: '              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`, { signal: flight.signal })',
-    to: '              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}&lang=zh-CN`, { signal: flight.signal })',
+    from: '              data = await call(`/panel?agent=${encodeURIComponent(target)}`, { signal: flight.signal })',
+    to: '              data = await call(`/panel?agent=${encodeURIComponent(target)}&lang=zh-CN`, { signal: flight.signal })',
     why: 'the summary is written in the language of the conversation; a second source of truth for that question is the bug the removal fixed',
   },
   // ---------------------------------------------------------------------

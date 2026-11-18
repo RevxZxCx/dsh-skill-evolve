@@ -177,13 +177,15 @@ const mutations = [
     file: 'packages/ui-evolve/lib/client.js',
     // This guard stands at both ends of the same loader — the try arm keeps a
     // stale reply from landing, the catch arm keeps a stale failure from landing.
-    // The anchor carries the line below it so that it names the try arm alone; a
-    // bare guard line matches twice and `split/join` would disable both while
-    // claiming to test one.
-    from: `if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
-            // An unchanged answer keeps the object it already had. React compares`,
+    // The anchor carries the session check and the first line of the comment
+    // below it so that it names the try arm alone; the bare guard lines match
+    // twice and `split/join` would disable both while claiming to test one.
+    from: `if (request !== panelRequest.current) return
+            if ((liveSessionId() || bridge.sessionId) !== target) return
+            // A sanity assert, not the cross-session guard — that is the check`,
     to: `if (false) return
-            // An unchanged answer keeps the object it already had. React compares`,
+            if ((liveSessionId() || bridge.sessionId) !== target) return
+            // A sanity assert, not the cross-session guard — that is the check`,
     suites: ['test/client.test.mjs'],
   },
   {

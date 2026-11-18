@@ -597,7 +597,25 @@ function boot(options) {
   // mutable here and `setPhase` flips it, rather than being baked in at boot —
   // a constant could only ever describe the first moment of the page's life.
   let phaseValue = settings.phase
-  const conversation =
+  // The host also publishes *which* conversation is on screen, on the same
+  // element. That attribute is the column's authority for "what am I looking
+  // at", so a fixture that cannot move it independently of the header button's
+  // prop cannot describe the bug it guards: the whole failure is those two
+  // disagreeing for one render. `null` means a page that publishes nothing,
+  // which is what every suite that does not ask for it should keep seeing.
+  let sessionValue = settings.conversationSession ?? null
+  // The host does not edit the conversation element when the person switches
+  // sessions: it unmounts the whole tree and mounts a fresh one inside the slot
+  // that owns it. Measured on the live page — the old node reports
+  // `isConnected === false` and no attribute record is delivered anywhere. A
+  // fixture that only moved the attribute described a host that does not exist,
+  // which is exactly how a fix that could never fire on the real page passed
+  // its own suite.
+  //
+  // So the node itself is replaceable here, and `swapConversation` below models
+  // the swap: new object, new identity, one childList record on the slot.
+  const slot = { hasAttribute: (name) => name === 'data-slot', parentElement: null, children: [] }
+  let conversation =
     rect === null ? null : {
       getBoundingClientRect: () => ({ ...rect }),
       offsetWidth: rect.width,
@@ -606,10 +624,49 @@ function boot(options) {
       // suites are describing; a suite that cares about the launcher passes
       // `phase: 'hero'` or `phase: 'settling'`, and `phase: null` is a host that
       // does not publish the attribute at all.
-      getAttribute: (name) => (name === 'data-content-phase' ? (phaseValue === null ? null : (phaseValue ?? 'active')) : null),
+      getAttribute: (name) => {
+        if (name === 'data-content-phase') return phaseValue === null ? null : (phaseValue ?? 'active')
+        if (name === 'data-conversation-session') return sessionValue
+        return null
+      },
+      // The column climbs from here to `data-slot`. This node is not the slot,
+      // and a stub that answered `true` would stop the climb at the conversation
+      // and leave the fixture watching a node the host throws away.
+      hasAttribute: () => false,
       setPhase: (next) => { phaseValue = next },
+      setSession: (next) => { sessionValue = next },
       querySelector: (selector) => (selector === 'code, pre' ? code : null),
+      // The slot is the nearest ancestor the host keeps across a switch. The
+      // column climbs to it so it can watch for the replacement instead of
+      // waiting for an edit that never comes.
+      parentElement: slot,
     }
+  if (conversation !== null) slot.children = [conversation]
+
+  // One session switch, the way the page performs it: throw the node away and
+  // put a different one in its place. Every observer parked on the slot hears
+  // about it; nothing edits an attribute.
+  const makeConversation = (session) =>
+    conversation === null ? null : {
+      ...conversation,
+      getAttribute: (name) => {
+        if (name === 'data-content-phase') return phaseValue === null ? null : (phaseValue ?? 'active')
+        if (name === 'data-conversation-session') return session
+        return null
+      },
+      parentElement: slot,
+    }
+  const swapConversation = (session) => {
+    sessionValue = session
+    const next = makeConversation(session)
+    conversation = next
+    slot.children = next === null ? [] : [next]
+    for (const observer of mutationObservers) {
+      const watchingSlot = observer.targets.some((row) => row.target === slot && row.options?.childList === true)
+      if (watchingSlot) observer.trigger([{ type: 'childList', target: slot, addedNodes: next === null ? [] : [next], removedNodes: [] }])
+    }
+    return next
+  }
 
   // The scrolling area is the box the prose is centred in *and* the box the
   // monitor column's reservation is a margin on, so the fixture models the one
@@ -700,6 +757,11 @@ function boot(options) {
       if (selector === '[data-conversation-content]') return conversation
       if (selector === '[data-conversation-scroll]') return scrollArea
       if (selector === '[data-shell-overlay]') return shellOverlay
+      // The column reads the live session off the page rather than off the
+      // header button's prop, so the selector has to resolve to the same
+      // element the host would use. A stub that answered `null` here would
+      // silently make every suite fall back to the value under test.
+      if (selector === '[data-conversation-session]') return conversation
       return null
     },
     querySelectorAll: (selector) => {
@@ -956,6 +1018,10 @@ function boot(options) {
     rootAttributes,
     navNodes,
     conversation,
+    // `conversation` is a snapshot of the node at boot; after a swap the page
+    // holds a different object, so suites that need the current one read this.
+    get liveConversation() { return conversation },
+    swapConversation,
     scrollArea,
     rafQueue,
     // One frame's worth of work: the observer schedules into this queue, so a
@@ -2265,7 +2331,14 @@ check(
   for (const row of disposers) row.dispose()
   const phaseObservers = instance.mutationObservers.filter((observer) =>
     observer.targets.some((entry) => (entry.options?.attributeFilter ?? []).includes('data-content-phase')))
-  const typographyObservers = instance.mutationObservers.filter((observer) => phaseObservers.includes(observer) === false)
+  // Three observers are alive by teardown: the phase observer, the slot observer
+  // that catches a conversation being replaced, and typography. The first is
+  // named by its attribute filter; the second by `childList` without `subtree`
+  // (that pair is the swap signal and nothing else); what remains is typography.
+  const slotObservers = instance.mutationObservers.filter((observer) =>
+    observer.targets.some((entry) => entry.options?.childList === true && entry.options?.subtree !== true))
+  const typographyObservers = instance.mutationObservers.filter(
+    (observer) => phaseObservers.includes(observer) === false && slotObservers.includes(observer) === false)
   check('teardown disconnects typography observers', typographyObservers.length > 0 && typographyObservers.every((observer) => observer.disconnected), JSON.stringify(typographyObservers.map((observer) => observer.disconnected)))
   // The phase observer belongs to the overlay's own React effect, so it outlives
   // the service teardown above by design and is released when the overlay
@@ -4039,6 +4112,61 @@ function byAction(node, action) {
   check('and come back when it becomes a conversation again', textOf(returnedTree).includes('SESSION FULL'), textOf(returnedTree).slice(0, 140))
 }
 
+{
+  // The same observer also carries the conversation's identity, and that is the
+  // part the live host got wrong: the header button publishes the id from an
+  // effect, so a switch that did not re-render that button left the whole column
+  // — including its session-scoped effects, which key on this value — on the
+  // previous conversation. Publishing it from root scope, where the page's own
+  // attribute is watched, is what makes the switch reach those effects at all.
+  //
+  // Without the fix the column keeps asking the old session forever; with it,
+  // one attribute change is enough, and no click is needed.
+  const asked = []
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/panel': (init, target) => {
+      const agent = decodeURIComponent(String(target).split('agent=')[1] ?? '')
+      asked.push(agent)
+      return { ok: true, data: { ...panelRoutes()['/api/ui-evolve/panel'].data, agent } }
+    },
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const watched = boot({ routes, conversationSession: 'session-a' })
+  watched.module.apply(watched.ctx)
+  pressToggle(firstByClass(await watched.renderer.render(watched.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await watched.renderer.deepRender(watched.seat('cards'))
+  check('the column opened on the conversation it was told about', asked[0] === 'session-a', JSON.stringify(asked))
+  const slotObserver = watched.mutationObservers.find((entry) =>
+    entry.targets.some((row) => row.options?.childList === true && row.options?.subtree !== true))
+  check('something watches the slot the conversation is replaced inside', slotObserver !== undefined, JSON.stringify(watched.mutationObservers.map((entry) => entry.targets[0]?.options)))
+  // The page moves; the button is never re-rendered, exactly the state the host
+  // was caught in. `swapConversation` is what the live page does: a new node in
+  // the old slot, not an edit to the old node. The slot observer is the only
+  // thing that can notice, which is why the swap is modelled rather than nudged.
+  watched.swapConversation('session-b')
+  await settle()
+  await watched.renderer.deepRender(watched.seat('cards'))
+  // `syncSession` also calls `notify()`, and that call is deliberately not
+  // asserted here: this harness only renders when a test asks it to, so nothing
+  // it could observe distinguishes "assigned and notified" from "assigned
+  // quietly" — `Cards` re-reads `bridge.sessionId` on any render, and the slot
+  // observer's own `remeasure()` already moves the change counter. On the live
+  // page `notify()` is what re-renders without an external trigger. Recorded as
+  // a coverage gap in R-102 rather than papered over with a green assertion.
+  // The column polls on a timer, so "did it notice" cannot be answered by
+  // waiting for one — a fix that only corrected the request would still need
+  // the timer, and the reader would stare at the old conversation for eight
+  // seconds. Publishing the id changes `sessionId`, which rebuilds the loader and
+  // restarts the polling effect, so the first request for the new conversation
+  // is issued at once. That is the difference being asserted.
+  check('the switch reaches the column without waiting for a timer', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+  const poll = watched.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  if (poll.length >= 1) poll[poll.length - 1].fn()
+  await settle()
+  check('and the timer that arrives later agrees', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+}
+
 // ---------------------------------------------------------------------------
 // The panel no longer asks the host what language to answer in
 // ---------------------------------------------------------------------------
@@ -4380,6 +4508,58 @@ function byAction(node, action) {
   await settle()
   const settled = await instance.renderer.deepRender(cards)
   check('and the answer that replaced it lands', textOf(settled).includes('A-NEW'), textOf(settled).slice(0, 160))
+}
+
+{
+  // The other half of the same guard, and the one a request ticket cannot cover:
+  // the abandoned request arriving *last*. Switching away and back issues a new
+  // request for the same conversation, so a reply issued before the switch can
+  // still name the conversation the reader is on now — the busy ticket has
+  // already been cleared by the switch, and the session check passes because the
+  // names match. Only the request counter can tell the two apart. Without it the
+  // older answer lands on top of the newer one, and the column shows a state
+  // that was already superseded.
+  const slowFirst = deferred()
+  const slowThird = deferred()
+  const routes = panelRoutes()
+  let asked = 0
+  routes['/api/ui-evolve/panel'] = () => {
+    asked += 1
+    if (asked === 1) return slowFirst.promise
+    if (asked === 3) return slowThird.promise
+    return { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+      summary: { text: 'B' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const { instance } = await openPanel(routes)
+  const cards = instance.seat('cards')
+  const toggle = instance.seat('toggle')
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  await instance.renderer.deepRender(cards)
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+  check('the third request replaced the abandoned first', asked === 3, `${asked} request(s)`)
+  // The newest answer lands first.
+  slowThird.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+    summary: { text: 'A-NEW' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const fresh = await instance.renderer.deepRender(cards)
+  check('the newest answer is on screen', textOf(fresh).includes('A-NEW'), textOf(fresh).slice(0, 160))
+  // Then the abandoned one, arriving late with the same session name.
+  slowFirst.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+    summary: { text: 'A-OLD' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const late = await instance.renderer.deepRender(cards)
+  // This pair is about the request counter that predates the session work: an
+  // abandoned request must not land on top of the one that replaced it. It is
+  // not regression coverage for the switch bug — it passes on the pre-fix file.
+  check('a reply that arrives after its replacement does not overwrite it', textOf(late).includes('A-OLD') === false, textOf(late).slice(0, 160))
+  check('the newer answer is still the one on screen', textOf(late).includes('A-NEW'), textOf(late).slice(0, 160))
 }
 
 // ---------------------------------------------------------------------------
@@ -4802,6 +4982,75 @@ async function openPanel(routes, options) {
   const switched = await instance.renderer.deepRender(cards)
   check('and it does not carry the old number into the new conversation', textOf(firstByClass(switched, 'dsse-speed')).includes('100') === false, textOf(firstByClass(switched, 'dsse-top-row')).slice(0, 160))
   check('so the new conversation reads as idle', textOf(firstByClass(switched, 'dsse-speed')).includes('—'), textOf(firstByClass(switched, 'dsse-speed')))
+}
+
+{
+  // The column's session identity has to come from the page, not from the header
+  // button's prop. Reproduced on a live host: switching conversation moved the
+  // title, the selected row and `data-conversation-session`, but the column kept
+  // asking about the session the reader had left — and clicking the header
+  // button once fixed it, because that click writes the id an effect was
+  // supposed to write. The window is one render wide, so it only shows up as a
+  // race; here it is staged on purpose by moving the attribute and never
+  // re-rendering the button.
+  const asked = []
+  const { instance } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/panel': (init, target) => {
+        const agent = decodeURIComponent(String(target).split('agent=')[1] ?? '')
+        asked.push(agent)
+        return { ok: true, data: { ...panelRoutes()['/api/ui-evolve/panel'].data, agent } }
+      },
+      '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+    },
+    { conversationSession: 'session-a' },
+  )
+  const cards = instance.seat('cards')
+  await instance.renderer.deepRender(cards)
+  check('the first request names the conversation on screen', asked[0] === 'session-a', JSON.stringify(asked))
+  // The page moves to another conversation; the button is not re-rendered, so
+  // the value it published is still the old one. This is the exact state the
+  // host was caught in.
+  instance.swapConversation('session-b')
+  const poll = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  check('a refresh is waiting to run', poll.length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
+  if (poll.length === 1) poll[0].fn()
+  await settle()
+  check('the refresh asks about the conversation on screen, not the one this closure captured', asked[1] === 'session-b', JSON.stringify(asked))
+}
+
+{
+  // The answer says which conversation it describes. If that disagrees with what
+  // was asked for, believing it would paint one conversation's cards under
+  // another's title — the same visible failure as the switch bug, arriving by a
+  // different route. The payload's own field is the only self-check available,
+  // and until this guard existed the client never read it.
+  const { instance, tree } = await openPanel(
+    {
+      ...panelRoutes(),
+      '/api/ui-evolve/panel': () => ({
+        ok: true,
+        data: {
+          ...panelRoutes()['/api/ui-evolve/panel'].data,
+          agent: 'session-somewhere-else',
+          summary: { text: 'PAINTED-FROM-THE-WRONG-SESSION' },
+          files: [],
+        },
+      }),
+      '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+    },
+    { conversationSession: 'session-a' },
+  )
+  const cards = instance.seat('cards')
+  const before = instance.renderer.stateChanges()
+  const poll = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  if (poll.length === 1) poll[0].fn()
+  await settle()
+  const after = await instance.renderer.deepRender(cards)
+  check('an answer about another conversation is not painted', textOf(after).includes('PAINTED-FROM-THE-WRONG-SESSION') === false, textOf(after).slice(0, 160))
+  check('and it does not replace the state it was dropped for', instance.renderer.stateChanges() === before, `${before} -> ${instance.renderer.stateChanges()}`)
+  check('the first answer on screen is still the real one', tree !== undefined, '')
 }
 
 {

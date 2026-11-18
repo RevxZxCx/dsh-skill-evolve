@@ -3418,3 +3418,87 @@ HTTP 层的 `2533 ms 且返回正文` 证明过，与「失败」无关。
 `601P 186h 3h 3h 202h 3h 3h 186h 993P 3h`（两次付费相隔约 64 秒，符合 60 秒窗口），
 与那两次对不上。可能是打点前页面里还有另一个标签页/另一段 effect 在问同一会话，
 也可能是我漏了一个 `forget` 路径。**未验证，不作为结论。**
+
+## R-102 · 切换会话后监控列偶发不跟随（用户报障，一名独立审查者，三条 should-fix）
+
+覆盖 D-212 ~ D-215、缺陷 11。用户原话：「切换会话的时候，偶尔监控侧栏的内容没有进行切换。这个bug出现时，会话记录加载的很快（不太确定）」。
+
+### 起点的样子
+
+`packages/ui-evolve/lib/client.js` 的 `bridge` 是模块级可变对象（`:1115`），改它不会让 React 重渲染，只能靠 `notify()` 手动唤。`bridge.sessionId` 唯一的组件写入点是会话头那个 `Toggle` 里依赖 `[sessionId]` 的 effect。监控列 `Cards` 从 `bridge.sessionId` 取会话 id，`load` 又是 `useCallback(..., [sessionId])`。三者不同步时，`load` 的闭包会一直用旧 id 发请求，而响应回来又被 `sessionId !== bridge.sessionId` 判成「已经离开了」而静默丢弃 —— 数据是新的，屏幕上一直不换，正是用户看到的样子。
+
+### 真机复现（ego 浏览器 + 宿主 19387）
+
+页面内 patch `window.fetch` 记录 `/api/ui-evolve/panel` 的 `{ at, agent, sel }`：
+
+- 点另一个会话后，标题、`aria-selected`、`data-conversation-session` 全都变成新 id，但 `/panel` 请求的 `agent=` 仍是旧 id；**等 9 秒、两轮 8 秒轮询之后仍然是旧 id**
+- 点一次 `.dsse-toggle` 立刻自愈，随后三次请求 `agent` 全变成新会话 —— 因为它的 onClick 直接写 `bridge.sessionId`
+- 反向形态也抓到：对话锚点已是旧会话，请求仍发着新会话
+- 对照组（快速连点 8 次、6 次来回切换）没有复现；`maxToggles` 全程 = 1，不存在第二个实例
+
+### 一处被真机推翻的设计（本轮最重要的一条）
+
+第一版修复是「监听 `data-conversation-session` 这个属性的变化」。测试替身里它能触发，真机上一次都没触发过：
+
+- 在真实页面装 `attributes: true, attributeFilter: ['data-conversation-session'], subtree: true` 于 `document.documentElement` → 切换后 `marks: []`，零条记录，但属性值已经是新的
+- `sameNode: false` —— 宿主**整体替换**这棵子树，不是编辑旧节点
+- 对照：同一上下文里装 `document.body` 的 `{childList, subtree, attributes}` 观察器，一次采样收到 41 批记录，说明观察器本身没问题
+- 逐层找「存活祖先」：`[data-conversation-session]` 与其父 `.an3WzG_root` 都被换掉；再上两层的 `<div data-slot>` 空容器活着，切换时正好收到 **1 条** `{added:1, removed:1}` childList 记录
+- 监听 `aria-selected` 也不行：它只在切换瞬间闪一下，且记录里当时读到的会话 id 仍是旧值
+
+结论：**可靠的切换信号是 `[data-slot]` 容器上的 childList 记录**，只需 `childList: true`，不加 `subtree`。我最初那版只盯属性的观察器在真机上永久惰性，**而测试因为替身会主动触发它而全绿** —— 这是本轮最值得记住的教训。
+
+### 改动
+
+1. `liveSessionId()`（模块级，`:1171`）：读 `[data-conversation-session]`，`document`/`querySelector`/`getAttribute` 任一缺失或值非字符串时返回 `""`（`""` 的意思是「这一帧没有意见」，调用方回退到 `bridge.sessionId`）
+2. `load` 每次请求都用**当下**的页面身份：`const target = liveSessionId() || bridge.sessionId`，请求与三条丢弃判定全部以 `target` 为准
+3. 丢弃判定拆成三条：新请求已发出（`request !== panelRequest.current`）、页面已换（`(liveSessionId() || bridge.sessionId) !== target`）、载荷自证（`data.agent !== target`）
+4. `syncSession()` + `attachSlotObserver()`：爬到 `[data-slot]` 祖先上装 `childList: true` 的观察器，回调里 `syncSession()` → `remeasure()` → 重新 `attachSlotObserver()`（节点被换掉后旧观察器已经失效）
+
+### 独立审查（subagent 8b4b2029，0 must-fix / 3 should-fix）
+
+审查者在隔离副本里复核了根因，确认核心修复正确且真的被测住（把 `liveSessionId()` 改成永远返回 `""` 会让 3 条用例红），随后指出我给你的三处说法与代码不符：
+
+1. **载荷自证那条守卫在生产里不可能触发**。`api.js:1040` 是 `searchParams.get('agent')`，`api.js:1345` 原样返回 `agent: id` —— 服务端只是把查询串回显，`data.agent === target` 恒成立。真正挡住跨会话上屏的是上面那条 `liveSessionId()` 比较。它现在被降级成「对恶意/规范化服务端的断言」，注释已改
+2. **「晚到的旧答案不覆盖新答案」那条用例在未修复的文件上也通过**（`git show HEAD:...` 跑出新套件 957/5，它不在 5 条失败里）。它验的是既有的请求计数器，不是这次的修复。测试保留，注释已标明它不构成本 bug 的回归覆盖
+3. **`syncSession()` 里的 `notify()` 和挂载时那次发布都没有测试钉住**。`let anchor = liveSessionId()` 会让挂载时那次调用拿属性和自己比、直接 return，永远发布不了 —— 已改成 `let anchor = ""`
+
+### 变异表（每条都亲自跑，跑完从备份恢复并 `node --check`）
+
+| 变异 | 结果 |
+|---|---|
+| `const target = liveSessionId() \|\| bridge.sessionId` → `const target = sessionId` | 红 1：`the refresh asks about the conversation on screen...` → `["session-a","session-a"]` |
+| slot 观察器回调里的 `syncSession()` → `if (false) syncSession()` | 红 1：`the switch reaches the column without waiting for a timer` → `["session-a"]` |
+| 成功路径 `if (request !== panelRequest.current) return` → `if (false) return` | 红 2：两条都报 `建议 0 A-OLD` |
+| 载荷自证 `if (typeof data?.agent ...) return` → `if (false) return` | 红 1：`an answer about another conversation is not painted` |
+| `syncSession` 里的 `notify()` 删掉 | **962/0，存活** |
+| 挂载时那次 `syncSession()` 删掉 | **962/0，存活** |
+
+最后两条是有意的：这个测试替身只有在测试要求时才渲染，所以「赋值并通知」与「悄悄赋值」在它眼里无法区分 —— `Cards` 任何一次渲染都会重读 `bridge.sessionId`，而 slot 观察器自带的 `remeasure()` 已经把变化计数器推高了。我一度加过一条 `stateChanges` 断言，被自己的变异证明是假安慰（`remeasure()` 单独就会让它变绿），于是**改成如实写下这条覆盖缺口，而不是留一条绿的假断言**。
+
+### 自己写砸的四处
+
+1. `slot.hasAttribute is not a function` —— climb 循环对测试替身直接抛错。修法：climb 条件加 `typeof slot.hasAttribute === "function"`，替身补 `hasAttribute: () => false`
+2. `teardown disconnects typography observers — [true,false]` —— 新观察器被算进 typography 桶。按 `childList && !subtree` 归到 slot 桶
+3. 用 `entry.target === instance.document.body` 认 typography → 报 `[]`，因为观察器 observe 的是 `documentElement` 与 `body` 两次，存的引用与替身里的不是同一个
+4. 第一次「让旧答案最后 settle」的用例**抓不住**变异：既有那条测的是 `panelBusyRequest` 票据，旧答案当时比新答案先返回，落地后仍被覆盖。必须新写一条同名会话、旧答案最后 resolve 的用例
+
+### 一次真实的污染事故
+
+跑变异期间有几个后台 job 交叉，其中一个被 `job_kill` 打断，源码被留在「已变异」的状态：`openFile` 里的 `try { openResource(address) } catch {}` 变成了裸调用。症状是 `test/mutations.test.mjs` 报锚点缺失，而且**两次运行报的缺失项还不一样**。我写了个残留扫描器（对两个变异脚本的每个 entry 检查「`to` 出现且 `from` 不出现」）定位到唯一一处，恢复后一切正常。**教训：变异脚本被中断后必须扫描残留，不能只信 `git status` 里的文件列表 —— 文件在列表里，内容却可能还是被改的样子。**
+
+### 收尾数据
+
+- 全量（仓库外 TMPDIR）**4067 passed / 0 failed**
+- `node test/mutations.test.mjs` → 48 passed / 0 failed
+- `node scripts/mutate-checklist-panel.mjs` → **137 killed, 0 survived, 0 not applied**
+- `node scripts/mutate-language-and-files.mjs` → **195 killed, 0 survived, 0 not applied, 0 crashed (of 195)**
+- 四个改动文件全 LF；残留扫描 0；`git diff --stat` 4 files changed, 403 insertions(+), 17 deletions(-)
+
+### 诚实缺口
+
+1. **真机验证暂定未收束（用户 2026-11-18 决定）**。上面所有真机证据都是「修复前」的现场。宿主跑的是内存里的旧模块，`touch` 不触发服务端重载，需要重启桌面端才能验证不再复现 —— 这一步只能由人做；而这个 bug 是偶现，单次「没再出现」不构成证据。用户会在日常使用中继续观察，若再遇到会重新打开这一条
+2. `syncSession()` 的 `notify()` 与挂载时那次发布**没有测试覆盖**（见变异表最后两行），理由已写在测试注释里
+3. `liveSessionId()` 取的是文档里第一个 `[data-conversation-session]`。审查者指出宿主可能同时挂载带 `variant: "embedded"` 的第二个对话根（子代理面板），若它排在前就会跟错会话。真机未观测到，加固方案是收窄到 `[data-conversation-region="chat"][data-conversation-session]` 并保留旧选择器作回退 —— 未做
+4. 切会话瞬间（旧已卸载、新未挂载）`liveSessionId()` 返回 `""`，`target` 回退到旧 `bridge.sessionId`，会多发一次注定被丢弃的 `/panel`。每次切换一次，且它持有服务端队列的写锁 —— 可接受但未优化
+5. `SpeedBadge` 的 `sessionId` 仍来自 `Cards` 那一次渲染捕获的值，同一条陈旧链路上它的历史数据重置也会滞后。修复后路径上它会被 `notify()` 一起带过去，但没有专门断言
