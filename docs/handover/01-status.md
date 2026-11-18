@@ -67,6 +67,7 @@
 | 2026-11-15 | 后缀：A2 的验收条件第一次真跑，没过 | `docs/20:187` 要求遍历命中数归零，一直标着「已完工」却从没人跑过；实测 83 条仍漏，全在 `.review-tmp`。根因是名字表只认整名，而 `.review-tmp` 两张表都够不着——78 条被卡片当成人写的。改成一个谓词 + 后缀分隔规则（字母算另一个词）；A2 复跑 1064→0；3784 断言、突变 190/45/69/128 全杀，残留 0。新增 DEF-155、D-179 |
 | 2026-11-15 | 真实会话固化成 fixture：三次静默失败，每次让套件更绿 | `test/real-data.test.mjs` 换台机器读到零个会话就 skip 退 0，与通过无法区分。新建 `scripts/make-fixture.mjs` 从本机 214 个真实会话里选五份（6/28/74/1/0 行，分别覆盖五态混合、git+scan 并存、无 `at`、v1 裸数字、v1 空文档），剥掉 `previous.commands` 等字段，把每个绝对根换成编号替身，固定键序写盘，重跑逐字节一致。三次静默失败：缺 `version` 被 `SessionStore.inspect` 判 `foreign`（套件仍 `39 passed`，因为每条「有行」的断言都落在空数组上）、脱敏只枚举了 8 条想得到的根（自检拦下 9 条 `F:\bot` 下的真实路径）、`C:\Users` 被当根使账号名进了第二段；另有裸 `\` 被误映射成 `D:\` 而盘根真实存在。新套件 54 断言只断言 payload，渲染交回已有两个套件（我在里面写的第三份 DOM/React 替身已删，653→431 行）。注入验证：`folder` 改回三元 → `52 passed, 2 failed`；删残渣守卫 → `53 passed, 1 failed`；均按字节恢复。3838 断言全绿，`26903`/`dsh-plugin` 在 fixture 里各 0 次。新增 DEF-156、D-180、R-95 |
 | 2026-11-16 | 一行被判生成，读者就看不见这一轮 | 用户实测报原型文件被归入生成文件、产出卡为空。两处根因：祖先目录套用了为文件名写的下划线规则（`scratchName` 的注释早写明不该这么用，遍历侧已排除、卡片侧漏了同步）；零人写时头部只剩「N 个生成文件」且列表折叠成空。拆出 `scratchDirectory`、`filesOpen` 加第三态 `null`、零人写换成整句并自动展开。真机 b5ee3f88：25 行 → 人写 14 / 生成 11，头部回到「14 个文件」。新增 34 条断言、5 条突变（195 全杀）、三处注入验证；3863 断言全绿。新增 DEF-157/158、D-181/182、R-96 |
+| 2026-11-18 | 监控列：从「浮在空白里」到「对话列右侧常驻」 | 用户说不清想要什么位置，只给了 Qoder 逆向成果作参照。查清 Qoder 把该功能叫**消息锚点**、只按视口宽度决定显示；宿主则用 900px 容器查询主动隐藏——这是我们反复踩坑的根源。用户随后明确「不是侧栏，是实时监控」，放弃复刻三形态，改做**对话列内常驻让宽列**：给 `[data-conversation-scroll]` 加 `margin-right` 即真实让宽。随后九轮界面迭代与四个真根因（`sidebarOpen()` 绑错列、`visibility` 继承、`pointer-events:none`、`delete` 清不掉 CSSOM 声明）。3928 断言全绿，变异 137 全杀 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -4951,3 +4952,65 @@ probeRows 9 / probeGenerated 9
 - 截图仍然是同源渲染，不是宿主实拍（把 payload 喂给真实 `client.js` 需要一个 hook 槽位正确的
   React 替身，`end-to-end.test.mjs` 里有一份，我不想再造第三份；见 DEF-156 那一轮的教训）。
 - 本轮没有独立审查者，以注入验证代替（R-96 里如实写了）。
+
+## 2026-11-18 · 监控列：位置从「说不清」到「对话列右侧常驻」
+
+### 用户给的是一个参照物，不是一个坐标
+
+原话是「显示位置我觉得很不好，但是我无法描述具体想让他显示在什么位置」，随后指向另一个会话里对 Qoder 的逆向成果。
+这是本轮最重要的约束：**没有验收标准可对齐，只能先建立一个可看的原型让用户指着改。** 所以先出可行性评估与三方案
+（A：dock 触发器 + 浮层/钉住；B：右栏页签；C：只挪按钮），再出原型。
+
+三方案都被推翻了。用户 m00643 给了真正的设计意图：「他是直接和对话界面结合到了一起…我们能不能再对话区域的右边再加入我们的
+卡片界面…**注意，这不是侧栏，侧栏是分页的，而这个是一个实时监控的**」。B 方案（右栏页签）恰恰就是「分页的侧栏」，
+而它在更早的 R-04 里已经被否决过一次。
+
+### Qoder 的对照价值，和我们自己挖的坑
+
+Qoder 把该功能叫**「消息锚点」`chatTimeline.anchorNav`**，`className:"...hidden md:flex"`，
+判据只有两条：视口 ≥768px、`items.length >= 3`。**它从不测量空间。**
+宿主 DSH 相反，用 `@container (width<=900px){.SNx2jG_frame{display:none}}` 主动隐藏轮次导航，
+容器 `.SNx2jG_slot` 的 `padding-inline` 每侧 32px。我们让宽之后容器掉到 900 以下，导航就消失——
+这个交互是本轮六轮诊断的全部来源。
+
+教训记在这里：**grep 零命中不等于功能不存在。** Qoder 的 UI 被拆成 566 个分块放在 `_qoder_rev/assets/`，
+`gtd.js`/`main.js` 不是 UI 主体，在它们里面找不到「消息锚点」。用户纠正之后才在 `gtdG4YpP.js` 里找到。
+
+### 四个真根因，全部靠真实 DOM 才看见
+
+1. **`sidebarOpen()` 读错了列。** 读 `data-sidebar-collapsed`，那是左侧会话列表（默认展开 → 属性永远不存在）→
+   恒返回「已展开」→ 监控列每次渲染都被跳过。桌面端与网页端同时消失。右栏才是抢空间的那一栏
+   （`data-rightbar-collapsed`，400–570px）。
+2. **`visibility` 是继承属性。** nav 盒子 28×202、19 条横条、`display:block` 全对，只有 `visibility:hidden`。
+   `display`/`z-index` 覆盖不了它。
+3. **`pointer-events` 被算成 `none`。** `elementFromPoint` 落到滚动体上，真实鼠标穿透。
+4. **`delete node.style.display` 是空操作。** `element.style` 是 CSSOM 代理，`display` 从来不是 own property；
+   `delete` 返回 `true` 却什么都不删。列关掉后导航仍被强制显示。
+
+前三个都是「源码推断六轮全落空、读到真实 DOM 一轮定案」。第四个是靠一次显式的对照实验抓到的
+（`{"deleted":true, "afterDelete":{"display":"block"}, "afterRemove":{"display":""}}`）。
+
+### 三次测试没能兑现承诺，形状是同一类
+
+- **替身发明了真实 DOM 不会有的属性**：`aria-expanded` 在产出文件卡上根本不存在（`interactive === true` 守卫），
+  注入测试给它手写了一个，于是两条规则在唯一真实场景里全部不命中。
+- **普通对象让 `delete` 变成有效操作**：`railNode.style` 是字面量，`delete` 真能删掉，断言恒真。
+  改成 `Object.defineProperty(..., {configurable:false})` 才有 CSSOM 的性质。
+- **规则集覆盖了一个元素却漏掉孪生元素**：`.dsse-card` 有两态规则，`.dsse-recap` 没有，
+  而测试对 recap 的徽标位置完全没有断言（`grep -c "dsse-recap .dsse-expand" test/` → 0）。
+
+共同点：**测试测的不是用户看的那个元素。** 三条都已固化成变异，现在全杀。
+
+### 当前状态
+
+- 监控列：对话列右侧常驻，默认开启，宽度 220–460px，`reserve === width`，<780px 不画，右栏展开时让位。
+- 旧 gutter 卡片布局整套删除（`placeCards`/`placeHandle`/`gutters`/`CARD_WIDTH`/`panelSide`/`panelCollapsed`
+  与两个测试文件）。
+- 轮次导航：随列开关，替身轨道无条件收起，内联样式用 `removeProperty` 清理。
+- 全量 **3928 passed / 0 failed**；`mutate-checklist-panel.mjs` **137 killed / 0 survived**。
+- 决策记录：D-183 ~ D-197（含 D-196 补记）。
+
+### 还没做的
+
+- 右栏展开时监控列让位，是 D-193 起的**新增行为**，原型里没有它，所以没有对应的视觉验收。
+- `twin-element-state-rule-coverage` 技能候选仍在队列里等批准（`candidates.json`），未生效。

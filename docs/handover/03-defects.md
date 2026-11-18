@@ -161,6 +161,11 @@
 | DEF-156 | 2026-11 | 少写一个 `version`，fixture 被静默拒绝，而套件全绿 | 断言只有「行数大于零」与「没有一条目录被叫已删除」，后者在空数组上通过 |
 | DEF-157 | 2026-11-16 | 一条为文件名写的规则被问到目录，十四个原型文件消失 | 遍历侧的注释早写明不该这么用，卡片侧漏了同步；两套谓词是分别维护的，没有任何断言要求它们在目录上回答一致 |
 | DEF-158 | 2026-11-16 | 全是生成文件时，卡片折叠成零行 | 折叠列表只切 `fresh.concat(earlier)`，断言都在「有内容」的 fixture 上跑；零人写的 fixture 之前只断言了头部文案 |
+| DEF-159 | 2026-11-18 | 读错了一个同样叫「侧栏」的属性（`data-sidebar-collapsed` 是左侧会话列表，永不存在），`sidebarOpen()` 恒返回「已展开」，监控列在桌面端与网页端同时消失 | 替身里 frame 由测试自己实现 `hasAttribute`，两套属性名都能问出想要的一半；真实 DOM 的「React 不输出 false 属性」这条规则替身没有，缺陷正好藏在那里 |
+| DEF-160 | 2026-11-18 | `visibility` 是继承属性：nav 盒子 28×202、19 条横条、`display:block` 全对，只有 `visibility:hidden`，`display`/`z-index` 覆盖不了 | 断言只查规则文本里有 `display:block`，从不问 computed `visibility`；测试环境没有祖先元素，继承这条语义在替身里不存在。六轮源码推断全落空，读到真实 DOM 一轮定案 |
+| DEF-161 | 2026-11-18 | `pointer-events` 被算成 `none`，元素看得见、尺寸正确，但鼠标事件全部穿透到滚动体 | 基于 `getBoundingClientRect`/颜色/尺寸/`display` 的断言全部通过；一条「元素可见」的断言对「元素可交互」零覆盖 |
+| DEF-162 | 2026-11-18 | `delete node.style.display` 返回 `true` 却什么都没删 —— `element.style` 是 CSSOM 代理，`display` 不是 own property；列关掉后宿主 nav 仍被强制显示，与替身形成两条轨道 | 替身 `railNode.style` 是字面量普通对象，`delete` 在它上面真的有效，于是 `!railNode.style.display` 这条断言恒真；变异首轮 SURVIVED 才暴露（135 killed / 2 survived） |
+| DEF-163 | 2026-11-18 | 替身轨道的隐藏规则绑在 `html[data-dsse-turn-rail="1"]` 上，而「只画一条轨道」是页面级不变量、与监控列开关无关；列一关规则自己失效 | 断言把错误的作用域写成了正确契约（要求规则以该前缀开头），且正则未锚定行首，新旧两种形态都能匹配，改完仍通过 |
 
 ---
 
@@ -2739,3 +2744,150 @@ for (const path of after) {
 **为什么测试没抓到**：那一轮唯一覆盖全生成场景的 fixture 只断言了头部文案（`=== '全部 2 个文件都是生成文件'`），
 没有断言列表里有没有行。断言写了「该说的那句话说了」，没写「该显示的行显示了」——
 一半的契约被验了，另一半正好是坏的。
+
+
+## DEF-159 · 读错了一个同样叫「侧栏」的属性，监控列在两端同时消失
+
+**症状**：用户报「现在根本看不到监控侧栏，网页端也是如此」。桌面端、网页端同时消失，
+而两边跑的是同一个服务端、同一份 bundle，排除了环境差异。全量测试 3924 条全绿。
+
+**根因**：`sidebarOpen()` 读宿主 frame 的 `data-sidebar-collapsed`，据此判断「系统侧栏是否展开」。
+但宿主有两个同名的折叠属性，语义完全不同：
+
+```js
+"data-sidebar-collapsed": sidebarCollapsed || void 0,   // 左侧会话列表
+"data-rightbar-collapsed": cols.rightbar === 0 || void 0 // 右栏
+```
+
+`data-sidebar-collapsed` 在普通屏幕上**永远不存在**（左栏默认展开 → `sidebarCollapsed` 为 false →
+`|| void 0` 让 React 整个属性都不输出）。于是 `hasAttribute(...) === false` 恒成立，
+函数恒返回「已展开」，监控列每次渲染都在入口处被跳过。
+
+抢空间的那一栏是右栏（400–570px），判据必须读 `data-rightbar-collapsed`。
+
+**为什么测试没抓到**：测试替身里 frame 是一个普通对象，`hasAttribute` 由测试自己实现，
+两套属性名在替身里都能被问出想要的那一半。真正的问题不是「读错名字」，而是
+**「读一个不存在的属性时返回值恰好等于期望值」** —— 这类缺陷在替身里天然不会发生，
+因为替身没有「React 不输出 false 属性」这条规则。
+
+**修法**：改读 `frame.hasAttribute("data-rightbar-collapsed") === false`；
+`MutationObserver` 的 `attributeFilter` 从 `["data-sidebar-collapsed"]` 改为 `["data-rightbar-collapsed"]`；
+并在 README 里写明两者的区别，避免下一个人再读错。
+
+**判据**：光凭源码推断跑了六轮都没找到（`visibility`、`pointer-events`、缓存、CSS 优先级全部试过），
+是用户在真实界面里贴出 `{"nav":[1185,311,1213,513],"visibility":"hidden"}` 之后才定案的。
+**读真实 DOM 优先于读源码。**
+
+
+## DEF-160 · `display` 和 `z-index` 都对，元素就是不见：`visibility` 会继承
+
+**症状**：监控列开启时，轮次导航（滚动条旁的横条导航）不出现；把窗口拖窄到某个宽度就出现，
+拖回来又消失。反复出现「拖窄才显示」的现象。
+
+**根因**：`visibility` 是**继承属性**，与 `display` 不同 —— 后代可以声明 `visible` 覆盖祖先的 `hidden`，
+但在自己身上没有声明时，祖先的 `hidden` 会一路传下来。实测：
+
+```json
+{"nav":[1185,311,1213,513],"visibility":"hidden","opacity":"1","hit":"V4vHZW_scroll"}
+```
+
+nav 盒子 28×202 真实存在、19 条横条颜色尺寸全对、`display:block`、`z-index` 也对，
+**只有 `visibility` 是 hidden**。之前六轮对 `display`、`!important`、`@container`、`@layer`、
+CSS 解析、DOM 层级的检查全部落在正确的位置上，所以全部返回「没问题」。
+
+**为什么测试没抓到**：断言检查的是规则文本里有没有 `display:block`，
+没有一条断言问「这个元素的 computed `visibility` 是什么」。而测试环境里没有祖先元素，
+继承这条规则在替身里不存在。这是 DEF-159 的同一形状：
+**替身缺少真实 DOM 的某条语义，缺陷就正好藏在那条语义里。**
+
+**修法**：结构 CSS 加 `visibility:visible !important`，`forceTurnRail(true)` 内联加
+`node.style.visibility = "visible"`。两者都要 —— 一个对付继承，一个对付内联优先级。
+
+**顺带确认**：宿主题的 `css$17`（3542 字符）里没有任何 `visibility` 规则，
+隐藏来自别处（插件 `dsh-claude-style@0.19.5` 的子功能「重绘消息导航」，
+它给 nav 打 `data-dsh-claude-turn-nav-replaced` 并设 `visibility:hidden; pointer-events:none`）。
+
+
+## DEF-161 · 看得见但点不着：`pointer-events` 被算成 `none`
+
+**症状**：轮次导航的横条在界面上可见，`getBoundingClientRect` 也对，但鼠标悬停没有反应、点不动。
+
+**根因**：`elementFromPoint` 落在 `V4vHZW_scroll`（滚动体）上，而不是 nav 上 ——
+nav 的 computed `pointer-events` 是 `none`，事件直接穿透过去。
+
+**为什么测试没抓到**：这是 DEF-160 的孪生问题，但更难发现，因为**元素在视觉上是完全正确的**。
+所有基于 `getBoundingClientRect`、颜色、尺寸、`display` 的断言都会通过。
+一条「元素可见」的断言，对「元素可交互」这件事零覆盖。
+
+**修法**：结构 CSS 加 `pointer-events:auto !important`，内联加 `node.style.pointerEvents = "auto"`。
+
+**判据**：只有用真实指针事件（CDP `Input.dispatchMouseEvent` 或 ego 的 hover）打上去、
+再读 `elementFromPoint`，才能把这类缺陷与「样式没生效」区分开。
+`display`/`visibility`/`pointer-events` 是三个独立的门，任何一个关着都表现为「看不到」或「点不着」，
+必须分别验证，不能用一个 `getComputedStyle` 里随便挑一个字段代表。
+
+
+## DEF-162 · `delete node.style.display` 返回 `true`，却什么都没删掉
+
+**症状**：点「收起任务监控」后，界面上出现**两条**轮次导航条 —— 宿主那条和主题自绘的替身同时在场。
+
+**根因**：`forceTurnRail(false)` 用 `delete node.style.display`（以及 `zIndex`/`visibility`/`pointerEvents`
+共四行）清理之前写入的内联样式。但 `element.style` 是 `CSSStyleDeclaration`，是一个 **CSSOM 代理对象**，
+`display` 从来不是它的 own property，而是原型链上的访问器。`delete` 对访问器属性的行为是
+「删不掉，返回 true」。实测：
+
+```json
+{"deleted":true,
+ "afterDelete":{"display":"block","zIndex":"21","cssText":"display: block; z-index: 21;"},
+ "afterRemove":{"display":"","zIndex":"","cssText":""}}
+```
+
+`delete` 之后 `cssText` 原封不动；只有 `style.removeProperty("display")` 真正清掉。
+
+**为什么测试没抓到**：`test/client.test.mjs` 里的 `railNode` 是
+`{ style: { display:'', zIndex:'', visibility:'' }, getAttribute: ... }` —— 一个**字面量普通对象**。
+在普通对象上 `delete obj.display` 真的有效，所以 `!railNode.style.display` 这条断言恒真。
+替身不但没复现缺陷，还让缺陷看起来被覆盖了。
+
+**修法**：两处同时改。
+1. 源码改用 `style.removeProperty("display")` / `("z-index")` / `("visibility")` / `("pointer-events")`，
+   各自带 `if (node.style.X === 期望值)` 守卫，避免误删宿主自己写的样式；
+2. 测试替身改成 `navStub(label)`，四个字段用
+   `Object.defineProperty(style, field, {value:'', writable:true, enumerable:true, configurable:false})` 定义 ——
+   **`configurable:false` 是让 `delete` 失效的关键**，这样替身与 CSSOM 访问器同性质。
+
+**变异验证**：改回 `delete` 的那条变异、以及把替身规则重新绑回 `data-dsse-turn-rail` 的那条变异，
+首轮**双双 SURVIVED**（135 killed / 2 survived）—— 这直接证明原断言没有抓力。
+修完替身与正则锚定后 137 killed / 0 survived。
+
+**教训**：`configurable:false` 这类细节值得写进 fixture 里并加注释说明为什么，
+否则下一个人会「顺手简化」掉它，缺陷就又回来了。
+
+
+## DEF-163 · 替身轨道的隐藏规则绑在了「监控列开着」这个作用域上
+
+**症状**：与 DEF-162 同时出现，两者叠加才表现为「收起监控列就多一条轨道」。
+
+**根因**：D-192 引入的规则是
+
+```css
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
+```
+
+`data-dsse-turn-rail` 由 `applyMonitorReserve` 写入，值是 `width > 0 ? "1" : "0"` ——
+**监控列一关，规则自己就失效了**。而监控列关掉的副作用恰恰是把滚动区从 764px 放回约 984px，
+越过替身自带的 `@container (width<=900px)` 阈值 → 替身开始渲染。
+
+「只画一条轨道」是**页面级不变量，与监控列开关无关**，这条规则的作用域从一开始就选错了。
+
+**为什么测试没抓到**：断言写的是 `standIn[0].indexOf('html[data-dsse-turn-rail="1"]') === 0`，
+即「规则以带作用域的前缀开头」—— 断言把错误的作用域当成了正确契约固定下来。
+另外正则没锚定行首，带前缀的旧形态与无前缀的新形态都能匹配，改完之后断言仍会通过。
+
+**修法**：改为无条件 `[data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}`；
+断言正则加 `^` 与 `m` 标志；原断言改名为 `and the rule sits inside the stylesheet`（它实际验的是「在样式表里」），
+新增 `and retires it whether or not the column is on`（断言规则里不含 `data-dsse-turn-rail` 与 `data-dsse-monitor`）。
+
+**通用判据**：一条规则的作用域里出现某个状态属性时，先问「这个不变量在状态变化后还成立吗」。
+如果答案是不成立而规则本来该一直生效，作用域就是错的。这里的状态属性是 `data-dsse-turn-rail`，
+不变量是「宿主轨道与主题替身不能同时可见」，两者没有关系。
