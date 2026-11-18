@@ -61,6 +61,22 @@ const MAX_INPUT_CHARS = 6000
 /** Wall clock budget for one summary call. */
 const SUMMARY_TIMEOUT_MS = 20000
 
+/**
+ * How long a failed call is remembered, in milliseconds.
+ *
+ * A failure is not a value, so it must not go into the cache above — the next
+ * turn has to be able to try again. But "next turn" is not "next repaint": the
+ * panel polls every eight seconds, and without a short memory of the failure
+ * each poll pays for the same doomed model call again. Measured on a host whose
+ * model route had gone away, that was 0.5-2 seconds of dead waiting per poll,
+ * forever, which is the very slowness this module exists to remove.
+ *
+ * A minute is long enough that a broken route costs one call a minute instead
+ * of seven, and short enough that a route that comes back is noticed without
+ * anybody reloading the page.
+ */
+const SUMMARY_FAILURE_TTL_MS = 60000
+
 /** Output token budget; a summary is short by construction. */
 const SUMMARY_MAX_TOKENS = 300
 
@@ -233,6 +249,36 @@ function summaryKey(turn, body) {
 }
 
 /**
+ * Name the route a summary would use, without resolving it.
+ *
+ * The failure memory must not outlive the route that caused it: the summary of
+ * a broken model says "switch models", so remembering its failure across the
+ * switch would delay the one thing it tells the reader to do. This mirrors the
+ * first two steps of `resolveRoute` — the configured pair, then the session's
+ * own route — and answers `undefined` for the catalogue fallback, where the
+ * provider is not known until the catalogue is read and "the same route" cannot
+ * be claimed.
+ *
+ * @param {object | undefined} config - the resolved plugin config.
+ * @param {{ provider: string, model: string } | undefined} sessionRoute - the session's route.
+ * @returns {string | undefined} the route identity, or undefined when unknown.
+ */
+function routeIdentity(config, sessionRoute) {
+  const provider = typeof config?.summaryProvider === 'string' ? config.summaryProvider.trim() : ''
+  const model = typeof config?.summaryModel === 'string' ? config.summaryModel.trim() : ''
+  if (provider.length > 0 && model.length > 0) return `${provider}/${model}`
+  if (
+    typeof sessionRoute?.provider === 'string' &&
+    sessionRoute.provider.length > 0 &&
+    typeof sessionRoute?.model === 'string' &&
+    sessionRoute.model.length > 0
+  ) {
+    return `${sessionRoute.provider}/${sessionRoute.model}`
+  }
+  return undefined
+}
+
+/**
  * Accumulate the text of one streamed response.
  *
  * The host's `BlockAssembler` would do this, but it lives in
@@ -366,6 +412,14 @@ class Summariser {
     /** @type {Map<string, Promise<object>>} in-flight calls, so one turn costs one call. */
     this.inflight = new Map()
     /**
+     * Failed calls, remembered briefly so a broken route is not retried on
+     * every poll. Keyed like `cache`; the value is the reason and when it was
+     * observed.
+     *
+     * @type {Map<string, { reason: string, at: number }>}
+     */
+    this.failed = new Map()
+    /**
      * Sessions whose panel has been opened at least once.
      *
      * The gate on `warm`. Deliberately not persisted: a restarted host forgets,
@@ -483,18 +537,50 @@ class Summariser {
     if (body.length === 0) return { enabled: true, reason: 'the turn left nothing to summarise' }
 
     const key = `${agentId}:${summaryKey(snapshot.turn, body)}`
+    const routeKey = routeIdentity(config, sessionRoute)
     const hit = this.cache.get(key)
     // `at` comes from the cache rather than the clock: the panel says when the
     // summary was written, and a repaint is not a rewrite. Reporting "just now"
     // on every refresh would make the timestamp say nothing at all.
     if (hit !== undefined) return { enabled: true, text: hit.text, at: hit.at, cached: true }
 
+    // Only a failure recorded on the route we would use now. A remembered
+    // failure from a model the reader has just switched away from would keep
+    // reporting that model's error, and the error text itself says to switch.
+    const failed = this.failed.get(key)
+    if (failed !== undefined && failed.routeKey === routeKey && Date.now() - failed.at < SUMMARY_FAILURE_TTL_MS) {
+      return { enabled: true, reason: failed.reason, cached: true }
+    }
+
     const running = this.inflight.get(key)
     if (running !== undefined) return running
 
-    const task = this.run({ key, body, signal, sessionRoute }).finally(() => this.inflight.delete(key))
+    const task = this.run({ key, body, signal, sessionRoute, routeKey }).finally(() => this.inflight.delete(key))
     this.inflight.set(key, task)
     return task
+  }
+
+  /**
+   * Remember that a call failed, so a repaint does not pay for it again.
+   *
+   * Only failures that actually reached the model are remembered. "no model
+   * service available" and "no model route is available" are decided without a
+   * call, cost nothing to repeat, and depend on things (installed adapters, the
+   * catalogue) that can change without the config changing — so they are left
+   * to answer fresh every time.
+   *
+   * @param {string} key - cache key.
+   * @param {string} reason - what went wrong.
+   * @param {string | undefined} routeKey - identity of the route that failed.
+   * @returns {void}
+   */
+  noteFailure(key, reason, routeKey) {
+    this.failed.set(key, { reason, at: Date.now(), routeKey })
+    if (this.failed.size <= 64) return
+    // Same oldest-first bound as the cache, for the same reason: only the
+    // newest few dozen turns are ever asked about again.
+    const oldest = [...this.failed.entries()].sort((a, b) => a[1].at - b[1].at)[0]
+    if (oldest !== undefined) this.failed.delete(oldest[0])
   }
 
   /**
@@ -506,9 +592,15 @@ class Summariser {
    * @param {AbortSignal} [input.signal] - cancellation.
    * @param {{ provider: string, model: string } | undefined} [input.sessionRoute] -
    *   the route the session is using, preferred over the catalogue.
+   * @param {string | undefined} [input.routeKey] - identity of the route the caller
+   *   would use, recorded with any failure so a later route switch ignores it.
    * @returns {Promise<object>} the summary record.
    */
-  async run({ key, body, signal, sessionRoute }) {
+  async run({ key, body, signal, sessionRoute, routeKey }) {
+    // A caller who cancelled before the call started should not be charged for
+    // it. `addEventListener` never fires for an abort that already happened, so
+    // without this the request would run to completion for nobody.
+    if (signal?.aborted === true) return { enabled: true, reason: 'the summary call was cancelled' }
     const llm = valueOf(this.llm)
     if (llm === undefined || typeof llm.prepareCall !== 'function') return { enabled: true, reason: 'no model service available' }
     const route = await this.resolveRoute(signal, sessionRoute)
@@ -537,11 +629,20 @@ ${TRANSCRIPT_CLOSE}` }],
       }
       const { text, finish } = await collectText(call.stream(options), controller.signal)
       const failure = finishFailure(finish)
-      if (failure !== undefined) return { enabled: true, reason: `the model call failed: ${failure}` }
+      if (failure !== undefined) {
+        this.noteFailure(key, `the model call failed: ${failure}`, routeKey)
+        return { enabled: true, reason: `the model call failed: ${failure}` }
+      }
       const trimmed = tidy(text)
-      if (trimmed.length === 0) return { enabled: true, reason: 'the model returned nothing' }
+      if (trimmed.length === 0) {
+        this.noteFailure(key, 'the model returned nothing', routeKey)
+        return { enabled: true, reason: 'the model returned nothing' }
+      }
       const at = Date.now()
       this.cache.set(key, { text: trimmed, at })
+      // One key, one answer: a remembered failure must not outlive the success
+      // that replaced it, or evicting this cache entry would resurrect it.
+      this.failed.delete(key)
       if (this.cache.size > 64) {
         // Oldest-first eviction: the panel only ever asks about the last turn,
         // so anything beyond the newest few dozen entries is unreachable.
@@ -551,7 +652,12 @@ ${TRANSCRIPT_CLOSE}` }],
       return { enabled: true, text: trimmed, at, model: `${route.provider}/${route.model}`, pinned: route.pinned }
     } catch (error) {
       const aborted = controller.signal.aborted
-      return { enabled: true, reason: aborted ? 'the summary call timed out' : `the summary call failed: ${error?.message ?? error}` }
+      const cancelled = signal?.aborted === true
+      const reason = cancelled ? 'the summary call was cancelled' : aborted ? 'the summary call timed out' : `the summary call failed: ${error?.message ?? error}`
+      // A cancellation is the caller's decision, not the model's verdict: it must
+      // not suppress the next attempt for a minute.
+      if (!cancelled) this.noteFailure(key, reason, routeKey)
+      return { enabled: true, reason }
     } finally {
       clearTimeout(timer)
       signal?.removeEventListener('abort', forward)
@@ -632,11 +738,21 @@ ${TRANSCRIPT_CLOSE}` }],
   forget(agentId) {
     if (typeof agentId !== 'string' || agentId.length === 0) return
     this.viewed.delete(agentId)
+    // Failure memories are keyed by session too, and a disposed session will
+    // not be asked about again. Dropping them keeps the map bounded by live
+    // sessions rather than by sessions that have ever existed.
+    const prefix = `${agentId}:`
+    for (const key of [...this.failed.keys()]) {
+      if (key.startsWith(prefix)) this.failed.delete(key)
+    }
   }
 
   /** Drop every cached summary. Called when the configured model changes. */
   reset() {
     this.cache.clear()
+    // A different model is a different chance of success, so yesterday's
+    // failure must not outlive the setting that caused it.
+    this.failed.clear()
   }
 }
 
@@ -645,6 +761,7 @@ export {
   MAX_SUMMARY_CHARS,
   MAX_INPUT_CHARS,
   SUMMARY_TIMEOUT_MS,
+  SUMMARY_FAILURE_TTL_MS,
   SUMMARY_MAX_TOKENS,
   INSTRUCTION,
   TRANSCRIPT_OPEN,

@@ -181,9 +181,9 @@ const mutations = [
     // bare guard line matches twice and `split/join` would disable both while
     // claiming to test one.
     from: `if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
-            setState({ status: "ready", data })`,
+            // An unchanged answer keeps the object it already had. React compares`,
     to: `if (false) return
-            setState({ status: "ready", data })`,
+            // An unchanged answer keeps the object it already had. React compares`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -1101,10 +1101,10 @@ const mutations = [
     // A timer that nobody clears keeps polling the session the reader left.
     label: 'the timer outlives the panel that started it',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `        const timer = setInterval(() => load(true), REFRESH_MS)
-        return () => clearInterval(timer)`,
-    to: `        const timer = setInterval(() => load(true), REFRESH_MS)
-        return () => {}`,
+    from: `        return () => {
+          clearInterval(timer)`,
+    to: `        return () => {
+          void timer`,
     suites: ['test/client.test.mjs'],
   },
   {

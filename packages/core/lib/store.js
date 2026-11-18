@@ -149,6 +149,18 @@ export class Store {
     this.candidatesPath = join(this.root, 'candidates.json')
     this.registryPath = join(this.root, 'registry.json')
     this.ledgerPath = join(this.root, 'ledger.jsonl')
+    /**
+     * Bumped on every write to the candidate file.
+     *
+     * A reader that caches the queue cannot tell a fresh answer from a stale
+     * one by looking at the clock alone: a slash command or a second panel can
+     * append a row a millisecond after a read. Comparing this counter instead
+     * of the timestamp makes the invalidation exact, and it costs the writer
+     * one integer increment.
+     *
+     * @type {number}
+     */
+    this.candidatesRevision = 0
     /** @type {Promise<unknown>} tail of the mutation queue. */
     this.#queue = Promise.resolve()
   }
@@ -202,6 +214,7 @@ export class Store {
    */
   async saveCandidates(candidates) {
     await writeJson(this.candidatesPath, candidates)
+    this.candidatesRevision += 1
   }
 
   /**
@@ -215,7 +228,10 @@ export class Store {
     return this.serialize(async () => {
       const current = await this.loadCandidates()
       const outcome = await transform(current)
-      if (outcome.candidates !== undefined) await writeJson(this.candidatesPath, outcome.candidates)
+      if (outcome.candidates !== undefined) {
+        await writeJson(this.candidatesPath, outcome.candidates)
+        this.candidatesRevision += 1
+      }
       return outcome.result
     })
   }
@@ -236,7 +252,10 @@ export class Store {
   async mutateCandidatesWithin(transform) {
     const current = await this.loadCandidates()
     const outcome = await transform(current)
-    if (outcome.candidates !== undefined) await writeJson(this.candidatesPath, outcome.candidates)
+    if (outcome.candidates !== undefined) {
+      await writeJson(this.candidatesPath, outcome.candidates)
+      this.candidatesRevision += 1
+    }
     return outcome.result
   }
 

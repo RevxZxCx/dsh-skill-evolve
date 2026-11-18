@@ -478,6 +478,23 @@ export function apply(ctx, config, options) {
     if (event?.type === 'turn/end') {
       sessionState.rememberTurn(agentId)
       if (ended !== undefined) sessionState.rememberPaths(agentId, ended, endedTurn)
+      // Write the summary now rather than when somebody opens the panel.
+      //
+      // `record` folded this turn into `previous` on the line above, so this is
+      // the one moment the finished turn is readable and no longer changing —
+      // and it is the last moment the panel is not waiting for it. Warmed here,
+      // the first open after a turn reads a cached answer instead of paying for
+      // a model call inside its own request (which is what the panel used to
+      // do, for up to the summariser's own 20-second timeout).
+      //
+      // Not awaited, and `warm` never rejects: it answers a failure by logging.
+      // An abandoned turn needs no special case — `endTurn` clears the turn and
+      // sets no `previous`, so the read below is `undefined` and `warm` is not
+      // called at all.
+      const finished = transcripts.view(agentId)?.previous
+      if (finished !== undefined) {
+        summariser.warm({ agentId, snapshot: finished, sessionRoute: routeFor(agentId) })
+      }
       // Both halves of both brackets, started together. Not awaited: this handler
       // returns to the host's event loop, and a `git status` that takes a second
       // on a large workspace must not hold up the turn that just finished.
@@ -661,6 +678,13 @@ export function apply(ctx, config, options) {
     // previous session's turn began — an unbounded interval attributed to one
     // turn.
     scanWatch.forget(agentId)
+    // The summariser keeps its own per-session record: which sessions have a
+    // reader. That set gates the warm-up, and its doc is explicit that leaving
+    // an entry behind changes the gate's question from "is somebody watching
+    // this session" to "did anybody ever open it" — after which a host running
+    // background sessions pays one model call per turn on every session whose
+    // panel was opened once, however long ago.
+    summariser.forget(agentId)
   }))
 
   // ------------------------------------------------------------- summariser --
@@ -837,6 +861,47 @@ export function apply(ctx, config, options) {
     const api = createPanelApi({
       config: () => liveConfig(),
 
+      /**
+       * Whether the host will vouch for this request.
+       *
+       * The panel serves the person's own conversation, and a loopback listener
+       * is reachable by every process on the machine, so the route has to ask the
+       * same question the host's own `/api` route asks: `connection.admission`
+       * (exposed as `requestRejection`) answers 401 for a request carrying no
+       * valid browser or API credential, 403 for an untrusted host, and
+       * `undefined` for a request it is willing to serve.
+       *
+       * Read through `service()` on every request rather than captured at apply
+       * time: a host that installs its connection service after this plugin would
+       * otherwise be permanently unauthenticated. Deliberately absent from
+       * `inject` — the panel must still load, and still work, on a host with no
+       * connection service at all.
+       */
+      admission(req) {
+        const connection = service('connection')
+        if (connection !== undefined && typeof connection.requestRejection === 'function') {
+          return connection.requestRejection(req)
+        }
+        // `undefined` has two causes and they point in opposite directions. A host
+        // that has no connection service at all cannot vouch for anything, and its
+        // panel must keep working -- that is the case this dep is optional for. A
+        // host that has one which is merely not active yet (cordis resolves a
+        // service strictly: a provider whose fiber has not settled reads as
+        // absent) is a boot or reload window, and serving the panel open for its
+        // duration is exactly the hole this gate exists to close.
+        //
+        // Asking again without the strictness separates them: something there but
+        // not ready means wait, nothing there at all means there is nobody to ask.
+        let pending
+        try {
+          pending = typeof ctx.get === 'function' ? ctx.get('connection', false) : undefined
+        } catch {
+          pending = undefined
+        }
+        if (pending !== undefined) return 503
+        return undefined
+      },
+
       /** Panel switches, honoured for this process only. */
       applyOverride(next) {
         Object.assign(overrides, next)
@@ -1010,10 +1075,12 @@ export function apply(ctx, config, options) {
       /**
        * Candidates waiting for approval, for the panel's badge.
        *
-       * Read from the queue on disk on the far side rather than from a counter
-       * kept in memory: a second session, a slash command and the panel all write
-       * the same file, and a cached count would be wrong the moment any of them
-       * ran.
+       * The far side annotates the queue and caches the answer for a few seconds,
+       * invalidating it whenever the file it came from changes. Not a counter kept
+       * in memory: a second session, a slash command and the panel all write the
+       * same file, and a count read here would be wrong the moment any of them ran.
+       * Not a fresh disk sweep per panel either — that was the cost this dependency
+       * used to add to every refresh of every open panel.
        */
       pendingCandidates: halfDependency('pendingCandidates'),
 

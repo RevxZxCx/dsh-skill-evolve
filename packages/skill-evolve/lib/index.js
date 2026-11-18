@@ -24,7 +24,7 @@
  * @module dsh-skill-evolve
  */
 
-import { lstat, mkdir, open, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, open, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { Config } from './config.js'
 import { createDetector, renderSteps } from './signal.js'
@@ -42,6 +42,7 @@ import {
   decideStage,
   describeStale,
   dshHome,
+  evaluateStaleness,
   findByName,
   invertBody,
   isLive,
@@ -301,13 +302,61 @@ export function apply(ctx, config) {
    */
   async function sessionExists(sessionId) {
     const query = service('sessionQuery')
+    // No index is not the same as no session: a host that cannot answer must
+    // leave the candidate alive, so the unanswerable case is `true` here and
+    // only a listing that actually ran can say `false`.
     if (query === undefined || typeof query.listSessions !== 'function') return true
     const records = await query.listSessions()
+    // A listing that did not produce a list did not answer the question. The
+    // old code threw here by accident -- `records.some` on a non-array is a
+    // TypeError -- and `evaluateStaleness`'s catch turned that into
+    // `live = true`. This says the same thing out loud.
+    //
+    // It is a contract, not the only line of defence: that catch still exists,
+    // so deleting this guard changes nothing observable today (mutation test:
+    // forty tests stayed green). It is written down because the meaning is
+    // then in the function that decides it, rather than in whichever caller
+    // happens to wrap it in a try.
+    if (!Array.isArray(records)) return true
     return records.some((record) => record?.header?.id === sessionId)
   }
 
   /**
+   * Every session the host still lists, in one listing.
+   *
+   * Separate from {@link sessionExists} because the queue needs the ids once,
+   * not once per row: each listing walks every persisted session on disk, and
+   * a sixteen-row queue against a large history spent minutes of wall clock
+   * doing the same walk sixteen times. Undefined when the host cannot answer,
+   * which `annotateQueue` reads as "no evidence either way" — the same
+   * meaning a throwing probe already had.
+   *
+   * @returns {Promise<Array<object> | undefined>} the listed sessions, or
+   *   undefined when the host cannot answer — which the caller must read as
+   *   "no evidence", not as "no sessions", or one missing service would mark
+   *   every candidate in the queue stale at once.
+   */
+  async function listSessionsOnce() {
+    const query = service('sessionQuery')
+    if (query === undefined || typeof query.listSessions !== 'function') return undefined
+    return query.listSessions()
+  }
+
+  /**
    * Probe the catalog for one skill name, as the staleness rules need it.
+   *
+   * "Not there" and "could not look" are different answers, and this is the
+   * one probe where the difference decides whether a file gets overwritten.
+   * `approve` re-checks the candidate it is about to write through this
+   * function: if a read that failed for an unrelated reason (a permission
+   * error, a file another process is rewriting, frontmatter that does not
+   * parse) were reported as `{exists: false}`, the name would look free and
+   * the write would land on top of the skill that is actually there. So only
+   * ENOENT means absent; everything else is thrown and the caller refuses.
+   *
+   * This is the same asymmetry `sessionExists` argues for, in the opposite
+   * direction: a session an index cannot speak for stays alive, a skill name a
+   * catalog cannot speak for must not be called free.
    *
    * @param {string} skillName - the name to look for.
    * @returns {Promise<{exists: boolean, owned?: boolean, body?: string}>} what is there.
@@ -316,32 +365,152 @@ export function apply(ctx, config) {
     try {
       const parsed = await readSkillFile(join(rootFor(undefined), skillName, SKILL_FILE))
       return { exists: true, owned: parsed.owned, body: parsed.body }
-    } catch {
-      return { exists: false }
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { exists: false }
+      throw error
     }
   }
+
+  /**
+   * How long an annotated queue may be reused.
+   *
+   * This has to outlast the panel's poll interval or it buys nothing: the
+   * panel asks every eight seconds (`REFRESH_MS` in the ui half), and a TTL
+   * shorter than that expires before the next question arrives, so every poll
+   * pays the listing again.
+   *
+   * Measured, rather than reasoned about: a reader polling every eight seconds
+   * against this window gets a hit, a miss, a hit, a miss — `at` is set when an
+   * answer is computed and is not refreshed by a hit, so a ten-second window
+   * covers one poll and expires during the next. Over five polls that is three
+   * listings, not five. Half the listings is the honest size of this saving;
+   * the sixteen-fold drop from asking the host once instead of once per
+   * candidate is the part that actually fixed the latency.
+   *
+   * Ten against eight is a two-second margin, and that is thin on purpose: a
+   * wider window would serve `name-taken` verdicts for longer than the panel
+   * takes to show them, and the whole point of the re-check in `approve` is to
+   * keep that window from being trusted by a write. `readQueue` also refuses
+   * to cache an answer produced across a write, so the margin only matters for
+   * a queue that changed while nothing was looking.
+   *
+   * What makes a read cheap is not the verdicts, it is the disk listing, and
+   * the listing only has to happen when the queue changed. So the honest claim
+   * for this number is: it is not "a few seconds of slack changes nothing",
+   * it is the width of the window in which a written-then-changed verdict can
+   * be served from memory. `approve` re-verifies the one candidate it is about
+   * to act on precisely because that window exists.
+   */
+  const QUEUE_TTL_MS = 10000
+
+  /**
+   * The last annotated queue, and the revision it was computed at.
+   *
+   * Three conditions, and they are not redundant, they answer different
+   * questions:
+   *
+   * - `stamp` is the one that actually catches writes. It is a stat of the
+   *   candidate file, so it sees every writer: this store, a second host
+   *   process, a hand edit, a test that seeds the file. One stat costs a
+   *   tenth of a millisecond, which is nothing next to the listing it
+   *   protects.
+   * - `revision` is the fast path for our own writes. It is a counter, so it
+   *   costs nothing to compare, and it fires even in the window where a write
+   *   lands with the same size and a modification time the filesystem has not
+   *   yet rounded. It is the weaker of the two today — mutation testing
+   *   confirmed that removing it alone leaves every test green, because the
+   *   stat was already catching the case — but it is the only guard that does
+   *   not depend on the filesystem's timestamp resolution.
+   * - the clock covers the case where nothing wrote but the verdicts aged: a
+   *   candidate crosses its TTL while somebody is looking at the dialog.
+   *
+   * @type {{value: Array<object> | undefined, at: number, revision: number, stamp: string | undefined}}
+   */
+  const queueCache = { value: undefined, at: 0, revision: -1, stamp: undefined }
+
+  /**
+   * Identify the candidate file without reading it.
+   *
+   * @returns {Promise<string>} size and modification time, or "missing".
+   */
+  async function candidatesStamp() {
+    try {
+      const info = await stat(store.candidatesPath)
+      return `${info.size}:${info.mtimeMs}`
+    } catch {
+      return 'missing'
+    }
+  }
+
+  /** @type {Promise<Array<object>> | undefined} the read currently in flight. */
+  let queueInflight
 
   /**
    * Re-evaluate the whole candidate queue and persist any verdict changes.
    *
    * Runs on every read rather than on a timer: recomputing is idempotent and
    * needs no scheduler, and a queue that is only swept periodically spends most
-   * of its life lying about which entries are still approvable.
+   * of its life lying about which entries are still approvable. What made that
+   * expensive was not the recomputation but the disk listing behind it, so the
+   * annotation stays and only its answer is reused.
+   *
+   * Concurrent callers share one read: the panel route, the badge and the
+   * dialog all ask for the same queue within a few hundred milliseconds of
+   * each other, and queuing three identical reads behind the mutation lock
+   * made the second and third wait for work the first had already done. The
+   * returned array is shared and must be treated as read-only; every caller
+   * either maps it or filters it.
    *
    * @returns {Promise<Array<object>>} the annotated queue.
    */
   async function loadQueue() {
+    const cached = queueCache.value
+    if (
+      cached !== undefined &&
+      queueCache.revision === store.candidatesRevision &&
+      Date.now() - queueCache.at < QUEUE_TTL_MS &&
+      queueCache.stamp === (await candidatesStamp())
+    ) {
+      return cached
+    }
+    if (queueInflight !== undefined) return queueInflight
+    queueInflight = readQueue().finally(() => {
+      queueInflight = undefined
+    })
+    return queueInflight
+  }
+
+  /**
+   * Read, annotate and persist the queue once.
+   *
+   * Split out of {@link loadQueue} so the cache and the in-flight promise can
+   * be cleared in one place regardless of how this fails.
+   *
+   * @returns {Promise<Array<object>>} the annotated queue.
+   */
+  async function readQueue() {
+    // The revision is captured before the read, not after. A write that lands
+    // while this is running bumps the counter, so the answer about to be
+    // cached is already known to be one revision old and will be re-read
+    // rather than trusted.
+    const revision = store.candidatesRevision
+    const stamp = await candidatesStamp()
     // Annotate inside the mutation lock: the verdicts are derived from the
     // queue itself, so computing them outside and then writing would overwrite
     // a candidate another session appended in between.
-    return store.mutateCandidates(async (raw) => {
+    const annotatedQueue = await store.mutateCandidates(async (raw) => {
       const annotated = await annotateQueue({
         candidates: raw,
         options: {
           now: new Date(),
           ttlDays: config.candidateTtlDays,
           lookup: probeSkill,
-          sessionExists: config.verifyCandidateSource ? sessionExists : undefined
+          sessionExists: config.verifyCandidateSource ? sessionExists : undefined,
+          // One listing for the whole queue. `sessionExists` is still handed
+          // over, but only as the fallback for a read where the listing itself
+          // failed: once `liveSessions` exists the set wins for every row, so
+          // this is a whole-queue fallback, not a per-row one.
+          listSessions: config.verifyCandidateSource ? listSessionsOnce : undefined
         }
       })
       return {
@@ -349,6 +518,16 @@ export function apply(ctx, config) {
         result: annotated.candidates
       }
     })
+    // Only cached when nothing wrote underneath it: a mutation inside this
+    // read bumps the counter, which means the verdicts were computed against
+    // content that may already have been replaced.
+    if (store.candidatesRevision === revision && (await candidatesStamp()) === stamp) {
+      queueCache.value = annotatedQueue
+      queueCache.at = Date.now()
+      queueCache.revision = revision
+      queueCache.stamp = stamp
+    }
+    return annotatedQueue
   }
 
   /**
@@ -1278,6 +1457,37 @@ export function apply(ctx, config) {
       return { ok: false, error: `this candidate is ${describeStale(candidate.stale)}; regenerate it before approving` }
     }
 
+    // The verdict above came from `loadQueue`, which may have been served from
+    // the cache a moment ago. That is fine for drawing a dialog and not fine
+    // for writing a file: two things can change without touching
+    // `candidates.json` — the session can disappear, and a skill can appear
+    // under this name in the catalog — and both of them make this approval
+    // unsafe. So one candidate gets one fresh probe right before it acts. It
+    // costs a single listing per approval, which nobody can feel, and it is
+    // the only place where the cost of being wrong is a file.
+    //
+    // A probe that throws is not an answer, and here an unanswered question is
+    // a refusal: `probeSkill` throws for every read failure other than "absent",
+    // precisely so this catch can turn an unreadable catalog into "could not
+    // verify" instead of into a green light over a file that may be there.
+    let fresh
+    try {
+      fresh = await evaluateStaleness(candidate, {
+        now: new Date(),
+        ttlDays: config.candidateTtlDays,
+        lookup: probeSkill,
+        sessionExists: config.verifyCandidateSource ? sessionExists : undefined
+      })
+    } catch (error) {
+      return {
+        ok: false,
+        error: `could not verify "${candidate.name}" before writing it: ${error?.message ?? error}`
+      }
+    }
+    if (fresh !== undefined) {
+      return { ok: false, error: `this candidate is ${describeStale(fresh)}; regenerate it before approving` }
+    }
+
     if (config.approvalMode === 'confirm') {
       // Staging must report whether it actually staged something: claiming
       // success for a candidate that is no longer in the queue leaves the user
@@ -1470,7 +1680,8 @@ export function apply(ctx, config) {
           now: new Date(),
           ttlDays: config.candidateTtlDays,
           lookup: probeSkill,
-          sessionExists: config.verifyCandidateSource ? sessionExists : undefined
+          sessionExists: config.verifyCandidateSource ? sessionExists : undefined,
+          listSessions: config.verifyCandidateSource ? listSessionsOnce : undefined
         }
       })
       return {
@@ -1656,9 +1867,10 @@ export function apply(ctx, config) {
   // evidence gate and the digest check, and none of them would survive being
   // re-derived.
   //
-  // Nothing here decides anything. Each call re-reads the queue from disk,
-  // because a slash command, another session and the panel all write the same
-  // file and a cached answer would be wrong the moment any of them ran.
+  // Nothing here decides anything. Each call goes through `loadQueue`, which
+  // recomputes the verdicts whenever the candidate file changed — a slash
+  // command, another session and the panel all write that same file, and the
+  // cache is keyed on seeing those writes, not on the clock alone.
   ctx.provide('skillEvolve', {
     /**
      * The queue, annotated, for the panel's candidate dialog.
@@ -1671,6 +1883,10 @@ export function apply(ctx, config) {
      */
     async listCandidates() {
       const queue = await loadQueue()
+      // The rows are handed out for reading, but the queue array they come from
+      // is now shared with the cache. A caller that pushes onto `evidence` would
+      // be editing the cached row, not a copy, and every later reader would see
+      // the edit. Copy the two mutable members; the strings cannot be corrupted.
       return queue.map((candidate) => ({
         id: candidate.id,
         name: candidate.name,
@@ -1678,8 +1894,8 @@ export function apply(ctx, config) {
         kind: candidate.kind,
         whenToUse: candidate.whenToUse,
         body: candidate.body,
-        evidence: candidate.evidence,
-        stale: candidate.stale
+        evidence: Array.isArray(candidate.evidence) ? candidate.evidence.slice() : candidate.evidence,
+        stale: candidate.stale === undefined || candidate.stale === null ? candidate.stale : { ...candidate.stale }
       }))
     },
 

@@ -54,6 +54,23 @@ window.__ModuleLoader__.load({
     const REFRESH_MS = 8000
 
     /**
+     * How long one panel request may stay out before it is abandoned.
+     *
+     * The refresh is skipped while a request is in flight, so a request that
+     * never settles would stop the column from ever updating again — and the
+     * things that make a request hang (a half-open socket, a proxy that swallowed
+     * the answer, a host that is wedged) all leave `fetch` pending forever rather
+     * than rejecting. This is the ceiling that turns "in flight" back into "over".
+     *
+     * Generous compared with a healthy answer (the route is served from memory and
+     * a cold one measured under a second after the queue cache landed) and short
+     * compared with what a person would call stuck. Deliberately shorter than the
+     * summariser's own 20-second ceiling, because this one has to give up before
+     * the person concludes the column is broken.
+     */
+    const PANEL_TIMEOUT_MS = 15000
+
+    /**
      * How wide the monitor column starts out.
      *
      * The design width: 300px is the narrowest column that holds a file path and
@@ -238,6 +255,45 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * A comparable string for a `/panel` payload, or null when it is not worth
+     * comparing.
+     *
+     * The point is to notice that a poll changed nothing, so the column can keep
+     * the object it is already rendering. React compares state by identity, and
+     * every answer used to be a fresh object even when its contents were
+     * byte-identical -- so the whole column re-rendered every eight seconds to
+     * produce the same output.
+     *
+     * `JSON.stringify` is not a canonical form: two objects with the same pairs in
+     * a different order produce different strings. That is accepted rather than
+     * fought. It only ever errs towards rendering, never towards skipping a
+     * change, and the payloads compared here are built by one function on the
+     * server, so their key order is stable in practice.
+     *
+     * @param {any} data - the payload.
+     * @returns {string | null} the signature, or null if it could not be built.
+     */
+    function panelSignature(data) {
+      try {
+        // The payload is not the only thing on screen. `formatAgo` turns an
+        // absolute `at` into "3 分钟前", and that string is derived from the clock
+        // at render time -- the payload itself never changes as the minutes pass.
+        // Left out of the signature, an unchanged poll would keep the object
+        // identity and the label would freeze at whatever it read the first time,
+        // which is the opposite of what the label is for.
+        //
+        // So the rendered label goes into the signature: it changes exactly when
+        // the text on screen would change, and not more often.
+        return JSON.stringify(data) + "\u0000" + formatAgo(data?.summary?.at)
+      } catch {
+        // A payload with a cycle or a BigInt cannot be serialised. Returning null
+        // means "always render", which is the behaviour before this existed --
+        // the safe answer, not an optimisation that silently stops updating.
+        return null
+      }
+    }
+
+    /**
      * Format a tokens-per-second reading for the badge.
      *
      * Two significant-ish digits under ten, whole numbers above it, matching
@@ -282,6 +338,7 @@ window.__ModuleLoader__.load({
       if (raw.startsWith("no model service")) return { text: "宿主没有可用的模型服务", detail }
       if (raw.startsWith("no model route")) return { text: "没有可用的模型路由，请先在设置里指定摘要模型", detail }
       if (raw.startsWith("the summary call timed out")) return { text: "摘要生成超时，稍后会自动重试", detail }
+      if (raw.startsWith("the summary call was cancelled")) return { text: "摘要生成已取消", detail }
       if (raw.startsWith("the model returned nothing")) return { text: "模型没有返回内容", detail }
       if (raw.startsWith("the summary call failed")) return { text: "摘要生成失败", detail }
       if (raw.startsWith("the model call failed")) return { text: "摘要生成失败", detail }
@@ -2684,6 +2741,27 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       const [settingsEpoch, setSettingsEpoch] = React.useState(0)
       const panelRequest = React.useRef(0)
       const configRequest = React.useRef(0)
+      // The ticket of the `/panel` request that is out right now, or null. A ref,
+      // not state: it must be set the instant the request starts, not one render
+      // later, or two refreshes in the same tick both read "idle" and both go out.
+      //
+      // Any request in flight blocks a new one, whatever session it belongs to.
+      // A session switch is not rescued by this guard but by the reset effect
+      // below, which clears the ref on every session change -- so the new
+      // session's fetch goes out immediately instead of waiting for the
+      // abandoned one. The ticket then keeps that abandoned request from
+      // clearing the marker of whoever replaced it.
+      const panelBusyRequest = React.useRef(null)
+      // Set when a refresh arrives while one is already out. The answer in flight
+      // was computed before this request existed, so waiting for it would leave the
+      // panel one whole cycle behind. The interval tick does not care -- it is
+      // asking the same question again -- but an approval that just returned and a
+      // refresh the reader clicked do: for those the answer is from before the thing
+      // they just did, so it has to be asked for again.
+      const panelRefreshWanted = React.useRef(false)
+      // The signature of the payload currently on screen, so an unchanged answer
+      // can skip the render entirely. Null means "no comparable answer yet".
+      const panelSignatureRef = React.useRef(null)
 
       const sessionId = bridge.sessionId
       const closeSettings = React.useCallback(() => setSettingsOpen(false), [])
@@ -2697,9 +2775,40 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
        * than a visible error.
        *
        * @param {boolean} quiet - suppress the loading state on a background refresh.
+       * @param {boolean} [mustAsk] - re-ask if a request is already out. For a call
+       *   made in response to something the reader just did, the answer in flight
+       *   predates it, so dropping the call shows the state before their action.
+       *   A periodic tick can be dropped: it asks the same question again.
        */
       const load = React.useCallback(
-        async (quiet) => {
+        async (quiet, mustAsk) => {
+          // One request at a time. The refresh interval is eight seconds and a
+          // cold answer used to take longer than that, so the timer could start a
+          // second request while the first was still out; each request holds the
+          // server's mutation lock for part of its life, which turned three
+          // overlapping refreshes into three sequential ones.
+          //
+          // The marker holds the ticket of the request that owns it, not the
+          // session name. A name cannot tell two requests for the same session
+          // apart: leave A for B and come back, and the abandoned A request's
+          // finally sees its own name again and unlocks the new A request while
+          // that one is still out -- exactly the stacking this guard prevents.
+          // The ticket is unique per request, so it can only ever unlock itself.
+          if (panelBusyRequest.current !== null) {
+            // An interval tick can be dropped outright: it asks the same question
+            // the request already out is asking, and the next tick is eight seconds
+            // away. A call made in response to something the reader did cannot --
+            // it follows an approval that has already returned, a saved setting or a
+            // click on the button, and the answer in flight predates all of them.
+            // Marking it wanted re-asks the moment the request out finishes.
+            //
+            // The distinction is `mustAsk`, not `quiet`: quiet only decides whether
+            // to show the loading state, and the approval callback is quiet because
+            // the panel is already on screen -- which is exactly the call that must
+            // not be dropped.
+            if (mustAsk === true) panelRefreshWanted.current = true
+            return
+          }
           const request = ++panelRequest.current
           if (sessionId === "") {
             setState({ status: "no-session" })
@@ -2711,14 +2820,74 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // the open settings dialog went with it.
           if (quiet !== true) setState((prior) => (prior.status === "ready" ? prior : { ...prior, status: "loading" }))
           try {
-            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`)
+            // Claimed inside the try, not before it: the marker is what silences
+            // every later poll, so anything that threw while it was set and before
+            // the finally would freeze the column for good. The finally is the only
+            // place the guard needs to hold, so the assignment lives inside the
+            // same block the finally covers.
+            panelBusyRequest.current = request
+            // The timeout is not belt-and-braces: `fetch` has no default one, so
+            // without this a request against a socket that never speaks keeps the
+            // busy marker held and the column frozen. `AbortController` also makes
+            // the abandonment observable — the `catch` below turns it into the same
+            // visible error any other failure produces.
+            const flight = new AbortController()
+            const deadline = setTimeout(() => flight.abort(), PANEL_TIMEOUT_MS)
+            let data
+            try {
+              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`, { signal: flight.signal })
+            } finally {
+              clearTimeout(deadline)
+            }
             if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
+            // An unchanged answer keeps the object it already had. React compares
+            // state by identity, so a fresh object with identical contents
+            // re-renders the whole column: one hundred and fifty `jsx` calls every
+            // eight seconds to produce exactly the same output. Most polls land on
+            // an unchanged session -- the queue, the skill list and the file sizes
+            // only move when something happens -- so that was the common case, not
+            // the exceptional one.
+            //
+            // The signature is the payload serialised. It costs a stringify of the
+            // answer (the large field is the file list, bounded by MAX_PATHS) and
+            // saves a full render of it, which is the cheaper side of that trade by
+            // a wide margin.
+            const signature = panelSignature(data)
+            if (signature !== null && signature === panelSignatureRef.current) {
+              // Nothing on screen changes, but a failed state has to clear: an
+              // error that has since healed must not stay pinned above a fresh
+              // answer. Setting the same empty string is a no-op for React, so
+              // this costs nothing on the ordinary path.
+              setError("")
+              return
+            }
+            panelSignatureRef.current = signature
             setState({ status: "ready", data })
             setError("")
           } catch (failure) {
             if (request !== panelRequest.current || sessionId !== bridge.sessionId) return
+            // A failed poll invalidates the signature: the next success must be
+            // rendered even if it happens to match the last good payload, because
+            // the error banner in between is what changed.
+            panelSignatureRef.current = null
             setState((prior) => ({ status: "ready", data: prior.data }))
             setError(String(failure?.message ?? failure))
+          } finally {
+            // Only clear the marker this call set. A response for a session that
+            // has since been left must not unlock the session now on screen while
+            // its own request is still out. Comparing the ticket rather than the
+            // session name is what makes that true even for two requests on the
+            // same session.
+            if (panelBusyRequest.current === request) panelBusyRequest.current = null
+            // A refresh that arrived while this one was out now gets the answer it
+            // was asking for. Dropped instead, an approval would leave the panel
+            // showing the queue from before it and a click would do nothing at all
+            // until the next tick. The marker is already clear, so this call is the
+            // one that owns the next ticket.
+            if (panelRefreshWanted.current) {
+              panelRefreshWanted.current = false
+              load(false)
+            }
           }
         },
         [sessionId],
@@ -2741,6 +2910,19 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         setHoverTurn("")
         setPinnedTurn("")
         setClippedTurn("")
+        // The payload signature belongs to one session as much as the turn tags
+        // do. Two sessions whose cards happen to render identically are entirely
+        // ordinary -- a fresh conversation and an idle one look the same -- so
+        // keeping the signature across a switch would let the new session's first
+        // answer be judged "unchanged" and skipped, leaving the column on the
+        // loading state it just entered.
+        panelSignatureRef.current = null
+        // Clearing the marker here is what lets a session switch proceed while a
+        // request for the previous session is still out -- see the guard above.
+        panelBusyRequest.current = null
+        // A refresh wanted for the session being left must not fire against the
+        // one being entered.
+        panelRefreshWanted.current = false
       }, [sessionId])
 
       React.useEffect(() => {
@@ -2749,8 +2931,32 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // turn ends and when a file on disk is touched, and neither of those is
         // something this bundle can be told about: it renders from whatever
         // `/panel` answers, and asks again every few seconds.
-        const timer = setInterval(() => load(true), REFRESH_MS)
-        return () => clearInterval(timer)
+        //
+        // Nothing is asked while the page is hidden. A backgrounded window is not
+        // reading the column, and this plugin's honest cost is a full queue read
+        // per answer -- paying that every eight seconds for a tab nobody is
+        // looking at is the kind of quiet expense that shows up as battery drain
+        // and as a host that never goes idle. Coming back asks once, immediately,
+        // because the numbers are stale by then.
+        const timer = setInterval(() => {
+          if (typeof document !== 'undefined' && document.hidden === true) return
+          load(true)
+        }, REFRESH_MS)
+        const onVisible = () => {
+          if (typeof document !== 'undefined' && document.hidden === true) return
+          // Coming back is a reader action, and the numbers on screen are from
+          // before the tab went away. Not droppable.
+          load(true, true)
+        }
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
+          document.addEventListener('visibilitychange', onVisible)
+        }
+        return () => {
+          clearInterval(timer)
+          if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
+            document.removeEventListener('visibilitychange', onVisible)
+          }
+        }
       }, [load, sessionId])
 
       React.useEffect(() => {
@@ -2792,7 +2998,9 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           if (saved?.ok === false) throw new Error(String(saved.reason ?? saved.error ?? 'the setting was refused'))
           setConfig(saved && typeof saved === "object" ? saved : { ...prior, ...patch })
           setError("")
-          load(true)
+          // A setting just changed, so the answer in flight describes the panel as
+          // it was configured before -- not droppable.
+          load(true, true)
         } catch (failure) {
           if (request !== configRequest.current) return
           setConfig(prior)
@@ -3305,7 +3513,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
               // aims at.
               jsx(Checklist, {
                 sessionId,
-                onDecided: () => load(true),
+                // Quiet (no loading state, the panel is on screen) but not
+                // droppable: the approval has already returned, so an answer in
+                // flight predates it.
+                onDecided: () => load(true, true),
                 children: jsxs('button', {
                   className: 'dsse-queue',
                   type: 'button',
@@ -3326,7 +3537,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                 type: 'button',
                 'aria-label': '刷新面板',
                 title: '刷新面板',
-                onClick: () => load(false),
+                onClick: () => load(false, true),
                 children: jsx(Icon, { name: 'refresh' }),
               }),
               jsx('button', {

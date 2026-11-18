@@ -100,6 +100,7 @@ export function candidateAgeInDays(createdAt, now) {
  * @param {number} options.ttlDays - days before a proposal expires.
  * @param {(name: string) => Promise<{exists: boolean, owned?: boolean, body?: string}>} options.lookup - catalog probe.
  * @param {(sessionId: string) => Promise<boolean>} [options.sessionExists] - source probe; omitted means "cannot check".
+ * @param {Set<string>} [options.liveSessions] - the ids known to exist, already resolved. Takes precedence over `sessionExists`, so a queue-wide read costs one listing instead of one per candidate.
  * @returns {Promise<{reason: string, detail: string, at: string} | undefined>} the verdict.
  */
 export async function evaluateStaleness(candidate, options) {
@@ -117,17 +118,26 @@ export async function evaluateStaleness(candidate, options) {
     }
   }
 
-  if (options.sessionExists !== undefined && typeof candidate.sessionId === 'string' && candidate.sessionId.length > 0) {
-    let live = true
-    try {
-      live = await options.sessionExists(candidate.sessionId)
-    } catch {
-      // A probe that cannot answer must not condemn a candidate: the session
-      // may well exist and simply not be listed right now.
-      live = true
-    }
-    if (!live) {
-      return { reason: 'source-missing', detail: `session ${candidate.sessionId} is no longer available`, at }
+  if (typeof candidate.sessionId === 'string' && candidate.sessionId.length > 0) {
+    // A pre-resolved set wins: the caller listed the sessions once for the
+    // whole queue, and asking again per candidate is what made a sixteen-row
+    // read take sixteen full scans.
+    if (options.liveSessions instanceof Set) {
+      if (options.liveSessions.has(candidate.sessionId) === false) {
+        return { reason: 'source-missing', detail: `session ${candidate.sessionId} is no longer available`, at }
+      }
+    } else if (options.sessionExists !== undefined) {
+      let live = true
+      try {
+        live = await options.sessionExists(candidate.sessionId)
+      } catch {
+        // A probe that cannot answer must not condemn a candidate: the session
+        // may well exist and simply not be listed right now.
+        live = true
+      }
+      if (!live) {
+        return { reason: 'source-missing', detail: `session ${candidate.sessionId} is no longer available`, at }
+      }
     }
   }
 
@@ -160,6 +170,41 @@ export async function evaluateStaleness(candidate, options) {
 }
 
 /**
+ * Resolve the source probe once for the whole queue.
+ *
+ * The queue-wide read used to call `listSessions` once per candidate, and each
+ * call walks every persisted session on disk: sixteen rows meant sixteen full
+ * scans of a directory that had grown to megabytes, which is why opening the
+ * panel took ten seconds. The ids are the same for every row, so listing them
+ * once is not a cache, it is simply not asking the same question sixteen times.
+ *
+ * A listing that fails leaves the probe in place, so every row still falls back
+ * to the per-candidate path and an unreadable index still cannot condemn one.
+ *
+ * @param {Array<object>} candidates - the rows about to be judged.
+ * @param {object} options - the caller's options.
+ * @returns {Promise<object>} the options to judge with.
+ */
+async function withLiveSessions(candidates, options) {
+  if (typeof options.listSessions !== 'function') return options
+  const wanted = candidates.some((candidate) => typeof candidate.sessionId === 'string' && candidate.sessionId.length > 0)
+  if (wanted === false) return options
+  let records
+  try {
+    records = await options.listSessions()
+  } catch {
+    return options
+  }
+  if (!Array.isArray(records)) return options
+  const ids = new Set()
+  for (const record of records) {
+    const id = record?.header?.id
+    if (typeof id === 'string' && id.length > 0) ids.add(id)
+  }
+  return { ...options, liveSessions: ids }
+}
+
+/**
  * Re-evaluate a whole queue and persist the verdicts.
  *
  * The previous verdict is passed through when it still holds so the recorded
@@ -168,13 +213,27 @@ export async function evaluateStaleness(candidate, options) {
  * @param {object} input - batch input.
  * @param {Array<object>} input.candidates - the queue.
  * @param {object} input.options - the same options `evaluateStaleness` takes.
+ * @param {(() => Promise<Array<{header?: {id?: string}}>>)} [input.options.listSessions] - when given, the queue is annotated against one listing rather than one probe per row. A listing that throws, or that answers with something that is not a list, is ignored, leaving every row judged on its other evidence.
  * @returns {Promise<{candidates: Array<object>, changed: boolean}>} the annotated queue.
  */
 export async function annotateQueue(input) {
   let changed = false
   const candidates = []
+  const options = await withLiveSessions(input.candidates, input.options)
   for (const candidate of input.candidates) {
-    const verdict = await evaluateStaleness(candidate, input.options)
+    // A catalog probe that fails for a reason other than "not there" (a
+    // permission error, a file mid-rewrite, frontmatter that does not parse)
+    // is not evidence about this candidate either way. Drawing the queue must
+    // stay possible while the catalog is momentarily unreadable, so a throw
+    // here leaves the row with whatever verdict it already had. The one place
+    // that must not shrug is `approve`, which catches this same rejection and
+    // refuses to write.
+    let verdict
+    try {
+      verdict = await evaluateStaleness(candidate, options)
+    } catch {
+      verdict = candidate.stale
+    }
     const previous = candidate.stale
     const same = verdict === undefined
       ? previous === undefined

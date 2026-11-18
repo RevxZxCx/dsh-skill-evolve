@@ -18,7 +18,7 @@
  */
 
 import { join } from 'node:path'
-import { readFile } from 'node:fs/promises'
+import { stat as statFile } from 'node:fs/promises'
 
 /** Largest request body accepted, in bytes. */
 /**
@@ -679,11 +679,35 @@ function cannotBeAPath(path) {
  * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved' | 'folder', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
  */
 
+// Mirrors `MAX_PATHS` in session-state.js on purpose: the list that comes from
+// session state is already this long, so the fallback should not be allowed to
+// ask about more than the primary source would.
+const MAX_TOUCHED_FILES = 200
+
 async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, readStat, now }) {
   const clock = Number.isFinite(now) ? now : Date.now()
   const seen = new Set()
   const out = []
+  // One `stat` per path, awaited in sequence, was measured at 17.5ms for two
+  // hundred paths against 2.6ms for the same set issued together. This runs
+  // inside a request the panel repeats every few seconds, so the difference
+  // lands on every refresh.
+  //
+  // Concurrency changes *when* the filesystem is asked, not *what* is reported:
+  // the loop below only collects, the results are assembled in the original
+  // order afterwards, and every skip condition keeps its meaning.
+  //
+  // The cap is here, not only upstream, because the two callers disagree about
+  // their own bounds. The session-state list is already trimmed to `MAX_PATHS`
+  // on the way in, but the fallback is the transcript's per-turn path list,
+  // which has no bound at all -- a command that writes many files appends every
+  // one of them. Issuing everything at once over that list would turn a large
+  // turn into a large burst of concurrent `stat` calls on the same thread pool
+  // the rest of the host is using. Trimming to the same number the other source
+  // already uses keeps the two callers equivalent.
+  const pending = []
   for (const raw of paths) {
+    if (pending.length >= MAX_TOUCHED_FILES) break
     // Two shapes arrive here: the objects `pathsSeen` returns, and the bare
     // strings `previous.paths` holds. Accepting both keeps the fallback path
     // working without a second function, and a bare string means exactly what an
@@ -732,13 +756,28 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       stale: Number.isFinite(recordedAt) && Number.isFinite(clock) ? clock - recordedAt >= STALE_AFTER_MS : false,
       source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,
     }
+    pending.push({ path, absolute, isAbsolute, base })
+  }
+  // Phase two: ask about every path at once, then put the answers back in the
+  // order the loop found them. `Promise.all` preserves index order regardless of
+  // which `stat` finishes first, so the card's rows are identical to the ones the
+  // sequential version produced.
+  //
+  // A path that must be withheld answers `null` rather than skipping a push; the
+  // filter below drops it. Returning null keeps the "did not yield a row" cases
+  // sitting next to their reasons, which is where they were before.
+  const rows = await Promise.all(pending.map(async (entry) => {
+    const { path, absolute, isAbsolute, base } = entry
     let info
     try {
       if (typeof readStat === 'function') {
         info = await readStat(absolute)
       } else {
-        const { stat } = await import('node:fs/promises')
-        info = await stat(absolute)
+        // Resolved once at module load, not once per path. The dynamic import sat
+        // inside this loop and ran two hundred times per refresh while the module
+        // cache made it cheap; the cost was never the point — a filesystem call in
+        // a hot loop should not also be a module lookup.
+        info = await statFile(absolute)
       }
     } catch (error) {
       // Three answers, not two. Not there, not readable, and "this path was
@@ -757,10 +796,9 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       // This sits here, after `stat`, and not before it: a real file may legitimately be
       // called `a*b.txt`, `stat` would have found it, and refusing up front would hide a
       // file the session had written -- the same lie in the opposite direction.
-      if (gone === true && cannotBeAPath(path) === true) continue
+      if (gone === true && cannotBeAPath(path) === true) return null
       const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'
-      out.push({ ...base, status, bytes: null, mtimeMs: null })
-      continue
+      return { ...base, status, bytes: null, mtimeMs: null }
     }
     // Something is at this path and it is not a file. The awkward part is that
     // this used to say `missing`, and `missing` is a claim about the past: "what
@@ -775,10 +813,12 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
     // neither of them can be reported honestly. So: a fifth status, which says
     // exactly what was found.
     if (!info.isFile()) {
-      out.push({ ...base, status: 'folder', bytes: null, mtimeMs: null })
-      continue
+      return { ...base, status: 'folder', bytes: null, mtimeMs: null }
     }
-    out.push({ ...base, status: 'available', bytes: info.size, mtimeMs: info.mtimeMs })
+    return { ...base, status: 'available', bytes: info.size, mtimeMs: info.mtimeMs }
+  }))
+  for (const row of rows) {
+    if (row !== null) out.push(row)
   }
   return out
 }
@@ -935,6 +975,10 @@ function describeMcp(seen, recency) {
  * @param {(name: string, id?: string) => Promise<object>} [deps.discardCandidate] - discard one candidate.
  *   Same id-then-name rule as `approveCandidate`.
  * @param {any} [deps.sessionState] - the persisted per-session state, read when memory has nothing.
+ * @param {(req: import('node:http').IncomingMessage) => number | undefined} [deps.admission] -
+ *   the host's own answer for "may this request be served": an HTTP status to
+ *   refuse with, or `undefined` to allow. Absent when the host has no connection
+ *   service, in which case the origin check above is the whole story.
  * @param {(message: string) => void} [deps.log] - diagnostics.
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>} the handler.
  */
@@ -950,6 +994,34 @@ function createPanelApi(deps) {
     if (rejected !== undefined) {
       json(res, 403, { ok: false, code: 'error.origin.forbidden', error: rejected })
       return
+    }
+    // The host's admission, not this plugin's opinion.
+    //
+    // `checkOrigin` above answers a different question: "did this arrive from a
+    // page that is allowed to talk to this server". It says nothing about who is
+    // asking, and a loopback listener is reachable by every process and every
+    // user on the machine. Everything below it serves the person's own
+    // conversation, so the same admission the host's `/api` route applies has to
+    // apply here too — otherwise the panel is a hole in an otherwise closed door.
+    //
+    // `admission` is optional because a host without a connection service cannot
+    // answer. That case stays open rather than shutting the panel off for
+    // everybody: the plugin cannot invent an identity check it was not given.
+    // A host that *can* answer and then fails is refused instead — a route that
+    // serves private conversation must not fall open because the question was
+    // hard.
+    if (typeof deps.admission === 'function') {
+      let refusal
+      try {
+        refusal = deps.admission(req)
+      } catch (error) {
+        deps.log?.(`panel: admission check failed, refusing: ${error?.message ?? error}`)
+        refusal = 401
+      }
+      if (typeof refusal === 'number') {
+        json(res, refusal, { ok: false, code: 'error.auth.required', error: 'this route needs the host to vouch for the request' })
+        return
+      }
     }
     const headOnly = req.method === 'HEAD'
     if (req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'POST') {

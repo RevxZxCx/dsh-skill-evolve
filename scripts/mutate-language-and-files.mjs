@@ -211,8 +211,8 @@ const mutations = [
     file: client,
     label: 'the panel asks for interface language again',
     suites: ['test/client.test.mjs'],
-    from: '            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`)',
-    to: '            const data = await call(`/panel?agent=${encodeURIComponent(sessionId)}&lang=zh-CN`)',
+    from: '              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}`, { signal: flight.signal })',
+    to: '              data = await call(`/panel?agent=${encodeURIComponent(sessionId)}&lang=zh-CN`, { signal: flight.signal })',
     why: 'the summary is written in the language of the conversation; a second source of truth for that question is the bug the removal fixed',
   },
   // ---------------------------------------------------------------------
@@ -330,8 +330,8 @@ const mutations = [
     // replaces passed with it in place, so they were paying for a run and
     // covering nothing.
     suites: ['test/api.test.mjs'],
-    from: "      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'\n      // A record can outlive the parser that wrote it. When the filesystem also says\n      // there is nothing there and the spelling could not be a path anyway, the record\n      // is a mis-parse rather than a deleted file -- drawing it would say \"you deleted\n      // this\" about something that was never a name. The state file is append-only, so\n      // the record survives for whoever works out later what the command meant; only\n      // the row is withheld.\n      //\n      // This sits here, after `stat`, and not before it: a real file may legitimately be\n      // called `a*b.txt`, `stat` would have found it, and refusing up front would hide a\n      // file the session had written -- the same lie in the opposite direction.\n      if (gone === true && cannotBeAPath(path) === true) continue\n      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'",
-    to: '      continue',
+    from: "      const gone = error?.code === 'ENOENT' || error?.code === 'ENOTDIR'\n      // A record can outlive the parser that wrote it. When the filesystem also says\n      // there is nothing there and the spelling could not be a path anyway, the record\n      // is a mis-parse rather than a deleted file -- drawing it would say \"you deleted\n      // this\" about something that was never a name. The state file is append-only, so\n      // the record survives for whoever works out later what the command meant; only\n      // the row is withheld.\n      //\n      // This sits here, after `stat`, and not before it: a real file may legitimately be\n      // called `a*b.txt`, `stat` would have found it, and refusing up front would hide a\n      // file the session had written -- the same lie in the opposite direction.\n      if (gone === true && cannotBeAPath(path) === true) return null\n      const status = gone === false ? 'invalid' : isAbsolute === true ? 'missing' : 'unresolved'",
+    to: '      return null',
     why: 'dropping the row is the old behaviour that made "edited then deleted" and "never touched" the same sentence; the whole of S1 exists to tell them apart',
   },
   {
@@ -1494,10 +1494,9 @@ const mutations = [
     file: api,
     label: 'a directory is called deleted again',
     suites: ['test/api.test.mjs'],
-    from: "      out.push({ ...base, status: 'folder', bytes: null, mtimeMs: null })",
-    to: "      out.push({ ...base, status: 'missing', bytes: null, mtimeMs: null })",
+    from: "      return { ...base, status: 'folder', bytes: null, mtimeMs: null }",
+    to: "      return { ...base, status: 'missing', bytes: null, mtimeMs: null }",
     why: 'this is the bug the end-to-end run found: a real session listed its own working directory with a line through it, because a folder standing where a file was claimed was reported as a deletion',
-  
   },
   {
     file: client,
@@ -1694,7 +1693,7 @@ const mutations = [
     file: api,
     suites: ['test/api.test.mjs'],
     label: "a record spelled like a redirection is drawn as a deleted file",
-    from: "      if (gone === true && cannotBeAPath(path) === true) continue",
+    from: "      if (gone === true && cannotBeAPath(path) === true) return null",
     to: "",
     why: "The state file keeps rows the parser no longer produces. Counting with the same predicate this guard uses, the live state directory holds 20 such records in 12 spellings across 12 sessions (`&1`, `/dev/null)`, `2>\\dev\\null`, `--include=*.md`, `&1|head`). Without the refusal they come back as missing, which tells the reader they deleted a file whose name was never a name.",
   },
@@ -1711,7 +1710,7 @@ const mutations = [
     suites: ["test/api.test.mjs"],
     label: "the spelling is judged before the filesystem is asked",
     from: "    let info\n    try {",
-    to: "      if (cannotBeAPath(path) === true) continue\n    let info\n    try {",
+    to: "      if (cannotBeAPath(path) === true) return null\n    let info\n    try {",
     why: "Refusing before stat hides a file the session really wrote whenever its name merely looks like an operator. The injected-readStat assertion fails only under this reordering, so it is the one check standing between the narrow guard and a wide one.",
   },
   {

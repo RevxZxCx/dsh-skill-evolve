@@ -317,6 +317,277 @@ try {
   const directApprove = await directHost.commands.get('skill-capture').handler({ rawInput: 'direct-write', agent: directAgent })
   check('direct mode approves in one step', directApprove.kind === 'success' && directApprove.text.includes('wrote'), directApprove.text.slice(0, 200))
   check('direct mode writes the file immediately', await fileExists(join(skillsRoot, 'direct-write', 'SKILL.md')))
+
+  // ---------------------------------------------------------- queue caching --
+  // Reading the queue used to list every session once per candidate. A fresh
+  // plugin instance starts with a cold cache, so `listings` counts exactly the
+  // reads that reached the host.
+  let listings = 0
+  const cacheHost = fakeHost({ sessions: ['session-two'] })
+  const listSessions = cacheHost.ctx.sessionQuery.listSessions
+  cacheHost.ctx.sessionQuery.listSessions = async () => {
+    listings += 1
+    return listSessions()
+  }
+  apply(cacheHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true }))
+  const cacheAgent = fakeAgent('session-two', 'F:/project')
+  cacheHost.agents.set(cacheAgent.id, cacheAgent)
+  cacheAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+
+  for (const name of ['cache-a', 'cache-b', 'cache-c']) {
+    await cacheHost.tools.get('skill_candidate_submit').execute({
+      name, description: 'a candidate for the cache test', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+    }, { agent: cacheAgent })
+  }
+
+  const cacheList = cacheHost.tools.get('skill_candidate_list')
+  const quiet = listings
+  const readOne = await cacheList.execute({}, { agent: cacheAgent })
+  check('one read lists the sessions once, not once per candidate', listings - quiet === 1, `${listings - quiet} listing(s)`)
+  check('the read still returns every candidate', /cache-c/.test(readOne.text) && /cache-a/.test(readOne.text), String(readOne.text).slice(0, 200))
+
+  // The first read is allowed to miss the cache: it may have written verdicts,
+  // and an answer computed against content that then changed is not reusable.
+  // What matters is that a settled queue stops costing a listing per read.
+  await cacheList.execute({}, { agent: cacheAgent })
+  const settled = listings
+  await cacheList.execute({}, { agent: cacheAgent })
+  await cacheList.execute({}, { agent: cacheAgent })
+  check('a settled queue costs one listing, not one per read', listings === settled, `${listings - settled} extra listing(s)`)
+
+  // A candidate appended through the store invalidates immediately: the
+  // revision is compared, not a timestamp, so no read may lag behind a write.
+  const beforeWrite = listings
+  await cacheHost.tools.get('skill_candidate_submit').execute({
+    name: 'cache-d', description: 'appended after the cache filled', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: cacheAgent })
+  const afterWrite = await cacheList.execute({}, { agent: cacheAgent })
+  check('a write through the store invalidates the cached queue', listings > beforeWrite, 'no re-listing after a write')
+  check('the appended candidate is visible', /cache-d/.test(afterWrite.text), String(afterWrite.text).slice(0, 200))
+
+  // The one write path the revision cannot see: something outside this process
+  // edits the file. The stamp catches it without a full re-read of the queue.
+  const externalPath = join(root, 'plugin-data', 'skill-evolve', 'candidates.json')
+  const external = JSON.parse(await readFile(externalPath, 'utf8'))
+  external.push({
+    id: 'external-1', name: 'external-candidate', kind: 'create', description: 'appended by something else',
+    body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }],
+    sessionId: 'session-two', workspace: 'F:/project', createdAt: new Date().toISOString(), source: 'model'
+  })
+  await writeFile(externalPath, JSON.stringify(external, null, 2), 'utf8')
+  const afterExternal = await cacheList.execute({}, { agent: cacheAgent })
+  check('a queue edited underneath the cache is noticed', /external-candidate/.test(afterExternal.text), String(afterExternal.text).slice(0, 200))
+
+  // Three readers arriving together share one read. That is not an optimisation
+  // for its own sake: the panel route, the badge and the dialog all ask within
+  // a few hundred milliseconds, and without single-flight the second and third
+  // queue behind the mutation lock to repeat work the first already did.
+  //
+  // The cache is invalidated first on purpose. Three readers hitting a warm
+  // cache proves nothing about sharing — they would each be served from memory
+  // — so the state has to be a genuine miss for all three at once.
+  const racePath = join(root, 'plugin-data', 'skill-evolve', 'candidates.json')
+  const raced = JSON.parse(await readFile(racePath, 'utf8'))
+  raced.push({
+    id: 'race-1', name: 'race-candidate', kind: 'create', description: 'appended to force a miss',
+    body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }],
+    sessionId: 'session-two', workspace: 'F:/project', createdAt: new Date().toISOString(), source: 'model'
+  })
+  await writeFile(racePath, JSON.stringify(raced, null, 2), 'utf8')
+  const joined = listings
+  const concurrent = await Promise.all([
+    cacheList.execute({}, { agent: cacheAgent }),
+    cacheList.execute({}, { agent: cacheAgent }),
+    cacheList.execute({}, { agent: cacheAgent })
+  ])
+  // Exactly one, not "at most one". Zero means the invalidation above did not
+  // land and all three readers were served from the pre-write cache -- which is
+  // the failure this block was written to detect, and `<= 1` accepted it.
+  check('concurrent readers share one listing', listings - joined === 1, `${listings - joined} listing(s) for three readers`)
+  check('every concurrent reader gets an answer', concurrent.every((result) => typeof result?.text === 'string' && result.text.length > 0), JSON.stringify(concurrent.map((result) => typeof result?.text)))
+
+  // The rows come out of the cache now, so a consumer that edits what it was
+  // handed must not be editing the cache. The panel treats the rows it gets as
+  // its own and has no reason to copy before touching them.
+  //
+  // A row that is actually stale is planted first. Every earlier candidate in this
+  // queue is live, so the `stale` half of this check used to run against
+  // `handed[0].stale === undefined` and never executed at all -- replacing the
+  // `{ ...candidate.stale }` copy with the shared object left the whole block
+  // green, which was only visible in the failure JSON.
+  const stalePath = join(root, 'plugin-data', 'skill-evolve', 'candidates.json')
+  const withStale = JSON.parse(await readFile(stalePath, 'utf8'))
+  withStale.push({
+    id: 'stale-1', name: 'stale-candidate', kind: 'create', description: 'its session is gone',
+    body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }],
+    sessionId: 'session-that-no-longer-exists', workspace: 'F:/project', createdAt: new Date().toISOString(), source: 'model'
+  })
+  await writeFile(stalePath, JSON.stringify(withStale, null, 2), 'utf8')
+
+  // Read once before the read that gets tampered with: the first read after a file
+  // change recomputes and writes verdicts back, so its answer is deliberately not
+  // cached. Tampering with that answer proves nothing about the cache.
+  await cacheHost.ctx.skillEvolve.listCandidates()
+  const handed = await cacheHost.ctx.skillEvolve.listCandidates()
+  const handedStaleAt = handed.findIndex((row) => row?.stale !== undefined && row?.stale !== null)
+  const handedEvidenceAt = handed.findIndex((row) => Array.isArray(row?.evidence))
+  check('a stale row is on hand to tamper with', handedStaleAt >= 0, JSON.stringify(handed.map((row) => row?.stale?.reason ?? null)))
+  check('a row with evidence is on hand to tamper with', handedEvidenceAt >= 0, 'no evidence array in any row')
+  const handedEvidence = handed[handedEvidenceAt]?.evidence
+  if (Array.isArray(handedEvidence)) handedEvidence.push({ class: 'user', quote: 'appended by a consumer' })
+  if (handedStaleAt >= 0) handed[handedStaleAt].stale.reason = 'tampered'
+  const reread = await cacheHost.ctx.skillEvolve.listCandidates()
+  const evidenceKept = handedEvidenceAt < 0 || (Array.isArray(reread[handedEvidenceAt]?.evidence) && reread[handedEvidenceAt].evidence.length === handedEvidence.length - 1)
+  const staleKept = handedStaleAt < 0 || reread[handedStaleAt]?.stale?.reason !== 'tampered'
+  check('a consumer editing the rows does not edit the cache', evidenceKept && staleKept, JSON.stringify({ evidence: reread[handedEvidenceAt]?.evidence?.length, stale: reread[handedStaleAt]?.stale?.reason }))
+
+  // A listing that fails must not condemn anything: an outage is not evidence
+  // that sixteen sessions were deleted.
+  let failNext = true
+  const outageHost = fakeHost({ sessions: ['session-two'] })
+  const healthyList = outageHost.ctx.sessionQuery.listSessions
+  outageHost.ctx.sessionQuery.listSessions = async () => {
+    if (failNext) {
+      failNext = false
+      throw new Error('session listing unavailable')
+    }
+    return healthyList()
+  }
+  apply(outageHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true }))
+  const outageAgent = fakeAgent('session-two', 'F:/project')
+  outageHost.agents.set(outageAgent.id, outageAgent)
+  outageAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+  await outageHost.tools.get('skill_candidate_submit').execute({
+    name: 'outage-survivor', description: 'must not be condemned by an outage', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: outageAgent })
+  const outageRead = await outageHost.tools.get('skill_candidate_list').execute({}, { agent: outageAgent })
+  check('a failed listing does not mark candidates stale', /outage-survivor — .*verified in session-two/.test(outageRead.text), String(outageRead.text).slice(0, 300))
+
+  // A listing that answers with something that is not a list is the same
+  // situation as one that throws, and it has to be treated the same way: no
+  // answer is not an answer. The bulk path ignores a non-array (so no set is
+  // pre-resolved), which means the per-candidate fallback is what judges the
+  // rows — and it has to bail out too, or the one moment the host is
+  // misbehaving is the moment the queue decides every session is gone.
+  let nonsenseCalls = 0
+  const nonsenseHost = fakeHost({ sessions: ['session-two'] })
+  // Every call answers with nonsense, not just the first: the guard that has
+  // to hold is the per-candidate fallback, and a one-shot nonsense would be
+  // repaired by the next call before that fallback ever ran.
+  nonsenseHost.ctx.sessionQuery.listSessions = async () => {
+    nonsenseCalls += 1
+    return undefined
+  }
+  apply(nonsenseHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true }))
+  const nonsenseAgent = fakeAgent('session-two', 'F:/project')
+  nonsenseHost.agents.set(nonsenseAgent.id, nonsenseAgent)
+  nonsenseAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+  await nonsenseHost.tools.get('skill_candidate_submit').execute({
+    name: 'nonsense-survivor', description: 'must not be condemned by a nonsense listing', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: nonsenseAgent })
+  const nonsenseRead = await nonsenseHost.tools.get('skill_candidate_list').execute({}, { agent: nonsenseAgent })
+  check('a listing that answers with nonsense does not mark candidates stale', /nonsense-survivor — .*verified in session-two/.test(nonsenseRead.text), String(nonsenseRead.text).slice(0, 300))
+  // The survivor above only means something if the nonsense was actually
+  // produced: a build that never asked would also leave the row alive, and
+  // that is the shape of assertion that stays green through the bug it names.
+  check('the nonsense listing was really asked for', nonsenseCalls >= 1, `${nonsenseCalls} listing(s)`)
+
+  // The approval path re-verifies its own candidate instead of trusting the
+  // verdict the dialog was drawn from. The cache is what makes that necessary:
+  // between the read that filled the dialog and the click that approves, the
+  // queue can be served from memory while the fact the write depends on has
+  // already moved.
+  const driftHost = fakeHost({ sessions: ['session-two'] })
+  apply(driftHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true }))
+  const driftAgent = fakeAgent('session-two', 'F:/project')
+  driftHost.agents.set(driftAgent.id, driftAgent)
+  driftAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+  await driftHost.tools.get('skill_candidate_submit').execute({
+    name: 'drift-candidate', description: 'approved after the ground moved', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: driftAgent })
+  // Warm the cache twice: the first read may write verdicts, and a read that
+  // wrote anything is deliberately not cached. Only the second read leaves an
+  // answer in memory, which is the state this test is about.
+  await driftHost.tools.get('skill_candidate_list').execute({}, { agent: driftAgent })
+  await driftHost.tools.get('skill_candidate_list').execute({}, { agent: driftAgent })
+  // The session disappears without anyone touching the candidate file.
+  driftHost.ctx.sessionQuery.listSessions = async () => []
+  // The command rejects rather than returning a refusal, so the assertion has
+  // to read the rejection: what matters is that the approval did not go
+  // through and that the reason names the thing that moved.
+  let driftText = ''
+  try {
+    const refused = await driftHost.commands.get('skill-capture').handler({ rawInput: 'drift-candidate', agent: driftAgent })
+    driftText = String(refused?.text ?? '')
+  } catch (error) {
+    driftText = String(error?.message ?? error)
+  }
+  check('an approval re-checks the session even when the queue was cached', /cannot be approved|cannot approve/.test(driftText), driftText.slice(0, 240))
+  check('the re-check names the missing session', driftText.includes('no longer available'), driftText.slice(0, 240))
+
+  // The same window has a second half that no queue guard covers: the skill
+  // catalog is not `candidates.json`, so a skill appearing under this name
+  // never touches the cache at all. Approving must not overwrite it.
+  // `direct` and not the default `confirm`: under `confirm` an approval only
+  // stages the candidate and writes nothing, so "the file was not overwritten"
+  // would be true whether or not the re-check ran. Direct mode is where the
+  // write actually happens, which is the only place the re-check can be seen.
+  const takeoverHost = fakeHost({ sessions: ['session-two'] })
+  apply(takeoverHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true, approvalMode: 'direct' }))
+  const takeoverAgent = fakeAgent('session-two', 'F:/project')
+  takeoverHost.agents.set(takeoverAgent.id, takeoverAgent)
+  takeoverAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+  await takeoverHost.tools.get('skill_candidate_submit').execute({
+    name: 'contested-name', description: 'proposed before the name was taken', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: takeoverAgent })
+  await takeoverHost.tools.get('skill_candidate_list').execute({}, { agent: takeoverAgent })
+  await takeoverHost.tools.get('skill_candidate_list').execute({}, { agent: takeoverAgent })
+  await mkdir(join(skillsRoot, 'contested-name'), { recursive: true })
+  await writeFile(join(skillsRoot, 'contested-name', 'SKILL.md'), '---\nname: "contested-name"\ndescription: "someone else wrote this"\n---\n\nnot ours\n', 'utf8')
+  let takeoverText = ''
+  try {
+    const refused = await takeoverHost.commands.get('skill-capture').handler({ rawInput: 'contested-name', agent: takeoverAgent })
+    takeoverText = String(refused?.text ?? '')
+  } catch (error) {
+    takeoverText = String(error?.message ?? error)
+  }
+  // Naming the reason, not just the refusal: the staged-success path also
+  // prints "Approved ...", so a loose `/cannot approve/` alternation would
+  // stay green on an unfixed build for the wrong reason. `exists now` is
+  // `evaluateStaleness`'s own `name-taken` detail.
+  check('an approval re-checks the name even when the queue was cached', /cannot be approved|cannot approve/.test(takeoverText) && /name taken/.test(takeoverText) && /exists now/.test(takeoverText), takeoverText.slice(0, 240))
+  const survived = await readFile(join(skillsRoot, 'contested-name', 'SKILL.md'), 'utf8')
+  check('the skill that took the name is not overwritten', survived.includes('not ours'), survived.slice(0, 200))
+
+  // The re-check is only as good as what it is standing on. `probeSkill` used
+  // to answer `{ exists: false }` for any read failure, so a skill file this
+  // code could not parse read as "the name is free" and the approval wrote
+  // over it -- the very overwrite the re-check exists to stop. A file with no
+  // frontmatter is the cheapest real way to make the read fail for a reason
+  // that is not ENOENT.
+  const opaqueHost = fakeHost({ sessions: ['session-two'] })
+  apply(opaqueHost.ctx, Config({ mode: 'suggest', verifyCandidateSource: true, approvalMode: 'direct' }))
+  const opaqueAgent = fakeAgent('session-two', 'F:/project')
+  opaqueHost.agents.set(opaqueAgent.id, opaqueAgent)
+  opaqueAgent.push({ type: 'user/message', seq: 1, time: Date.now(), data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'use 300 dpi and check the log' }] } })
+  await opaqueHost.tools.get('skill_candidate_submit').execute({
+    name: 'opaque-name', description: 'proposed before an unreadable file appeared', body: 'b', evidence: [{ class: 'user', quote: 'use 300 dpi and check the log' }]
+  }, { agent: opaqueAgent })
+  await opaqueHost.tools.get('skill_candidate_list').execute({}, { agent: opaqueAgent })
+  await opaqueHost.tools.get('skill_candidate_list').execute({}, { agent: opaqueAgent })
+  await mkdir(join(skillsRoot, 'opaque-name'), { recursive: true })
+  const opaquePath = join(skillsRoot, 'opaque-name', 'SKILL.md')
+  await writeFile(opaquePath, 'no frontmatter, so this cannot be parsed\n', 'utf8')
+  let opaqueText = ''
+  try {
+    const refused = await opaqueHost.commands.get('skill-capture').handler({ rawInput: 'opaque-name', agent: opaqueAgent })
+    opaqueText = String(refused?.text ?? '')
+  } catch (error) {
+    opaqueText = String(error?.message ?? error)
+  }
+  check('an unreadable skill file stops the approval instead of reading as absent', /could not verify/.test(opaqueText), opaqueText.slice(0, 240))
+  const opaqueSurvived = await readFile(opaquePath, 'utf8')
+  check('the file the read could not parse is left alone', opaqueSurvived.includes('no frontmatter'), opaqueSurvived.slice(0, 200))
 } finally {
   await rm(root, { recursive: true, force: true })
 }

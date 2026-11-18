@@ -272,6 +272,11 @@ function createRenderer() {
 
   let slots = new Map()
   let deps = new Map()
+  // How many times a setter actually replaced its slot. React compares state by
+  // identity and does nothing when the value is the same object, so this counts
+  // the updates React would have acted on -- which is the thing a poll that
+  // changes nothing must not produce.
+  let stateChanges = 0
 
   const hooks = {
     useState(initial) {
@@ -283,6 +288,7 @@ function createRenderer() {
         if (Object.is(value, slot.value)) return
         slot.value = value
         rerenderNeeded = true
+        stateChanges += 1
       }
       return [slot.value, setter]
     },
@@ -509,7 +515,16 @@ function createRenderer() {
     return node
   }
 
-  return { hooks, render, deepRender, unmount, setNodeForRef, setTriggerForRef }
+  return {
+    hooks,
+    render,
+    deepRender,
+    unmount,
+    setNodeForRef,
+    setTriggerForRef,
+    /** @returns {number} state replacements so far, the ones React would act on. */
+    stateChanges: () => stateChanges,
+  }
 }
 
 /**
@@ -666,6 +681,19 @@ function boot(options) {
       },
     },
     activeElement: null,
+    // A backgrounded page is a real state the panel has to behave differently in,
+    // and a stub without these made that path unreachable: the code guards on
+    // `document.hidden`, so a document object lacking the field was
+    // indistinguishable from a visible one and no assertion could be written.
+    hidden: settings.hidden === true,
+    visibilityListeners: [],
+    addEventListener: (type, handler) => {
+      if (type === 'visibilitychange') documentStub.visibilityListeners.push(handler)
+    },
+    removeEventListener: (type, handler) => {
+      if (type !== 'visibilitychange') return
+      documentStub.visibilityListeners = documentStub.visibilityListeners.filter((entry) => entry !== handler)
+    },
     getElementById: () => null,
     createElement: () => ({ id: '', textContent: '' }),
     querySelector: (selector) => {
@@ -1325,6 +1353,7 @@ check(
     ['no model service', { word: '模型服务', reasons: ['no model service available'] }],
     ['no model route', { word: '路由', reasons: ['no model route is available'] }],
     ['timeout', { word: '超时', reasons: ['the summary call timed out'] }],
+    ['cancelled', { word: '取消', reasons: ['the summary call was cancelled'] }],
     ['call failed', { word: '失败', reasons: ['the summary call failed: 401 Unauthorized', 'the summary call failed: fetch failed', 'the model call failed: stream ended early'] }],
     ['empty', { word: '没有返回', reasons: ['the model returned nothing'] }],
   ])
@@ -4067,6 +4096,290 @@ function byAction(node, action) {
     after.length > 0 && after.every((row) => row.url.includes('lang=') === false),
     JSON.stringify(after.map((row) => row.url)),
   )
+}
+
+// ---------------------------------------------------------------------------
+// A backgrounded page, and a second refresh that would stack on the first
+// ---------------------------------------------------------------------------
+//
+// Both are about the same cost: this plugin pays a full queue read for every
+// answer it gets, so an answer nobody asked for is not free the way a rendered
+// div is. The refresh interval is eight seconds, and a cold answer used to take
+// longer than that, so the timer could start a second request before the first
+// returned -- and each request holds a lock for part of its life, which turns
+// overlap into a queue.
+
+{
+  // Hidden: the poll fires into nothing. Not merely "does not render" -- it must
+  // not ask, because asking is the expense.
+  const { instance } = await openPanel({ ...panelRoutes() }, { hidden: true })
+  const cards = instance.seat('cards')
+  await instance.renderer.deepRender(cards)
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  check('a hidden page still schedules the refresh', poll !== undefined, JSON.stringify(instance.timers.map((row) => row.ms)))
+  const before = instance.calls.filter((row) => row.url.includes('/panel?')).length
+  poll?.fn?.()
+  await settle()
+  const after = instance.calls.filter((row) => row.url.includes('/panel?')).length
+  check('a hidden page does not ask', after === before, `${after - before} extra request(s)`)
+
+  // Coming back asks once, immediately: the numbers on screen are stale by then,
+  // and waiting up to eight more seconds would show a column that is visibly
+  // behind the conversation next to it.
+  instance.document.hidden = false
+  const listeners = instance.document.visibilityListeners
+  check('the bundle watches for the page coming back', listeners.length > 0, String(listeners.length))
+  for (const listener of listeners) listener()
+  await settle()
+  const returned = instance.calls.filter((row) => row.url.includes('/panel?')).length
+  check('coming back asks again at once', returned > after, `${returned - after} request(s)`)
+
+  // The listener has to be unregistered, not just registered. `load` depends on
+  // `sessionId`, so the polling effect re-runs on every switch; left behind, each
+  // switch would add a listener that fires its own `load(true)` on every return
+  // to the tab. Deleting `removeEventListener` from the cleanup kept all of this
+  // suite green, because nothing asserted the removal.
+  //
+  // One listener is the correct count, not zero: the new session's effect
+  // registers its own. What must not happen is growth -- two listeners means the
+  // old one was never removed, and both would fire a fetch on every return.
+  // The switch only tears anything down when the panel itself renders again --
+  // rendering the toggle sets the session the cards read, but the cards' own
+  // effect runs on their next render. Asserting right after the toggle measured a
+  // component that had not re-run yet, which is why deleting `removeEventListener`
+  // survived this check at first.
+  await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-b' })
+  await instance.renderer.deepRender(cards)
+  const afterSwitch = instance.document.visibilityListeners.length
+  await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-c' })
+  await instance.renderer.deepRender(cards)
+  const afterSecondSwitch = instance.document.visibilityListeners.length
+  check(
+    'the page-back listener does not accumulate across session switches',
+    afterSwitch === 1 && afterSecondSwitch === 1,
+    `${afterSwitch} then ${afterSecondSwitch} listener(s)`
+  )
+}
+
+{
+  // Overlap: the second refresh is skipped, not queued behind the first.
+  const slow = deferred()
+  const routes = panelRoutes()
+  let asked = 0
+  routes['/api/ui-evolve/panel'] = () => {
+    asked += 1
+    return asked === 1 ? slow.promise : { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, summary: { text: 'SECOND' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const { instance } = await openPanel(routes)
+  const cards = instance.seat('cards')
+  await instance.renderer.deepRender(cards)
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  check('a slow first answer leaves a live timer to collide with', poll !== undefined && asked === 1, JSON.stringify({ asked, timers: instance.timers.map((row) => row.ms) }))
+  poll?.fn?.()
+  await settle()
+  check('a refresh that would stack on a request in flight is skipped', asked === 1, `${asked} request(s)`)
+  slow.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, summary: { text: 'FIRST' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const settled = await instance.renderer.deepRender(cards)
+  check('the first answer still lands', textOf(settled).includes('FIRST'), textOf(settled).slice(0, 120))
+  // And the skip was not a permanent lock: the next refresh goes out.
+  const next = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  next?.fn?.()
+  await settle()
+  check('the next refresh is not blocked by the one that completed', asked === 2, `${asked} request(s)`)
+}
+
+{
+  // A refresh the reader caused must not be swallowed by one already out. The
+  // approval callback is quiet -- the panel is on screen, so there is no loading
+  // state to show -- and the first version of the guard keyed on that, which
+  // dropped exactly the calls that mattered: a poll in flight when an approval
+  // returned left the queue on screen as it was *before* the approval, for up to
+  // eight seconds, with nothing queued to fix it.
+  const routes = panelRoutes()
+  const slow = deferred()
+  const decision = deferred()
+  let asked = 0
+  // One candidate, so the dialog has something to approve. The decide route is
+  // left hanging until the test says otherwise: an approval that has *returned* is
+  // what triggers the refresh, so the ordering has to be the test's to control.
+  routes['/api/ui-evolve/candidates'] = { ok: true, data: { candidates: [
+    { id: 'a', name: 'pdf-tools', description: 'work with pdfs', kind: 'create', body: 'BODY-A', whenToUse: 'WHEN-A', uses: 0 },
+  ] } }
+  routes['/api/ui-evolve/panel'] = () => {
+    asked += 1
+    if (asked === 1) return { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, summary: { text: 'FIRST' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+    if (asked === 2) return slow.promise
+    return { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, summary: { text: 'AFTER-DECISION' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const { instance } = await openPanel(routes)
+  const cards = instance.seat('cards')
+  await instance.renderer.deepRender(cards)
+  check('the first answer is on screen', asked === 1, String(asked))
+
+  // A poll goes out and is left hanging.
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  poll?.fn?.()
+  await settle()
+  check('a poll is out', asked === 2, String(asked))
+
+  // The reader approves a candidate while that poll is still out. This is the
+  // call the first version dropped: the approval callback is quiet (the panel is
+  // already on screen, so there is no loading state to show) and the guard keyed
+  // on that, which dropped exactly the calls that mattered. The refresh button
+  // would not catch this -- it is not quiet -- so the test has to go through the
+  // quiet one.
+  const tree = await instance.renderer.deepRender(cards)
+  firstByClass(tree, 'dsse-queue').props.onClick()
+  await settle()
+  const listed = await instance.renderer.deepRender(cards)
+  byClass(listed, 'dsse-candidate')[0].props.onClick()
+  const detailed = await instance.renderer.deepRender(cards)
+  const approve = byAction(detailed, 'approve')
+  check('the dialog offers an approval to press while a poll is out', approve !== undefined)
+  approve?.props?.onClick?.()
+  await settle(16)
+  check('the approval does not stack a second request on the one out', asked === 2, `${asked} request(s)`)
+
+  slow.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, summary: { text: 'STALE-POLL' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  check('the dropped refresh is asked for once the poll lands', asked === 3, `${asked} request(s)`)
+  const settled = await instance.renderer.deepRender(cards)
+  check('and the panel shows what the refresh asked for, not the poll it was waiting on', textOf(settled).includes('AFTER-DECISION'), textOf(settled).slice(0, 160))
+}
+
+{
+  // An unchanged poll must not re-render the column. This is the defect the user
+  // feels as "it stutters when there are many files": the refresh runs every eight
+  // seconds whether or not anything happened, and a fresh payload object meant the
+  // whole card tree was rebuilt each time.
+  const routes = panelRoutes()
+  let served = 0
+  routes['/api/ui-evolve/panel'] = () => {
+    served += 1
+    return { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, summary: { text: 'SAME' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], commands: [],
+      files: Array.from({ length: 12 }, (_, at) => ({ path: `src/file-${at}.js`, bytes: 1000 + at })),
+    } }
+  }
+  const { instance } = await openPanel(routes)
+  const cards = instance.seat('cards')
+  await instance.renderer.deepRender(cards)
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  check('the first answer is on screen before the refresh', served === 1, String(served))
+  const before = instance.renderer.stateChanges()
+  poll?.fn?.()
+  await settle()
+  const after = instance.renderer.stateChanges()
+  check('a poll that changes nothing asks again', served === 2, String(served))
+  // Not "renders less" -- renders not at all. Keeping the old payload object is
+  // what makes React skip the update, so a replaced state here means the whole
+  // column is about to be rebuilt from an answer identical to the one on screen.
+  check('and it does not replace the state', after === before, `${after - before} state replacement(s)`)
+
+  // A poll that does change something must render. The guard is a signature
+  // comparison, and a comparison that never fires is indistinguishable from an
+  // optimisation that swallows updates.
+  routes['/api/ui-evolve/panel'] = () => ({ ok: true, data: {
+    turn: 2, calls: 2, failed: 0, summary: { text: 'CHANGED' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], commands: [],
+    files: [{ path: 'src/file-0.js', bytes: 1000 }],
+  } })
+  const again = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const beforeChange = instance.renderer.stateChanges()
+  again?.fn?.()
+  await settle()
+  const changed = await instance.renderer.deepRender(cards)
+  check('a poll that changes something renders', textOf(changed).includes('CHANGED'), textOf(changed).slice(0, 120))
+  check('and it replaces the state', instance.renderer.stateChanges() > beforeChange, `${instance.renderer.stateChanges() - beforeChange} state replacement(s)`)
+}
+
+{
+  // The payload is not everything on screen: "3 分钟前" is derived from the clock
+  // at render time, so an unchanged payload can still describe a changed screen.
+  // A signature that compares only the payload freezes that label at whatever it
+  // read first -- for hours, since nothing about the answer ever changes again.
+  const started = 1_700_000_000_000
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = { ok: true, data: {
+    turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+    summary: { text: 'TEXT', at: started },
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } }
+  const { instance } = await openPanel(routes, { now: started })
+  const cards = instance.seat('cards')
+  const first = await instance.renderer.deepRender(cards)
+  check('a summary carries how long ago it was made', textOf(first).includes('刚刚'), textOf(first).slice(0, 160))
+  const before = instance.renderer.stateChanges()
+  // Five minutes later, the same answer. Nothing in the payload moved; the line
+  // on screen did.
+  instance.clock.at = started + 5 * 60 * 1000
+  instance.timers.find((row) => row.ms === 8000 && row.cleared === false)?.fn?.()
+  await settle()
+  const later = await instance.renderer.deepRender(cards)
+  check('an unchanged answer still ages on screen', textOf(later).includes('5分钟前'), textOf(later).slice(0, 160))
+  check('and the ageing is a render, not a skipped poll', instance.renderer.stateChanges() > before, `${instance.renderer.stateChanges() - before} state replacement(s)`)
+}
+
+{
+  // Leave a session and come back while its first request is still out. The
+  // abandoned request must not unlock the one now on screen: session names cannot
+  // tell two requests for the same session apart, a per-request ticket can.
+  const slowFirst = deferred()
+  const slowThird = deferred()
+  const routes = panelRoutes()
+  let asked = 0
+  routes['/api/ui-evolve/panel'] = () => {
+    asked += 1
+    if (asked === 1) return slowFirst.promise
+    if (asked === 3) return slowThird.promise
+    return { ok: true, data: {
+      turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+      summary: { text: 'B' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } }
+  }
+  const { instance } = await openPanel(routes)
+  const cards = instance.seat('cards')
+  const toggle = instance.seat('toggle')
+  check('the first request for A is out', asked === 1, `${asked} request(s)`)
+  await instance.renderer.render(toggle, { sessionId: 'session-b' })
+  await instance.renderer.deepRender(cards)
+  await instance.renderer.render(toggle, { sessionId: 'session-a' })
+  await instance.renderer.deepRender(cards)
+  check('coming back to A asks again', asked === 3, `${asked} request(s)`)
+  // The abandoned first request settles now, while the third is still out.
+  slowFirst.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+    summary: { text: 'A-OLD' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  poll?.fn?.()
+  await settle()
+  check('an abandoned request does not unlock the one that replaced it', asked === 3, `${asked} request(s)`)
+  slowThird.resolve({ ok: true, data: {
+    turn: 1, calls: 1, failed: 0, pendingCandidates: 0,
+    summary: { text: 'A-NEW' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  const settled = await instance.renderer.deepRender(cards)
+  check('and the answer that replaced it lands', textOf(settled).includes('A-NEW'), textOf(settled).slice(0, 160))
 }
 
 // ---------------------------------------------------------------------------

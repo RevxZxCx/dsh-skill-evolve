@@ -11,7 +11,7 @@
 
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 import {
   MAX_BODY_BYTES,
@@ -1562,6 +1562,107 @@ function heldBodyOf(res) {
   check('a cross-site request names its code', bodyOf(res).code === 'error.origin.forbidden', String(res.body))
 }
 
+// ---------------------------------------------------------------------------
+// The host's admission
+//
+// `checkOrigin` above answers "did this arrive from a page allowed to talk to
+// this server". It does not answer "who is asking", and a loopback listener is
+// reachable by every process and every user on the machine. The route therefore
+// asks the host the same question its own `/api` route asks, and these tests pin
+// the three answers it can give plus the two failure shapes.
+// ---------------------------------------------------------------------------
+
+{
+  // No connection service on this host: the plugin cannot invent an identity
+  // check it was not given, so the route stays open. This is the shape every
+  // existing test above relies on.
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a` }))
+  check('a host with no admission still serves the panel', res.statusCode === 200, String(res.statusCode))
+}
+
+{
+  const asked = []
+  const res = await route(
+    {
+      admission: (req) => {
+        asked.push(req)
+        return undefined
+      }
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a` }),
+  )
+  check('a host that vouches serves the panel', res.statusCode === 200, String(res.statusCode))
+  check('the host is asked exactly once', asked.length === 1, `${asked.length} ask(s)`)
+}
+
+{
+  const res = await route({ admission: () => 401 }, fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a` }))
+  check('an unauthenticated request is a 401', res.statusCode === 401, String(res.statusCode))
+  check('and it names its code', bodyOf(res).code === 'error.auth.required', String(res.body))
+  check('and it carries no payload', bodyOf(res).data === undefined, String(res.body))
+}
+
+{
+  // 403 is the untrusted-host answer. It has to survive as 403 rather than being
+  // flattened to 401: the two say different things to whoever is debugging.
+  const res = await route({ admission: () => 403 }, fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a` }))
+  check('an untrusted host keeps its own status', res.statusCode === 403, String(res.statusCode))
+}
+
+{
+  // A host that can answer and then fails is refused, not waved through. This is
+  // the direction that matters: the route serves the person's own conversation,
+  // so "the question was hard" must not be the same answer as "yes".
+  const res = await route(
+    {
+      admission: () => {
+        throw new Error('the credentials store is unreadable')
+      }
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a` }),
+  )
+  check('an admission that throws is a refusal', res.statusCode === 401, String(res.statusCode))
+}
+
+{
+  // The gate covers every route, not only the one that lists files: `/candidates`
+  // returns the queue, and `/propose` writes into the session.
+  const refused = []
+  for (const path of ['/panel', '/candidates', '/models', '/config', '/speed']) {
+    const res = await route({ admission: () => 401 }, fakeReq({ url: `${ROUTE_PREFIX}${path}` }))
+    refused.push({ path, status: res.statusCode })
+  }
+  check(
+    'every read route is behind the same gate',
+    refused.every((row) => row.status === 401),
+    JSON.stringify(refused)
+  )
+
+  const post = await route(
+    { admission: () => 401 },
+    fakeReq({ url: `${ROUTE_PREFIX}/propose`, method: 'POST', body: JSON.stringify({ agent: 'a', skill: 's' }) })
+  )
+  check('the writing route is behind it too', post.statusCode === 401, String(post.statusCode))
+}
+
+{
+  // Order matters: the origin check runs first, so a cross-site request is
+  // reported as cross-site rather than as a missing credential. Both refuse, but
+  // only one of them names the actual problem.
+  const asked = []
+  const res = await route(
+    {
+      admission: () => {
+        asked.push(1)
+        return undefined
+      }
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/panel`, headers: { 'sec-fetch-site': 'cross-site' } }),
+  )
+  check('a cross-site request still reads as cross-site', bodyOf(res).code === 'error.origin.forbidden', String(res.body))
+  check('and the host is not even asked', asked.length === 0, `${asked.length} ask(s)`)
+}
+
 {
   const hints = []
   const res = await route(
@@ -2200,6 +2301,58 @@ function heldBodyOf(res) {
   // delete the reason the card exists.
   const absent = await statTouchedFiles({ paths: [join(dir, 'never-existed.txt')], cwd: dir })
   check('an absent ordinary path is still reported as missing', absent.length === 1 && absent[0].status === 'missing', JSON.stringify(absent))
+
+  // Two hundred paths, one stat each, awaited one at a time, was measured at
+  // 17.5ms against 2.6ms for the same set issued together. The observable
+  // difference is how many probes are in flight at once, so that is what this
+  // asserts -- an implementation that awaits each one before starting the next
+  // never sees a peak above one.
+  let inFlight = 0
+  let peak = 0
+  const burst = Array.from({ length: 24 }, (_, index) => join(dir, `burst-${index}.txt`))
+  // Later paths are answered sooner, so completion order is the reverse of arrival
+  // order. With one shared delay the two orders are identical and an
+  // implementation that pushed rows as each answer landed would pass the ordering
+  // check while scrambling the card.
+  const delayFor = (absolute) => {
+    const index = burst.findIndex((candidate) => absolute.endsWith(basename(candidate)))
+    return 24 - index
+  }
+  const measured = await statTouchedFiles({
+    paths: burst,
+    cwd: dir,
+    readStat: async (absolute) => {
+      inFlight += 1
+      peak = Math.max(peak, inFlight)
+      // Yield to the event loop so the other probes get a chance to start; a
+      // synchronous resolve would collapse the peak back to one no matter how
+      // the caller awaits.
+      await new Promise((resolve) => setTimeout(resolve, delayFor(absolute)))
+      inFlight -= 1
+      return { isFile: () => true, size: 1, mtimeMs: 1 }
+    },
+  })
+  check('probes are issued together, not one after another', peak > 1, `peak concurrency ${peak}`)
+  check('every burst path still gets its row', measured.length === burst.length, `${measured.length} of ${burst.length}`)
+  check('the rows keep the order the paths arrived in', measured.every((row, index) => row.path === burst[index]), JSON.stringify(measured.map((row) => row.path).slice(0, 3)))
+
+  // The fallback source is the transcript's per-turn path list, which has no cap
+  // of its own -- a command that writes many files appends every one. Asking
+  // about all of them at once would put an unbounded burst on the thread pool the
+  // rest of the host shares, so the function trims to the same number session
+  // state already uses. Bounded by the callee, not by trusting the caller.
+  let asked = 0
+  const flood = Array.from({ length: 260 }, (_, index) => join(dir, `flood-${index}.txt`))
+  const trimmed = await statTouchedFiles({
+    paths: flood,
+    cwd: dir,
+    readStat: async () => {
+      asked += 1
+      return { isFile: () => true, size: 1, mtimeMs: 1 }
+    },
+  })
+  check('a path list longer than the batch is trimmed, not issued whole', asked <= 200, `${asked} probe(s) for 260 paths`)
+  check('the trim keeps the first rows, so the newest stay', trimmed.length === asked, `${trimmed.length} row(s) for ${asked} probe(s)`)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

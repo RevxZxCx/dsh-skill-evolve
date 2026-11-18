@@ -2712,3 +2712,709 @@ diff 从来没稳定下来过（最后一次改动是 `33dadc4`，距第一版 `
    这一轮三次失效里有两次是它的形状（`.dsse-card` vs `.dsse-recap`、`style` 替身 vs CSSOM），
    它没生效意味着下一轮还会付同样的代价。
 5. **面板改动要重启宿主才可见** —— `client.js` 是手写 bundle，没有构建步骤。这一条每轮都要重述一次。
+
+## R-98 · 性能 P0：候选队列的 N×全库扫盘（两名独立审查者，三条必改）
+
+### 覆盖范围
+
+D-198 ~ D-201，缺陷 1、2、3。改动 5 个文件：`packages/core/lib/candidates.js`、
+`packages/core/lib/store.js`、`packages/skill-evolve/lib/index.js`、
+`test/catalog.test.mjs`、`test/gaps.test.mjs`。全量 **3948 passed / 0 failed**（基线 3928）。
+
+### 起点的量化
+
+用户报两个现象，但实测只有一个根子。不带 `agent` 参数的 `/panel` 返回 283 字节、
+`files: []`、`skills: []`、一次 stat 都不做，仍然要 **9 ~ 14 秒**。
+排除掉渲染数据量与 stat 之后，只剩 `pendingCandidates()`。
+
+它走 `loadQueue()` → `annotateQueue()`，后者对每条候选调一次 `sessionExists()`，
+每次 `sessionExists()` 调一次 `sessionQuery.listSessions()`，那是全量扫
+`~/.dsh/sessions/`（本机 527 个文件、766MB）。16 条候选 × 单次 136ms ≈ **2178ms**，
+再加上它与并发请求在 `mutateCandidates` 串行锁上排队，端到端就是 8 ~ 14 秒。
+三个并发请求实测 6.31 / 9.23 / 12.91 秒 —— 线性叠加，正是串行锁的形状。
+
+### 改动
+
+1. `annotateQueue` 增加 `options.liveSessions`（`Set<string>`），由 `withLiveSessions` 在循环外
+   取一次 `listSessions` 建成。`evaluateStaleness` 里 Set 优先于逐条 `sessionExists`。
+2. `loadQueue()` 变成守门函数，三重校验：`store.candidatesRevision`（Store 每次写盘自增）、
+   `QUEUE_TTL_MS`、`candidates.json` 的 `size:mtimeMs` 指纹。加 single-flight。
+3. `pendingCandidates` 的接口与字段名都不动 —— 队列一旦变快，它就不再是瓶颈，
+   拆接口反而要动客户端与 `test/client.test.mjs` 十余处假 data。
+
+### 两名独立审查者给出的三条必改（均与我自己的判断冲突，均正确）
+
+**必改 1：`sessionExists()` 语义回归。** 我写的是
+`return Array.isArray(records) && records.some(...)`。旧代码是 `return records.some(...)` ——
+宿主返回非数组时会抛 TypeError，被 `core/lib/candidates.js` 的 catch 接住变成 `live = true`。
+也就是说旧代码**靠异常意外达成**「答不上来就放行」的语义。我把它改成了静默的 `false`，
+而那正好是 `withLiveSessions` 的唯一兜底路径，宿主一抽风整队被判死。
+审查者实测：HEAD 语义下 `pending: 4, 全 live, approve ok`；我的工作树下
+`pending: 0, 全 source-missing, approve refused`。
+已改为显式三段，`if (!Array.isArray(records)) return true`，并把「旧代码是靠抛错达成这个语义」写进注释。
+可达性很低（asar 里 `listSessions` 永远返回数组），但一行的事。
+
+**必改 2：`QUEUE_TTL_MS = 5000` 短于 `REFRESH_MS = 8000`。** 缓存对 `/panel` 命中率为零，
+注释却声称「每八秒轮询能共享一次答案」。审查者实测：预热后 1ms / 0 次 listing，
+8.1 秒后下一次轮询 141ms / 1 次 listing，每次都 miss。
+→ 提到 10000，并在注释里诚实写明「这个数字的真实含义是可服务陈旧裁决的窗口宽度，
+`approve` 之所以要复核正是因为该窗口存在」。
+**这条值得记住：性能指标达成不等于每个改动都贡献了它。这一批的收益 100% 来自缺陷 1。**
+
+**必改 3：缓存开了「可批准已失效候选」的窗口，而且真会写盘。** `approve()` 只看
+`candidate.stale`，从不重新探测；`writeApprovedWithin` 既不验会话存活也不查名字占用，
+`create` 分支无存在性检查直接写文件。缓存成了唯一防线。
+审查者 b512811d 实测：队列读热后让 `listSessions` 返回 `[]`，不等 TTL 过期就批准 →
+真的写进了 `skills\ttl-window\SKILL.md`。
+审查者 6aef1739 指出更危险的另一半：缓存键只看 `candidates.json`，
+但 `name-taken`/`base-changed` 依据的是 skill 目录。队列外新建同名 skill 不碰 `candidates.json`，
+两个守卫都不动 → 面板显示可批准 → 点下去**静默覆盖**别人刚写的 skill。这条生产已可触发。
+→ `approve()` 内对候选补一次 `evaluateStaleness`（新鲜 `probeSkill` + 新鲜 `sessionExists`），
+拒绝文案复用 `describeStale`。代价是每次批准多一次 listing，批准是人的动作，可以接受。
+
+### 我自己发现的、审查者没提的一条
+
+`listCandidates()` 外层是新数组，但 `evidence` 与 `stale` 是缓存对象的**同一引用**。
+调用方 push 一个元素就污染缓存。今天没人这么干，但缓存把「读到的是共享数据」这件事
+从不可能变成了可能，所以现在补 `slice()` / `{ ...stale }`。
+变异验证：把复制撤掉 → `a consumer editing the rows does not edit the cache` 变红。
+
+### 变异验证：新增守卫逐条证明有抓力
+
+| 变异 | 结果 |
+| --- | --- |
+| `liveSessions` 置空（忘掉批量） | 红 1：`one read lists the sessions once` |
+| 缓存整体短路 | 红 1：`a settled queue costs one listing` |
+| `QUEUE_TTL_MS` → 1 | 红 1：同上，报 `2 extra listing(s)` |
+| 删 `revision` 比较 | **全绿（存活）** |
+| 删 `stamp` 比较 | 红 4 |
+| 删 single-flight | 红 1：`3 listing(s) for three readers` |
+| `approve` 复核以 `false &&` 短路 | 红 3（会话消失、名字被占、文案） |
+| `!Array.isArray(records)) return false` | 红 1：`a listing that answers with nonsense` |
+| 撤掉 `evidence`/`stale` 复制 | 红 1：`a consumer editing the rows` |
+
+**「删 revision 比较全绿」是这一批最值得记的一条。** 三重条件不是三个冗余，
+是三个盲区不同的部分覆盖。revision 单删存活不是因为没用，而是 stamp 恰好覆盖了那批用例；
+而 stamp 覆盖不到的地方（skill 目录），两个守卫都覆盖不到 —— 那块盲区现在由 `approve` 的复核守住。
+原注释写「revision 是真正的守卫」是错的，已改成三条并列的诚实说明。
+
+### 三次自己写砸的断言（都是「以为有抓力」）
+
+1. 并发共享用例最初没先强制缓存 miss，三个读者全被热缓存服务，单删 single-flight 也全绿。
+   加一次外部追加 `race-1` 造出真 miss 后才抓住。
+2. `listSessions` 返回 undefined 的用例最初写成「只返回一次 undefined，第二次恢复」，
+   守卫根本没被触发，用例假通过。改成「一直返回 undefined」才抓住。
+3. `/skill-capture` 拒绝时是 Promise.reject 不是 `{text}`，断言读 `refused.text` 恒为空串。
+
+### 交付前的失误
+
+首次全量 3887/1，失败在 `mutations.test.mjs`。根因是我用 Python 文本模式写回文件，
+Windows 把 `\n` 转成了 `\r\n`，四个文件被整体改成 CRLF。
+`.gitattributes` 规定 `* text=auto eol=lf`，`test/mutations.test.mjs` 的 `textOf` 是直接比对原文，
+锚点匹配不上。变异脚本自己会规范化换行，所以它没报错 —— 掩盖了这个错误。
+**纪律：改这个仓库的文件必须显式写 LF**（`newline='\n'`，或写完二进制替换），
+判据 `grep -qU $'\r' <file>` 有输出即被污染。
+
+### 真机验收：同一个请求，修前修后（2026-11-18，宿主 19387 已加载新代码）
+
+隔离测量解释不了宿主上的 8–14 秒，所以最后回到宿主上量。三件事要一起说清：宿主确实在跑新代码、同一个请求现在多少钱、以及剩下的时间花在哪。
+
+**宿主跑的是新代码的证据**：不带 cookie 的 `/api/ui-evolve/panel` 现在返回 **401**（102 B），修复前实测是 **200**（283 B）。401 只可能来自本轮新加的 admission 闸门，所以进程里的确是新代码。
+
+**同一个请求，修前 vs 修后**（`GET /api/ui-evolve/panel?agent=session-a6eb196a-…`，85 KB 载荷，修复前那组数字就是排查阶段量的同一批）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 首次 | 8.11–14.29 s | **291 ms** |
+| 之后 | 8–14 s（每次都这样） | **8–11 ms**，八次均值 **8.9 ms** |
+| 比值 | — | 约 **1100x** |
+| 不带 cookie | 200（裸奔） | **401** |
+
+`/api/ui-evolve/candidates`（68 KB）同样从 7.52–10.28 s 降到 **2–4 ms**。
+
+**剩下的那一档时间花在哪（诚实的部分）**：冷会话首次打开仍有 **2.3–3.2 s**，但那不是队列问题，是摘要模型调用 —— 有已完成回合、且摘要还没进缓存的会话要走一次 LLM（`SUMMARY_TIMEOUT_MS = 20000`）。没有已完成回合的会话冷启动就是 **7–8 ms**。这正是缺陷 8 存在的理由：`warm()` 接到回合结束后，回合结束时就付过这次钱，面板打开时命中缓存（实测热态 1–2 ms）。修前那些已经结束的回合没有预热，所以它们的首次打开仍要等模型一次；这是缓存内容的自然结论，不是新缺陷。
+
+**还没做的**：以上全部是 HTTP 层测量，不是 GUI 里的体感。监控列实际绘制、切换会话时眼睛看到的延迟、卡片多时的手感，仍需重启桌面端后在界面上确认。
+
+### 端到端补测：`readPanel` 整个跑一遍，用真实状态文件（2026-11-18 补）
+
+分段测过不算数，最后把 `readPanel` 本身跑起来了：真实 session 状态文件（`session-de0dfca5-…`，40389 字节、`paths` 有 200 条）、真实 `filesSeen` 顺序、`listSessions` 按实测的 136ms 桩住，两种 `pendingCandidates` 形状各跑一次。
+
+| 形状 | 耗时 | listing 次数 | 响应体 | 行数 |
+|---|---|---|---|---|
+| 旧：每条候选问一次（16 条） | **2191 ms** | 16 | 99717 B | 200 |
+| 现在：整队问一次 | **141 ms** | 1 | 99717 B | 200 |
+
+两边的响应体字节数与行数完全一致 —— 这不是性能提升换来的一点点行为差异，输出是同一个东西。
+
+**这个数字与宿主实测的 8–14 秒对不上，必须写下来。** 16 × 136ms 只能解释其中的 2.2 秒，剩下的 6–12 秒在这个模型里没有位置。可能的原因：真实负载下 `listSessions` 比空闲时的 136ms 慢得多；或者 `mutateCandidates` 的串行锁在等别的写；或者宿主进程里同时有多个请求在排队。**我没有在真实宿主上验证过修复后的数字**（19387 是本会话进程，重启会杀掉它），所以「切会话从 8–14 秒降到毫秒级」这句话到今天为止仍然只有推理和隔离测量支撑，没有真机数字。体感验收因此不是补一句确认，是这条结论唯一的直接证据。
+
+### 诚实的缺口
+
+1. **体感未验收。** 宿主 `127.0.0.1:19387` 跑的是内存里的旧代码，改完必须重启才生效，
+   而那个进程就是当前对话本身。三批改完后需要用户重启一次桌面端。
+   在此之前，「切会话变快」只有离线测量支撑（冷读 144ms、热读 0ms、改前 2178ms），
+   没有一次真实点击的观测。
+2. **`saveCandidates` 在生产代码无调用者**，只有测试用，是死代码。本轮未删。
+3. **`candidates.js` 降级路径无超时。** 若 `listSessions` 挂住，single-flight 会把
+   面板、徽标、对话框一起卡住。今天不可达（宿主实现不发散），但结构上是新的。
+4. **`finalizeWithin` 的批量化改动没有独立用例**，只有 `approve` 侧有。
+
+## R-99 · 性能 P1：客户端每一轮都在重做没有变化的事（两名独立审查者，两条必修）
+
+### 覆盖范围
+
+D-202 ~ D-204，缺陷 4、5、6、7。改动 `packages/ui-evolve/lib/api.js`、
+`packages/ui-evolve/lib/client.js`、`scripts/mutate-language-and-files.mjs`、
+`scripts/mutate-checklist-panel.mjs`、`test/api.test.mjs`、`test/client.test.mjs`。
+全量 **3997 passed / 0 failed**（R-98 结束时 3948）。
+
+### 四项改动
+
+1. **缺陷 4：`statTouchedFiles` 串行改并发。** 原来是 `for` 循环里逐个 `await stat`，
+   并且 `const { stat } = await import('node:fs/promises')` 写在循环体内，每个文件重新解析一次模块。
+   重构成两阶段：第一段只收集 `pending`（保留全部跳过条件），第二段 `Promise.all` 探完，
+   最后按原顺序组装。跳过条件由 `continue` 改成 `return null`，由 `api.js` 末尾过滤。
+   实测 200 个路径：串行 15.5ms / 并行 4.1ms。
+2. **缺陷 5：后台不轮询。** 定时器回调先看 `document.hidden === true` 就直接返回，
+   并新增 `visibilitychange` 监听，回来时立刻补一次 —— 回来的那一刻屏幕上的数字已经过期，
+   等最多 8 秒会让监控列明显落后于旁边的对话。
+3. **缺陷 6：堆积守卫。** 上一轮请求未返回时跳过这一轮。原实现用 `sessionId` 做标记，
+   审查者指出这会误伤（见必修 2），改成按请求票据。
+4. **缺陷 7：未变化的轮询不重渲染。** 新模块级 `panelSignature(data)` 把载荷序列化成可比字符串，
+   与上次相同就不 `setState`。折叠态本来就只画 `FOLDED_FILES = 4` 行，
+   但每次轮询都会重建整棵树 —— 这才是「文件多时卡顿」的形状。
+
+### 缺陷 7 的剩余部分：量过，决定不做
+
+原计划还要给 `Card`/`Cards` 加 `React.memo`，并把 `copied`/`menuFor` 之外的 props 稳定化。
+三次实测（`.bench/`，测完即删）：
+
+| 测的东西 | 耗时 |
+| --- | --- |
+| `fileParts` + 200 行的全部派生 | **0.666 ms/趟** |
+| 200 行的整棵元素树构造 | **0.060 ms/趟** |
+| 45.6 KB 载荷的 `JSON.stringify`（签名本身） | **0.196 ms** |
+
+200 行满载时，一轮渲染里能靠 memo 省掉的合计 **0.7 ms**，而 React 的 reconciliation
+与 DOM 提交省不掉。反过来说，签名守卫把「内容相同的 8 秒轮询」整个跳过，
+省下的是**整棵树**，不是这 0.7ms。加 memo 需要稳定化 157 处 jsx 里处在 `Cards`
+闭包内的 props，而 `copied`/`menuFor` 恰恰是必须变化的状态；这个 bundle 的历史教训
+（DEF-159 ~ 163）是「两态规则必须成对，否则留下无条件规则会赢」。
+**结论：不做。** 记在这里是为了留下「量过」的依据，而不是留一个没有依据的待办。
+
+### 两名独立审查者的两条必修（均正确）
+
+**必修 1：签名跳过会冻结相对时间标签。** `formatAgo(summary.at)` 读的是渲染那一刻的时钟，
+屏幕上是「3 分钟前」。改动前每 8 秒新对象 → 重渲染 → 标签会走；改动后未变化的轮询保留对象身份
+→ 标签永远停在第一次的值，包括隐藏标签页回来时（同签名 → 跳过）。
+这与 `formatAgo` 自己的 JSDoc 直接矛盾 —— 它说这个标签存在的意义就是回答「这条摘要是否还新鲜」。
+→ 签名改为 `JSON.stringify(data) + "\u0000" + formatAgo(data?.summary?.at)`，
+把**渲染出来的文字**也纳入比较：它恰好在屏幕文字会变时才变，不多变一次。
+夹具里的 `summary` 全都不带 `at`，这正是这个 bug 溜过去的原因，新用例带了 `at`。
+
+**必修 2：忙标记在 A→B→A 时提前解锁。** `load` 按 `[sessionId]` memo，
+被放弃的旧请求恢复时带着自己捕获的 `sessionId`。A 的慢请求在飞 → 切 B → 切回 A
+（新 A 请求设 busy='A'）→ 旧的 A 请求 settle，`panelRequest` 正确丢弃了载荷，
+但 `finally` 里 `panelBusyFor.current === sessionId` 为真（'A' === 'A'），
+一把清掉了**新** A 请求的标记。会话身份区分得了会话，区分不了同一会话的两个请求。
+→ 改成 `panelBusyRequest`，存的是唯一的请求票据（`++panelRequest.current`），
+`finally` 里只可能解锁自己。
+
+### 我自己发现的一条：`/panel` 请求没有超时
+
+`call()` 只有 `fetch` + `unwrap`，没有 AbortController 默认值（`/speed` 长轮询自己带了）。
+而忙标记靠 `finally` 释放，`finally` 只在 promise settle 时执行 —— fetch 挂死
+（半开 socket、代理吞响应、宿主 wedged）时永不 settle，监控列从此不再刷新。
+第一位审查者确认「无永久冻结路径」的前提，正是我先补上了这个。
+→ `PANEL_TIMEOUT_MS = 15000` + `AbortController`，15 秒刻意短于 summariser 自己的 20 秒上限。
+
+### 变异验证
+
+| 变异 | 结果 |
+| --- | --- |
+| 删 `document.hidden` 守卫 | 红 1：`a hidden page does not ask — 1 extra request(s)` |
+| 堆积守卫改 `false &&` | 红 3（含 `2 request(s)`、答案错位、`3 request(s)`） |
+| 删签名守卫 | 红 1：`and it does not replace the state — 1 state replacement(s)` |
+| 签名回退成只有 `JSON.stringify(data)` | 红 1：`and the ageing is a render, not a skipped poll — 0 state replacement(s)` |
+| `finally` 里的票据比较改成无条件清空 | 红 2：`an abandoned request does not unlock the one that replaced it — 4 request(s)` |
+| stat 改回串行 `for await` | 红 1：`probes are issued together — peak concurrency 1` |
+
+审查者对 `peak > 1` 的实测：串行 peak 1、并发 peak 24，**有抓力**。
+但同一条用例的顺序断言近乎恒真 —— 24 个探针都 await 同一个 1ms 定时器，
+完成序等于开始序，按到达序组装的实现也能过。这条我保留但知道它弱。
+
+### 一次变异脚本的连带损坏（值得记住的教训）
+
+修锚点时我改了两套变异脚本的 `from`/`to`。其中一条把语句 `out.push({...})` 改成
+`return {...}` 后**没有去掉尾逗号** —— 前者逗号是标点，后者是语法错误，
+整套变异报 `CRASHED`。改完必须让 `test/mutations.test.mjs` 的 48 条锚点检查先过。
+
+更严重的一次是**并行跑变异**：我让 `mutate-language-and-files.mjs` 在后台跑，
+同时前台跑 `test/mutations.test.mjs`。变异脚本会临时改写源码再恢复，
+于是锚点检查每次报的缺失项都不一样（第一次 `FILE_LIST_MAX_PX`、第二次 git-changes 的 prefixes、
+第三次 `.dsse-row-menu`）—— 不是锚点坏了，是两个进程在抢同一批文件。
+**纪律：变异脚本必须串行，跑前确认没有别的测试或变异在跑。**
+另外，变异被 `job_kill` 打断会把源码留在被改状态（`setMenuFor(undefined)` 与
+`.dsse-row-menu` 各残留过一次），杀完必须扫描「`to` 出现且 `from` 不出现」确认没有残骸。
+
+### 第三位审查之后补做的四件事
+
+审查者 806da43f 无 must-fix，但它列出的四条 nit 里有三条是真问题，补做了，另一条是判断后不动。
+
+**一、`statTouchedFiles` 自己也要有上限。** 审查者指出这个函数没有内部 cap，只靠上游。看了两个调用方才发现它们对边界的主张并不一致：session state 那条路已在写入时裁到 `MAX_PATHS = 200`（`packages/ui-evolve/lib/session-state.js:91`、`:164-167`、`:770-772`），而 fallback 是 transcript 的每回合路径表 —— `packages/ui-evolve/lib/transcript.js:499` 与 `:542` 两处 `this.paths.push(...)` 都没有上限，一条写了很多文件的命令会把每一个都塞进去。改成 `MAX_TOUCHED_FILES = 200` 的内部裁剪后，两个调用方等价。
+
+**这条在改成并发之后才变重要**：串行版本下多出来的路径只是慢，并发版本下它们是一个瞬间打到线程池的突发，而那个池子宿主其他部分也在用。
+
+新用例 `a path list longer than the batch is trimmed, not issued whole`（260 条路径，断言 `asked <= 200`）与 `the trim keeps the first rows, so the newest stay`。变异：`if (pending.length >= MAX_TOUCHED_FILES) break` → `if (false) break` ⇒ **1 红，报 `260 probe(s) for 260 paths`**。
+
+**二、删掉 `api.js` 的死导入。** `import { readFile, stat as statFile } from 'node:fs/promises'` 里的 `readFile` 全文件零使用（`grep -n "readFile" packages/ui-evolve/lib/api.js` 只有 import 那一行；`session-store.js` 里的是它自己 import 的）。这是我在这轮 stat 重写时留下的。
+
+**三、补验 `ctx.get(name, false)` 的宿主语义。** 见 R-100 的补验一节 —— 那是 P2 的事，但它和这里是同一批工作。
+
+**四、共享缓存数组的保护，只留注释，不加工。** 审查者的原话是这份保护「只靠注释」。给它加运行时保护（比如 `Object.freeze` 或每读一次深拷贝）代价是把 16 条候选的每次读都变成一次全量复制，而 `listCandidates()` 已经复制了 `evidence` 与 `stale`（D-201）。剩下的风险是有人往返回的数组本身 `push` —— 8 处调用点全部是 `map`/`filter`/`find`，我逐个看过。**判断：不值得为一条今天不存在、且已有 8 处证据的假设付出每次读的复制成本。** 记在这里，是为了让下一个人知道这条保护是「看过、判过」，而不是「没想到」。
+
+### 诚实的缺口
+
+1. **体感未验收**，同 R-98。改完 client.js 必须重启宿主才可见。
+2. **仍有一处 `setState` 写在 `try/finally` 之外**（`client.js` 的 `sessionId === ""` 早退分支），
+   理论上有冻结可能，审查者认为不可达，本轮未修。
+3. **200 个并发 stat 会占 libuv 的 4 线程池**，没到 EMFILE（`MAX_PATHS = 200`），
+   但冷启动那一下会拖慢进程内其它 fs 工作。
+4. ~~**顺序断言弱**：`the rows keep the order the paths arrived in` 在现夹具下近乎恒真。~~ 第三位审查者提出后已修（探针改递减延迟，见下一节）。
+
+### 第三位审查者（806da43f）：无 must-fix，七条 should-fix 全部照做
+
+第三位审查者的报告先声明 `/tmp/p1.diff` 已过期——client.js 在它审查期间被重写过——所以它按当前文件重读。结论是**没有 must-fix**，但有七条 should-fix 和四条 nit。这里逐条记下处理方式，因为其中三条改的是代码而不只是注释。
+
+**A. 忙标记的注释在谴责自己的代码。** `panelBusyRequest` 上方的注释说「它记录*哪个*会话，而不是仅仅记录有请求在飞……不同会话的请求正是必须放行的情形」，而紧接着的守卫 `if (panelBusyRequest.current !== null) return` 正是它谴责的那种布尔形式。改注释，不改代码：任何在飞请求都拦新请求，会话切换是由下面的 reset effect 清空 ref 救的；票据只负责让被放弃的请求清不掉接替者的标记。这两件事必须分开写，混在一句里就是这轮被读出来的错。
+
+**B. 被跳过的刷新必须补发（`mustAsk` 参数）。** 审查者指出：请求在飞时守卫直接 `return`，于是一次用户主动的刷新（批准候选后的 `onDecided`、刷新按钮、标签页切回来、配置保存成功）被静默丢弃，面板停在批准前的状态，直到下一次轮询。修法是加 `panelRefreshWanted` ref 与 `mustAsk` 第二参数，`finally` 里在清票据之后补发一次。
+
+这里我自己先写错了一版：用 `quiet !== true` 判断「这次请求重不重要」。但 `onDecided` 恰恰传的是 `load(true)`——quiet=true 因为面板已经在屏上、不需要 loading 态。**`quiet` 表达的是「别显示 loading」，不是「这事不重要」**，两个语义当初就混在一个参数里，审查者描述的正是这个混淆的后果。变异验证：把 `mustAsk === true` 改回 `quiet !== true`，client 套件 935 passed / 2 failed（`the dropped refresh is asked for once the poll lands — 2 request(s)`）。新用例必须走审批回调那条 quiet=true 的路径，走刷新按钮抓不住。
+
+**C. `panelBusyRequest.current = request` 移进 `try`。** 原来在 `try {` 之前赋值，中间隔着空会话分支与 `setState`。今天没有可达输入会在那之间抛错，但一旦抛就永久持有标记，而守卫是 `!== null`——**永久静默、无错误、只能重挂面板**。
+
+**D–G. 四条测试弱点，全部补强并各自做了变异验证。**
+
+| 弱点 | 补强 | 变异结果 |
+|---|---|---|
+| `visibilitychange` 解绑零断言 | 切换后再 `deepRender(cards)` 让 panel 自己的 effect 重跑，断言两次切换后监听器数都是 1 | 删 `removeEventListener` → 937/1：`the page-back listener does not accumulate across session switches — 2 then 3 listener(s)` |
+| 并发读者 `<= 1` 允许 0 | 改 `=== 1`（0 意味着上面那次失效没落地） | 见 R-98 已有变异 |
+| cache poison 的 stale 半边从未执行 | 先种一行 stale 候选（`sessionId: 'session-that-no-longer-exists'`），用 `findIndex` 定位两半分别断言；篡改前先读一次把缓存温热 | 撤 `{ ...candidate.stale }` → gaps 44/1 |
+| stat 顺序断言近乎恒真 | 每个探针用**递减**延迟（`24 - index`），完成序与到达序相反 | 反向组装行 → `the rows keep the order the paths arrived in` 红 |
+
+第 D 条踩了两次坑值得记：第一次断言切换后 `visibilityListeners.length === 0` 报 1——新会话的 effect 注册了自己的监听器，**1 才是正确值**；第二次改成断言恒为 1 仍不咬，因为 `render(toggle, {sessionId})` 换的是另一个组件实例，旧 instance 的 cleanup 根本不跑。必须 `deepRender(cards)` 让 panel 自己的 effect 重跑。
+
+第 G 条同理：原先 24 个探针都 `await` 同一个 `setTimeout(..., 1)`，完成序等于到达序，一个按到达序组装的实现也能过这条断言。
+
+cache poison 那条还暴露一个前提：第一次读如果写了裁决就不进缓存，所以篡改必须发生在**第二次**读到的对象上，否则共享不共享根本没被检验。
+
+**这一轮结束时的状态**：全量 **4008 passed / 0 failed**（补做 `statTouchedFiles` 内部上限后）；`mutate-checklist-panel.mjs` **137 killed**；`mutate-language-and-files.mjs` **195 killed, 0 crashed**；16 个改动文件全 LF；`git status` 无变异残留。
+
+### 交付前的实测：两个数字，一个注释被推翻
+
+重启宿主之前用真实候选队列（16 条，全部带 `sessionId`）与真实的 136ms `listSessions` 跑了两段原地测量：
+
+| 场景 | 耗时 | listing 次数 |
+|---|---|---|
+| 修复前：每条候选问一次，串行 | **2187 ms** | 16 |
+| 修复后：整个队列问一次 | **137 ms** | 1 |
+
+比值 16.0x，与改动前推算的 16×136ms ≈ 2178ms 吻合。
+
+第二段测的是队列缓存对「每 8 秒轮询一次」的读者意味着什么，结果推翻了我写在 `QUEUE_TTL_MS` 上方的一句话：
+
+```
+5 polls spaced 8s apart -> 3 listing(s) total
+per poll: 138ms, 0ms, 138ms, 0ms, 137ms
+```
+
+命中时不刷新 `at`，所以 10 秒的窗口只覆盖一次轮询、在下一次轮询到达前就过期——**命中率 50%，不是 100%**。原注释说「Ten seconds leaves the whole polling cycle inside one answer」是错的，已改成实测描述，并写明「省一半 listing 是这处改动的真实体量；把延迟真正压下来的是那条 16 倍」。
+
+这条错误值得单独记一笔：它不是代码错，是**注释在描述一个没有实际发生的收益**，与缺陷 8 的 `warm()` 是同一种毛病，只是规模小得多。写注释时如果有「应该如此」的推理而没有实测，就会留下这种句子。
+
+**仍未做的四条 nit**（审查者标为 nit，本轮未动）：`api.js` 的 `readFile` 死导入；`statTouchedFiles` 没有自己的内部上限（靠调用方传 200 条）；`index.js` 两条「承认自己不可观测」的注释；共享缓存数组只靠注释保护调用方不改写。
+
+## R-100 · 性能 P2：预热从未接线，插件路由绕过宿主认证（两名独立审查者，两条必修）
+
+### 覆盖范围
+
+D-205 ~ D-207，缺陷 8、9。改动 `packages/ui-evolve/lib/index.js`、
+`packages/ui-evolve/lib/api.js`、`packages/ui-evolve/lib/summarise.js`、
+`test/warm.test.mjs`（新文件）、`test/api.test.mjs`。全量 **3997 passed / 0 failed**。
+
+### 缺陷 8：`warm()` 是死代码，注释在说谎
+
+`summarise.js:589` 的 `warm()` 注释说它「在回合结束时先把摘要算好，免得面板打开时等模型」，
+但 `grep -rn "\.warm(" packages/` 只在测试里命中 —— 生产代码从未调用它。
+与之配套的 `markViewed()` 门禁（`summarise.js:614`）形同虚设：
+`markViewed` 本身有接线（`api.js` 的 `readPanel` 开头），但门后没有人。
+
+→ 接到 `packages/ui-evolve/lib/index.js` 的 `turn/end` 分支，`record` 刚把本回合折进
+`previous` 之后立刻预热 —— 这是已完成回合唯一可读且不再变化的时刻，
+也是面板还没在等它的最后时刻。被放弃的回合由 `endTurn` 清空且**不设** `previous`，
+所以读出来是 `undefined`，不需要额外判断。
+→ 同时补上从未接线的 `summariser.forget(agentId)`（`agent/disposed`）。
+`forget` 的 JSDoc 自己说得很清楚：留着条目会让门禁的问题从「有没有人在看这个会话」
+变成「有没有人曾经打开过它」，然后后台会话每回合一次模型调用，付到进程退出。
+
+### 缺陷 9：`/api/ui-evolve/*` 绕过宿主认证
+
+实测：不带任何 cookie，`curl http://127.0.0.1:19387/api/ui-evolve/panel` 返回 **200**，
+而 `/` 返回 401。`webServer.register()` 只把 route 放进 exact/prefixes 表，
+**完全不处理认证** —— 认证是调用方的事。
+
+宿主提供的入口在 `@deepseek-ai/dsh-client-connection` 的 `HostConnectionService`
+（服务名 `connection`），对外是 `requestRejection(request)`：返回 401 / 403 / `undefined`。
+`/api` 自己的路由就是 handler 开头 `admit(req)`、有 rejection 就写头结束 —— 照抄即可。
+
+→ `createPanelApi` 新增可选 dep `admission(req)`；`handle()` 里紧跟 `checkOrigin` 之后
+调它，返回数字就回 `error.auth.required` 并结束。`index.js` 侧用 `service('connection')`
+取（**故意不进 `inject`**：没有 connection 服务的宿主仍要能加载面板）。
+顺序上 `checkOrigin` 在前、admission 在后 —— 跨站请求要报 `error.origin.forbidden`
+而不是「缺凭据」，只有一种答案能说清真正的问题。
+
+### 两名独立审查者的两条必修（均正确）
+
+**必修 1：`probeSkill` fail-open，把 approve 的安全门变成敞开的门。**
+`probeSkill` 原 `catch { return { exists: false } }` 把**一切**读取失败
+（EACCES、EBUSY、正在被改写、frontmatter 解析失败）都当成「名字空着」。
+而 R-98 新加的 approve 复核正是靠这个 probe 当安全门 —— 读取失败就绿通过，
+`writeApprovedWithin` 覆盖真实文件，恰好复现了要堵的静默覆盖。
+→ `catch (error) { if (error?.code === 'ENOENT') return { exists: false }; throw error }`，
+`approve()` 里的复核包 try/catch，抛错就拒绝写并说明。
+**这是与 `sessionExists` 方向相反的不对称，两处都写了注释：会话答不上来要放行，
+skill 名字答不上来不能算空着。** 一个会误杀用户已批准的候选，一个会静默覆盖用户的文件。
+
+**必修 2：启动窗口 fail-open，且生产接线完全无测试。**
+`service('connection')` 走 cordis 的严格查询，而宿主实现是
+`_getImpl(name, strict) { ...; if (strict && impl.fiber.state !== 2) return; return impl }` ——
+宿主或插件重载窗口内 `fiber.state` 不是 2，`service('connection')` 返回 `undefined`，
+于是所有 `/api/ui-evolve/*` 在启动瞬间放行。
+另外 `test/api.test.mjs` 那些认证断言都是**直接注入 `deps.admission`**，
+`index.js` 的生产接线删掉也全过 —— 测的是闸门，不是闸门被装上。
+→ `admission()` 里区分两种 `undefined`：严格查不到就用 `ctx.get('connection', false)`
+（非严格）再查一次，查得到 = 启动窗口 → **503**（暂不服务），查不到 = 宿主根本没有这个服务
+→ `undefined`（面板照常工作）。
+→ `test/warm.test.mjs` 的 `fakeHost` 增加 `pending` Map 表达「有但未激活」，
+新增末块四条用例走**生产接线**而不是桩。
+
+### 变异验证
+
+| 变异 | 结果 |
+| --- | --- |
+| 删 `summariser.warm(...)` 调用 | 红 2：`a watched session is warmed when the turn ends — 1 after 1`、`the panel does not pay twice` |
+| 删 `summariser.forget(agentId)` | 红 1：`a disposed session is not warmed any more — 1 vs 0` |
+| 删 `warm()` 里的 `if (!this.viewed.has(agentId)) return` | 红 2：`a session nobody has opened is not warmed — 1 call(s)` |
+| `probeSkill` 回到无条件 `{ exists: false }` | 红 1：`an unreadable skill file stops the approval instead of reading as absent` |
+| admission 闸门 `typeof deps.admission === 'function'` 改 `false` | 红 8（五个读路由 + POST） |
+| admission 抛错分支 `401` 改 `undefined` | 红 1：`an admission that throws is a refusal — 200` |
+| `checkOrigin` 守卫 `&& false` | 红 4（跨站变 200、`and the host is not even asked`） |
+| `admission(req) { return undefined }` 短路生产接线 | 红 2：`a refusal from the host reaches the client`、`a service that is not ready yet is not read as absent — the route served a boot window open` |
+
+### 三次自己写砸的断言 / 测试
+
+1. **装饰性断言。** `test/warm.test.mjs` 原有一条 `host.routes.length > 0` 当作
+   「打开面板会标记会话被观看」的证据。删掉 `markViewed` 它照样通过 —— 它只证明了
+   「插件注册了路由」。改为不写这条断言，让下一条 delta 断言（预热多付一次）承担证明，
+   并把这句「为什么这里不能断言」写进注释。
+2. **累计计数。** 预热那条最初用 `llm.log.prepared >= 1`，而打开面板已经付过一次，
+   所以它永远为真。改成 delta：`beforeTurn` 前后差 1，报错文案 `1 after 1`。
+3. **测试事件形状错了三处。** `assistant/message` 写 `data: { content: [...] }`，但
+   `transcript.js` 读的是 `data?.message?.content`；`playTurn` 只投最后一个事件，
+   前面三个从未到达 `record`；`openPanel` 没带 `host` header，被 `checkOrigin` 403 挡掉，
+   `markViewed` 从未执行，于是预热被正确关掉 —— 三条错误各自都能让用例失败，
+   但报出来的现象都是「0 call(s)」。
+
+### 补验：`ctx.get(name, false)` 真的会绕过 fiber 状态检查（读宿主源码确认）
+
+503 分支依赖一个我从 asar 里读出来、但没有执行过的假设：cordis 的 `get` 会把第二个参数原样传下去。今天把这条链读完整了，结论成立，但它值得记下来，因为**这是这轮里唯一「靠读源码而不是跑代码」确认的机制**。
+
+`dsh/node_modules/@deepseek-ai/cordis/lib/index.js`（size 60361）：
+
+```js
+get(name, strict = true) {
+  return getTraceable(this.ctx, this._getImpl(name, strict)?.value)
+}
+_getImpl(name, strict = true) {
+  const key = this.ctx[symbols.isolate][name]
+  const impl = key && this.store[key]
+  if (!impl) return
+  if (strict && impl.fiber.state !== 2) return
+  return impl
+}
+```
+
+这两处是 `ReflectService` 的方法。它们挂到 `ctx` 上走的是 `mixin` 的 accessor：
+
+```js
+const value = Reflect.get(service, key, mixin)
+if (typeof value !== "function") return value
+return value.bind(mixin ?? service)
+```
+
+`bind` 只固定 `this`，不改变调用参数，所以 `ctx.get('connection', false)` 里的 `false` 会一路传进 `_getImpl`，`if (strict && ...)` 短路，未激活的 provider 就能被看见。**「有但未就绪」与「根本没有」确实分得开**，503 分支不是空中楼阁。
+
+同时确认了两件相邻的事：asar 的文件表是**嵌套目录树**而不是扁平的 `files['a/b/c']` 映射，得递归走 `entry.files` 才是 18188 个文件（按扁平方式取只看到 5 个顶层键）；`ReflectService` 类定义在偏移 21081、`get` 在 24206、`mixin` 在 28373。
+
+**这不是执行验证**，是把实现读完后的推断。`test/warm.test.mjs` 里那四条生产接线用例仍用测试替身模拟 strict 与 strict=false 两种返回——它们证明**我的代码如何用这个语义**，这条补验证明**宿主的语义确实如我所用**。两者合起来才算闭环，缺任何一半都只能说「大概对」。
+
+### 诚实的缺口
+
+1. **体感未验收**，同 R-98。`/panel` 现在该是毫秒级，但没有一次真实点击的观测；
+   重启桌面端之前，宿主跑的还是内存里的旧代码。
+2. **warm 失败不入 cache**，所以一个在 20 秒上限超时的回合，会让随后的 8 秒轮询反复付费。
+3. **`forget` 不 abort 在飞调用、不清 cache**：disposed 的会话的调用会跑到 20 秒
+   并把文本写进 cache（64 条淘汰封顶，有界）。
+4. **`test/api.test.mjs` 仍缺** HEAD、POST `/config`、POST `/candidates`、405 顺序的用例；
+   生产接线由 `test/warm.test.mjs` 补，但两者没有合并成一个套件。
+5. **503 分支的依据是 asar 里读到的 cordis 实现**（`_getImpl` 的 `strict` 语义），
+   不是运行中的宿主实测 —— 本机无法在不重启的情况下制造出 fiber 未就绪的窗口。
+
+## R-101 · 性能 P3：失败的摘要调用被每 8 秒重试一次（界面层验收时发现，无独立审查者）
+
+### 这一条不是排查出来的，是点出来的
+
+前三批的判断标准一直是「HTTP 层的数字」。这一轮把证据推到界面层（带 cookie 的 ego 浏览器打开真实 GUI），
+在点会话的过程中撞见了它：
+
+```
+GET /api/ui-evolve/panel?agent=session-517e1902-...   → 1838 / 545 / 488 / 537 ms
+```
+
+同一个会话、同一份载荷、连测四次都是半秒上下。响应体里写着答案：
+
+```json
+"summary": { "enabled": true,
+  "reason": "the model call failed: buddy: 当前模型不可用，请切换模型 model [hy4free] service info not found" }
+```
+
+模型调用失败了，但**每次轮询都在重试它**。源码里 `summarise` 的失败分支只 `return`，
+不进 cache（`packages/ui-evolve/lib/summarise.js`）：
+
+```js
+const failure = finishFailure(finish)
+if (failure !== undefined) return { enabled: true, reason: `the model call failed: ${failure}` }
+```
+
+`this.cache` 只存成功的结果。这个设计本身是对的——失败不是值，下一回合得能重试。
+错的是「下一回合」被当成了「下一次重绘」：面板每 8 秒轮询一次，于是每一次轮询都付一次注定失败的模型调用。
+**用户看到的「切会话要等很久」，有一份残余就来自这里，而它在前三批的十个缺陷里一次都没被点名。**
+
+### 改动
+
+**`packages/ui-evolve/lib/summarise.js`** 新增 `this.failed`（`Map<string, { reason, at }>`）与
+`SUMMARY_FAILURE_TTL_MS = 60000`：
+
+- `summarise()` 在查 `cache` 与 `inflight` 之间查 `failed`，未过期就返回
+  `{ enabled: true, reason, cached: true }` —— 带 `cached` 标记，让调用方能区分「刚问过」与「又问了」
+- 只有**真的打到模型**的失败才记：`the model call failed: …`、`the model returned nothing`、
+  `the summary call timed out` / `the summary call failed: …`
+- `no model service available` 与 `no model route is available` **刻意不记**：它们决定于一次目录查询，
+  重复不要钱，而且依赖的事实（装了哪个 adapter、catalogue 里有什么）会变，记住它只会把一个配置问题冻住一分钟
+- 上限 64 条、按 `at` 最旧淘汰，与 `cache` 同一套边界与理由
+- `forget(agentId)` 按 `${agentId}:` 前缀清掉该会话的失败记忆；`reset()` 一并清空
+  —— 换模型是换一次机会，旧模型的失败不该活过造成它的设置
+
+### 用例（`test/summarise.test.mjs`，+16 条，套件 156 → 172）
+
+1. 首次失败如实报告；失败不进 `cache`
+2. 窗口内重复问**不再调用模型**，且答案带 `cached: true`
+3. 窗口过期后**重新问**（把 `at` 拨老，不真等一分钟）
+4. `no model route` 不被记为失败，且决定它时**一次模型调用都没有**
+5. 失败记忆是**按会话**的：A 的失败不会让 B 少问一次
+6. `reset()` 清空失败记忆
+
+### 变异（五次，全部亲自跑，跑完 `restored; identical: True`）
+
+| 变异 | 结果 |
+|---|---|
+| 删掉整段失败记忆 | 红 2：`a repeat asked within the window costs no second call — 2 call(s)`、`and it is marked as remembered, not fresh` |
+| 记忆永不过期（去掉 TTL 比较） | 红 1：`an expired failure is asked again — 1 call(s)` |
+| 连 `no model route` 也记 | 红 1：`a missing route is not a remembered failure` |
+| `forget()` 不清失败记忆 | 红 1：`disposing the session forgets it — 1` |
+| `reset()` 不清失败记忆 | **第一次存活**（170 passed / 0 failed）→ 补第 6 组用例后红 1：`resetting the model forgets the failures it caused — 1` |
+
+最后一条是这轮唯一一次「用例没抓住」：`reset()` 的 `failed.clear()` 写在注释旁边，
+测试里没有任何一条在失败之后调 `reset()`。补上之后才死。**这又一次印证同一个形状：
+新加的每一行守卫，都必须有一条专门的用例去删它。**
+
+### 我在这轮犯的三个错（都要记）
+
+1. **子进程输出解码**：`subprocess.run(..., text=True)` 在中文 Windows 上按 GBK 解码，
+   测试输出里的 `—` 直接抛 `UnicodeDecodeError`，五个变异的结论全被吞掉、只剩空行。
+   改成 `capture_output=True` 拿 bytes 再 `.decode('utf-8','replace')`。
+2. **对照组是无效的**：我写了一个「old shape」对照组想量化修复前后，但它 import 的是
+   **已经修好的模块**，两个组都打印 `calls: 1`。修复前的真实行为只能由真机那五次半秒证明，
+   不能由这个脚本证明。**没有回滚的对照组不是对照组。**
+3. **`touch` 不等于热重载**：`touch packages/ui-evolve/lib/summarise.js` 之后真机仍是
+   728 / 530 / 488 / 503 / 533 ms，五次全是半秒 —— 宿主没有重新加载服务端模块。
+   所以「修后真机数字」这一格**仍然是空的**，和 R-98 的体感缺口是同一个缺口。
+
+### 数据
+
+- 全量 `4008 → 4024 passed / 0 failed`（`test/summarise.test.mjs` 172 passed）
+- 模块级实测（500ms 的失败流 × 5 次）：修复后 `503 / 0 / 0 / 0 / 0 ms`，模型只被调 **1 次**
+- 真机（宿主仍是旧代码）：`1838 / 545 / 488 / 537 ms`、`728 / 530 / 488 / 503 / 533 ms`
+  —— 这条是**修复前的证据**，不是修复后的验收
+
+### 诚实的缺口
+
+1. **修后真机数字为空**。宿主跑的是内存里的旧模块，`touch` 没有触发重载；
+   重启桌面端会结束当前会话，所以只能由人来重启。
+2. **无独立审查者**。这一条是我自己在界面验收时发现的，改动没有经过第三方审查 ——
+   与 R-97 记录的是同一类缺口（当时也是「知道该派但没派」）。
+3. **60 秒这个数字没有实测依据**。它是「一分钟一次话是小的、几十秒内恢复能被发现」的直觉取值，
+   没有量过「多短算短」。真要说的话，它只保证了一件事：不会每 8 秒一次。
+4. **失败记忆不区分失败类型**。`quota exceeded`（等一会儿可能好）与
+   `model [hy4free] service info not found`（配置错了）现在同样被压 60 秒。
+5. **`warm()` 也会撞上同一件事**：`warm` 调 `summarise`，所以它同样受益于失败记忆，
+   但这也意味着一个坏路由在 60 秒里只会预热失败一次，日志里看不出「一直在失败」。
+
+### 界面层补记（同一轮稍后，宿主仍是旧代码）
+
+一开始我以为监控列没有渲染：`data-dsse-monitor="1"`、`--dsse-monitor-reserve: 300px`、
+右栏 `data-rightbar-collapsed="true"` 全部正确，但整个 DOM 里只有一个 `.dsse-toggle`，
+找不到 `.dsse-monitor`。查下去是**测量时机的问题，不是缺陷**：
+
+- 会话切换会先 `remeasure()`，那一刻 `placeMonitor` 返回 `visible:false`，Overlay 走
+  `if (place.visible === false) return jsx("div", { style: { display: "none" } })`，
+  于是列不存在；随后订阅通知再测一次，列才出现。我两次探测正好落在两个不同的阶段。
+- 真正选中会话之后，列稳定存在且内容正确：
+  `rect { w: 300, h: 858, x: 1622 }`（视口 1922×935），
+  `innerText` = `建议 16 / — / 摘要生成失败 / 技能与 MCP 1 技能 · 0 服务 / diagnosing-bugs`。
+
+所以「监控列在最后一次观察中未渲染」这个疑问**已经排除**，它不是 D-193 的让位规则在起作用，
+而是我在启动器视图和会话视图之间取样造成的假象。
+
+**同一时刻的真实数字（仍是旧代码）**：在页面里直接 `fetch` 同一个 `/panel` 两分钟后又量了一次，
+**2169 ms**，响应里 `summary.reason` 仍是那句 `the model call failed: buddy: 当前模型不可用…`，
+且**没有 `cached` 字段**。没有 `cached` 恰好是宿主跑旧代码的指纹——新版失败命中时会带 `cached: true`。
+这一条同时证明了：缺陷 10 在真机上确实在以「每 8 秒一次、每次约 0.5–2 秒」的节奏发生，
+而修复只在文件里，还没进到跑着的进程里。
+
+### 第五轮：独立审查（subagent 49952223）——0 must-fix / 2 should-fix / 3 minor
+
+审查者在**未改动任何文件**的前提下跑基线（`test/summarise.test.mjs` 172 passed、`test/run.mjs` 4024 passed），
+把变异实验都放在仓库外的副本上做，并用 sha256 逐字节确认恢复。
+
+**should-fix 1（真问题，正中这次的动机）：失败记忆不带路由身份，换模型后最多 60 秒内仍报旧模型的错。**
+键是 `${agentId}:${turn}:${digest}`，不含 provider/model；而面板的路由来自 `routeFor()`（session 的 requestContext）。
+审查者用 provA（坏）/ provB（好）复现：第一次走 A 失败，第二次换成 B 之后仍然 `{"enabled":true,...old error...,"cached":true}`，
+**零次调用**——换模型这个动作根本没有机会被执行。而错误文案本身就在说「请切换模型」，
+于是这次修复把用户唯一的出路推迟了最多一分钟。
+
+**should-fix 2：三处 `noteFailure` 只有一处有覆盖，而用户真实走的正是没覆盖的那条。**
+删 `:612`（catch 路径）→ 172/0，没被抓住；删 `:597`（空文本）→ 同样 172/0；
+删 `:592`（finish 失败）→ 套件直接崩（TypeError），算抓住但不干净。
+关键在于用户机器上的错误是 `prepareCall` 抛出的 `buddy: ... service info not found`，走的是 **catch 路径**，
+而当时六条新用例全部走 `finish: {kind:'error'}`。
+
+**三条 minor**：成功时不删同名失败条目（两表可能不一致）；调用方主动 abort 与超时不可区分且会被记忆 60 秒（当前无调用方传 signal，潜伏）；文档声称两种「不记」的失败里只有一种有测试。
+
+### 第五轮的修复
+
+- 新增模块级 `routeIdentity(config, sessionRoute)`：复刻 `resolveRoute` 的前两步（配置里的固定路由，其次 session 路由），
+  目录回退那一步返回 `undefined`——那时路由还不知道，不能声称「同一条路由」。
+- `summarise()` 算出 `routeKey`，查失败记忆时要求 `failed.routeKey === routeKey`；`run()` 透传，三处 `noteFailure` 都带上。
+  **换模型立刻生效，换回去也一样**：路由不同就是不同的机会。
+- 成功时 `this.failed.delete(key)`：一个键只回答一个问题，否则缓存条目被淘汰后旧失败会复活。
+- 取消不再算失败：`if (!cancelled) this.noteFailure(...)`，并新增 `the summary call was cancelled`（client 映射为「摘要生成已取消」）。
+  区分 `signal?.aborted`（调用方主动取消）与 `controller.signal.aborted`（超时）。
+- 提前取消直接返回、不发起调用：`run()` 开头 `if (signal?.aborted === true) return {...}`。
+  理由：`addEventListener` 对**已经发生**的 abort 不会触发，原实现会让一个已经走开的调用跑完整次模型调用。
+
+### 第五轮新增用例（`test/summarise.test.mjs` 172 → 191）
+
+- `prepareCall` 抛错：报为 `the summary call failed`、原消息保留、窗口内不再调用、第二次带 `cached: true`
+- 空白流：报为 `the model returned nothing`、窗口内不再调用
+- 换路由：坏路由失败后换好路由，**不被旧路由的失败回答**、新路由真的被调用、且成功
+- 换回去：两条路由各失败/成功一次，**互不遮蔽**
+- 成功清失败：把失败条目拨老越过窗口后重试成功，`failed.size === 0`
+- 取消（调用前）：报为 cancelled、**零次调用**、不记忆
+- 取消（飞行中）：报为 cancelled、不记忆
+
+### 第五轮变异表（七处生产代码，逐一删除或短路）
+
+| 变异 | 结果 |
+|---|---|
+| 删 catch 路径的 `noteFailure` | 红 2（`a throwing route is not asked twice within the window — 2 call(s)`） |
+| 删空文本的 `noteFailure` | 红 1（`an empty answer is not re-asked within the window — 2 call(s)`） |
+| 查失败时不比 `routeKey` | 红 4（换模型被旧失败回答、新路由 0 次调用、换回去只调了 1 次） |
+| 成功时不 `failed.delete(key)` | 红 1（`a success leaves no failure behind for its key — 1`） |
+| 取消也记失败 | 红 1（`and a mid-flight cancellation is not remembered — 1`） |
+| 删掉提前取消的早退 | 红 2（报成有摘要、`1 call(s)`） |
+| 删 finish 失败的 `noteFailure` | 红 8，**不再崩溃**（把「拨老失败条目」的测试改成带守卫，缺失时干净失败） |
+
+### 第五轮我自己写砸的两处
+
+1. 「取消」用例第一版没有给 `sessionRoute`，于是先返回 `no model route is available`，断言错位。
+2. 「成功清失败」用例第一版**用了两个不同的 Summariser**，等于什么都没测（变异存活）。改成同一个实例、先把失败条目拨老越过窗口，才真正走到「重试成功」这条路径。
+   这是本批第二次犯「对照组/被测对象不是同一个」的错（第一次是 P2 的 old-shape 对照）。
+
+### 第五轮之后的诚实缺口
+
+- 60 秒仍是拍定的，没有按失败种类分的实测依据（D-210 已记）。
+- `no model service available` 这半「不记」仍无用例（审查者 minor 5 指出）。
+- 修后的真机数字依旧为空——宿主不热重载服务端模块，重启桌面端会结束当前会话，只能由人重启。
+
+### 第六轮：重启宿主之后的真机数字（2026-11-18 21:35，宿主 PID 32948）
+
+用户完全退出并重新打开桌面端后，同一个进程、同一批请求，全部拿到修后数字。
+这是缺陷 10 唯一的真机证据，也是前面「修后仍为空」那一格的收尾。
+
+**认证闸门同时生效（缺陷 9 的复验）**：不带任何 cookie 访问四条插件路由，全部 **401 + 102 B**，
+与 `/` 的 401 形态一致；修复前它们对匿名请求返 200。
+
+**缺陷 10 的那个会话**（`session-517e1902-2f51-41c2-9f09-f46b0c8876c3`，模型路由仍是坏的）：
+
+| | 修复前 | 修复后 |
+|---|---|---|
+| 单次 `/panel` | 1838 / 545 / 488 / 537 ms | 1.8 / 1.8 / 1.6 / 1.4 ms |
+| 响应里的指纹 | 无 `cached` 字段 | `"cached": true` |
+
+**25 次连发的命中分布**：min 1.1 / median **1.5** / p90 1.9 / max 2.4 ms
+（首个 663.5 ms 是失败窗口恰好过期那一次）。
+
+**跨 TTL 的节奏**（间隔 12 秒）：`11.3 ms (cached)` → `773.4 ms (未命中，重新付费)` → `3 ms (cached)`；
+等过 60 秒窗口后再打，`1141.8 ms (未命中)`。只有窗口过期那一次付费，与设计一致。
+
+**按真实轮询节奏跑满一个 60 秒窗口**（每 8 秒一次，共 64 秒）：
+
+```
+8 次轮询 / 1 次付费 / 7 次命中
+1s:998.2ms(PAID)  9s:3.2  17s:311.5  25s:3.2  34s:206.8  42s:3  50s:240.3  58s:3.2
+```
+
+命中中位 **3.2 ms**。修复前是 8 次全付费、每次 0.5–2 秒。
+
+**命中里 311 / 207 / 240 ms 那三个峰值不是摘要，是 `QUEUE_TTL_MS = 10000` 到期。**
+1 秒一次连打 32 秒，峰值恰好每 10.2 秒出现一次（`10.3s:235ms / 20.5s:233ms / 30.7s:180ms`），
+其余全部 2 ms。这与 `QUEUE_TTL_MS` 注释里写的「hit, miss, hit, miss」完全对应 ——
+也就是说那半秒不是缺陷 10 的残留，是候选队列每秒级读与十秒级缓存之间的正常边界，
+且它由缺陷 1 的批量化降到了单次 listSessions 的量级（200–240 ms），而不是 16 次。
+
+**界面层**：监控列可见（`data-dsse-monitor=1`、`--dsse-monitor-reserve: 220px`、
+`rect { w: 220, h: 728, x: 1044 }`，视口 1264×805），切换按钮存在；
+页面内连发 6 次 `/panel` 全部 `200` + `cached: true`，耗时 **4.3–6.0 ms**。
+
+### 第六轮更正：那个 2.1 秒不是「新会话」的代价（我读错了自己的日志）
+
+第六轮先写下一段结论：切到一个从未失败过的会话时第一次仍要付约 2.1 秒。**这段是错的，已撤回。**
+
+回看当时的 `fetch` 打点，两条被拦到的请求 `agent=` 都是 `session-517e1902-…`，
+也就是**路由本来就坏的那个会话**，不是新切过去的那个。我把「界面上选中的会话变了」
+当成了「面板在问新会话」，于是把一次失败重算记成了新会话的首次成本。
+
+撤回后补测（同一进程、从未请求过的会话）：
+`session-10e7c6f9` 首次 14 ms、`session-6115c7d2` 首次 2 ms、`session-6f2c48c0` 首次 2 ms，
+三次都返回 `no completed turn yet`。**真正没失败过、且没有已完成回合的会话，冷启动是毫秒级的。**
+当成功缓存为空、但确实有已完成回合时，才会有一次正常的模型调用 —— 这一条由前面
+HTTP 层的 `2533 ms 且返回正文` 证明过，与「失败」无关。
+
+仍然没有解释清楚的一点（如实留下）：在浏览器里那次打点中，同一个坏路由会话在 8 秒内
+出现两次**未命中**（2161.9 ms 与 767 ms）。之后的命令行连测 10 次 8 秒轮询是
+`601P 186h 3h 3h 202h 3h 3h 186h 993P 3h`（两次付费相隔约 64 秒，符合 60 秒窗口），
+与那两次对不上。可能是打点前页面里还有另一个标签页/另一段 effect 在问同一会话，
+也可能是我漏了一个 `forget` 路径。**未验证，不作为结论。**

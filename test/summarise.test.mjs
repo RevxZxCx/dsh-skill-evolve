@@ -10,6 +10,7 @@
 
 import {
   MAX_SUMMARY_CHARS,
+  SUMMARY_FAILURE_TTL_MS,
   INSTRUCTION,
   TRANSCRIPT_OPEN,
   TRANSCRIPT_CLOSE,
@@ -856,6 +857,199 @@ check('a reply under the cap is untouched', tidy('x'.repeat(MAX_SUMMARY_CHARS - 
   summariser.warm({ agentId: 'a', snapshot })
   await new Promise((resolve) => setTimeout(resolve, 20))
   check('a disabled panel is not warmed', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
+// A failed call is not retried on every repaint
+//
+// The panel polls every eight seconds. Before this, a route that had gone away
+// meant one doomed model call per poll, forever: measured on the host at
+// 0.5-2 seconds each, which is exactly the slowness the warming path exists to
+// remove. A failure is not a value, so it still must not enter the cache — the
+// next turn has to be able to try again.
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a failure is reported the first time', String(first.reason).includes('quota exceeded'), JSON.stringify(first))
+  check('a failure is not put in the cache', summariser.cache.size === 0, String(summariser.cache.size))
+
+  const again = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a repeat asked within the window costs no second call', llm.log.prepare.length === 1, `${llm.log.prepare.length} call(s)`)
+  check('and it says the same thing the failure said', String(again.reason).includes('quota exceeded'), JSON.stringify(again))
+  check('and it is marked as remembered, not fresh', again.cached === true, JSON.stringify(again))
+}
+
+{
+  // The reported failure on the host was not a finish reason: prepareCall itself
+  // threw ("buddy: current model unavailable, please switch"). That throws into
+  // the catch path, which is a different line from the finish-failure one, so it
+  // needs its own proof — otherwise the memory can be deleted from the path the
+  // user actually hit and every test still passes.
+  const llm = fakeLlm({ prepareThrows: new Error('buddy: current model unavailable [hy4free] service info not found') })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a throw from prepareCall is reported as a failed call', String(first.reason).includes('the summary call failed'), JSON.stringify(first))
+  check('and the host message survives into the reason', String(first.reason).includes('service info not found'), JSON.stringify(first))
+  const again = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a throwing route is not asked twice within the window', llm.log.prepare.length === 1, `${llm.log.prepare.length} call(s)`)
+  check('and the second answer says it was remembered', again.cached === true, JSON.stringify(again))
+}
+
+{
+  // Same argument for "the model answered with nothing": it cost a call, so it
+  // is remembered, and it reaches the report through its own line.
+  const llm = fakeLlm({ chunks: [{ type: 'text-delta', text: '   ' }] })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  check('whitespace-only output is reported as nothing returned', String(first.reason).includes('returned nothing'), JSON.stringify(first))
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('an empty answer is not re-asked within the window', llm.log.prepare.length === 1, `${llm.log.prepare.length} call(s)`)
+}
+
+{
+  // The failure text tells the reader to switch models. Remembering it across
+  // the switch would delay the only thing it asks for, so a remembered failure
+  // only answers for the route that produced it.
+  const refused = fakeLlm({ prepareThrows: new Error('buddy: service info not found') })
+  const working = fakeLlm()
+  let llm = refused
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const broken = await summariser.summarise({ agentId: 'a', snapshot, sessionRoute: { provider: 'prov-a', model: 'model-a' } })
+  check('the broken route fails', String(broken.reason).includes('service info not found'), JSON.stringify(broken))
+  llm = working
+  const switched = await summariser.summarise({ agentId: 'a', snapshot, sessionRoute: { provider: 'prov-b', model: 'model-b' } })
+  check('switching the model is not answered from the old route failure', switched.cached === undefined, JSON.stringify(switched))
+  check('and the new route is actually called', working.log.prepare.length === 1, `${working.log.prepare.length} call(s)`)
+  check('and it succeeds', switched.text === 'A summary.', JSON.stringify(switched))
+}
+
+{
+  // Switching back to the route that failed must not be silently answered from
+  // memory either, once the other route has produced a summary.
+  const llm = fakeLlm({ prepareThrows: new Error('buddy: service info not found') })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot, sessionRoute: { provider: 'prov-a', model: 'model-a' } })
+  await summariser.summarise({ agentId: 'a', snapshot, sessionRoute: { provider: 'prov-b', model: 'model-b' } })
+  check('a failure on one route does not hide the other route', llm.log.prepare.length === 2, `${llm.log.prepare.length} call(s)`)
+}
+
+{
+  // A success replaces the failure for that key: one key answers one question,
+  // and a stale failure must not be able to resurface when the cache entry for
+  // the newer success is evicted. The failure has to be aged past the window
+  // first, otherwise the retry is answered from memory and never succeeds.
+  const broken = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const working = fakeLlm()
+  let llm = broken
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('the failure is on hand before the success', summariser.failed.size === 1, String(summariser.failed.size))
+  const remembered = summariser.failed.get([...summariser.failed.keys()][0])
+  summariser.failed.set([...summariser.failed.keys()][0], { ...remembered, at: Date.now() - SUMMARY_FAILURE_TTL_MS - 1 })
+  llm = working
+  const ok = await summariser.summarise({ agentId: 'a', snapshot })
+  check('the retry after the window succeeds', ok.text === 'A summary.', JSON.stringify(ok))
+  check('a success leaves no failure behind for its key', summariser.failed.size === 0, String(summariser.failed.size))
+}
+
+{
+  // A cancellation is the reader's decision, not the model's verdict: it must not
+  // be remembered like a failure, and it must not be paid for either.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const controller = new AbortController()
+  controller.abort()
+  const cancelled = await summariser.summarise({ agentId: 'a', snapshot, signal: controller.signal, sessionRoute: { provider: 'prov-a', model: 'model-a' } })
+  check('a cancelled summary says it was cancelled, not that the model failed', String(cancelled.reason).includes('cancelled'), JSON.stringify(cancelled))
+  check('and a cancellation costs no model call', llm.log.prepare.length === 0, `${llm.log.prepare.length} call(s)`)
+  check('and a cancellation is not remembered', summariser.failed.size === 0, String(summariser.failed.size))
+}
+
+{
+  // An abort that arrives mid-flight is a different path from one that arrives
+  // before the call: it goes through the catch, where the decision to remember
+  // or not is made. Both must stay un-remembered.
+  const controller = new AbortController()
+  const llm = {
+    async prepareCall(route) {
+      return {
+        config: route,
+        async *stream() {
+          yield { type: 'text-delta', text: 'partial ' }
+          controller.abort()
+          throw Object.assign(new Error('aborted'), { name: 'AbortError' })
+        },
+      }
+    },
+  }
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const mid = await summariser.summarise({ agentId: 'a', snapshot, signal: controller.signal, sessionRoute: { provider: 'prov-a', model: 'model-a' } })
+  check('a mid-flight cancellation is not reported as a model failure', String(mid.reason).includes('cancelled'), JSON.stringify(mid))
+  check('and a mid-flight cancellation is not remembered', summariser.failed.size === 0, String(summariser.failed.size))
+}
+
+{
+  // The window has to expire, or a route that comes back is never noticed.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  const remembered = summariser.failed.get([...summariser.failed.keys()][0])
+  check('the failure was remembered', remembered !== undefined, JSON.stringify([...summariser.failed.keys()]))
+  // Age it past the window rather than waiting a minute. Guarded so that a
+  // regression which forgets to record anything fails this check cleanly
+  // instead of throwing on the missing entry and taking the suite with it.
+  if (remembered !== undefined) {
+    summariser.failed.set([...summariser.failed.keys()][0], { reason: remembered.reason, at: Date.now() - SUMMARY_FAILURE_TTL_MS - 1 })
+  }
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('an expired failure is asked again', llm.log.prepare.length === 2, `${llm.log.prepare.length} call(s)`)
+}
+
+{
+  // "No route" is decided without a call, so remembering it would only freeze
+  // an answer that a catalogue change can fix.
+  const llm = fakeLlm({ providers: [], models: [] })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('a missing route is not a remembered failure', summariser.failed.size === 0, JSON.stringify([...summariser.failed.keys()]))
+  check('and it is decided without calling the model', llm.log.prepare.length === 0, `${llm.log.prepare.length} call(s)`)
+  check('and it says so', String(first.reason).includes('no model route'), JSON.stringify(first))
+}
+
+{
+  // The memory is per session: one broken session must not silence another.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  const before = llm.log.prepare.length
+  await summariser.summarise({ agentId: 'b', snapshot })
+  check('a second session is not served from the first one memory', llm.log.prepare.length === before + 1, `${llm.log.prepare.length - before} new call(s)`)
+  check('and it records its own failure', summariser.failed.size === 2, JSON.stringify([...summariser.failed.keys()]))
+}
+
+{
+  // Changing the configured model is a different chance of success: the old
+  // model misfortune must not outlive the setting that caused it.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('a failure is on hand before the reset', summariser.failed.size === 1, String(summariser.failed.size))
+  summariser.reset()
+  check('resetting the model forgets the failures it caused', summariser.failed.size === 0, String(summariser.failed.size))
+}
+
+{
+  // Disposing a session must drop its remembered failures with everything else.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('the failure is remembered while the session lives', summariser.failed.size === 1, String(summariser.failed.size))
+  summariser.forget('a')
+  check('disposing the session forgets it', summariser.failed.size === 0, String(summariser.failed.size))
 }
 
 // ---------------------------------------------------------------------------

@@ -636,5 +636,39 @@ try {
   await rm(dir3, { recursive: true, force: true })
 }
 
+// ---- the candidates revision counter ---------------------------------------
+//
+// `loadQueue` compares this counter before reusing a cached queue. The stat it
+// also takes already catches every write, so a test that only exercises the
+// cache cannot tell the two guards apart -- mutation testing showed that
+// removing the counter alone left the whole suite green. This checks the
+// counter's own contract instead: it must move on every write that goes
+// through the store, and only on those.
+const dir4 = await mkdtemp(join(tmpdir(), 'skill-evolve-revision-'))
+try {
+  const store = new Store({ root: dir4, log: () => {} })
+  await store.saveCandidates([])
+  const start = store.candidatesRevision
+  check('the counter is a number', Number.isInteger(start), String(start))
+
+  await store.mutateCandidates(async () => ({ candidates: [{ id: 'a', name: 'a' }], result: undefined }))
+  const afterWrite = store.candidatesRevision
+  check('a mutating write advances the counter', afterWrite > start, `${start} -> ${afterWrite}`)
+
+  // A mutation that returns no replacement content writes nothing, and the
+  // counter must not move: advancing it would invalidate the cache on every
+  // read, which is exactly the cost this cache exists to avoid.
+  await store.mutateCandidates(async () => ({ result: undefined }))
+  check('a read-only mutation leaves the counter alone', store.candidatesRevision === afterWrite, `${afterWrite} -> ${store.candidatesRevision}`)
+
+  await store.mutateCandidatesWithin(async () => ({ candidates: [{ id: 'b', name: 'b' }], result: undefined }))
+  check('the unlocked variant advances it too', store.candidatesRevision > afterWrite, `${afterWrite} -> ${store.candidatesRevision}`)
+
+  const fresh = new Store({ root: dir4, log: () => {} })
+  check('a new store starts its own count', fresh.candidatesRevision === 0, String(fresh.candidatesRevision))
+} finally {
+  await rm(dir4, { recursive: true, force: true })
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 process.exitCode = failed === 0 ? 0 : 1
