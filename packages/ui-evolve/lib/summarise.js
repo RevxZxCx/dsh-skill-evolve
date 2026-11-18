@@ -66,14 +66,17 @@ const SUMMARY_TIMEOUT_MS = 20000
  *
  * A failure is not a value, so it must not go into the cache above — the next
  * turn has to be able to try again. But "next turn" is not "next repaint": the
- * panel polls every eight seconds, and without a short memory of the failure
- * each poll pays for the same doomed model call again. Measured on a host whose
- * model route had gone away, that was 0.5-2 seconds of dead waiting per poll,
- * forever, which is the very slowness this module exists to remove.
+ * panel reads on every pushed frame and on a 60-second floor behind them, and
+ * without a short memory of the failure each of those reads pays for the same
+ * doomed model call again. Measured on a host whose model route had gone away,
+ * that was 0.5-2 seconds of dead waiting per read, forever, which is the very
+ * slowness this module exists to remove.
  *
  * A minute is long enough that a broken route costs one call a minute instead
- * of seven, and short enough that a route that comes back is noticed without
- * anybody reloading the page.
+ * of one per read, and short enough that a route that comes back is noticed
+ * without anybody reloading the page. The bound is per minute rather than a
+ * multiple of the old eight-second clock, which stopped being the right number
+ * to multiply when the clock did.
  */
 const SUMMARY_FAILURE_TTL_MS = 60000
 
@@ -683,18 +686,24 @@ ${TRANSCRIPT_CLOSE}` }],
    *
    * Fire and forget. `summarise` answers every failure with a value instead of
    * throwing, so the catch exists for the event loop rather than for an expected
-   * error. Nothing awaits this, and nothing should start.
+   * error. Nothing has to await this -- but the promise is returned rather than
+   * dropped, because "the summary landed" is itself a change the panel has to be
+   * told about, and the caller that warmed it is the only one who knows when.
+   *
+   * It never rejects: the catch below answers a failure with `undefined` after
+   * logging, so a caller can attach a `.then` without a `.catch`.
    *
    * @param {object} input - what to warm.
    * @param {string} input.agentId - which agent the turn belongs to.
    * @param {object} input.snapshot - the turn that just ended.
    * @param {{ provider: string, model: string } | undefined} [input.sessionRoute] -
    *   the route the session is using.
-   * @returns {void}
+   * @returns {Promise<object|undefined>} the answer, or `undefined` when nothing
+   *   was warmed and when the call failed.
    */
   warm({ agentId, snapshot, sessionRoute }) {
-    if (valueOf(this.config)?.panelSummary !== true) return
-    if (!this.viewed.has(agentId)) return
+    if (valueOf(this.config)?.panelSummary !== true) return Promise.resolve(undefined)
+    if (!this.viewed.has(agentId)) return Promise.resolve(undefined)
     // The rejection is logged rather than dropped. `run` catches everything it
     // can survive, so a rejection here means a real bug above it, and the only
     // evidence would be a card that stays stale for no stated reason.
@@ -702,8 +711,9 @@ ${TRANSCRIPT_CLOSE}` }],
     // `log` is a bare function in every caller, not a logger object, so this is
     // `this.log(...)` — `this.log.warn` would throw inside the catch handler and
     // turn the failure being reported into an unhandled rejection.
-    void this.summarise({ agentId, snapshot, sessionRoute }).catch((error) => {
+    return this.summarise({ agentId, snapshot, sessionRoute }).catch((error) => {
       this.log(`the warm-up summary failed outside its own handler: ${error?.message ?? error}`)
+      return undefined
     })
   }
 

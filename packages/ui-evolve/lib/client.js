@@ -51,7 +51,24 @@ window.__ModuleLoader__.load({
     const NS = "@revxz/dsh-ui-evolve"
     const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
     const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
-    const REFRESH_MS = 8000
+    /**
+     * How often the panel asks when nothing has told it to.
+     *
+     * This used to be eight seconds and was the panel's only clock. It is now a
+     * fallback: an open `EventSource` on `/events` answers the moment the payload
+     * could have changed, so the ordinary case is a frame within a round trip of
+     * the thing happening rather than up to eight seconds after it.
+     *
+     * What the fallback is still for is the part no session event can announce,
+     * and it is a short list: the global candidate queue (another conversation
+     * or a slash command writes it), file sizes (read with `stat` at request
+     * time, so another process editing a file raises no event here), and the
+     * skill directory (whether a name is taken is a directory read). Sixty
+     * seconds is slow enough to be nearly free, and the price it charges is
+     * that one of those three can now be up to a minute stale -- that is the
+     * trade, not an oversight.
+     */
+    const REFRESH_MS = 60000
 
     /**
      * How long one panel request may stay out before it is abandoned.
@@ -2814,11 +2831,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
        */
       const load = React.useCallback(
         async (quiet, mustAsk) => {
-          // One request at a time. The refresh interval is eight seconds and a
-          // cold answer used to take longer than that, so the timer could start a
-          // second request while the first was still out; each request holds the
-          // server's mutation lock for part of its life, which turned three
-          // overlapping refreshes into three sequential ones.
+          // One request at a time. Two things can ask at once now: the minute
+          // clock, which is predictable, and an `EventSource` frame, which is
+          // not -- it arrives whenever something happened, including while an
+          // answer is still out. Each request holds the server's mutation lock
+          // for part of its life, so overlapping reads do not run in parallel,
+          // they queue.
           //
           // The marker holds the ticket of the request that owns it, not the
           // session name. A name cannot tell two requests for the same session
@@ -2827,12 +2845,15 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // that one is still out -- exactly the stacking this guard prevents.
           // The ticket is unique per request, so it can only ever unlock itself.
           if (panelBusyRequest.current !== null) {
-            // An interval tick can be dropped outright: it asks the same question
-            // the request already out is asking, and the next tick is eight seconds
+            // A clock tick can be dropped outright: it asks the same question
+            // the request already out is asking, and the next tick is a minute
             // away. A call made in response to something the reader did cannot --
             // it follows an approval that has already returned, a saved setting or a
             // click on the button, and the answer in flight predates all of them.
             // Marking it wanted re-asks the moment the request out finishes.
+            // That is also why a frame sets it: dropping a tick costs a minute,
+            // dropping a frame loses the last change until something else
+            // happens to announce itself, which may be never.
             //
             // The distinction is `mustAsk`, not `quiet`: quiet only decides whether
             // to show the loading state, and the approval callback is quiet because
@@ -2895,11 +2916,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             if (typeof data?.agent === "string" && data.agent !== "" && data.agent !== target) return
             // An unchanged answer keeps the object it already had. React compares
             // state by identity, so a fresh object with identical contents
-            // re-renders the whole column: one hundred and fifty `jsx` calls every
-            // eight seconds to produce exactly the same output. Most polls land on
-            // an unchanged session -- the queue, the skill list and the file sizes
-            // only move when something happens -- so that was the common case, not
-            // the exceptional one.
+            // re-renders the whole column: one hundred and fifty `jsx` calls to
+            // produce exactly the same output. Most reads land on an unchanged
+            // session -- the queue, the skill list and the file sizes only move
+            // when something happens -- so that was the common case, not the
+            // exceptional one.
             //
             // The signature is the payload serialised. It costs a stringify of the
             // answer (the large field is the file list, bounded by MAX_PATHS) and
@@ -2985,32 +3006,137 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
 
       React.useEffect(() => {
         load(false)
-        // A timer, not a subscription. The counts on these cards change when a
-        // turn ends and when a file on disk is touched, and neither of those is
-        // something this bundle can be told about: it renders from whatever
-        // `/panel` answers, and asks again every few seconds.
+        // One push stream, one slow clock, and neither runs while the page is
+        // hidden.
         //
-        // Nothing is asked while the page is hidden. A backgrounded window is not
-        // reading the column, and this plugin's honest cost is a full queue read
-        // per answer -- paying that every eight seconds for a tab nobody is
-        // looking at is the kind of quiet expense that shows up as battery drain
-        // and as a host that never goes idle. Coming back asks once, immediately,
-        // because the numbers are stale by then.
+        // The stream is the fast path. The host knows when a turn ends, a skill is
+        // used or an MCP server is called, and this plugin owns the only place
+        // that knows the panel's payload changes at those moments (`Revisions`,
+        // bumped at the six session-event sites on the plugin side, plus one for an
+        // approval and one for a summary landing). So the page opens one
+        // `EventSource` and the
+        // server writes a frame when it has something to say. That is what the
+        // host's own `/plugins/events` channel does, and matching its shape means
+        // one long-lived-connection protocol in the page rather than two.
+        //
+        // This replaced a twenty-five-second parked request, which replaced an
+        // eight-second timer. Both were polls: they had to be re-asked after every
+        // answer, and the timer spent four hundred and fifty round trips an hour
+        // to hear "still the same". A stream is opened once.
+        //
+        // `EventSource` reconnects on its own, so there is no retry logic here --
+        // except that its first attempt is what discovers a host too old to serve
+        // the route, and a failed `EventSource` retries on the browser's own
+        // schedule. That is why the fallback below is not "retry the stream
+        // often": it is the ordinary slow clock, which was always there for the
+        // three things no event announces (the global candidate queue, file
+        // sizes read with `stat`, and the skill directory).
+        //
+        // The interval is that slow clock: sixty seconds. See `REFRESH_MS`.
+        //
+        // Neither runs while the page is hidden. A backgrounded window is not
+        // reading the column, and the honest cost of an answer is a full queue
+        // read -- paying that for a tab nobody is looking at is the kind of quiet
+        // expense that shows up as battery drain and as a host that never idles.
+        // Coming back asks once, immediately, because the numbers on screen are
+        // from before the tab went away.
+        let stream = null
+
+        const stopStream = () => {
+          if (stream === null) return
+          stream.close()
+          stream = null
+        }
+
+        const startStream = () => {
+          if (typeof document !== 'undefined' && document.hidden === true) return
+          // No `EventSource` in this environment (a headless renderer, an older
+          // browser, a test harness): the slow clock still keeps the column
+          // working, and starting a stream is not worth a polyfill.
+          if (typeof EventSource !== 'function') return
+          // No empty-id guard here: this effect lives in the card column, which
+          // the overlay does not render at all until it has a session id, so a
+          // blank target cannot reach this line. A guard that cannot fire is one
+          // more branch to keep honest, and this one survived a mutation run
+          // with the check deleted -- unreachable code looks identical to
+          // untested code from the outside.
+          const target = liveSessionId() || bridge.sessionId
+          stopStream()
+          // Through `resolveUrl` like every other request: the GUI can be
+          // mounted under a path prefix, and a root-relative URL would miss the
+          // route entirely. That failure is invisible -- a 404 makes
+          // `EventSource` give up for good, so the panel would quietly fall back
+          // to the minute clock while looking perfectly healthy.
+          const opened = new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(target)}`))
+          stream = opened
+          // A notice means the payload could have changed, so fetch it. Not
+          // droppable: this is the whole point of the stream.
+          opened.addEventListener('message', () => {
+            load(true, true)
+          })
+          // `error` covers two different outcomes, and they need opposite
+          // handling. A dropped connection leaves `readyState` CONNECTING and
+          // the browser retries by itself -- closing here would put a stop to
+          // the only fast path there is. A fatal failure (a 404 from a host that
+          // does not serve this route, a response that is not
+          // `text/event-stream`) leaves it CLOSED and the browser never comes
+          // back. That distinction is `readyState`, and getting it wrong is what
+          // D-73 recorded the first time this route lost its stream: the panel
+          // stayed on stale data until the reader switched conversations.
+          opened.addEventListener('error', () => {
+            if (opened.readyState !== 2) return
+            // Given up for good, so give the slot back and let the slow clock
+            // retry it rather than spinning here: the route may come back when
+            // the plugin reloads, and a reconnect storm costs more than the
+            // minute it was meant to replace.
+            stopStream()
+          })
+        }
+
         const timer = setInterval(() => {
           if (typeof document !== 'undefined' && document.hidden === true) return
           load(true)
+          // A stream that gave up is retried here rather than left dead. Without
+          // this, a fatal failure -- a host that had not loaded the plugin yet,
+          // a reload in progress -- cost the fast path for the rest of the
+          // session, which is exactly the outcome `error` was written to avoid.
+          if (stream === null) startStream()
         }, REFRESH_MS)
+
         const onVisible = () => {
-          if (typeof document !== 'undefined' && document.hidden === true) return
+          if (typeof document !== 'undefined' && document.hidden === true) {
+            // Going away: close the stream rather than leave a server slot
+            // writing frames to a page nobody is looking at. Coming back reopens
+            // it, and the first read on the way back catches up.
+            stopStream()
+            return
+          }
           // Coming back is a reader action, and the numbers on screen are from
           // before the tab went away. Not droppable.
           load(true, true)
+          // The stream was closed on the way out (or never opened), so it has to
+          // begin again or the fast path would stay dead for the rest of the
+          // session. Only when there is nothing open: `visibilitychange` also
+          // fires for reasons other than the tab leaving (a window that is
+          // merely uncovered), and tearing down a healthy stream for one of
+          // those would cost the frame it was about to deliver.
+          if (stream === null) startStream()
         }
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
           document.addEventListener('visibilitychange', onVisible)
         }
+
+        startStream()
+
         return () => {
           clearInterval(timer)
+          stopStream()
+          // A switch between conversations already clears this; unmounting did
+          // not. Without it, a frame that arrives while a request is out leaves
+          // the flag set, and that request's `finally` then asks once more for a
+          // column that is no longer on screen -- one wasted queue read and a
+          // `setState` on an unmounted component.
+          panelRefreshWanted.current = false
           if (typeof document !== 'undefined' && typeof document.removeEventListener === 'function') {
             document.removeEventListener('visibilitychange', onVisible)
           }

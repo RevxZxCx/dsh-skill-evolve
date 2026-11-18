@@ -87,29 +87,33 @@ const SPEED_WAIT_MS = 25 * 1000
 const SPEED_WAIT_STEP_MS = 100
 
 /**
- * Hold a speed request open until the reading could say something new.
+ * Hold a request open until the number it names could have moved.
  *
- * A timer on the client discovers a reply up to one interval late, and that
+ * A timer on the client discovers a change up to one interval late, and that
  * interval has to be long enough not to be traffic. This is the other way round:
- * the request waits, and answers the moment the meter's revision moves. What it
+ * the request waits, and answers the moment the caller's revision moves. What it
  * must never do is wait past the client's patience or into a socket that has
  * already gone — hence the deadline, and the `close` listener that ends the wait
  * the moment the browser navigates away. Without that listener the interval
  * outlives the request it belongs to, once per abandoned panel.
  *
- * @param {object} deps - the api dependencies.
+ * The speed badge is the only caller. It is a named function anyway because these
+ * four rules -- the deadline, the `close` listener, the `unref`, the interval --
+ * are the part of a long poll that has been wrong before, and they are easier to
+ * get right once than once per route that wants them.
+ *
+ * @param {() => number} read - the counter to compare against `after`.
  * @param {import('node:http').IncomingMessage} req - the request, for its close.
- * @param {string} agentId - the session being watched.
  * @param {URLSearchParams} params - the request's query.
+ * @param {number} limit - how long to hold, in milliseconds.
  * @returns {Promise<void>} resolves when it is time to answer, however that happened.
  */
-function speedWait(deps, req, agentId, params) {
+function holdRevision(read, req, params, limit) {
   const after = Number.parseInt(params.get('after') ?? '', 10)
   // No `after`, or a nonsense one: the caller asked for a plain read and gets
   // one. Answering at once is also right for a client that has just opened the
   // panel — it has nothing yet, and waiting would delay the first paint.
   if (Number.isFinite(after) === false) return Promise.resolve()
-  if (typeof deps.speedRevision !== 'function') return Promise.resolve()
 
   // `after` is the caller's own reading, not a flag saying "I would like a
   // wait". Comparing against the revision at the moment the request happens to
@@ -117,10 +121,15 @@ function speedWait(deps, req, agentId, params) {
   // all, and a reply that settles in that gap is the common case rather than the
   // corner one: the caller would then sit out the whole deadline for a number
   // that was already final when it asked.
-  const moved = () => deps.speedRevision(agentId) !== after
+  // One comparison, no branch. There used to be an `undefined` arm here for a
+  // host that "cannot answer" -- no host ever did: the only implementation
+  // (`speed.js`) returns `?? 0` and every test double returns a number, so the
+  // arm was unreachable and no mutation could reach it either. A host without a
+  // counter is answered one level up, where the dependency is checked.
+  const moved = () => read() !== after
   if (moved() === true) return Promise.resolve()
 
-  const deadline = Date.now() + SPEED_WAIT_MS
+  const deadline = Date.now() + limit
   return new Promise((resolve) => {
     const finish = () => {
       clearInterval(timer)
@@ -134,6 +143,202 @@ function speedWait(deps, req, agentId, params) {
     if (typeof timer.unref === 'function') timer.unref()
     if (typeof req?.once === 'function') req.once('close', finish)
   })
+}
+
+/**
+ * Hold a speed request open until the reading could say something new.
+ *
+ * @param {object} deps - the api dependencies.
+ * @param {import('node:http').IncomingMessage} req - the request, for its close.
+ * @param {string} agentId - the session being watched.
+ * @param {URLSearchParams} params - the request's query.
+ * @returns {Promise<void>} resolves when it is time to answer, however that happened.
+ */
+function speedWait(deps, req, agentId, params) {
+  if (typeof deps.speedRevision !== 'function') return Promise.resolve()
+  return holdRevision(() => deps.speedRevision(agentId), req, params, SPEED_WAIT_MS)
+}
+
+/**
+ * Write one server-sent-event frame.
+ *
+ * The wire format is the one the host's own `/plugins/events` channel speaks:
+ * `data: <json>\n\n`. No `event:` name and no `id:` — a client that reconnects
+ * with `EventSource` asks again from scratch, and the frame carries the session
+ * and its counter anyway, so a replay window would buy nothing.
+ *
+ * @param {import('node:http').ServerResponse} res - the stream response.
+ * @param {object} frame - the JSON-able payload.
+ */
+function sseData(res, frame) {
+  res.write(`data: ${JSON.stringify(frame)}\n\n`)
+}
+
+/**
+ * How often a stream says nothing, on purpose.
+ *
+ * A long-lived response with no bytes on it is indistinguishable from a dead one
+ * to anything in the middle, and the middle is where the idle timeouts live: a
+ * reverse proxy's read timeout is the usual sixty seconds, and an IDE's port
+ * forward is often shorter. Thirty seconds is half of that, so one dropped
+ * heartbeat still leaves the connection alive.
+ */
+const HEARTBEAT_MS = 30 * 1000
+
+/**
+ * Turn one request into a live push stream of "this session's payload could have
+ * changed" notices.
+ *
+ * This is deliberately the same shape the host's own `/plugins/events` channel
+ * uses (`dsh-client-hmr`): `writeHead(200, text/event-stream)` plus a comment to
+ * commit the headers, a `Set` of open responses, and removal on `close`. Doing
+ * anything else here would be a second long-lived-connection protocol in one
+ * page for no reason.
+ *
+ * Why push rather than wait: the panel's previous life was an eight-second timer,
+ * which is a round trip to say "still the same" four hundred and fifty times an
+ * hour. A parked request (what this replaced) is better, but it still has to be
+ * re-asked after every answer, which is a poll wearing a longer interval. A
+ * stream is opened once and stays; the host writes when it has something to say.
+ *
+ * @param {object} deps - the api dependencies.
+ * @param {import('node:http').IncomingMessage} req - the request.
+ * @param {import('node:http').ServerResponse} res - the response.
+ * @param {string} agentId - the session to watch.
+ * @param {Set<() => void>} openStreams - every live stream, so a plugin dispose can
+ *   end them. A set that is only cleared is not enough: the responses have to be
+ *   destroyed as well, or the browser keeps a healthy-looking connection to a
+ *   route that no longer exists. That is not a theoretical difference -- measured
+ *   against a real socket, a dispose that only unhooked the listeners left the
+ *   client's `read()` pending forever and the server still holding the TCP
+ *   connection, with the set already empty and no way left to reach it.
+ * @returns {() => void} a stop that is safe to call more than once.
+ */
+function openEventStream(deps, req, res, agentId, openStreams) {
+  // Two different ways for a response to be gone, and `writableEnded` only
+  // answers one of them. After a client abort Node reports `destroyed === true`
+  // while `writableEnded` stays false and `write()` returns false without
+  // throwing -- so a guard written only against `writableEnded` lets a frame be
+  // written into a dead socket and dropped. Cheap to test both.
+  const finished = () => res.destroyed === true || res.writableEnded === true
+
+  // HEAD and other methods are handled before this is called: a stream has no
+  // head, and a POST body has nothing to do with a push channel.
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    // `no-cache` rather than `no-store`: the browser may keep the response, it
+    // just must not reuse it for a later request. `keep-alive` is what tells
+    // every proxy between here and the page not to close an idle connection.
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    // Belt and braces for a proxied deployment: this response must not be
+    // buffered anywhere, or the whole point of a push channel is lost.
+    'x-accel-buffering': 'no',
+  })
+  // The stop is built first, before the frame, the subscription and the beat,
+  // so that the registration below really is ahead of everything that can throw.
+  // It used to come last, under a comment claiming otherwise: a `send()` or a
+  // `panelSubscribe` that threw left a response with SSE headers already
+  // committed, absent from the set, unreachable by `closeStreams()` and with the
+  // route's `catch` about to append a JSON body to it.
+  //
+  // `unsubscribe` and `heartbeat` are filled in after registration, so both
+  // start as placeholders. No re-check of `stopped` is needed after them: this
+  // function is synchronous, so nothing can close the stream while it runs. The
+  // two such checks that were here were unreachable, which is exactly the kind of
+  // branch this change has been removing elsewhere. `heartbeat` still needs its
+  // `undefined` guard, because a throw on the way up leaves it unassigned while
+  // the stop is already in the set.
+  let stopped = false
+  let heartbeat = undefined
+  let unsubscribe = () => {}
+
+  // Every exit has to unhook both sides. `close` covers a client that goes away
+  // and a socket that dies; `error` covers the write that discovers it. Neither
+  // fires reliably without the other, and a missed unhook is a listener leak on
+  // a per-session counter that outlives the page.
+  //
+  // Idempotent on purpose: this runs from the client going away, from a write
+  // that discovers the socket is gone, and from a plugin dispose, and more than
+  // one of those can happen for the same stream.
+  const stop = () => {
+    if (stopped === true) return
+    stopped = true
+    if (heartbeat !== undefined) clearInterval(heartbeat)
+    openStreams.delete(stop)
+    unsubscribe()
+    if (typeof req.removeListener === 'function') req.removeListener('close', stop)
+    if (typeof res.removeListener === 'function') {
+      res.removeListener('close', stop)
+      res.removeListener('error', stop)
+    }
+    // Destroy rather than end. An ordinary EOF tells `EventSource` the stream is
+    // over, and it reconnects a few seconds later -- to a route that a dispose
+    // has just removed, so it costs a 404 and a retry storm for an answer this
+    // side already knows. A destroyed socket surfaces as a network error, which
+    // is the branch the client reads as fatal (`readyState === CLOSED`) and stops
+    // on. Skipped when the socket is already gone: `destroy()` on a destroyed
+    // response is harmless, but on the ordinary client-close path there is
+    // nothing left to tell.
+    if (typeof res.destroy === 'function' && finished() === false) res.destroy()
+  }
+  // The set is the only record a stream has, so it goes in before anything else
+  // can go wrong.
+  openStreams.add(stop)
+  if (typeof req.once === 'function') req.once('close', stop)
+  if (typeof res.once === 'function') res.once('close', stop)
+  if (typeof res.on === 'function') res.on('error', stop)
+
+  // A comment line is the cheapest way to commit the headers. Without it the
+  // browser may not treat the stream as open until the first real frame, which
+  // could be minutes away — and `EventSource` would look dead in the meantime.
+  res.write(': connected\n\n')
+
+  const send = () => {
+    if (finished() === true) return
+    sseData(res, { agent: agentId, revision: deps.panelRevision(agentId) })
+  }
+  // The current number goes out at once, so a client that opens the stream does
+  // not have to also ask `/panel` for it, and cannot miss an event that lands
+  // between the two.
+  send()
+
+  // `?? (() => {})` because `panelSubscribe` is an injection point: a host that
+  // returns nothing is saying "there is nothing to undo", which is a legal
+  // answer -- and `stop` runs from a `close` handler, so an undefined call here
+  // would throw inside an event callback and reach the process as an uncaught
+  // exception rather than as anything the panel could report.
+  const subscribed =
+    (typeof deps.panelSubscribe === 'function'
+      ? deps.panelSubscribe((changed, revision) => {
+          if (changed !== agentId) return
+          if (finished() === true) return
+          sseData(res, { agent: changed, revision })
+        })
+      : undefined) ?? (() => {})
+  unsubscribe = subscribed
+
+  // A stream that has nothing to say for an hour is a connection every proxy
+  // between here and the page has a reason to drop, and `EventSource` would then
+  // reconnect in a loop. A comment frame is a byte that says nothing to the
+  // client and everything to the middlebox. Thirty seconds: comfortably under
+  // nginx's sixty-second `proxy_read_timeout`, which is the tightest default in
+  // common use.
+  //
+  // The interval is injectable so a test can watch a beat without sleeping for
+  // one. Not a test-only seam: `deps` is the same object every other timing
+  // decision in this module comes from (`SPEED_WAIT_STEP_MS` is a constant only
+  // because nothing has needed to vary it).
+  const beatMs = typeof deps.heartbeatMs === 'number' && deps.heartbeatMs > 0 ? deps.heartbeatMs : HEARTBEAT_MS
+  const beat = setInterval(() => {
+    if (stopped === true) return
+    if (finished() === true) return
+    res.write(': heartbeat\n\n')
+  }, beatMs)
+  if (typeof beat.unref === 'function') beat.unref()
+  heartbeat = beat
+
+  return stop
 }
 
 /**
@@ -983,13 +1188,17 @@ function describeMcp(seen, recency) {
  * @returns {(req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => Promise<void>} the handler.
  */
 function createPanelApi(deps) {
+  // One set for the whole plugin: the point of it is that a dispose can reach
+  // streams opened by requests that are no longer on the stack.
+  const openStreams = new Set()
+
   /**
    * Route one request.
    *
    * @param {import('node:http').IncomingMessage} req - the request.
    * @param {import('node:http').ServerResponse} res - the response.
    */
-  return async function handle(req, res) {
+  async function handle(req, res) {
     const rejected = checkOrigin(req)
     if (rejected !== undefined) {
       json(res, 403, { ok: false, code: 'error.origin.forbidden', error: rejected })
@@ -1041,7 +1250,41 @@ function createPanelApi(deps) {
 
     try {
       if (path === `${ROUTE_PREFIX}/panel`) {
+        // The read itself is deliberately *not* made to wait. A wait answers
+        // "has anything changed since the reading you hold", and the answer has
+        // to be useful to a caller that wants the payload too. So the shape is
+        // two routes: `/events` holds a connection and writes a frame when the
+        // counter moves, `/panel` fetches. The client opens the stream once and
+        // fetches on each frame.
         return json(res, 200, { ok: true, data: await readPanel(deps, agentId) }, headOnly)
+      }
+      // The push channel: one open connection per watched session, answering
+      // the moment the counter moves rather than when a timer next asks.
+      //
+      // One route per concern, not folded into `/panel`: a change notice and a
+      // document are different sizes and different lifetimes, and merging them
+      // would mean either re-sending a hundred kilobytes because a counter moved
+      // or holding a document open for twenty-five seconds so it can expire in
+      // the socket.
+      if (path === `${ROUTE_PREFIX}/events`) {
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          return json(res, 400, { ok: false, code: 'error.agent.missing', error: 'the events route needs a session id' }, headOnly)
+        }
+        if (headOnly === true) {
+          // A HEAD cannot carry a stream. Answering 200 with no body is the
+          // honest reply, and it lets the client discover the route without
+          // opening a connection it would then have to close.
+          return json(res, 200, { ok: true, data: { agent: agentId, streaming: true } }, headOnly)
+        }
+        // The shared method gate lets POST through because most routes take a
+        // body. This one does not, and a POST here would park an open stream on
+        // a request whose body is never read -- the host would wait for it while
+        // the response wrote frames.
+        if (req.method !== 'GET') {
+          return json(res, 405, { ok: false, code: 'error.method.unsupported', error: `${req.method} is not supported on a stream` })
+        }
+        openEventStream(deps, req, res, agentId, openStreams)
+        return undefined
       }
       if (path === `${ROUTE_PREFIX}/models`) return json(res, 200, { ok: true, data: { providers: deps.modelCatalog() } }, headOnly)
       // A speed is a reading of the last two seconds, not a document. It is a
@@ -1084,7 +1327,13 @@ function createPanelApi(deps) {
       if (path === `${ROUTE_PREFIX}/candidates` && req.method === 'POST') {
         const body = await readJsonBody(req)
         if (body.ok === false) return json(res, body.status, { ok: false, code: body.code, error: body.error })
-        return json(res, 200, { ok: true, data: await decideCandidate(deps, body.value, agentId) })
+        const decision = await decideCandidate(deps, body.value, agentId)
+        // Approving or discarding moves `pendingCandidates`, which is part of the
+        // panel payload -- and this path goes nowhere near a session event, so
+        // nothing else would notice. Without the bump a second tab on the same
+        // conversation keeps showing the old count until the minute clock.
+        if (decision?.ok !== false && typeof deps.panelBump === 'function') deps.panelBump(agentId)
+        return json(res, 200, { ok: true, data: decision })
       }
       if (path === `${ROUTE_PREFIX}/propose` && req.method === 'POST') {
         const body = await readJsonBody(req)
@@ -1102,6 +1351,34 @@ function createPanelApi(deps) {
       json(res, 200, { ok: false, code: 'error.internal', error: `the panel could not be built: ${error?.message ?? error}` })
     }
   }
+
+  /**
+   * End every live stream.
+   *
+   * Called from the plugin's dispose: the route is about to stop existing, and a
+   * browser left holding an open response would sit on a connection that will
+   * never carry another frame. Destroying the response is what tells it to give
+   * up rather than wait.
+   */
+  handle.closeStreams = () => {
+    for (const stop of [...openStreams]) stop()
+    openStreams.clear()
+  }
+
+  /**
+   * How many streams are open right now.
+   *
+   * The set is the only record of them, so a stream that closes without removing
+   * itself is a leak nothing else would notice: `stop` is idempotent, so a stale
+   * entry costs nothing until the process has been open long enough to hold
+   * thousands of them. Exposed so a test can see the difference between "closed"
+   * and "forgotten", which the observable behaviour cannot distinguish.
+   *
+   * @returns {number} the count.
+   */
+  handle.openStreamCount = () => openStreams.size
+
+  return handle
 }
 
 /**

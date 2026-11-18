@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url'
 const repo = fileURLToPath(new URL('..', import.meta.url))
 
 const api = path.join(repo, 'packages', 'ui-evolve', 'lib', 'api.js')
+const revision = path.join(repo, 'packages', 'ui-evolve', 'lib', 'revision.js')
 const client = path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
 const index = path.join(repo, 'packages', 'ui-evolve', 'lib', 'index.js')
 const state = path.join(repo, 'packages', 'ui-evolve', 'lib', 'session-state.js')
@@ -1776,6 +1777,353 @@ const mutations = [
     from: "      if (nothingStillStands === true) {",
     to: "      if (false) {",
     why: "`另有` points at the number before it. With every row generated there is no such number, and the line has to state the whole list instead of referring back to a count the card did not draw.",
+  },
+  {
+    // A stream that answers someone else's conversation wakes every open panel
+    // on every event in the application, which is worse than the timer it
+    // replaced.
+    label: 'a stream forwards changes from another conversation',
+    file: api,
+    from: `          if (changed !== agentId) return`,
+    to: `          if (false) return`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // Without the opening frame the client has to ask `/panel` for the number it
+    // just subscribed to, and an event landing between the two is lost.
+    label: 'a stream opens without saying where it stands',
+    file: api,
+    from: `  send()
+
+  // \`?? (() => {})\` because`,
+    to: `
+  // \`?? (() => {})\` because`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // The comment line is what commits the headers; without it a browser may not
+    // treat the stream as open until the first real frame, which for an idle
+    // conversation can be minutes.
+    label: 'a stream never commits its headers',
+    file: api,
+    from: "  res.write(': connected\\n\\n')",
+    to: `  void res`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // A closed tab that stays subscribed is a listener writing frames into a dead
+    // response for the life of the process, once per closed tab.
+    label: 'a closed stream keeps its subscription',
+    file: api,
+    from: `    if (heartbeat !== undefined) clearInterval(heartbeat)
+    openStreams.delete(stop)`,
+    to: `    if (heartbeat !== undefined) clearInterval(heartbeat)`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // Writing after the socket is gone throws inside the host's process.
+    label: 'a change after the stream ended is written anyway',
+    file: api,
+    from: `          if (changed !== agentId) return
+          if (finished() === true) return`,
+    to: `          if (changed !== agentId) return`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // A dispose that leaves streams open hands the browser responses nothing will
+    // ever write to again, and `EventSource` retries against a route that has
+    // just stopped existing.
+    label: 'a dispose leaves its streams open',
+    file: api,
+    from: `  handle.closeStreams = () => {
+    for (const stop of [...openStreams]) stop()`,
+    to: `  handle.closeStreams = () => {`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // Stopping twice is not hypothetical: the client going away and the dispose
+    // both arrive for the same stream.
+    label: 'a stopped stream is stopped a second time',
+    file: api,
+    from: `  const stop = () => {
+    if (stopped === true) return
+    stopped = true`,
+    to: `  const stop = () => {`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // Unhooking the listeners is not ending the response. Without this the socket
+    // stays open with nothing left holding a reference to it: the server keeps a
+    // TCP connection, the browser's `read()` never returns done, and no amount of
+    // bookkeeping can reach it again because the `Set` entry is already gone.
+    // Measured: `openStreamCount()` was 0 and the connection was still there.
+    label: 'a stream is unhooked but never ended',
+    file: api,
+    from: `    if (typeof res.destroy === 'function' && finished() === false) res.destroy()`,
+    to: ``,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // A POST has nothing to do with a push channel, and the host's own reference
+    // implementation answers 405. Accepting one means a caller can hold a stream
+    // open with a request body it never finishes sending.
+    label: 'a stream answers a POST',
+    file: api,
+    from: `        if (req.method !== 'GET') {
+          return json(res, 405`,
+    to: `        if (req.method === 'POST') {
+          return json(res, 200`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // A stream with nothing to say for an hour is a connection every proxy in
+    // between has a reason to drop, and `EventSource` then reconnects in a loop.
+    // The comment frame is the only thing keeping it alive, and it is invisible to
+    // every client-side test.
+    label: 'a stream never says anything while idle',
+    file: api,
+    from: `    res.write(': heartbeat\\n\\n')`,
+    to: ``,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // The heartbeat is the one timer a stream owns. Left running it keeps writing
+    // to a destroyed response for as long as the process lives -- one interval per
+    // stream ever opened.
+    label: 'a heartbeat outlives the stream that started it',
+    file: api,
+    from: `    if (heartbeat !== undefined) clearInterval(heartbeat)
+    openStreams.delete(stop)`,
+    to: `    openStreams.delete(stop)`,
+    suites: ['test/api.test.mjs'],
+  },
+  {
+    // The first bump wakes a fetch that reads the previous turn's sweep: `sweep`
+    // and this turn's `files` are written by an async block that has not run yet.
+    // Without the second notice the panel shows a stale file list for a whole
+    // minute, which is exactly the delay the channel exists to remove.
+    label: 'the sweep answers without telling anyone',
+    file: index,
+    from: `            if (revisions.has(agentId) === true) revisions.bump(agentId)
+          } catch {`,
+    to: `          } catch {`,
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    // A turn beginning moves the payload's `turn` field, so it is a visible change
+    // even before anything happens inside the turn.
+    label: 'a turn starting wakes nobody',
+    file: index,
+    from: `      // a fresh turn is a visible change even before anything happens inside it.
+      revisions.bump(agentId)`,
+    to: `      // a fresh turn is a visible change even before anything happens inside it.`,
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    // A turn ending is the event that changes more of the payload than any other.
+    label: 'a turn ending wakes nobody',
+    file: index,
+    from: `      revisions.bump(agentId)
+      sessionState.rememberTurn(agentId)`,
+    to: `      sessionState.rememberTurn(agentId)`,
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    // The MCP module is written by `rememberTool`, and this is its only call site.
+    label: 'an MCP tool call wakes nobody',
+    file: index,
+    from: `    sessionState.rememberTool(agentId, toolName)`,
+    to: `    sessionState.rememberTool(agentId, toolName)
+    if (false)`,
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    // Nothing closes the browser's stream when a session ends -- the page is still
+    // there -- so this bump is the only notice the panel ever gets that the
+    // conversation it is describing is gone.
+    label: 'a session ending wakes nobody',
+    file: index,
+    from: `    revisions.bump(agentId)
+    // Same reason as the speed window`,
+    to: `    // Same reason as the speed window`,
+    suites: ['test/index.test.mjs'],
+  },
+  {
+    // Approving a candidate moves `pendingCandidates`, which the card draws, and
+    // that path touches no session at all -- so the session bus cannot carry it.
+    label: 'an approval wakes nobody',
+    file: api,
+    from: `    if (decision?.ok !== false && typeof deps.panelBump === 'function') deps.panelBump(agentId)`,
+    to: ``,
+    suites: ['test/api.test.mjs'],
+  },
+  // ---------------------------------------------------------------------
+  // The change counter behind the stream
+  // ---------------------------------------------------------------------
+  //
+  // Every entry here removes something a stream cannot see from the outside:
+  // the counter is read once when the stream opens, and after that only its
+  // listeners matter, so a broken counter looks exactly like a quiet
+  // conversation.
+  {
+    file: revision,
+    label: 'a bump counts without remembering',
+    suites: ['test/revision.test.mjs'],
+    from: '    const next = (this.sessions.get(agentId) ?? 0) + 1',
+    to: '    const next = 1',
+    why: 'the counter never advances, so every frame carries the same number and a reader that compared them would never fetch again',
+  },
+  {
+    file: revision,
+    label: 'a session nobody bumped reports a position that does not exist',
+    suites: ['test/revision.test.mjs'],
+    from: '    return this.sessions.get(agentId) ?? 0',
+    to: '    return this.sessions.get(agentId) ?? -1',
+    why: 'the first frame would announce a position the counter has never been in, and the panel would render a negative revision',
+  },
+  {
+    file: revision,
+    label: 'forgetting a session keeps its counter',
+    suites: ['test/revision.test.mjs'],
+    from: '    this.sessions.delete(agentId)',
+    to: '',
+    why: 'the map grows by one entry per conversation the person ever opened and never shrinks; nothing throws and nothing looks wrong',
+  },
+  {
+    file: revision,
+    label: 'unsubscribing leaves the listener attached',
+    suites: ['test/revision.test.mjs'],
+    from: '    return () => {\n      this.listeners.delete(listener)\n    }',
+    to: '    return () => {}',
+    why: 'a closed stream keeps being written to, so the listener set grows with every reconnect that follows a page reload',
+  },
+  {
+    file: revision,
+    label: 'a bump with no session is counted anyway',
+    suites: ['test/revision.test.mjs'],
+    from: "    if (typeof agentId !== 'string' || agentId.length === 0) return 0\n    const next",
+    to: '    const next',
+    why: 'undefined lands in the map as a key, and every malformed event adds a frame no stream can match to a conversation',
+  },
+  {
+    // The catch is only honest if something hears it. `onError` is the link: a
+    // listener that throws goes to the plugin's log, where a person can find it.
+    // Deleting the call leaves every suite green before this entry existed, which
+    // is how the field ended up declared, documented and never assigned.
+    file: revision,
+    label: 'a listener that throws fails without saying so',
+    suites: ['test/index.test.mjs'],
+    from: `        this.onError?.(error, agentId)`,
+    to: `        void error`,
+    why: 'a stream whose socket died throws on every write; swallowed, the only evidence is a panel that stops updating',
+  },
+  {
+    // The field itself. A plugin that builds the counter without passing its log
+    // has an `onError` that is always undefined -- the same defect one layer up.
+    file: index,
+    label: 'the counter is built without anywhere to report',
+    suites: ['test/index.test.mjs'],
+    from: `  const revisions = new Revisions({ onError: (error, agentId) => log('stream listener failed for', agentId, '-', error?.message ?? error) })`,
+    to: `  const revisions = new Revisions()`,
+    why: 'the failing listener is reported to a function nobody supplied, so the catch in bump and the catch in the emit site are the same silence',
+  },
+  {
+    // The opening frame. Without it a client that opens the stream has to also
+    // ask `/panel` for the number, and a change landing between the two is a
+    // change that never gets reported.
+    file: api,
+    label: 'a stream never says where it stands',
+    suites: ['test/api.test.mjs'],
+    from: `  send()
+`,
+    to: ``,
+  },
+  {
+    // A stream that is stopped twice would unsubscribe a second time and, worse,
+    // destroy a response another stream is now using.
+    file: api,
+    label: 'a stream registered after it could have thrown',
+    suites: ['test/api.test.mjs'],
+    from: `  openStreams.add(stop)
+  if (typeof req.once === 'function') req.once('close', stop)`,
+    to: `  if (typeof req.once === 'function') req.once('close', stop)`,
+    why: 'the set is the only record a stream has; a response that throws before it goes in can never be ended by a dispose',
+  },
+  {
+    file: revision,
+    label: 'one broken listener stops the others',
+    suites: ['test/revision.test.mjs'],
+    from: '      try {\n        listener(agentId, next)\n      } catch (error) {',
+    to: '      if (false) {',
+    why: 'the first stream writing into a socket that just died throws out of bump and takes every other listener with it, plus the emit site',
+  },
+  {
+    file: revision,
+    label: 'a session is never tracked',
+    suites: ['test/revision.test.mjs'],
+    from: '    return this.sessions.has(agentId)',
+    to: '    return false',
+    why: 'the two late answers on the plugin side act on this answer, so always false silently drops the sweep and the summary landing and neither ever reaches the panel',
+  },
+  {
+    file: revision,
+    label: 'a session is always tracked',
+    suites: ['test/revision.test.mjs'],
+    from: '    return this.sessions.has(agentId)',
+    to: '    return true',
+    why: 'always true resurrects a forgotten counter from every late answer, which is the leak the method exists to prevent',
+  },
+  {
+    file: revision,
+    label: 'a reporting callback that throws takes the rest with it',
+    suites: ['test/revision.test.mjs'],
+    from: `        try {
+          this.onError?.(error, agentId)
+        } catch {
+          // Nothing left to report to, and this is not the emit site's problem.
+        }`,
+    to: '        this.onError?.(error, agentId)',
+    why: 'onError is the caller code too: a logger that throws stops the listeners after it and lands in the host event handler',
+  },
+  {
+    file: index,
+    label: 'the summary landing announces nothing',
+    suites: ['test/index.test.mjs'],
+    from: '            if (revisions.has(agentId) === false) return\n            revisions.bump(agentId)',
+    to: '            if (revisions.has(agentId) === false) return',
+    why: 'the summary is a field the panel draws, and the frame that carried the turn end still shows the previous turn text: without this the new one waits for the minute clock',
+  },
+  {
+    file: index,
+    label: 'a landing after disposal is announced anyway',
+    suites: ['test/index.test.mjs'],
+    from: '            if (revisions.has(agentId) === false) return\n            revisions.bump(agentId)',
+    to: '            revisions.bump(agentId)',
+    why: 'the model call outlives its session, and bumping a forgotten counter recreates an entry nothing will ever forget again',
+  },
+  {
+    file: index,
+    label: 'a landing with no text still wakes the reader',
+    suites: ['test/index.test.mjs'],
+    from: "            if (typeof answer?.text !== 'string' || answer.text.length === 0) return",
+    to: '            if (answer === null) return',
+    why: 'a refusal, a timeout and a cancellation all answer with a value and no text: announcing them redraws a card that already says the summary failed',
+  },
+  {
+    file: index,
+    label: 'the sweep landing announces nothing',
+    suites: ['test/index.test.mjs'],
+    from: '            if (revisions.has(agentId) === true) revisions.bump(agentId)',
+    to: '            if (false) revisions.bump(agentId)',
+    why: 'files and sweep are written by the answer that arrives after the turn ended, so the frame already sent could not have carried them',
+  },
+  {
+    file: index,
+    label: 'a sweep landing after disposal is announced anyway',
+    suites: ['test/index.test.mjs'],
+    from: '            if (revisions.has(agentId) === true) revisions.bump(agentId)',
+    to: '            revisions.bump(agentId)',
+    why: 'the same leak as the summary landing, through the other late answer: a closed session keeps a counter nobody forgets',
   },
 ]
 

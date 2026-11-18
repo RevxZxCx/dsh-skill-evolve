@@ -549,6 +549,76 @@ function boot(options) {
   const requested = []
   const calls = []
   const mutationObservers = []
+  // ---------------------------------------------------------------------------
+  // `EventSource`, which is how the panel learns that something changed
+  // ---------------------------------------------------------------------------
+  //
+  // The plugin opens one stream per watched session and fetches on each frame.
+  // A suite with no `EventSource` at all would take the "this environment cannot
+  // stream" branch and quietly test only the sixty-second fallback, which is the
+  // path the feature exists to avoid.
+  //
+  // Records rather than a live server: the interesting question is never "did
+  // the bytes arrive" but "did the component ask again when the host said
+  // something changed", and only a suite can stage that ordering.
+  const eventSources = []
+
+  class EventSourceStub {
+    constructor(url) {
+      this.url = String(url)
+      this.listeners = new Map()
+      this.closed = false
+      this.readyState = 0
+      eventSources.push(this)
+    }
+    addEventListener(type, handler) {
+      if (this.closed === true) return
+      const list = this.listeners.get(type) ?? []
+      list.push(handler)
+      this.listeners.set(type, list)
+    }
+    removeEventListener(type, handler) {
+      const list = this.listeners.get(type)
+      if (list === undefined) return
+      const at = list.indexOf(handler)
+      if (at >= 0) list.splice(at, 1)
+    }
+    close() {
+      this.closed = true
+      this.readyState = 2
+    }
+    // Stands in for the host writing one frame. Only a suite can decide when.
+    emit(payload) {
+      if (this.closed === true) return
+      const list = this.listeners.get('message') ?? []
+      for (const handler of list.slice()) handler({ data: JSON.stringify(payload) })
+    }
+    // Stands in for the browser reporting that the connection dropped. Nothing
+    // may happen here: `EventSource` retries by itself, and a plugin that closed
+    // the source on error would never learn about the next change.
+    fail() {
+      if (this.closed === true) return
+      const list = this.listeners.get('error') ?? []
+      for (const handler of list.slice()) handler({})
+    }
+    // Stands in for a failure the browser will not retry: a 404 from a host that
+    // does not serve the route, or a response that is not
+    // `text/event-stream`. `EventSource` reports `error` with `readyState`
+    // CLOSED and never comes back -- which is the half the client has to act on.
+    //
+    // `closed` is left false so a suite can tell the two apart: the browser
+    // giving up (`readyState === 2`, still open from the plugin's side) versus
+    // the plugin having closed it. Without that distinction this stub could only
+    // ever reach the CONNECTING branch, which is why the fatal branch shipped
+    // with no test that could fail.
+    failFatal() {
+      if (this.closed === true) return
+      this.readyState = 2
+      const list = this.listeners.get('error') ?? []
+      for (const handler of list.slice()) handler({})
+    }
+  }
+
   const hostStyle = new Map()
   const hostWrites = []
   // The default fixture has a 280px left sidebar, so the conversation column and
@@ -719,7 +789,11 @@ function boot(options) {
 
   const rootAttributes = new Map()
   const documentStub = {
-    baseURI: 'http://127.0.0.1:19387/',
+    // The GUI can be served under a path prefix, and every request the plugin
+    // makes has to resolve against the page rather than the origin. A fixture
+    // without a prefix cannot tell those apart: with `baseURI` at the root,
+    // `/api/x` and `api/x` resolve to the same string.
+    baseURI: settings.baseURI ?? 'http://127.0.0.1:19387/',
     head: { appendChild: (node) => styles.push(node) },
     body: { attributes: new Map() },
     documentElement: {
@@ -950,6 +1024,7 @@ function boot(options) {
     'clearTimeout',
     'MutationObserver',
     'Date',
+    'EventSource',
     source,
   )
   // `setTimeout` is injected rather than left global because the hover grace
@@ -990,6 +1065,12 @@ function boot(options) {
     },
     MutationObserverStub,
     DateStub,
+    // `settings.EventSource` lets a suite boot in an environment that has no
+    // `EventSource` at all. Without that switch the guard in `startStream` is
+    // unobservable: every suite would hand the bundle a working stub and the
+    // fallback would never be exercised, which is exactly how a guard that
+    // throws on the way to the timer survives a whole mutation run.
+    settings.EventSource === undefined ? EventSourceStub : settings.EventSource,
   )
 
   const module = captured.factory(moduleTable)
@@ -1010,6 +1091,14 @@ function boot(options) {
     hostStyle,
     hostWrites,
     mutationObservers,
+    eventSources,
+    // The stream this session is watching, if the panel has opened one. Suites
+    // that want to prove the panel reacts to a push rather than to a clock need
+    // a handle on it, and "whichever one is open for this id" is the only stable
+    // way to name it -- the panel closes and reopens as sessions change.
+    streamFor(session) {
+      return eventSources.find((row) => row.closed === false && row.url.includes(encodeURIComponent(session)) === true)
+    },
     clock,
     document: documentStub,
     // The two switches the plugin publishes on <html>. The turn-rail one is the
@@ -1631,14 +1720,24 @@ check(
     instance.calls.some((row) => row.url.includes('/panel?')) && instance.calls.every((row) => row.url.includes('lang=') === false),
     JSON.stringify(instance.calls.map((row) => row.url)),
   )
-  // The timer is the panel's only way of learning anything. It cannot be told
-  // that a turn ended or that a file on disk was touched, so the delay is part of
-  // the contract rather than an implementation detail: a constant nobody asserts
-  // is a constant anybody can shorten to 100ms, and the comment beside it would
-  // still say "every few seconds". The fixture keeps the handle for exactly this.
-  const polls = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  // The clock is now the fallback, not the mechanism. Two claims have to hold
+  // together, and asserting only one of them is how a suite ends up blessing a
+  // panel that has quietly stopped listening: the stream is open, and the timer
+  // that backs it up is a minute rather than a few seconds.
+  //
+  // The delay is still part of the contract. It used to be eight seconds and was
+  // the only way the panel learned anything; it is now what covers the three
+  // things no session event can announce, and a constant nobody asserts is a
+  // constant anybody can shorten to 100ms.
+  const stream = instance.streamFor('session-a')
   check(
-    'the panel asks again on a timer',
+    'the panel opens a stream for the session on screen',
+    stream !== undefined && stream.url.includes('/api/ui-evolve/events?agent=session-a'),
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+  const polls = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
+  check(
+    'the fallback timer is a minute',
     polls.length === 1,
     JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])),
   )
@@ -1652,13 +1751,263 @@ check(
       `${before} -> ${instance.calls.length}`,
     )
   }
-  // A timer that outlives its component keeps a switched-away session's panel
-  // polling forever, and each one adds up for the life of the window.
+  // The whole point: a frame on the stream is an answer without waiting for any
+  // clock. This is the assertion the feature exists for.
+  if (stream !== undefined) {
+    const before = instance.calls.length
+    stream.emit({ agent: 'session-a', revision: 2 })
+    await settle()
+    check(
+      'a frame on the stream asks straight away',
+      instance.calls.length > before,
+      `${before} -> ${instance.calls.length}`,
+    )
+    // A frame that arrives while an answer is still out cannot be dropped: a
+    // clock tick asks the same question again in a minute, but a frame is the
+    // only announcement that change is ever going to get, so losing it means
+    // staying on the previous state until something unrelated happens. The
+    // assertion above passes either way -- nothing is in flight when it runs --
+    // which is exactly how this one survived a mutation run with `mustAsk`
+    // deleted.
+    const held = deferred()
+    let holding = true
+    const routesHeld = panelRoutes()
+    routesHeld['/api/ui-evolve/panel'] = () => (holding === true ? held.promise : { ok: true, data: {
+      turn: 4, calls: 1, failed: 0, summary: { text: 'AFTER THE FRAME' }, pendingCandidates: 0,
+      skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+    } })
+    const busy = await openPanel(routesHeld)
+    const busyStream = busy.instance.streamFor('session-a')
+    if (busyStream !== undefined) {
+      // The first load is still out, so the frame has nowhere to go but the
+      // wanted flag.
+      const askedWhileBusy = busy.instance.calls.filter((row) => row.url.includes('/panel?')).length
+      busyStream.emit({ agent: 'session-a', revision: 3 })
+      await settle()
+      check(
+        'a frame that arrives while a request is out waits its turn',
+        busy.instance.calls.filter((row) => row.url.includes('/panel?')).length === askedWhileBusy,
+        `${askedWhileBusy} -> ${busy.instance.calls.filter((row) => row.url.includes('/panel?')).length}`,
+      )
+      holding = false
+      held.resolve({ ok: true, data: {
+        turn: 3, calls: 0, failed: 0, summary: { text: 'BEFORE THE FRAME' }, pendingCandidates: 0,
+        skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+      } })
+      await settle()
+      const redrawn = await busy.instance.renderer.deepRender(busy.instance.seat('cards'))
+      check(
+        'and it is asked the moment that request lands',
+        textOf(redrawn).includes('AFTER THE FRAME'),
+        textOf(redrawn).slice(0, 140),
+      )
+    }
+    // A dropped connection must not close the source: `EventSource` retries on
+    // its own, and a plugin that shut it down on `error` would never hear about
+    // the next change while still passing every other test in this file.
+    stream.fail()
+    check(
+      'and a dropped connection is left to retry itself',
+      stream.closed === false,
+      stream.closed === true ? 'the source was closed on error' : 'still open',
+    )
+    // The other half of `error`, and the one that shipped untested: a fatal
+    // failure leaves `readyState` CLOSED and the browser never retries, so the
+    // plugin has to give the slot back or the fast path is dead for the rest of
+    // the session. Deleting `stopStream()` from the error handler used to leave
+    // every suite green.
+    stream.failFatal()
+    check(
+      'and a fatal failure is closed rather than waited on',
+      stream.closed === true,
+      stream.closed === true ? 'closed' : 'left open for a retry that will not come',
+    )
+    // ...and the minute clock is what picks it up again. A stream given up on
+    // that nothing retries is the same outcome as no stream at all.
+    const sourcesBeforeRetry = instance.eventSources.length
+    const fallback = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
+    if (fallback.length > 0) fallback[fallback.length - 1].fn()
+    await settle()
+    check(
+      'and the minute clock opens a new one',
+      instance.eventSources.length === sourcesBeforeRetry + 1 && instance.streamFor('session-a') !== undefined,
+      `${sourcesBeforeRetry} -> ${instance.eventSources.length}`,
+    )
+  }
+  // A stream that outlives its component keeps a switched-away session's panel
+  // polling forever, and each one holds a response open for the life of the
+  // window.
   instance.renderer.unmount()
   check(
-    'unmounting stops the timer',
-    instance.timers.every((row) => row.ms !== 8000 || row.cleared === true),
-    JSON.stringify(instance.timers.filter((row) => row.ms === 8000).map((row) => row.cleared)),
+    'unmounting stops the stream',
+    stream === undefined || stream.closed === true,
+    stream === undefined ? 'no stream' : `closed=${stream.closed}`,
+  )
+  check(
+    'and unmounting stops the timer',
+    instance.timers.every((row) => row.ms !== 60000 || row.cleared === true),
+    JSON.stringify(instance.timers.filter((row) => row.ms === 60000).map((row) => row.cleared)),
+  )
+}
+
+{
+  // Unmounting while a request is out and a frame has already arrived: the frame
+  // set the wanted flag, the request is still going to land, and its `finally`
+  // reads that flag. Clearing it on unmount is the only thing that stops a
+  // second read for a column that is no longer on screen -- and deleting that
+  // line survived a mutation run, because every other unmount test resolves its
+  // requests before unmounting, so the flag is never set at that moment.
+  const held = deferred()
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = () => held.promise
+  const { instance } = await openPanel(routes)
+  const stream = instance.streamFor('session-a')
+  const before = instance.calls.filter((row) => row.url.includes('/panel?')).length
+  if (stream !== undefined) stream.emit({ agent: 'session-a', revision: 4 })
+  await settle()
+  check(
+    'a frame that lands while a request is out does not ask yet',
+    instance.calls.filter((row) => row.url.includes('/panel?')).length === before,
+    `${before} -> ${instance.calls.filter((row) => row.url.includes('/panel?')).length}`,
+  )
+  instance.renderer.unmount()
+  held.resolve({ ok: true, data: {
+    turn: 1, calls: 0, failed: 0, summary: { text: 'UNMOUNTED' }, pendingCandidates: 0,
+    skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
+  } })
+  await settle()
+  check(
+    'and a frame that outlives the panel does not ask again',
+    instance.calls.filter((row) => row.url.includes('/panel?')).length === before,
+    `${before} -> ${instance.calls.filter((row) => row.url.includes('/panel?')).length}`,
+  )
+}
+
+{
+  // Served under a path prefix, a root-relative stream URL misses the route
+  // entirely. That failure is invisible: a 404 makes `EventSource` give up for
+  // good, so the column keeps working off the minute clock while looking
+  // completely healthy. Every other request in this bundle goes through
+  // `resolveUrl`; the fixture at the origin cannot see the difference, which is
+  // why skipping the resolver survived a mutation run.
+  const { instance } = await openPanel({ ...panelRoutes() }, { baseURI: 'http://127.0.0.1:19387/gui/' })
+  const opened = instance.streamFor('session-a')
+  check(
+    'the stream is resolved against the page, not the origin',
+    opened !== undefined && opened.url.startsWith('http://127.0.0.1:19387/gui/api/ui-evolve/events') === true,
+    opened === undefined ? 'no stream' : opened.url,
+  )
+}
+
+// A stream is a server-side resource: one open response per watching tab. The
+// three ways it can be left open by accident are all invisible from the page --
+// a hidden tab looks the same, a missing `EventSource` looks the same, and an
+// empty session id looks the same. Each is asserted here because each one
+// survived a mutation run with the guard deleted.
+{
+  // Going away must close it. A hidden tab that keeps its stream open costs a
+  // response writer on the host for as long as the tab is buried, and a reader
+  // who leaves twenty tabs open pays for twenty.
+  const { instance } = await openPanel({ ...panelRoutes() })
+  const opened = instance.streamFor('session-a')
+  check('a page that is being watched holds a stream', opened !== undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+  instance.document.hidden = true
+  for (const listener of instance.document.visibilityListeners) listener()
+  await settle()
+  check(
+    'a page that goes away closes its stream',
+    opened === undefined || opened.closed === true,
+    opened === undefined ? 'no stream to check' : `closed=${opened.closed}`,
+  )
+  // Coming back has to reopen it, or the fast path stays dead for the rest of
+  // the session and the minute clock is all that is left -- which is exactly the
+  // state this change exists to get out of. Only the closing half was asserted
+  // before, and the reopening half survived a mutation run with `startStream`
+  // deleted from `onVisible`.
+  instance.document.hidden = false
+  for (const listener of instance.document.visibilityListeners) listener()
+  await settle()
+  const reopened = instance.streamFor('session-a')
+  check(
+    'and coming back opens a new one',
+    reopened !== undefined && reopened !== opened,
+    reopened === undefined ? 'no stream after coming back' : `same source: ${reopened === opened}`,
+  )
+  check(
+    'and there is exactly one of them',
+    instance.eventSources.filter((row) => row.closed === false && row.url.includes('agent=session-a') === true).length === 1,
+    JSON.stringify(instance.eventSources.map((row) => [row.url, row.closed])),
+  )
+  // A `visibilitychange` that does not mean the tab went away (a window merely
+  // uncovered) must not tear down a healthy stream: the frame it was about to
+  // deliver would be lost, and reconnecting costs a round trip. Asserted by
+  // identity, because "still one open stream" is also true of a stream that was
+  // closed and immediately replaced.
+  for (const listener of instance.document.visibilityListeners) listener()
+  await settle()
+  check(
+    'and a second visible notice keeps the stream it already has',
+    instance.streamFor('session-a') === reopened,
+    reopened === undefined ? 'nothing to compare' : `replaced: ${instance.streamFor('session-a') !== reopened}`,
+  )
+}
+
+{
+  // Mounting into a hidden page must not open a stream either. The guard is a
+  // one-line early return, and deleting it survived a mutation run: every other
+  // case mounts into a visible page, so nothing ever asked this question.
+  const { instance } = await openPanel({ ...panelRoutes() }, { hidden: true })
+  check(
+    'a hidden page opens no stream at all',
+    instance.eventSources.length === 0,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+  check(
+    'and the fallback clock is still running for it',
+    instance.timers.some((row) => row.ms === 60000 && row.cleared === false),
+    JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])),
+  )
+}
+
+{
+  // No `EventSource` in this environment: a headless renderer, an older browser.
+  // The column still has to work off the slow clock, and nothing may throw on
+  // the way there -- a `ReferenceError` inside the effect would take the whole
+  // panel down rather than degrade it.
+  const { instance } = await openPanel({ ...panelRoutes() }, { EventSource: null })
+  check('an environment without a stream opens none', instance.eventSources.length === 0, String(instance.eventSources.length))
+  const polls = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
+  check(
+    'and the slow clock still backs it',
+    polls.length === 1,
+    JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])),
+  )
+  if (polls.length === 1) {
+    const before = instance.calls.filter((row) => row.url.includes('/panel?')).length
+    polls[0].fn()
+    await settle()
+    const after = instance.calls.filter((row) => row.url.includes('/panel?')).length
+    check('and firing it still asks', after > before, `${before} -> ${after}`)
+  }
+}
+
+{
+  // No session on screen: there is nothing to watch, and asking the host to
+  // watch nothing would either open a stream for a guessed id or open one per
+  // keystroke of a session that is being created.
+  const instance = boot({ routes: panelRoutes() })
+  instance.module.apply(instance.ctx)
+  const toggle = instance.seat('toggle')
+  const cards = instance.seat('cards')
+  // `sessionId: ''` is the host's "no conversation yet" state, and the toggle
+  // already skips publishing an empty id, so this is the same door the real
+  // application goes through on a cold start.
+  await instance.renderer.render(toggle, { sessionId: '' })
+  await instance.renderer.deepRender(cards)
+  check(
+    'a cold start opens no stream',
+    instance.eventSources.length === 0,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
   )
 }
 
@@ -4161,7 +4510,7 @@ function byAction(node, action) {
   // restarts the polling effect, so the first request for the new conversation
   // is issued at once. That is the difference being asserted.
   check('the switch reaches the column without waiting for a timer', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
-  const poll = watched.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  const poll = watched.timers.filter((row) => row.ms === 60000 && row.cleared === false)
   if (poll.length >= 1) poll[poll.length - 1].fn()
   await settle()
   check('and the timer that arrives later agrees', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
@@ -4213,7 +4562,7 @@ function byAction(node, action) {
   // fail the assertion below rather than silently skip it while the suite stays
   // green.
   instance.document.documentElement.lang = 'ja'
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   check('the panel is still polling', poll !== undefined, JSON.stringify(instance.timers.map((row) => row.ms)))
   const before = instance.calls.length
   poll?.fn?.()
@@ -4243,7 +4592,7 @@ function byAction(node, action) {
   const { instance } = await openPanel({ ...panelRoutes() }, { hidden: true })
   const cards = instance.seat('cards')
   await instance.renderer.deepRender(cards)
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   check('a hidden page still schedules the refresh', poll !== undefined, JSON.stringify(instance.timers.map((row) => row.ms)))
   const before = instance.calls.filter((row) => row.url.includes('/panel?')).length
   poll?.fn?.()
@@ -4304,7 +4653,7 @@ function byAction(node, action) {
   const { instance } = await openPanel(routes)
   const cards = instance.seat('cards')
   await instance.renderer.deepRender(cards)
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   check('a slow first answer leaves a live timer to collide with', poll !== undefined && asked === 1, JSON.stringify({ asked, timers: instance.timers.map((row) => row.ms) }))
   poll?.fn?.()
   await settle()
@@ -4317,7 +4666,7 @@ function byAction(node, action) {
   const settled = await instance.renderer.deepRender(cards)
   check('the first answer still lands', textOf(settled).includes('FIRST'), textOf(settled).slice(0, 120))
   // And the skip was not a permanent lock: the next refresh goes out.
-  const next = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const next = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   next?.fn?.()
   await settle()
   check('the next refresh is not blocked by the one that completed', asked === 2, `${asked} request(s)`)
@@ -4358,7 +4707,7 @@ function byAction(node, action) {
   check('the first answer is on screen', asked === 1, String(asked))
 
   // A poll goes out and is left hanging.
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   poll?.fn?.()
   await settle()
   check('a poll is out', asked === 2, String(asked))
@@ -4409,7 +4758,7 @@ function byAction(node, action) {
   const { instance } = await openPanel(routes)
   const cards = instance.seat('cards')
   await instance.renderer.deepRender(cards)
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   check('the first answer is on screen before the refresh', served === 1, String(served))
   const before = instance.renderer.stateChanges()
   poll?.fn?.()
@@ -4429,7 +4778,7 @@ function byAction(node, action) {
     skills: { available: true, skills: [] }, mcp: [], commands: [],
     files: [{ path: 'src/file-0.js', bytes: 1000 }],
   } })
-  const again = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const again = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   const beforeChange = instance.renderer.stateChanges()
   again?.fn?.()
   await settle()
@@ -4458,7 +4807,7 @@ function byAction(node, action) {
   // Five minutes later, the same answer. Nothing in the payload moved; the line
   // on screen did.
   instance.clock.at = started + 5 * 60 * 1000
-  instance.timers.find((row) => row.ms === 8000 && row.cleared === false)?.fn?.()
+  instance.timers.find((row) => row.ms === 60000 && row.cleared === false)?.fn?.()
   await settle()
   const later = await instance.renderer.deepRender(cards)
   check('an unchanged answer still ages on screen', textOf(later).includes('5分钟前'), textOf(later).slice(0, 160))
@@ -4497,7 +4846,7 @@ function byAction(node, action) {
     summary: { text: 'A-OLD' }, skills: { available: true, skills: [] }, mcp: [], files: [], commands: [],
   } })
   await settle()
-  const poll = instance.timers.find((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   poll?.fn?.()
   await settle()
   check('an abandoned request does not unlock the one that replaced it', asked === 3, `${asked} request(s)`)
@@ -5013,7 +5362,7 @@ async function openPanel(routes, options) {
   // the value it published is still the old one. This is the exact state the
   // host was caught in.
   instance.swapConversation('session-b')
-  const poll = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
   check('a refresh is waiting to run', poll.length === 1, JSON.stringify(instance.timers.map((row) => [row.ms, row.cleared])))
   if (poll.length === 1) poll[0].fn()
   await settle()
@@ -5044,7 +5393,7 @@ async function openPanel(routes, options) {
   )
   const cards = instance.seat('cards')
   const before = instance.renderer.stateChanges()
-  const poll = instance.timers.filter((row) => row.ms === 8000 && row.cleared === false)
+  const poll = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
   if (poll.length === 1) poll[0].fn()
   await settle()
   const after = await instance.renderer.deepRender(cards)
@@ -5114,18 +5463,22 @@ async function openPanel(routes, options) {
 }
 
 {
-  // The badge must not share the panel's 8s beat: two timers on the same delay
-  // are one delay, and nothing that filters recorded timers can tell them apart.
+  // The badge must not share the panel's beat: two timers on the same delay are
+  // one delay, and nothing that filters recorded timers can tell them apart.
+  //
+  // The panel's own number changed twice in one week -- eight seconds, then a
+  // sixty-second fallback beside a stream -- so what this asserts is the
+  // relationship rather than a literal. A literal here would have to be edited
+  // every time the panel's clock legitimately changes, and would then fail for a
+  // reason that has nothing to do with the badge.
   const source = readFileSync(join(repo, 'packages', 'ui-evolve', 'lib', 'client.js'), 'utf8')
+  const idle = /const SPEED_IDLE_MS = (\d+)/.exec(source)
+  const panel = /const REFRESH_MS = (\d+)/.exec(source)
+  check('the idle badge clock is its own number', idle !== null && idle[1] === '10000', idle === null ? 'no constant' : idle[1])
   check(
-    'the idle badge clock is its own number',
-    /const SPEED_IDLE_MS = 10000/.test(source),
-    (source.match(/const SPEED_IDLE_MS = \d+/) ?? ['none'])[0],
-  )
-  check(
-    'and the panel keeps its eight seconds',
-    /const REFRESH_MS = 8000/.test(source),
-    (source.match(/const REFRESH_MS = \d+/) ?? ['none'])[0],
+    'and the panel keeps a beat of its own',
+    panel !== null && panel[1] !== (idle?.[1] ?? ''),
+    panel === null ? 'no constant' : panel[1],
   )
 }
 

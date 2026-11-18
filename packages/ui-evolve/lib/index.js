@@ -38,6 +38,7 @@ import { ignoredPaths } from './git-changes.js'
 import { ScanWatch, scanReading } from './scan-watch.js'
 import { createReportTool } from './report-tool.js'
 import { TranscriptStore, readToolCallBlock } from './transcript.js'
+import { Revisions } from './revision.js'
 import { Summariser } from './summarise.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
 import { SessionState } from './session-state.js'
@@ -221,6 +222,27 @@ export function apply(ctx, config, options) {
   const speeds = new SpeedMeter()
 
   /**
+   * When the panel's payload could have changed, per session.
+   *
+   * Nothing in this process knew the answer before: the client asked every eight
+   * seconds and read the payload to find out. This counts the events the payload
+   * is actually built from, so the question can be answered without building
+   * anything.
+   *
+   * What is counted is a deliberate subset. Measured on a real 655-hour session,
+   * the host emits 0.394 events a second and 0.057 `tool/call` a second, so
+   * counting everything would wake a waiting panel roughly every two and a half
+   * seconds for a payload that had not changed. The lines below bump only where
+   * a field the panel renders is written.
+   */
+  // The sink is the plugin own log, passed at construction: see the
+  // constructor note on why this is an argument rather than a field assigned
+  // afterwards. A listener throwing is a frame written into a socket that died
+  // between the liveness check and the write -- nothing to act on, but the
+  // alternative to a line is a catch that hides real defects in a stream forever.
+  const revisions = new Revisions({ onError: (error, agentId) => log('stream listener failed for', agentId, '-', error?.message ?? error) })
+
+  /**
    * What `git status` said before each turn, per session.
    *
    * The third source for the output card, after the tools that name a path and
@@ -340,6 +362,11 @@ export function apply(ctx, config, options) {
     // back off disk — a rule enforced only on the way in would be a rule that
     // changes depending on whether the process had restarted.
     sessionState.rememberSkill(agentId, name, via)
+    // Both the tool path and the `/name` gesture path end here, which is why the
+    // bump is here and not in either caller: a second copy would be a second
+    // place to forget one of the two, and the panel's skill module would then be
+    // right about half the loads.
+    revisions.bump(agentId)
   }
 
   // ------------------------------------------------------------ live speed --
@@ -451,6 +478,9 @@ export function apply(ctx, config, options) {
       // relative until the card joins it to the session root, and a command that
       // did `cd` first then names a file that never existed.
       transcripts.record(agentId, event, workspaceFor(session))
+      // The panel's `turn` field is read from the transcript that just moved, so
+      // a fresh turn is a visible change even before anything happens inside it.
+      revisions.bump(agentId)
       return
     }
 
@@ -476,6 +506,17 @@ export function apply(ctx, config, options) {
     // rewriting the file once per tool call would be a write per file read for a
     // document that had not changed.
     if (event?.type === 'turn/end') {
+      // The panel describes the turn that just ended *and* the summary of it, so
+      // this single event changes more of the payload than any other.
+      //
+      // The reader this wakes does *not* get a cached summary: listeners run
+      // inside `bump`, so the frame leaves before `warm` below has started, and
+      // the fetch joins the in-flight call through `summarise`'s `inflight` map
+      // rather than hitting `cache`. That costs the reader the model call it
+      // would have paid for anyway -- one call per turn either way -- and what
+      // it buys is that the call starts at the turn boundary instead of at the
+      // moment somebody looked. The landing is announced by the `.then` below.
+      revisions.bump(agentId)
       sessionState.rememberTurn(agentId)
       if (ended !== undefined) sessionState.rememberPaths(agentId, ended, endedTurn)
       // Write the summary now rather than when somebody opens the panel.
@@ -483,9 +524,12 @@ export function apply(ctx, config, options) {
       // `record` folded this turn into `previous` on the line above, so this is
       // the one moment the finished turn is readable and no longer changing —
       // and it is the last moment the panel is not waiting for it. Warmed here,
-      // the first open after a turn reads a cached answer instead of paying for
-      // a model call inside its own request (which is what the panel used to
-      // do, for up to the summariser's own 20-second timeout).
+      // the first open after a turn finds the answer already made or already
+      // under way, instead of paying for a model call inside its own request
+      // (which is what the panel used to do, for up to the summariser's own
+      // 20-second timeout). Which of the two it finds depends on the model, and
+      // the paragraph above says why that is not a distinction the reader pays
+      // for either way.
       //
       // Not awaited, and `warm` never rejects: it answers a failure by logging.
       // An abandoned turn needs no special case — `endTurn` clears the turn and
@@ -493,7 +537,29 @@ export function apply(ctx, config, options) {
       // called at all.
       const finished = transcripts.view(agentId)?.previous
       if (finished !== undefined) {
-        summariser.warm({ agentId, snapshot: finished, sessionRoute: routeFor(agentId) })
+        // The bump above is already on the wire, so the frame the reader got
+        // describes a payload whose `summary` is still the previous turn's. The
+        // call that fills it in lands tens of seconds later and nothing else
+        // here announces it, so without this the new summary waited for the
+        // sixty-second clock -- the one payload field the push channel was
+        // supposed to cover.
+        //
+        // Announced only when text came back. `warm` answers a failure with a
+        // value too -- "no model route", a timeout, a cancelled call -- and
+        // waking the reader for each of those would repaint an unchanged card
+        // on a route that is already reporting itself as broken.
+        //
+        // `has` before `bump` because a model call can outlive its session: the
+        // disposal handler forgot this counter, and bumping here would create a
+        // fresh one that nothing ever forgets again -- one retained number per
+        // conversation, on a process that runs for weeks.
+        void summariser
+          .warm({ agentId, snapshot: finished, sessionRoute: routeFor(agentId) })
+          .then((answer) => {
+            if (typeof answer?.text !== 'string' || answer.text.length === 0) return
+            if (revisions.has(agentId) === false) return
+            revisions.bump(agentId)
+          })
       }
       // Both halves of both brackets, started together. Not awaited: this handler
       // returns to the host's event loop, and a `git status` that takes a second
@@ -570,13 +636,39 @@ export function apply(ctx, config, options) {
             // is what `source` then says.
             if (blind.length > 0) sessionState.rememberPaths(agentId, blind, endedTurn, 'scan')
             if (fromGit.length > 0) sessionState.rememberPaths(agentId, fromGit, endedTurn, 'git')
+            // The second bump, and it is not belt and braces: `sweep` and the
+            // turn's `files` are written *here*, after two subprocesses have
+            // answered. The bump at the top of this branch went out before
+            // either of them ran, so the fetch it wakes reads the previous
+            // turn's sweep and a file list missing this turn's paths. Without
+            // this second notice that stale answer stands until the minute
+            // clock -- which is exactly the delay a push channel exists to
+            // remove.
+            //
+            // `has` before `bump`, for the same reason the summary landing asks
+            // it: the two subprocesses above answer in their own time, and the
+            // session can be closed while they run. `agent/disposed` has by then
+            // already forgotten the counter, so bumping here would recreate an
+            // entry nothing will ever forget again -- and, worse, it would hand
+            // the summary landing's own `has` guard a live entry, letting a
+            // closed session announce itself twice.
+            if (revisions.has(agentId) === true) revisions.bump(agentId)
           } catch {
             // The panel is a backstop over the conversation; failing to record
             // this turn's files must not reach the host as an unhandled
             // rejection. Everything above is already best-effort.
+            //
+            // This `catch` is also why there is no rejection handler below. Both
+            // `finish` implementations are documented and tested never to reject
+            // -- each answers a failed reading with `coverage: 'none'` rather
+            // than throwing, because a failed sweep is a fact the card can state
+            // and a crashed host is not. And this function cannot reject either:
+            // every line above is inside the try. So a second argument to `then`
+            // would be a branch no input can reach, and a branch no input can
+            // reach is a branch no test can hold -- it would survive deletion and
+            // leave the coverage looking better than it is.
           }
-        },
-        () => {}
+        }
       )
     }
 
@@ -590,6 +682,10 @@ export function apply(ctx, config, options) {
     // side never has to decide what a bare string means — and it can count how
     // many tools each server actually contributed.
     sessionState.rememberTool(agentId, toolName)
+    // `rememberTool` is the only writer of the panel's MCP module, and this is
+    // its only call site, so the bump belongs here rather than in a second
+    // listener that would have to re-derive the same `mcp__` condition.
+    revisions.bump(agentId)
   }))
 
   // ------------------------------------------------------ visible skill use --
@@ -668,6 +764,18 @@ export function apply(ctx, config, options) {
     // about the map, not about the number — a host that runs for a week and
     // opens a thousand sessions should not hold a thousand empty windows.
     speeds.forget(agentId)
+    // The bump comes before the forget, and it is the only notice the panel ever
+    // gets that this session is gone. A browser watching a conversation that
+    // ends keeps a healthy stream open -- nothing closes it, because the page is
+    // still there -- so without this the column goes on describing a finished
+    // session until the minute clock, which is exactly the case a push channel is
+    // for. The payload is empty by now (`transcripts.forget` ran above), so the
+    // read this wakes is the honest answer rather than a leftover.
+    revisions.bump(agentId)
+    // Same reason as the speed window: the counter is only ever read by a client
+    // that is watching this session, and a host that runs for a week and opens a
+    // thousand sessions should not keep a thousand numbers.
+    revisions.forget(agentId)
     // A baseline describes one turn's interval. Carrying it past the session
     // would make the map grow with host uptime for a session that can never
     // finish another turn — and if the id were ever reused, the leftover reading
@@ -937,6 +1045,42 @@ export function apply(ctx, config, options) {
       },
 
       /**
+       * The counter a waiting panel request compares against.
+       *
+       * Kept next to `speedRevision` because the two answer the same question
+       * about different subjects, and keeping them apart in the deps is what
+       * stops one route from being able to write the other's number.
+       */
+      panelRevision(agentId) {
+        return revisions.read(agentId)
+      },
+
+      /**
+       * Hear about a change the moment it happens, for the pushed stream.
+       *
+       * The wait route could ask the counter on a clock; a stream cannot, because
+       * nothing would ever wake it. Handing the subscription down rather than
+       * letting the api module hold the `Revisions` instance keeps the one writer
+       * (this file, at the six `revisions.bump` sites in the event handlers plus
+       * `panelBump` and the summary landing below) and the readers apart.
+       */
+      panelSubscribe(listener) {
+        return revisions.subscribe(listener)
+      },
+
+      /**
+       * Record a change that happened outside the session's event stream.
+       *
+       * Approving or discarding a candidate moves `pendingCandidates`, which is
+       * part of the panel payload, and that path touches no session at all. It
+       * still goes through this class rather than a counter of its own: one
+       * writer, one number, one thing to reason about when a frame is late.
+       */
+      panelBump(agentId) {
+        revisions.bump(agentId)
+      },
+
+      /**
        * MCP tool names this session called.
        *
        * Per session, not per process: two conversations in one host have
@@ -1109,7 +1253,18 @@ export function apply(ctx, config, options) {
     })
 
     webCtx.effect(
-      () => webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: api }),
+      () => {
+        const unregister = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler: api })
+        return () => {
+          // The route is about to stop existing. A browser mid-stream would hold
+          // a response nothing will write to again, and `EventSource` would keep
+          // retrying against a path that answers 404 from that moment on. Ending
+          // the streams first is what makes the reload invisible instead of a
+          // column that flickers and then reconnects on its own schedule.
+          if (typeof api.closeStreams === 'function') api.closeStreams()
+          unregister()
+        }
+      },
       'ui-evolve: panel api'
     )
   })

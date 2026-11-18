@@ -403,9 +403,9 @@ const mutations = [
     // covering nothing.
     suites: ['test/api.test.mjs'],
     label: 'the wait compares against the meter rather than the caller',
-    from: '  const moved = () => deps.speedRevision(agentId) !== after',
-    to: `  const started = deps.speedRevision(agentId)
-  const moved = () => deps.speedRevision(agentId) !== started`,
+    from: `  const moved = () => read() !== after`,
+    to: `  const started = read()
+  const moved = () => read() !== started`,
     why: 'the caller names the revision it last saw, and that number is what a change is measured against. Comparing with the meter as it stands when the request arrives makes a change that landed between two polls invisible — which is what happening at the end of a reply looks like from the other side of a 250ms gap — so the request sits out the whole deadline for a number that was already final when it asked',
   },
   {
@@ -437,7 +437,7 @@ const mutations = [
     // covering nothing.
     suites: ['test/api.test.mjs'],
     label: 'the wait ignores the deadline',
-    from: '  const deadline = Date.now() + SPEED_WAIT_MS',
+    from: '  const deadline = Date.now() + limit',
     to: '  const deadline = Infinity',
     why: 'a conversation that never produces text would then hold a request forever, so the panel would never learn that the reply it is waiting for was abandoned',
   },

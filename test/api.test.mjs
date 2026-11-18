@@ -71,14 +71,30 @@ function fakeRes() {
     destroyed: false,
     writableEnded: false,
     listeners: [],
+    // What the stream has written so far, unparsed. A stream is the one route
+    // whose answer is not a single body, so `body` alone cannot describe it.
+    written: [],
     once(event, handler) {
       res.listeners.push([event, handler])
+      return res
+    },
+    on(event, handler) {
+      res.listeners.push([event, handler])
+      return res
+    },
+    removeListener(event, handler) {
+      const at = res.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) res.listeners.splice(at, 1)
       return res
     },
     writeHead(code, headers) {
       res.statusCode = code
       res.headers = headers
       return res
+    },
+    write(chunk) {
+      res.written.push(String(chunk))
+      return true
     },
     end(body) {
       res.ended = true
@@ -98,10 +114,25 @@ function fakeRes() {
 function fakeReq({ url = '/', method = 'GET', headers = {}, body = undefined } = {}) {
   const merged = { host: '127.0.0.1:19387', ...headers }
   const chunks = body === undefined ? [] : [Buffer.from(body)]
+  const listeners = []
   return {
     url,
     method,
     headers: merged,
+    listeners,
+    once(event, handler) {
+      listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) listeners.splice(at, 1)
+      return this
+    },
     async *[Symbol.asyncIterator]() {
       for (const chunk of chunks) yield chunk
     },
@@ -1099,6 +1130,317 @@ async function route(overrides, req) {
   check('the panel route names the requested agent', bodyOf(res).data.agent === 'a', String(res.body))
 }
 
+// ---------------------------------------------------------------------------
+// The event stream
+// ---------------------------------------------------------------------------
+//
+// The panel used to ask every eight seconds because nothing could tell it that
+// something had changed. This route is the answer to that, so the properties
+// worth pinning are the ones a wrong implementation would still look fine
+// without: the stream must be a stream, it must say the revision it is at the
+// moment it opens, it must push only this conversation's changes, and it must
+// let go of its subscription when the response closes.
+
+{
+  const res = await route(
+    { panelRevision: () => 7, panelSubscribe: () => () => {} },
+    fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }),
+  )
+  check('the stream answers 200', res.statusCode === 200, String(res.statusCode))
+  check(
+    'and it is announced as an event stream',
+    typeof res.headers?.['content-type'] === 'string' && res.headers['content-type'].startsWith('text/event-stream'),
+    JSON.stringify(res.headers),
+  )
+  // A proxy that buffers would hold every frame until the response ended, which
+  // for a stream is never. The header is the only lever a plugin has over that.
+  check(
+    'and asks not to be buffered',
+    res.headers?.['cache-control'] === 'no-cache' && res.headers?.['x-accel-buffering'] === 'no',
+    JSON.stringify(res.headers),
+  )
+  // The comment line is not noise: without a write, the headers sit in the
+  // server's buffer and the browser's `EventSource` stays in `connecting` until
+  // the first real frame, which may be minutes away.
+  check('it opens with a comment so the headers leave the buffer', res.written[0] === ': connected\n\n', JSON.stringify(res.written.slice(0, 2)))
+  const first = res.written.find((chunk) => chunk.startsWith('data: '))
+  check('and the first frame already carries the reading', first !== undefined && JSON.parse(first.slice(6)).revision === 7, String(first))
+  check('and it names the conversation it is about', first !== undefined && JSON.parse(first.slice(6)).agent === 'agent-1', String(first))
+  check('the response is left open', res.ended === false, res.ended === true ? 'the stream ended on its own' : 'open')
+  check('the first frame ends with a blank line', first !== undefined && first.endsWith('\n\n'), JSON.stringify(first))
+}
+
+{
+  // A change to another conversation must not wake this stream. Without the
+  // filter every open panel would fetch on every event in the application,
+  // which is worse than the timer it replaced.
+  let fire = () => {}
+  const stops = []
+  const res = await route(
+    {
+      panelRevision: () => 1,
+      panelSubscribe(listener) {
+        fire = listener
+        return () => {
+          stops.push('unsubscribed')
+        }
+      },
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }),
+  )
+  const before = res.written.length
+  fire('agent-2', 9)
+  check('another conversation does not write to this stream', res.written.length === before, String(res.written.length - before))
+  fire('agent-1', 8)
+  const frames = res.written.slice(before).filter((chunk) => chunk.startsWith('data: '))
+  check('this conversation does write to it', frames.length === 1, JSON.stringify(res.written.slice(before)))
+  check('and the frame carries the new revision', frames.length === 1 && JSON.parse(frames[0].slice(6)).revision === 8, String(frames[0]))
+  // Releasing the subscription is the whole difference between a stream and a
+  // leak: every closed tab would otherwise leave a listener writing into a dead
+  // response for the life of the process.
+  const closed = res.listeners.find((row) => row[0] === 'close')
+  check('the response registers for its own close', closed !== undefined, JSON.stringify(res.listeners.map((row) => row[0])))
+  closed?.[1]?.()
+  check('and closing it unsubscribes', stops.length === 1, JSON.stringify(stops))
+  check('and it stops writing afterwards', res.written.length === before + 1, String(res.written.length))
+}
+
+{
+  // A frame written after the socket is gone is a write to a closed response,
+  // which throws `ERR_STREAM_WRITE_AFTER_END` in the host's process. The guard
+  // is cheap and its absence is loud only in production.
+  let fire = () => {}
+  const res = await route(
+    { panelRevision: () => 1, panelSubscribe: (listener) => { fire = listener; return () => {} } },
+    fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }),
+  )
+  const before = res.written.length
+  res.writableEnded = true
+  fire('agent-1', 3)
+  check('a change after the stream ended writes nothing', res.written.length === before, String(res.written.length - before))
+}
+
+{
+  const res = await route({ panelRevision: () => 5, panelSubscribe: () => () => {} }, fakeReq({ url: `${ROUTE_PREFIX}/events` }))
+  check('a stream with no agent is refused', res.statusCode === 400, String(res.statusCode))
+  check('and it says what is missing', bodyOf(res).code === 'error.agent.missing', String(res.body))
+}
+
+{
+  // A dispose has to reach streams opened by requests that are no longer on the
+  // stack. Without it a reload leaves the browser holding responses nothing will
+  // write to again, and `EventSource` retries against a route that now 404s.
+  {
+    let unsubscribed = 0
+    const opened = createPanelApi({
+      panelRevision: () => 1,
+      panelSubscribe() {
+        return () => {
+          unsubscribed += 1
+        }
+      },
+    })
+    const first = fakeRes()
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }), first)
+    const second = fakeRes()
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-2` }), second)
+    // Captured before the dispose: `stop` removes these listeners, so reading
+    // them afterwards finds an empty list and the assertion below would pass
+    // without running anything.
+    const queuedClose = second.listeners.filter((row) => row[0] === 'close').map((row) => row[1])
+    check('two streams are open before the dispose', first.ended === false && second.ended === false, `${first.ended}/${second.ended}`)
+    opened.closeStreams()
+    check('a dispose unsubscribes every stream it left open', unsubscribed === 2, `${unsubscribed} unsubscribe(s)`)
+    // The dispose is not the only way a stream ends. A `close` event that was
+    // already queued when the stream was stopped arrives afterwards, and it runs
+    // the same teardown a second time. `Set.delete` is idempotent, so the only
+    // thing that can go wrong is the unsubscribe being called twice -- and a
+    // counter that is unhooked twice is how a listener survives the thing that
+    // removed it. Firing the queued close by hand is the only way to reach it:
+    // calling `closeStreams()` again iterates an empty set and proves nothing,
+    // which is exactly what this assertion used to do.
+    for (const handler of queuedClose) handler()
+    check('and a close that arrives after the dispose is ignored', unsubscribed === 2, `${unsubscribed} unsubscribe(s)`)
+  }
+
+  {
+    // A stream that closes on its own has to leave the set. Nothing observable
+    // changes if it does not -- `stop` is idempotent, so a stale entry is
+    // invisible until the process has held enough of them to matter. The count
+    // is the only place that distinction shows, which is why it exists.
+    let unsubscribed = 0
+    const opened = createPanelApi({
+      panelRevision: () => 1,
+      panelSubscribe() {
+        return () => {
+          unsubscribed += 1
+        }
+      },
+    })
+    const res = fakeRes()
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }), res)
+    check('an open stream is counted', opened.openStreamCount() === 1, String(opened.openStreamCount()))
+    for (const handler of res.listeners.filter((row) => row[0] === 'close').map((row) => row[1])) handler()
+    check('a stream that closes is forgotten, not just stopped', opened.openStreamCount() === 0, String(opened.openStreamCount()))
+    check('and it was unsubscribed once', unsubscribed === 1, `${unsubscribed} unsubscribe(s)`)
+  }
+
+  {
+    // The request side of the teardown. A real client abort fires `close` on the
+    // request before it fires one on the response, so `req.once('close', …)` is
+    // the listener that actually runs on the common path -- and nothing asserted
+    // it existed, so deleting both that line and its matching `removeListener`
+    // left the suite green. Firing the request's own close is the only way to
+    // reach it: the response never learns.
+    let unsubscribed = 0
+    const opened = createPanelApi({
+      panelRevision: () => 1,
+      panelSubscribe() {
+        return () => {
+          unsubscribed += 1
+        }
+      },
+    })
+    const req = fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` })
+    const res = fakeRes()
+    await opened(req, res)
+    const reqClose = req.listeners.filter((row) => row[0] === 'close').map((row) => row[1])
+    check('the request registers for its own close', reqClose.length === 1, JSON.stringify(req.listeners.map((row) => row[0])))
+    check('and the stream is counted while it is open', opened.openStreamCount() === 1, String(opened.openStreamCount()))
+    for (const handler of reqClose) handler()
+    check('a client going away releases the subscription', unsubscribed === 1, `${unsubscribed} unsubscribe(s)`)
+    check('and the stream is forgotten', opened.openStreamCount() === 0, String(opened.openStreamCount()))
+    check(
+      'and it is unhooked from both sides',
+      req.listeners.filter((row) => row[0] === 'close').length === 0 && res.listeners.filter((row) => row[0] === 'close').length === 0,
+      `${req.listeners.length}/${res.listeners.length}`,
+    )
+  }
+
+  {
+    // A dispose has to destroy the responses, not just stop writing to them. The
+    // difference was measured against a real socket: with only the listeners
+    // removed, the client's `read()` stayed pending and the server kept the
+    // connection, while the set was already empty and nothing could reach those
+    // responses again. `destroyed` is the observable half; `ended` is
+    // deliberately not used -- an ordinary EOF makes `EventSource` reconnect to a
+    // route the dispose just removed.
+    const opened = createPanelApi({ panelRevision: () => 1, panelSubscribe: () => () => {} })
+    const first = fakeRes()
+    const second = fakeRes()
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }), first)
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-2` }), second)
+    check('a stream starts out neither ended nor destroyed', first.destroyed === false && first.writableEnded === false, `${first.destroyed}/${first.writableEnded}`)
+    opened.closeStreams()
+    check('a dispose destroys the responses it left open', first.destroyed === true && second.destroyed === true, `${first.destroyed}/${second.destroyed}`)
+  }
+
+  {
+    // A socket that has already gone is the other way a response can be
+    // finished: Node reports `destroyed` and leaves `writableEnded` false, so a
+    // guard that only asked the second question would write into nothing and
+    // call it success.
+    let fire = () => {}
+    const res = await route(
+      { panelRevision: () => 1, panelSubscribe: (listener) => { fire = listener; return () => {} } },
+      fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }),
+    )
+    const before = res.written.length
+    res.destroyed = true
+    fire('agent-1', 3)
+    check('a change after the socket died writes nothing', res.written.length === before, String(res.written.length - before))
+  }
+
+  {
+    // The method gate lets POST through for the routes that take a body. A stream
+    // has no body to take, and parking a POST here would leave the host waiting
+    // for one nobody reads while the response wrote frames.
+    const res = await route(
+      { panelRevision: () => 1, panelSubscribe: () => () => {} },
+      fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1`, method: 'POST' }),
+    )
+    check('a post is refused on the stream route', res.statusCode === 405, String(res.statusCode))
+    check('and no stream is opened', res.headers?.['content-type'] !== 'text/event-stream', JSON.stringify(res.headers))
+  }
+
+  {
+    // The heartbeat. A response that says nothing for a minute is what a proxy
+    // drops, and `EventSource` then reconnects in a loop, so the silence has to
+    // be broken on purpose. The interval is injected short here rather than slept
+    // through: the real one is thirty seconds.
+    const opened = createPanelApi({ panelRevision: () => 1, panelSubscribe: () => () => {}, heartbeatMs: 5 })
+    const res = fakeRes()
+    await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }), res)
+    check('no beat has happened yet', res.written.filter((row) => row === ': heartbeat\n\n').length === 0, JSON.stringify(res.written.slice(0, 3)))
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    const beats = res.written.filter((row) => row === ': heartbeat\n\n').length
+    check('an idle stream breaks its own silence', beats > 0, `${beats} beat(s)`)
+    // A beat is a comment, so it must not look like a frame to the client: a
+    // `data:` line here would make the panel fetch on a timer under another name.
+    check('and a beat carries no frame', res.written.filter((row) => row.startsWith('data: ')).length === 1, JSON.stringify(res.written.filter((row) => row.startsWith('data: '))))
+    const stoppedAt = res.written.length
+    for (const handler of res.listeners.filter((row) => row[0] === 'close').map((row) => row[1])) handler()
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    check('and a stopped stream stops beating', res.written.length === stoppedAt, `${res.written.length - stoppedAt} beat(s) after the close`)
+  }
+
+  {
+    // `clearInterval` in `stop` looks redundant: the callback already returns
+    // early once `stopped` is set, so a deleted `clearInterval` changes nothing
+    // a socket can observe. What it changes is that the interval keeps firing
+    // for the life of the process -- one per closed stream, forever, since a
+    // stream is reopened every time the page or the conversation changes.
+    //
+    // A leak with no visible symptom is exactly what a mutation entry finds and
+    // a socket-level assertion cannot, so this watches the registration instead:
+    // the handle `setInterval` returned for this stream has to come back through
+    // `clearInterval` when the stream ends.
+    const opened = createPanelApi({ panelRevision: () => 1, panelSubscribe: () => () => {}, heartbeatMs: 5 })
+    const realSetInterval = globalThis.setInterval
+    const realClearInterval = globalThis.clearInterval
+    const registered = []
+    const clearedHandles = []
+    globalThis.setInterval = (...args) => {
+      const handle = realSetInterval(...args)
+      registered.push(handle)
+      return handle
+    }
+    globalThis.clearInterval = (handle) => {
+      clearedHandles.push(handle)
+      return realClearInterval(handle)
+    }
+    try {
+      const res = fakeRes()
+      await opened(fakeReq({ url: `${ROUTE_PREFIX}/events?agent=agent-1` }), res)
+      check('opening a stream registers one interval', registered.length === 1, String(registered.length))
+      for (const handler of res.listeners.filter((row) => row[0] === 'close').map((row) => row[1])) handler()
+      check('and ending it hands the interval back', clearedHandles.includes(registered[0]), `${clearedHandles.length} cleared`)
+    } finally {
+      globalThis.setInterval = realSetInterval
+      globalThis.clearInterval = realClearInterval
+    }
+  }
+
+  // A host that never wired `panelSubscribe` must not leave the route hanging:
+  // the frame at open time is still the useful half, and a HEAD probe has to
+  // answer without opening a stream at all.
+  const res = await route({ panelRevision: () => 2 }, fakeReq({ url: `${ROUTE_PREFIX}/events?agent=a`, method: 'HEAD' }))
+  check('a head probe does not open a stream', res.ended === true, res.ended === false ? 'the stream was opened for a HEAD' : 'ended')
+  // A HEAD answer carries no body by construction, so the assertion is that it
+  // ended as an ordinary response with headers -- not that it announced a stream
+  // in a payload nobody receives.
+  check('and it still reports success', res.statusCode === 200 && res.headers?.['content-type'] !== 'text/event-stream', `${res.statusCode} ${res.headers?.['content-type']}`)
+}
+
+{
+  // Without the reader the stream can only ever say "now", once. The fallback is
+  // what a host that cannot subscribe falls back to, so its absence must be a
+  // working stream rather than an exception.
+  const res = await route({ panelRevision: () => 4 }, fakeReq({ url: `${ROUTE_PREFIX}/events?agent=a` }))
+  check('a host with no subscriber still opens a stream', res.statusCode === 200 && res.headers?.['content-type'] === 'text/event-stream', String(res.statusCode))
+  check('and it still says where it stands', res.written.some((chunk) => chunk.includes('"revision":4')), JSON.stringify(res.written))
+}
+
 {
   const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a`, method: 'HEAD' }))
   check('a head request answers 200', res.statusCode === 200, String(res.statusCode))
@@ -1870,8 +2212,18 @@ function heldBodyOf(res) {
 }
 
 {
+  // Approving moves `pendingCandidates`, which is part of every panel payload on
+  // this conversation -- and this path never touches a session event, so nothing
+  // else would notice. The stream is the only channel that carries it, which is
+  // why the assertion below counts bumps rather than trusting the route to have
+  // called one: `deps()` supplies no `panelBump`, so a mutation that deletes the
+  // call would otherwise have nothing to fail against.
+  const bumps = []
   const res = await route(
-    { approveCandidate: async () => ({ ok: true }) },
+    {
+      approveCandidate: async () => ({ ok: true }),
+      panelBump: (id) => { bumps.push(id) },
+    },
     fakeReq({
       url: `${ROUTE_PREFIX}/candidates?agent=agent-9`,
       method: 'POST',
@@ -1882,6 +2234,26 @@ function heldBodyOf(res) {
   check('the decide route answers 200', res.statusCode === 200, String(res.statusCode))
   check('the decide route uses the ok envelope', bodyOf(res).ok === true, String(res.body))
   check('the decide route reports the outcome as data', bodyOf(res).data?.ok === true, String(res.body))
+  check('a realised decision wakes the panel', bumps.length === 1, JSON.stringify(bumps))
+  check('and it wakes the conversation the decision was made for', bumps[0] === 'agent-9', JSON.stringify(bumps))
+
+  // The other direction: a refusal changes no count, so waking every other tab
+  // would be a frame that says "look again" about nothing.
+  const refusedBumps = []
+  const refused = await route(
+    {
+      approveCandidate: async () => ({ ok: false, code: 'not-found', error: 'no such candidate' }),
+      panelBump: (id) => { refusedBumps.push(id) },
+    },
+    fakeReq({
+      url: `${ROUTE_PREFIX}/candidates?agent=agent-9`,
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'gone', action: 'approve' }),
+    }),
+  )
+  check('a refused decision still answers 200', refused.statusCode === 200, String(refused.statusCode))
+  check('a refused decision wakes nobody', refusedBumps.length === 0, JSON.stringify(refusedBumps))
 }
 
 {

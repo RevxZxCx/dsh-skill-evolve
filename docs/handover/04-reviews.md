@@ -101,6 +101,7 @@
 | R-95 | 2026-11 | 真实会话固化成 fixture（无独立审查者） | 自查 7 处，采纳 7，驳回 0；以可执行验收代替阅读 | 7 / 0 |
 | R-96 | 2026-11-16 | 产出卡噪声修复（无独立审查者） | 本轮以三处注入验证代替阅读审查：每处都让预期的那几条断言变红并校验 sha256 复原；另加 5 条永久突变与真机验收 | 修 2 / 推迟 2 |
 | R-97 | 2026-11-18 | 监控列整轮 D-183~D-197（无独立审查者） | 未派审查者：diff 四天未稳定，每轮都在修上一条断言未覆盖的东西；以真实 DOM 取证代替阅读，三个根因（`visibility:hidden`、`pointer-events:none`、读错侧栏属性）源码推断合计八轮全落空、读到真实 DOM 各一轮定案；变异首轮 135 killed / 2 survived，两条存活的正是本轮新写、我以为有抓力的断言 | 修 2（均本轮） |
+| R-103 | 2026-11-19 | 面板从 8 秒轮询改成事件驱动（五轮审查） | 用户 m05581 拦下我第一版长轮询方案，要求先查 qoder 逆向与成熟实现 —— 调研改变了方案（qoder 用进程内 observable，跨 bundle 搬不过来；宿主转发事件白名单硬编码且被独占注册；官方 dsh-client-hmr 的 /plugins/events 可照抄）。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续并核正了他推断里的时间顺序。五轮审查：r1 失败无结论；r2 判词「实现的质量高于测试」（12 条变异 5 条存活）；r3 NOT CONVERGED，抓出 onError 从没人赋值、致命 error 分支零测试可达；r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（真缺口）、`has()` 缺失、`onError` 可能逃进宿主；r5 CONVERGED 无 must-fix，用真实 Node 探针证伪了 `req.once('close')` 会误触发的担心，剩下的全是文案时效（README 还写着「没有订阅也没有服务端推送」）。新增 revision.js 与 test/revision.test.mjs，8 处 bump，变异 143 + 230 全杀 | 修 36（另有自查 6 处）/ 推迟 1 |
 
 ---
 
@@ -3502,3 +3503,371 @@ HTTP 层的 `2533 ms 且返回正文` 证明过，与「失败」无关。
 3. `liveSessionId()` 取的是文档里第一个 `[data-conversation-session]`。审查者指出宿主可能同时挂载带 `variant: "embedded"` 的第二个对话根（子代理面板），若它排在前就会跟错会话。真机未观测到，加固方案是收窄到 `[data-conversation-region="chat"][data-conversation-session]` 并保留旧选择器作回退 —— 未做
 4. 切会话瞬间（旧已卸载、新未挂载）`liveSessionId()` 返回 `""`，`target` 回退到旧 `bridge.sessionId`，会多发一次注定被丢弃的 `/panel`。每次切换一次，且它持有服务端队列的写锁 —— 可接受但未优化
 5. `SpeedBadge` 的 `sessionId` 仍来自 `Cards` 那一次渲染捕获的值，同一条陈旧链路上它的历史数据重置也会滞后。修复后路径上它会被 `notify()` 一起带过去，但没有专门断言
+
+## R-103 · 从 8 秒轮询改成事件驱动（五轮审查，第五轮判定收敛）
+
+### 覆盖范围
+
+D-216 ~ D-221，新文件 `packages/ui-evolve/lib/revision.js` 与其测试 `test/revision.test.mjs`。
+改动 10 个文件 + 2 个新建：`packages/ui-evolve/lib/api.js`、`client.js`、`index.js`，
+`scripts/mutate-checklist-panel.mjs`、`mutate-language-and-files.mjs`、`mutate-speed.mjs`、`mutate-persistence.mjs`，
+`test/api.test.mjs`、`test/client.test.mjs`、`test/index.test.mjs`。`git diff --stat` 10 files changed, 2173 insertions(+), 77 deletions(-)。
+
+### 用户要的是什么
+
+用户 m05226 的原话：「我更希望是事件驱动的，只有事件驱动走不通时，才降级为轮询。」
+
+这句话把问题定义在**取数机制**上，不是「快一点」。起点是 `client.js` 里一条
+`setInterval(..., REFRESH_MS)`，8 秒一次，无条件重取整个 `/panel` —— 没有东西变化时也取。
+（R-98 ~ R-101 把这条轮询的**代价**压到了几十毫秒，所以这一轮要动的不是性能，是「为什么要有这条钟」。）
+
+### 用户 m05581 拦下了我的第一版
+
+我最初的方案是长轮询 `/watch`：客户端持一个请求挂着，服务端有变化就回包。改到一半被用户叫停：
+
+> 你已经在修改了吗？我觉得你应该先参考之前逆向的 qoder 对于这个情况的实现，或者搜索相关成熟实现再
+> 做方案决定，而不是依靠简单判断进行方案设计。
+
+这条批评是对的：我跳过了调研直接按自己判断动手。停下来查了四件事，其中三件改变了方案。
+
+**一、qoder 用的不是轮询，也不是 SSE。** 逆向材料里它的任务监控卡片（`data-task-monitor-pinned-panel`）
+靠进程内 observable 订阅：`p1(n ?? M.modelObs)`、`chatSessionHighlightsService`、`R.highlights?.updatedAt`。
+组件签名里那串 `sourceModelObs, backgroundAgents, backgroundProcesses, sideChats` 全是可观察对象。
+同一批材料里 qoder 自己的提示词还明确反对轮询（`GetBackendAgentStatus ... do not poll repeatedly`、
+`do not poll wait_chat_sessions for task completion`）。**结论**：这是进程内订阅，DSH 的插件与 GUI
+跨 bundle，没有等价物 —— 不能照搬。
+
+**二、`text/event-stream` 在 qoder 逆向里出现过 3 次，是死路。** 那一段代码是它的 APM/RUM 采集器
+（SkyWalking 埋点 `Cr` 类，用 `TransformStream` 拆 `\n\n` 统计首字节与 token 间隔），不是它的传输层。
+记在这里是为了不再走一次。
+
+**三、宿主的转发事件通道对插件不可用（决定性）。** 最诱人的方案是让服务端把 `turn/end` 这类事件
+直接推给页面，用宿主现成的 `ctx.remote.$on`。查清了：
+`dsh/node_modules/@deepseek-ai/dsh-api-remotes/lib/types/remote-events.js` 里的
+`API_REMOTE_FORWARDED_EVENTS` 是**硬编码的白名单**，而 `registerRemoteEvents(source, host)`
+（`dsh-api-gateway/lib/types/index.js`）注释写着「Register the sole application-selected forwarded-event
+source」，重复注册直接 throw。唯一注册者是 `api-remotes` 自己的 `apply()`。**插件无法扩展这个白名单。**
+白名单里唯一与会话活动有关的是 `api-session/activity`，而它只在
+`event.type === 'user/message' && event.data.source.kind === 'user'` 时发出
+（`dsh-api-session-controller/lib/types/index.js`）—— 只在人说话时发，驱动不了面板。
+客户端那一侧 `$on` 甚至有前置条件：`if (this.events === void 0) throw new Error("client api: forwarded
+events require interactions=answer")`。
+
+**四、官方插件 `@deepseek-ai/dsh-client-hmr` 就是一条 SSE，而且可照抄。** 它的 `/plugins/events`
+把 wire 格式（`data: ${JSON.stringify(frame)}\n\n`）、提交 header 的技巧（先写 `: connected\n\n`）、
+连接集合（`const connections = new Set()`，dispose 时 `res.destroy()`）都写明了。另外宿主压缩中间件
+显式跳过 `text/event-stream`（`content-type` 以它开头就 `return false`），所以流不会被 gzip 缓冲掐死。
+浏览器里实测 `typeof EventSource === "function"` 为真、`globalThis.__DSH_TRANSPORT__` 为 `undefined`
+（所以走原生 `EventSource` 分支，自带重连）。
+
+方案于是从「长轮询」改成「插件自有 SSE 长连接 + 60 秒兜底轮询」，并请用户在三选一里确认。
+
+### 为什么不是复刻本仓库已经撤掉的那个 SSE（D-70 → D-73 → D-74）
+
+这是本轮最该记的一件事：**我差一点在复刻一个十一天前被撤回的设计，而且不知道它存在。**
+`02-decisions.md` 里三段连着的记录：
+
+- **D-70**（`02-decisions.md:1138`）：引入 SSE `LiveHub` 与 `GET /api/ui-evolve/live`。背景是用户问
+  「这些统计数字能不能实时更新」。流里**不带载荷**，只喊「这个会话动了」，客户端收到就重取整个 `/panel`。
+- **D-73**（`:1178`）：流打开后把轮询从 8 秒放到 60 秒（`IDLE_REFRESH_MS`）。它自己记下两个洞：
+  `EventSource` 对不可用的响应（404、非 `text/event-stream`）**永久放弃重连**；`pendingCandidates`
+  读的是全局队列，而流只替一个会话说话。
+- **D-74**（`:1193`）：整条流删掉，轮询恒定 8 秒。用户原话「我认为这样会占用资源，实际体验并不好」，
+  技术理由是「**流替面板做的事，比它拿走的少**」。对应的 revert 是 `8457751`（2026-11-07），建流是 `c22ec9a`。
+
+用户 m07783 读了这些记录后自己做了推断，并让我去核实：
+
+> 当时引入这个决策的原因是因为实际的卡片中有调用命令、工具次数的显示，而我想要这部分内容实时显示，
+> 而实际的开发是将整张卡片实时刷新，这其实也算是一种错误决策。（这是我的推断，不知道准不准确，
+> 但是看实际记录似乎是这样）现在实际的调用命令、工具次数的显示已经被丢弃了，这里的决策可能已经过时了。
+
+核实结果 —— **动机与实现方式属实，但时间顺序要纠正**：
+
+- 那三个计数（calls / commands / files）确实是在列布局重构里移除的，`client.js:1919-1922` 的注释原话
+  `the title and the three counts (calls, commands, files) are gone because they answered "how much did
+  that turn cost", and the header answers "what happened"`。提交 `d5cc753`，日期 **2026-11-17**。
+- 但撤流是 `8457751`，日期 **2026-11-07**，**比计数移除早十天**。所以不能说「计数没了，撤流的理由就没了」——
+  D-74 从头到尾给的理由是覆盖面，不是计数。
+
+这个纠正有两个后果。一是 D-74 的**技术理由今天依然成立**：`pendingCandidates` 仍是全局队列，
+`statTouchedFiles()` 仍在现场 stat，技能目录也没事件。**这正是我保留 60 秒兜底的原因**，不是因为保守。
+二是 D-74 的**动机侧理由**（为几个实时数字付一条长连接）随计数移除而消失了，而这次的动机是新的
+（用户 m05226 提的是取数机制偏好）。收益与代价都要诚实地说：
+**收益**是会话驱动的变化「一轮结束立刻更新，而不是最多再等 8 秒」；时钟那一半的请求数从每分钟约 7.5 次
+降到每分钟 1 次，而每一帧各换一次取数，所以净效果是「约每八秒一次」变成「一圈固定的几个点 + 每个
+MCP 调用一次」。**代价**是那三处事件说不准的盲区从 8 秒变成 60 秒 —— 一次全局候选队列的变化现在可能
+晚一分钟才出现。这不是白赚：拿一处变慢换另一处变快，并少发大部分空转请求。
+（帧数没有实测分布：一轮里有多少 MCP 调用就多多少帧，我没统计过，所以这里只给折算方式不给倍数。）
+
+### 改动
+
+**一、`packages/ui-evolve/lib/revision.js`（新，155 行）。** `Revisions` 类：每会话一个计数器，
+`bump / read / forget / subscribe`。`Map` 而不是对象（会话 id 是外部字符串，`__proto__` 一类键会改容器形状）；
+`bump` 返回新计数并广播给 listener，单个 listener 抛错不影响其它 listener，也不传回 emit 点
+（调用方正处在事件中途）；`read` 未知会话返回 0；`onError` 走构造参数而不是事后赋值。
+不持久化，也不是跨重启比较：客户端开流时首帧告诉它当前值，之后任何帧到达就取数；数字随帧走是为了
+日志和未来的 waiter，不是因为读者比较它。
+
+**二、`api.js`：新增 `/events` 路由与 `openEventStream()`。** wire 格式照抄宿主 HMR 插件。
+`openEventStream` 里值得单独说的是四件事：
+
+- `finished()` 同时问 `res.destroyed` 和 `res.writableEnded`。客户端 abort 后 Node 报
+  `destroyed === true` 而 `writableEnded` 仍是 `false`，`write()` 返回 false 却不抛 ——
+  只看 `writableEnded` 会让帧被写进死 socket 然后丢掉。
+- `stop` 幂等，并且**先建好、先登记，再写首帧、再订阅、再起心跳**。顺序不是风格问题：先前的版本
+  `openStreams.add(stop)` 排在 `send()` 与 `panelSubscribe` 之后，而注释声称「Registered before the
+  listeners and before the first frame」—— 注释是假的。真后果是，若 `send()` 或 `panelSubscribe` 抛错，
+  响应已经提交了 SSE header、不在任何集合里、`closeStreams()` 永远触不到它，而路由的 `catch` 会往
+  这条流里追加一个 JSON body。
+- `stop` 结束时 `res.destroy()` 而不是 `end()`。普通 EOF 会让 `EventSource` 认为流结束、几秒后重连到
+  一个刚被 dispose 删掉的路由 —— 一次 404 加一轮重试风暴，而这一侧早就知道答案了。destroy 表现为网络错误，
+  正是客户端读作致命并停下的那个分支。
+- 心跳 `: heartbeat\n\n` 每 30 秒一次（nginx 默认 `proxy_read_timeout` 是 60 秒，30 秒留一次丢帧余量）。
+  没有它，一个安静的长连接会被中间任一代理掐掉，然后 `EventSource` 进入重连循环。
+
+**三、`index.js`：8 处 `revisions.bump`。** 这 8 处不是「事件都记一下」，每一处都对应一个**载荷字段会变**：
+`rememberSkillUse`（`skills` 列表）、`turn/start`（`turn` 与 `cwd`）、`turn/end`（`summary` / `files` /
+`turnFiles` / `sweep` / `commands` / `tools` / `calls` / `failed` 全部来自上一轮）、`turn/end` 之后异步
+`sweep` 与文件扫描返回时**第二次** bump（那两件事才写完 `sweep` 与 `files`）、MCP `tool/call`（`mcp` 行）、
+`agent/disposed`（面板得知会话已消失的唯一时机 —— 浏览器不会收到 close，页面还在）、
+`panelBump`（批准/丢弃候选改变了 `pendingCandidates`，而这条路径不经任何会话事件）、
+**摘要落地**（`summary` 也是会变的字段，而它由模型在回合结束后几十秒才写出，没有任何会话事件带着它）。
+
+后两处「迟到的答案」（异步 `sweep` 与摘要落地）都先用 `revisions.has(agentId)` 问一句再 bump。
+这不是保险：模型调用与 `git status` 都能活过它们的会话，而 `agent/disposed` 已经 `forget` 了计数器，
+此时 bump 会**重新造出一个永远没人 forget 的条目**（一个跑几周的过程里每次关会话留一个数）；更糟的是
+它会把这个复活条目交给摘要落地的 `has` 守卫，让一个已关闭的会话宣告自己两次。
+理由是采样过的：真实会话日志里一轮平均 1252 秒、`tool/call` 0.057 次/秒、全部事件 0.394 次/秒。
+「每个事件都刷新」约 2.5 秒一次，**比 8 秒更糟**，所以必须按类型过滤，不能照搬 `/speed` 的按 delta 计数。
+
+**四、`client.js`：`EventSource` + 60 秒兜底。** 三处容易写错的地方：
+
+- 地址必须走 `resolveUrl`。GUI 可以被挂在路径前缀下，而 `new URL("/api", base)` 会丢掉前缀、
+  `new URL("api", base)` 保留。裸根路径在带前缀部署时 404，`EventSource` 对 404 **永久放弃重连**，
+  于是快路径静默死掉、面板退回分钟时钟，而且看起来完全健康、日志里什么都没有。
+- `error` 处理必须分清「掉线」与「放弃」。掉线时 `readyState` 是 `CONNECTING`（0），浏览器自己会重试；
+  致命失败（404、非 `text/event-stream`）时是 `CLOSED`（2），再也不回来。把后者当前者，就是 D-73
+  记下的那条教训原样复现。
+- 帧不可丢。请求正在飞的时候到一帧，不能直接丢掉等下一帧 —— 可能没有下一帧。
+
+### 真机验证
+
+插件是 link 安装（`C:/Users/26903/.dsh/profiles/desktop/package.json:16` 是
+`"@revxz/dsh-ui-evolve": "link:F:/dsh-plugin/dsh-skill-evolve/packages/ui-evolve"`），
+宿主跑的就是工作区代码，所以不重启也能验传输层：
+
+- `GET /api/ui-evolve/events?agent=<id>` → **200**，`content-type: text/event-stream`，
+  `cache-control: no-cache`，**53 ms** 收到 `": connected\n\n"` 与首帧
+  `data: {"agent":"session-151cb1ab-...","revision":0}`
+- `GET /api/ui-evolve/watch` → **404** `error.route.unknown`（证明宿主跑的是删掉旧路由的新代码）
+- 后台挂着流监听本会话：`16:55:50` 首帧 `revision: 0`，我调一次 `skill` 工具（触发
+  `rememberSkillUse` → bump），**`16:59:25`（+214747 ms）收到 `revision: 1`**
+
+三端在真机上确实工作。此前我记过一条「跨回合收不到帧」的疑点，查清是**测量方式的问题**：
+那个回合从 00:02 连续跑到 01:00 没结束，`turn/end` 没有时机；而 `turn/start` 发生在插件重载之前，
+新的 `Revisions` 实例从 0 开始计数。
+
+### 五轮独立审查
+
+**第一轮 `b853abe5-96b5-4688-a850-6727c0f46326`：失败，无结论。** 完成前退出，没有留 closing message。
+按用户规矩（每次改代码后必须审查）重派。
+
+**第二轮拆成两个聚焦的范围。**
+
+`8b3edb8d-94cd-4d06-95a9-d573a14463d6`（客户端与测试），判词是「**实现的质量高于测试**」——
+它跑了 12 条变异，**5 条存活**，其中一条正是这条流存在的理由（帧不可丢）。三条 must-fix：
+
+1. `EventSource` 用了裸根相对路径，绕过 `resolveUrl`（见上）
+2. `error` 把「永久放弃重连」当成「永远会重试」，与 D-73 记录的结论直接矛盾
+3. 「SSE 帧必须不被丢弃」无测试覆盖：原用例 `stream.emit()` 之前没有任何请求在飞，
+   所以删掉 `mustAsk` 照样绿。真实场景是「请求在飞 → 帧到达 → 丢弃 → 不再补问 → 最后一次变化永远不到」
+
+`5844b482-c821-4711-8434-6b41e92d3688`（服务端生命周期），三条 must-fix + 八条 should-fix。
+其中最重要的是它用**真实 socket** 测出来的：
+
+> `closeStreams()` 后 2 秒，`openStreamCount=0`、listener 已卸，但客户端 `read()` 一直不返回 done，
+> 服务器仍握着 1 条 TCP 连接。
+
+即 `stop()` 只解绑了监听器，既没 `end()` 也没 `destroy()`。三处注释都写着 destroy，代码一次没调。
+另外它指出 `revision.js` **零测试零变异**（`grep -rn "Revisions" scripts/ test/` 无输出，5 条候选变异全存活），
+以及 `turn/end` 的 bump 早于异步 `sweep`/文件扫描写入，客户端收到帧立刻取数会读到上一轮的 `sweep`
+且没有第二次机会（只能等 60 秒兜底）。
+
+它同时明确判为**没问题**的几项也有价值：宿主 handler 返回 `undefined` 不会提前 end；
+gzip 中间件跳过 SSE；宿主未设 `requestTimeout/headersTimeout/keepAliveTimeout`（实测 1500 ms 也掐不断
+已提交头的流）；多标签页同会话互不干扰；四条退出路径全汇聚 `stop` 且幂等无竞态；
+以及 bump 早于 `rememberTurn` **不会**读到旧 `previous`（`transcript.js:448` 在 `record` 里已同步执行
+`this.previous = this.snapshot()`）。
+
+**第三轮 `65500bbb-4f88-4415-88b0-143009bd2399`：NOT CONVERGED**（2 must-fix + 3 should-fix + 1 nit）。
+它先确认设计正确（两标签页同会话互不干扰、`stop()` 真幂等、`destroyed`/`writableEnded` 都问了），然后：
+
+1. **`onError` 被声明、被文档化、被调用，但从没有人赋值。** 全仓四处提及，没有一处传入；
+   `index.js:238` 是 `const revisions = new Revisions()` 无参，而插件明明有 `log` helper。
+   所以我写的「the plugin wires it to its own log」是假的，`bump` 的 catch 依然不可观测。
+   删整个 try/catch 才被杀，只删那一行则全绿。
+2. **致命 `EventSource` 分支没有任何测试能到达。** `EventSourceStub.fail()` 在 `readyState` 仍是 0 时
+   触发 `error`，从不设 2；只有 `close()` 设 2 而它同时把 `closed = true`。所以守卫永远早返回、
+   `stopStream()` 从未被任何测试执行。**后果是那个原始 bug 原样回来了：删掉 error 处理器里的
+   `stopStream()`，全套件照样绿。**
+3. `/panel` 分支的注释还在描述已经删掉的 `/watch`。
+4. `openStreams.add(stop)` 的注释声称「先注册」，实际排在 `send()` 与 `panelSubscribe` 之后。
+5. `holdRevision` 里 `current === undefined` 那条臂不可达（唯一实现返回数字），理由段也过期。
+6. `test/revision.test.mjs` 那对「forgetting」断言读的不是它忘掉的那个 key。
+
+六条我逐条核实，**全部属实**。
+
+**第四轮 `3d366269-12cb-4057-a215-7606d321bf57`：NOT CONVERGED（2 must-fix + 3 should-fix + 2 nits）**，
+但它同时判「`openEventStream` / `revision.js` / 客户端 effect 均无正确性缺陷」，19 项早先修复全部成立。
+两条 must-fix 都是**陈述与代码不符**，不是行为错：
+
+1. `index.js:1025` 与 `client.js:3014` 都写「the five emit sites」，实际 7 处（我加了两处 bump 没更新计数）。
+2. `index.js:511` 那段「the fetch this wakes gets a cached answer」是**假陈述**：`bump` 同步跑完 listener
+   才返回，`warm()` 在其后才启动模型调用，所以被唤醒的 `/panel` 走的是 `summarise` 的 `inflight` 分支。
+   行为本身没错（一次调用无论谁先来都只发生一次），错的是那句解释。
+
+它顺手提出的 should-fix 4 才是真缺口：**`summary` 字段会在摘要落地时改变，却没有任何 bump**，
+只能等 60 秒兜底 —— 而摘要并不在「三件事件说不准」那张清单里。这一条我接受并实施（见 D-222）。
+另有一条它明确判干净的项值得记：**除 `summary` 外，7 处 bump 都对应一个会被渲染的字段，没有漏 bump。**
+
+它给的两条环境告警也进了教训：审查期间工作区被我的变异进程并发重写（`index.js` 的 sha 漂了两次），
+以及 `test/mutations.test.mjs` 在并发读时「缺失锚点」时红时绿（它另写独立复算得 143/143、missing 0）。
+
+**第五轮 `b7f29230-87cd-481d-9c74-29dd14dbc6a5`：CONVERGED，无 must-fix。**
+
+它按我的要求**读磁盘活文件而不是 diff 快照**（上一轮就是因此把已修项当新发现报的），并独立复算了：
+全量 4198/0；两条 `has()` 守卫经它自己变异验证都是真测试（删 `index.js:557` →
+`FAIL but a summary landing after it says nothing 5 -> 6`；删 `:652` → 同类失败），**并明确要求不要重报
+它们「没测到」**；`index.js` 恰 8 处 bump 与两处「six…plus」注释自洽（6+1+1=8）。
+
+它还用**真实 Node v24.21.0 探针**（`/f/dsh-plugin/.tmp-test/reqclose.mjs`）证伪了第三轮留下的一个担心：
+`req.once('close')` 不会在开流时触发 —— res close @1527ms `destroyed=true writableEnded=false`、
+req close @1527ms。teardown 路由是安全的。
+
+它剩下的 should-fix 与 nits **全是文案时效**，且都成立，我全部照改：
+
+- `README.md:766` 现在时写着「**How it learns: a timer.** … **There is no subscription and no server push**」，
+  与落地代码正好相反。这条权重最高，因为同一份 README 上一轮撤流（R-36）把「README 两处过期」
+  按 P2 处理过 —— 同一标准不能这次放过。
+- `README.md:399`「every panel read is one `fs.stat` per entry, **every eight seconds**」。
+- `summarise.js:69`「the panel polls every eight seconds」与 `:74`「one call a minute **instead of seven**」
+  —— `seven` 是 8 秒时钟下的算术，60 秒兜底后不再成立。该文件在 diff 内，属本次范围。
+- nit：`client.js` 的「one hundred and fifty `jsx` calls every eight seconds」（现在时口吻）、
+  `session-state.js` 两处同类残留（该文件不在 diff 内，顺手清）。
+
+**它未能完成的一项**：读不到 `F:/DSH/resources/app.asar/.../dsh-client-hmr/lib/index.js`
+（asar 是单文件归档，`app.asar.unpacked` 下没有这个包），所以**没有**做与宿主参考实现的逐行对照。
+这是这一轮审查的已知盲区，不是结论的一部分 —— 记进诚实缺口。
+
+### 变异表（每条都亲自跑，跑完从备份恢复并 `node --check`）
+
+| 变异 | 结果 |
+|---|---|
+| 帧到达时 `load(true, true)` → `if (false) load(true, true)` | 红：`a frame on the stream is received and dropped` |
+| 致命 error 分支 `readyState !== 2` → `!== 3` | 红 2：`a stream that gave up is waited on forever` |
+| 兜底定时器 `if (stream === null) startStream()` → `if (false)` | 红 1：`and nothing ever opens another one` |
+| `onVisible` 的 hidden 分支去掉 `stopStream()` | 红：`a hidden page keeps its stream open` |
+| 回前台无条件重开（去掉 `if (stream === null)`） | 红：`coming back throws away a stream that is still good` |
+| `send()` 删掉（不推首帧） | 红 5：`a stream never says where it stands` |
+| `openStreams.add(stop)` 删掉 | 红：`a stream registered after it could have thrown` |
+| `if (heartbeat !== undefined) clearInterval(heartbeat)` 删掉 | 红：`a heartbeat outlives the stream that started it` |
+| `res.destroy()` 那一行删掉 | 红：`a stream is unhooked but never ended` |
+| `/events` 方法门 `!== 'GET'` → `=== 'POST'` | 红：`a stream answers a POST` |
+| `res.write(': heartbeat\n\n')` 删掉 | 红：`a stream never says anything while idle` |
+| `revisions.bump` 五处逐条删除 | 各自红：`a turn starting / a turn ending / an MCP tool call / a session ending / the sweep answers without telling anyone` |
+| `turn/end` 异步成功分支的第二次 bump 删掉 | 红：`and so does the answer that arrives after it` |
+| `deps.panelBump(agentId)` 删掉 | 红：`a realised decision wakes the panel` |
+| `this.onError?.(error, agentId)` → `void error` | 红 2：`a listener that throws fails without saying so` |
+| `new Revisions({ onError })` → `new Revisions()` | 红 2：`the counter is built without anywhere to report` |
+| `revision.js` 六条（计数、`?? 0`→`?? -1`、`forget` 空实现、`subscribe` 返回空函数、删 id 校验、删 try/catch） | 全部红 |
+| `holdRevision` 的比较改成「与启动时比」 | 红 |
+| 摘要落地那次 `revisions.bump(agentId)` 删掉 | 红：`and the summary landing announces itself again 4 -> 4` |
+| 摘要落地的 `has` 守卫删掉 | 红：`but a summary landing after it says nothing 5 -> 6` |
+| 异步 sweep 续体的 bump 删掉 | 红：`and so does the answer that arrives after it 4 -> 4` |
+| 异步 sweep 续体的 `has` 守卫删掉 | 红：`but a sweep landing after it says nothing 5 -> 6` |
+| 「有文本才宣告」改成「非 null 就宣告」 | 红：`but a summary that failed says nothing 4 -> 5` |
+
+最终：`mutate-checklist-panel.mjs` **143 killed / 0 survived**，`mutate-language-and-files.mjs`
+**230 killed / 0 survived / 0 crashed**，`node test/mutations.test.mjs` 48 passed。
+
+### 自己写砸的十处
+
+1. **`git checkout` 恢复手工变异，丢掉了整轮服务端工作。** 验证 dispose 变异时我手工删掉
+   `handle.closeStreams` 的循环，测试报红（证明变异被抓住），然后我用
+   `git checkout packages/ui-evolve/lib/api.js` 恢复 —— 工作区未提交时这等于把 1680 行改回 1500 行。
+   靠变异前 `cp /tmp/api.bak` 救回。**教训：恢复手工变异绝不能用 `git checkout`。**
+2. **两次不可达分支。** 一次是 `Promise.all(...).then(onSuccess, onFailure)` 的拒绝处理器：
+   `git-watch.js:151` 与 `scan-watch.js:117` 的 `finish` 都自带 catch 且 JSDoc 写明 never a rejection，
+   所以任何输入都到不了第二个参数，我还为它写了走成功路径变绿的测试。另一次是
+   `openEventStream` 里两处「中途被 stop」的重检查 —— 它是同步函数，事件插不进来。两处都已删除，
+   而不是留着当「防御性代码」。
+3. **`EventSourceStub` 测不到致命分支**（第三轮 must-fix 2 的成因）。替身只会发 `readyState = 0` 的
+   error，于是唯一的断言验的是「掉线不关」那一半，另一半带着零测试上线。
+4. **`test/revision.test.mjs` 的 forgetting 断言**读一个 key、忘另一个 key，两行都恒真。
+5. **我的变异验证脚本两次误判。** 一是 `subprocess.run(text=True)` 在中文 Windows 上按 GBK 解码，
+   测试输出含中文时抛 `UnicodeDecodeError`，`stdout` 为 `None`，只看 returncode 就判 KILLED；
+   二是用 `line.startswith('FAIL')` 判断失败，而输出里 `FAIL` 前面有两个空格，于是「其实红了」被判成
+   SURVIVED。正确写法 `line.strip().startswith('FAIL')`。
+6. **`test/index.test.mjs` 新块引用了前一个 `{}` 块里的 `streamRes()`**，直接
+   `ReferenceError: streamRes is not defined`。改成块内自建。
+7. **摘要落地的测试块第一次全绿，却一次模型调用都没发生。** 我把 `fakeLlm` 的 `listProviders`
+   写成了 `async`，而 `resolveRoute` 用 `Array.isArray` 同步判断 —— 拿到 Promise 就当成「没有路由」，
+   于是每条断言都在验 `no model route is available`。真机的 `llm.listProviders()` 是同步的。
+   一个 `await` 加错了地方，整块测试就从「验行为」退化成「验一句错误文案」，而且全绿。
+8. **两条新断言写的时候时序算错。** 「sweep 在 dispose 之后落地」那块只等了 80ms，而 `turn/start`
+   的基线读取走的是同一个注入的 `changes`，所以收尾那次读要等到一整个 `sweepDelayMs` 之后才开始，
+   通知落在大约两倍处 —— 窗口等的是一个还没发生的落地，断言对「有守卫」和「没守卫」都成立。
+   变异把它抓了出来（`SURVIVED`），改成 250ms 才红。
+
+9. **`onError` 在磁盘上一直是裸调用**。第三轮审查后我记录「已包进 try/catch」，并在文档里写过一次；等第五轮审查时顺手 grep 才发现磁盘上是 `this.onError?.(error, agentId)` 裸调用。后果与那条修复想防的完全一样：一个会抛的日志器会停掉其后所有 listener，并逃进宿主的事件处理器 —— 而「一个坏 listener 不能停掉其它的」正是这个循环唯一的承诺。是某次备份恢复把这层包裹丢了（`revision.js` 是未跟踪文件，`git checkout` 对它静默无效，我那次「恢复」实际上什么都没做）。已补回并用 `test/revision.test.mjs` 四条钉住：`onError` 收到 `(agentId, message)`、不逃回调用点、**`onError` 自己也抛**时不逃逸、后续 listener 仍收到通知。
+
+10. **说得出、写不对的三条变异**。给 `has()` 与 `onError` 补变异时我一连写坏三版：前两条是**等价变异**（`has` 改成 `(get(x) ?? 0) > 0`、删掉 id 类型守卫 —— 因为 `bump` 总是从 0 增到 1，且 `Map.has(undefined)` 本来就是 false，答案不变所以判 `SURVIVED` 是正确结论不是覆盖漏洞），换成 `return false` / `return true` 后立刻红；第三条我的 `to` 只替换了 `try` 包裹的前半截，`}` 失配 → 整条变异 `CRASHED`（`mutations.test.mjs` 的锚点校验查不出来，因为 `from` 是真源码，错的是 `to` 里的代码结构）。**一条把自己写成语法错误的变异，与一条不被抓住的变异，在报告里长得一样：都不是绿。** 修法是让 `to` 覆盖整个块，而不是只覆盖被删的那几行。
+
+11. **两处「我以为修了、磁盘上并没有」的修复。** 第四轮审查要求改的两处（`revision.js` 的 `onError` 包裹、
+    以及它的头注释），我改过、也写进了记录，但 grep 复核时磁盘上是旧内容 —— 某次备份恢复把它们静默冲掉了。
+    **注释与文档类修复特别容易这样丢：`node --check` 查不出、测试也不会红。** 从那以后每次这类改动都在
+    收尾前 grep 一遍关键词。同一轮还发现 `index.js` 上方新写的「does *not* get a cached summary」与
+    15 行下方 HEAD 版的「reads a cached answer」直接矛盾 —— 两句话都在同一个函数里，谁也没删。
+
+12. **README 一直站在代码的对面。** 落地之后 README 还写着「**How it learns: a timer.** … **There is no
+    subscription and no server push**」，并紧接着讲那个「试过又被撤掉的事件流」。这是第五轮审查的第一条
+    should-fix，也是我自己最该早发现的一条：**改的是取数机制，而 README 那一节整段就是在讲取数机制。**
+    同一份 README 上一轮撤流时（R-36）已经把「两处过期」按 P2 处理，这次等于同一个错误在同一个文件里
+    犯了第二遍。
+
+### 收尾数据
+
+- 全量（仓库外 TMPDIR）**4198 passed / 0 failed**
+- `node test/mutations.test.mjs` → 48 passed / 0 failed
+- `mutate-checklist-panel.mjs` → **143 killed, 0 survived, 0 not applied**
+- `mutate-language-and-files.mjs` → **230 killed, 0 survived, 0 not applied, 0 crashed (of 230)**
+- **18 个文件**（16 改 + 2 新）逐字节确认 `CR=0`（`grep -cU $'\r'` 数的是行数，会误读，改用 Python 数 `\r`）
+
+### 诚实缺口
+
+1. **界面层真机验证还没做。** 传输层验过了（200 + `text/event-stream` + 真帧到达），但「面板是否真的
+   在轮次结束时立刻更新」「切会话时列是否跟着换流」需要重启桌面端才能看 —— 宿主内存里是旧模块，这一步
+   只能由人做。
+2. **这是一笔交换，不是纯赚。** 收益：会话驱动的变化从「最多等 8 秒」变成「一个往返」；空转的时钟请求
+   从每分钟约 7.5 次降到 1 次。代价：那三处事件说不准的盲区从 8 秒变成 60 秒 —— 全局候选队列的一次
+   变化现在可能晚一分钟才出现在列上。另外多了一条常驻连接（空闲时每 30 秒一行注释心跳）。
+   净请求量取决于一轮里有多少 MCP 调用（每调一次一帧、一帧一次取数），这个分布我没有统计。
+3. **`PANEL_TIMEOUT_MS`（15000）小于 `SUMMARY_TIMEOUT_MS`（20000）。** 回合结束那一帧唤醒的 `/panel`
+   会 join 正在跑的摘要调用；模型比 15 秒慢时那次取数超时、面板显示错误，而摘要随后落地 —— 现在它会
+   以第二帧宣告自己，卡片随即恢复。这个差值是有意的：不靠一次请求等到底，靠第二帧收尾。
+4. **三件事事件说不准，所以 60 秒兜底不是保守而是必需**：全局候选队列（`pendingCandidates` 由别的会话
+   的检测器改变）、文件 size/mtime（`statTouchedFiles()` 现场 stat）、技能目录。D-74 的技术理由今天仍成立。
+5. **`/panel` 载荷里我加过一个 `revision` 字段，删掉了。** 加它的理由是「消除初次加载与开始监听之间的
+   空档」，但这个理由不成立 —— 流一打开服务端就推当前值。删掉后全量仍 4104/0，证明无使用方。
+   记在这里是因为「加一个字段再删掉」本身说明我当时是在按直觉补洞，不是按协议设计。
+6. **没有与宿主参考实现做过逐行对照。** 落地前我读过
+   `dsh/node_modules/@deepseek-ai/dsh-client-hmr/lib/index.js`，照抄了它的 wire 格式、`Set` 收集连接、
+   dispose 时结束响应这几件事；但第五轮审查者在它的子会话里读不到 asar 里的那个文件
+   （`app.asar` 是单文件归档，`app.asar.unpacked` 下没有这个包），**所以这份「照抄」没有第二双眼睛核过**。
+   我自己核过的部分是：`writeHead` 的头集合、`": connected
+
+"` 先提交、`data: <json>
+
+` 的帧格式，
+   以及宿主压缩中间件显式跳过 `text/event-stream`（`dsh-host-webserver/lib/index.js` 的 filter）。
+   我**没有**核过的是：宿主是否在两帧之间做别的写入（比如 keep-alive 探测）、以及它的连接有没有上限。

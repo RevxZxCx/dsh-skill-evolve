@@ -438,8 +438,9 @@ class SessionState {
     // would then merge the same file into the same record and shift its counters
     // twice. That doubles every `at` and `sequence`, hands the transcript two
     // copies of the same turn, and makes the second caller believe it read
-    // something when the first one did. A panel poll every eight seconds and a
-    // `flush` that loads before it writes are enough to overlap.
+    // something when the first one did. A panel read -- on a pushed frame, or on
+    // the floor behind them -- and a `flush` that loads before it writes are
+    // enough to overlap.
     const pending = this.loading.get(sessionId)
     if (pending !== undefined) return pending
     const attempt = this.readInto(sessionId)
@@ -758,10 +759,9 @@ class SessionState {
    * The transcript caps its own per-turn list at 40 and the client draws five;
    * this list had no cap at all, so it grew for the life of the session. That is
    * not a display problem — it is one `fs.stat` per entry on every panel read,
-   * eight seconds apart, and a JSON object in the state file that never stops
-   * growing. Dropping the oldest edits costs nothing visible: the card shows the
-   * newest five, and "all" is a scroll through a session's work rather than an
-   * archive of it.
+   * and a JSON object in the state file that never stops growing. Dropping the
+   * oldest edits costs nothing visible: the card shows the newest five, and
+   * "all" is a scroll through a session's work rather than an archive of it.
    *
    * @param {object} entry - the record to trim in place.
    * @returns {void}

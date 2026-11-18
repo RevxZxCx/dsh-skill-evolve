@@ -3324,6 +3324,832 @@ try {
   check('and it does not smuggle the walk in either', byPath.has('C:/work/dist/bundle.js') === false, JSON.stringify(rows.map((file) => file.path)))
 }
 
+// ---------------------------------------------------------------------------
+// The push channel, wired to the host's events
+// ---------------------------------------------------------------------------
+//
+// `revision.test.mjs` owns the counter and `api.test.mjs` owns the route. Neither
+// can see whether the plugin ever bumps it: a plugin that builds a `Revisions`
+// and never writes to it passes both suites, and the panel silently falls back to
+// the minute clock with nothing in the log to say so.
+//
+// This block opens the real stream through the real route and asserts that each
+// host event which can change the payload produces a frame. The list of events is
+// the payload's field list turned inside out -- every one of these writes a field
+// the panel draws.
+{
+  const root = await makeTempRoot('skill-evolve-stream-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => [] })
+
+  const agent = fakeAgent('stream-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  /**
+   * A response that can hold a stream.
+   *
+   * The route's ordinary JSON path ends the response; the stream path writes
+   * frames into it and leaves it open, so this stub needs the four things a live
+   * `ServerResponse` offers and `json()` never touched.
+   */
+  const streamRes = () => ({
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+
+  const streamReq = (url) => ({
+    url,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+
+  const frames = (res) =>
+    res.written
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+
+  const route = host.routes.get('/api/ui-evolve')
+  const res = streamRes()
+  await route.handler(streamReq(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
+
+  // The opening frame, and the only one that does not need an event: it tells a
+  // client that opens the stream what the number is, so the client never has to
+  // ask `/panel` for it and cannot miss an event landing between the two.
+  check('a stream says where it stands before anything happens', frames(res).length === 1, JSON.stringify(frames(res)))
+  check('and it names the session it watches', frames(res)[0]?.agent === agent.id, JSON.stringify(frames(res)[0]))
+
+  const turns = []
+  const seen = () => {
+    const list = frames(res)
+    turns.push(list.length)
+    return list.length
+  }
+
+  host.emit('session/event', agent.session, {
+    type: 'user/message',
+    seq: 1,
+    time: Date.now(),
+    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '跑一下构建' }] }, source: { kind: 'user' } },
+  })
+  const afterMessage = seen()
+
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  check('a turn starting reaches the panel', seen() === afterMessage + 1, `${afterMessage} -> ${frames(res).length}`)
+
+  host.emit('session/event', agent.session, toolCall('mcp__fs__read_file', 'mcp_call_1'))
+  const afterMcp = frames(res).length
+  check('an MCP tool call reaches the panel', afterMcp === afterMessage + 2, String(afterMcp))
+
+  host.emit('session/event', agent.session, toolCall('edit', 'edit_call_1'))
+  check('an ordinary tool call does not', frames(res).length === afterMcp, `${frames(res).length} vs ${afterMcp}`)
+
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 5, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+  const afterEnd = frames(res).length
+  check('a turn ending reaches the panel', afterEnd > afterMcp, `${afterMcp} -> ${afterEnd}`)
+
+  // The second notice. `sweep` and the turn's `files` are written after two
+  // subprocesses answer, so the bump at the top of `turn/end` wakes a fetch that
+  // reads the previous turn's answer. Without this one the panel shows a stale
+  // file list until the minute clock.
+  await new Promise((done) => { setTimeout(done, 30) })
+  check('and so does the answer that arrives after it', frames(res).length > afterEnd, `${afterEnd} -> ${frames(res).length}`)
+
+  // Measured immediately before disposal, not from `afterEnd`: the async bump
+  // above already raised the count past that number, so a comparison against it
+  // stays true even when disposal says nothing at all.
+  const beforeDispose = frames(res).length
+  host.emit('agent/disposed', { agent })
+  const afterDispose = frames(res).length
+  check('a session ending reaches the panel', afterDispose > beforeDispose, `${beforeDispose} -> ${afterDispose}`)
+  check(
+    'and the stream is left for the client to close',
+    res.destroyed === false && res.writableEnded === false,
+    `${res.destroyed}/${res.writableEnded}`,
+  )
+
+  // The counter is forgotten after the bump, so a session that comes back starts
+  // again -- which is only safe because the client does not compare the numbers.
+  const reused = streamRes()
+  await route.handler(streamReq(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), reused)
+  check('a forgotten session reports zero', frames(reused)[0]?.revision === 0, JSON.stringify(frames(reused)[0]))
+}
+
+{
+  // The `catch` in `Revisions.bump` promises it is not silent. That promise was
+  // false for a while: `onError` was declared, documented and called, and the
+  // plugin never assigned it -- so the call was a no-op and deleting it left
+  // every suite green. This drives the whole chain instead (a stream whose
+  // socket throws, the counter's catch, the plugin's own log) because the plugin
+  // is the only thing that can connect the last link.
+  const root = await makeTempRoot('skill-evolve-stream-throw-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => [] })
+
+  const agent = fakeAgent('throw-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const res = {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const request = {
+    url: `/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const route = host.routes.get('/api/ui-evolve')
+  await route.handler(request, res)
+
+  // A socket that dies between the liveness check and the write. `destroyed` and
+  // `writableEnded` both stay false, so `finished()` lets the write through and
+  // `write` is where it discovers the truth.
+  res.write = () => {
+    throw new Error('write EPIPE')
+  }
+
+  const logsBefore = host.logs.length
+  let threw = false
+  try {
+    host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+  } catch {
+    threw = true
+  }
+  check('a stream that throws does not reach the event site', threw === false, threw ? 'the emit threw' : 'no throw')
+  const complaints = host.logs.slice(logsBefore).filter((line) => line.includes('stream listener failed'))
+  check('and the failure is written to the plugin own log', complaints.length === 1, JSON.stringify(host.logs.slice(logsBefore)))
+  check(
+    'and it names the session it was writing to',
+    complaints[0]?.includes(agent.id) === true,
+    complaints[0] ?? 'no line',
+  )
+}
+
+{
+  // A sweep that fails is not a hypothetical: `git status` fails on a directory
+  // that is not a repository, and the scan fails on a path that went away
+  // between turns. Both watchers answer that with `coverage: 'none'` rather than
+  // a rejection -- so what this proves is the shape of the *reachable* path: a
+  // broken git must not cost the turn its second bump, or the panel waits for
+  // the minute clock, which is the delay this channel exists to remove.
+  const root = await makeTempRoot('skill-evolve-stream-reject-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
+    changes: async () => {
+      throw new Error('not a repository')
+    },
+  })
+
+  const agent = fakeAgent('reject-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const res = {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const req = {
+    url: `/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const route = host.routes.get('/api/ui-evolve')
+  await route.handler(req, res)
+  const frames = () => res.written.filter((line) => line.startsWith('data: ')).length
+
+  host.emit('session/event', agent.session, { type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 } })
+  host.emit('session/event', agent.session, { type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
+  const afterEnd = frames()
+
+  // The watchers answer asynchronously and reject; the handler then answers the
+  // reader. Waiting is the only way to see it -- there is no event to hook.
+  await new Promise((done) => { setTimeout(done, 40) })
+  check('a turn whose git sweep failed still reaches the panel', frames() > afterEnd, `${afterEnd} -> ${frames()}`)
+}
+
+{
+  // Approving a candidate moves `pendingCandidates`, which is part of the payload,
+  // and that path touches no session at all -- so it needs its own notice or the
+  // card's count is wrong until something unrelated happens.
+  const root = await makeTempRoot('skill-evolve-stream-candidates-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => [] })
+
+  const agent = fakeAgent('candidate-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const res = {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const req = {
+    url: `/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const route = host.routes.get('/api/ui-evolve')
+  await route.handler(req, res)
+  const before = res.written.filter((line) => line.startsWith('data: ')).length
+
+  // Approving a candidate needs one to approve. The queue is the detector's, and
+  // this host has none, so the route answers without changing anything -- which
+  // is the other half of the claim: a failed decision must not wake the panel
+  // either.
+  const decision = {
+    statusCode: 0,
+    headers: {},
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code) {
+      this.statusCode = code
+      return this
+    },
+    end(body) {
+      this.writableEnded = true
+      this.body = body
+      return this
+    },
+    once() {
+      return this
+    },
+  }
+  await route.handler(
+    {
+      url: `/api/ui-evolve/candidates/not-a-candidate/approve?agent=${encodeURIComponent(agent.id)}`,
+      method: 'POST',
+      headers: { host: '127.0.0.1:19387' },
+      listeners: [],
+      once(event, handler) {
+        this.listeners.push([event, handler])
+        return this
+      },
+      on(event, handler) {
+        this.listeners.push([event, handler])
+        return this
+      },
+      removeListener() {
+        return this
+      },
+    },
+    decision,
+  )
+  const after = res.written.filter((line) => line.startsWith('data: ')).length
+  check('a decision that failed wakes nobody', after === before, `${before} -> ${after}`)
+}
+
+// ---------------------------------------------------------------------------
+// The summary landing, announced by the stream
+// ---------------------------------------------------------------------------
+//
+// Two things on the plugin side answer long after `turn/end` has been served,
+// and both of them change a field the card draws:
+//
+//   1. the sweep -- git status and the directory walk, written into the payload
+//      by the continuation at the bottom of `turn/end`;
+//   2. the summary -- a model call that starts at the same boundary.
+//
+// Each needs its own notice, and each needs to be silent once the session is
+// gone: a call outlives the session that started it, `agent/disposed` has
+// already forgotten the counter by then, and a bump at that point would rebuild
+// an entry nothing will ever forget again.
+//
+// The three blocks below separate the two paths in time. That separation is the
+// point: with an instant model and an instant sweep, "a frame arrived after
+// `turn/end`" is true whichever of them was announced, and deleting either
+// notice would leave the suite green.
+{
+  const root = await makeTempRoot('skill-evolve-summary-landing-')
+  process.env.DSH_HOME = root
+
+  /**
+   * A model service that answers after a delay.
+   *
+   * The delay is what makes the summary distinguishable from the sweep in time;
+   * it is not padding. The catalogue is walked rather than pinned because
+   * `fakeAgent` has no `requestContext`, which is the ordinary case for a
+   * session that has not made its first request yet.
+   *
+   * @param {number} delayMs - how long the call takes to answer.
+   */
+  // `listProviders` is synchronous on purpose: the host's service returns an
+  // array, and `resolveRoute` checks it with `Array.isArray` without awaiting.
+  // An `async` double hands back a promise, that check fails, and every summary
+  // quietly reports "no model route is available" -- which is exactly how the
+  // first version of this block passed every assertion while never once calling
+  // the model.
+  const fakeLlm = (delayMs) => ({
+    listProviders() {
+      return [{ id: 'prov-a' }]
+    },
+    async listModels() {
+      return [{ id: 'model-a', name: 'A' }]
+    },
+    async prepareCall(route) {
+      return {
+        config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+        async *stream() {
+          await new Promise((done) => { setTimeout(done, delayMs) })
+          yield { type: 'text-delta', text: '本轮改了两个文件。' }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      }
+    },
+  })
+
+  const streamRes = () => ({
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+
+  const streamReq = (url) => ({
+    url,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+
+  const frames = (res) =>
+    res.written
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+
+  const wait = (ms) => new Promise((done) => { setTimeout(done, ms) })
+
+  /**
+   * Mount both plugins, open a stream, and record a reader.
+   *
+   * `markViewed` is called from the panel route, so the `/panel` request below is
+   * not setup noise -- without it `warm` returns before doing anything and every
+   * assertion here would hold for the wrong reason.
+   *
+   * @param {string} id - the session id.
+   * @param {object} options - what to slow down.
+   * @param {number} options.llmDelayMs - how long the model takes.
+   * @param {number} options.sweepDelayMs - how long `git status` takes.
+   * @param {object} [options.llm] - a stand-in that replaces the fake outright,
+   *   for the paths a working model cannot reach: a provider that refuses, a
+   *   call that times out, a host with no route at all.
+   */
+  const openWatched = async (id, { llmDelayMs, sweepDelayMs, llm }) => {
+    const host = fakeHost()
+    apply(host.ctx, Config({ mode: 'suggest' }))
+    applyPanel(host.ctx, PanelConfig({ panelSummary: true }), {
+      changes: async () => {
+        await wait(sweepDelayMs)
+        return []
+      },
+    })
+    host.provide('llm', llm ?? fakeLlm(llmDelayMs))
+
+    const agent = fakeAgent(id, 'C:/work')
+    host.agents.set(agent.id, agent)
+    const route = host.routes.get('/api/ui-evolve')
+
+    const panel = {
+      statusCode: undefined,
+      writableEnded: false,
+      once() {
+        return this
+      },
+      writeHead(code) {
+        this.statusCode = code
+        return this
+      },
+      end(body) {
+        this.writableEnded = true
+        this.body = body
+        return this
+      },
+    }
+    await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, panel)
+
+    const res = streamRes()
+    await route.handler(streamReq(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
+    return { host, agent, route, res }
+  }
+
+  /**
+   * One complete turn: the message that opens it, a tool call inside it, the end.
+   *
+   * A turn opens only on a real human message -- a bare tool/call leaves `turn`
+   * undefined and `turn/end` folds nothing, which would make every assertion
+   * below compare against an empty snapshot.
+   */
+  const runTurn = (host, agent) => {
+    host.emit('session/event', agent.session, {
+      type: 'user/message',
+      seq: 1,
+      time: Date.now(),
+      data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '把构建修一下' }] }, source: { kind: 'user' } },
+    })
+    host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
+    host.emit('session/event', agent.session, toolCall('edit', 'landing_edit_1'))
+    host.emit('session/event', agent.session, {
+      type: 'turn/end',
+      seq: 4,
+      time: Date.now(),
+      data: { turn: 1, reason: { kind: 'completed' } },
+    })
+  }
+
+  // --- the summary landing, told apart from the sweep by its delay -----------
+  {
+    const { host, agent, res } = await openWatched('landing-agent', { llmDelayMs: 60, sweepDelayMs: 0 })
+    runTurn(host, agent)
+    const afterEnd = frames(res).length
+    check('the turn ending announces itself', afterEnd >= 2, String(afterEnd))
+
+    // The sweep is immediate here, so by 20ms it has landed and announced. The
+    // model is still thinking.
+    await wait(20)
+    const afterSweep = frames(res).length
+    check('the sweep announces itself as soon as it answers', afterSweep > afterEnd, `${afterEnd} -> ${afterSweep}`)
+
+    // Past the model's 60ms. This frame can only be the summary: the sweep's
+    // notice already went out above.
+    await wait(200)
+    const afterLanding = frames(res).length
+    check('and the summary landing announces itself again', afterLanding > afterSweep, `${afterSweep} -> ${afterLanding}`)
+    check('with the session it belongs to', frames(res)[afterLanding - 1]?.agent === agent.id, JSON.stringify(frames(res)[afterLanding - 1]))
+  }
+
+  // --- a summary that lands after its session closed says nothing -----------
+  //
+  // The sweep is immediate and the model is slow, so disposal happens strictly
+  // between the two. Once `agent/disposed` has forgotten the counter, the
+  // landing has nothing to announce to and must say so by staying quiet.
+  {
+    const { host, agent, res } = await openWatched('landing-disposed-agent', { llmDelayMs: 60, sweepDelayMs: 0 })
+    runTurn(host, agent)
+    await wait(20)
+    const beforeDispose = frames(res).length
+    host.emit('agent/disposed', { agent })
+    const afterDispose = frames(res).length
+    check('a session ending announces itself', afterDispose > beforeDispose, `${beforeDispose} -> ${afterDispose}`)
+
+    await wait(80)
+    check(
+      'but a summary landing after it says nothing',
+      frames(res).length === afterDispose,
+      `${afterDispose} -> ${frames(res).length}`,
+    )
+  }
+
+  // --- and a sweep that answers after its session closed says nothing too ---
+  //
+  // The mirror case, and it needs its own block: here the model is immediate and
+  // `git status` is slow, so the sweep is the one still running at disposal.
+  // Without this the two guards look interchangeable, and only one of them is
+  // exercised by the block above.
+  {
+    const { host, agent, res } = await openWatched('sweep-disposed-agent', { llmDelayMs: 0, sweepDelayMs: 60 })
+    runTurn(host, agent)
+    await wait(20)
+    const beforeDispose = frames(res).length
+    host.emit('agent/disposed', { agent })
+    const afterDispose = frames(res).length
+    check('a session ending announces itself before its sweep answers', afterDispose > beforeDispose, `${beforeDispose} -> ${afterDispose}`)
+
+    // Long enough for both of the sweep's readings, not just one: `turn/start`
+    // opens the baseline through the same injected `changes`, so the closing
+    // reading cannot begin until one whole `sweepDelayMs` has passed, and the
+    // notice lands at roughly twice that. An 80ms window here waited for a
+    // landing that had not happened yet, which made the assertion true whether
+    // or not the guard existed.
+    await wait(250)
+    check(
+      'but a sweep landing after it says nothing',
+      frames(res).length === afterDispose,
+      `${afterDispose} -> ${frames(res).length}`,
+    )
+  }
+
+  // --- a summary that failed says nothing, and must not wake anybody --------
+  //
+  // `summarise` answers every failure with a value instead of throwing: timeout,
+  // cancellation, a provider that refused, no route to a model at all. None of
+  // those changed a single field the panel draws, so announcing them would only
+  // redraw a card that already says the summary failed. The guard that keeps
+  // them quiet is a check on the answer's text, and without this block nothing
+  // reaches it: every other summary in this file succeeds.
+  {
+    const { host, agent, res } = await openWatched('landing-failed-agent', {
+      llmDelayMs: 0,
+      sweepDelayMs: 0,
+      llm: {
+        listProviders() {
+          return [{ id: 'prov-a' }]
+        },
+        listModels() {
+          return [{ id: 'model-a', name: 'A' }]
+        },
+        // Slow *and* failing: the refusal has to land after the 20ms reading
+        // below, or both frames arrive before it and the assertion holds for
+        // either answer.
+        prepareCall() {
+          return {
+            config: { model: 'model-a' },
+            async *stream() {
+              await wait(60)
+              throw new Error('the provider refused the call')
+            },
+          }
+        },
+      },
+    })
+    runTurn(host, agent)
+    await wait(20)
+    const afterSweep = frames(res).length
+    check('the sweep announces itself even when the summary cannot', afterSweep > 1, String(afterSweep))
+
+    // The failed call answers past the reading above, and with no text at all.
+    // A frame after this point could only be the landing, and there is nothing
+    // to land.
+    await wait(200)
+    check(
+      'but a summary that failed says nothing',
+      frames(res).length === afterSweep,
+      `${afterSweep} -> ${frames(res).length}`,
+    )
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)
 

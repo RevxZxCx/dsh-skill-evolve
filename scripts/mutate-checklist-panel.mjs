@@ -1095,7 +1095,7 @@ const mutations = [
     // in the suite can tell the difference between 8000 and 100.
     label: 'the panel asks again ten times a second',
     file: 'packages/ui-evolve/lib/client.js',
-    from: 'const REFRESH_MS = 8000',
+    from: 'const REFRESH_MS = 60000',
     to: 'const REFRESH_MS = 100',
     suites: ['test/client.test.mjs'],
   },
@@ -1104,7 +1104,8 @@ const mutations = [
     label: 'the timer outlives the panel that started it',
     file: 'packages/ui-evolve/lib/client.js',
     from: `        return () => {
-          clearInterval(timer)`,
+          clearInterval(timer)
+          stopStream()`,
     to: `        return () => {
           void timer`,
     suites: ['test/client.test.mjs'],
@@ -1175,6 +1176,79 @@ const mutations = [
     file: 'packages/ui-evolve/lib/client.js',
     from: '.dsse-monitor-grip{position:absolute;left:-12px;top:0;bottom:0;width:20px;',
     to: '.dsse-monitor-grip{position:absolute;left:-4px;top:0;bottom:0;width:8px;',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The frame is the only reason the stream exists. A listener that ignores it
+    // leaves a column that looks connected, passes every timer assertion, and
+    // never updates -- which is strictly worse than the poll it replaced.
+    label: 'a frame on the stream is received and dropped',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          opened.addEventListener('message', () => {
+            load(true, true)`,
+    to: `          opened.addEventListener('message', () => {
+            if (false) load(true, true)`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A hidden tab holding an open stream keeps a server response writing frames
+    // to a page nobody is looking at, and every hidden tab is another one.
+    label: 'a hidden page keeps its stream open',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (typeof document !== 'undefined' && document.hidden === true) {
+            // Going away: close the stream rather than leave a server slot
+            // writing frames to a page nobody is looking at. Coming back reopens
+            // it, and the first read on the way back catches up.
+            stopStream()
+            return
+          }`,
+    to: `          if (typeof document !== 'undefined' && document.hidden === true) {
+            return
+          }`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // An environment without `EventSource` (a headless renderer, an older
+    // browser) must fall back to the clock, not throw on the way to it.
+    label: 'a stream is opened in an environment that has none',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (typeof EventSource !== 'function') return`,
+    to: '',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The half of `error` that shipped untested. A dropped connection leaves
+    // `readyState` CONNECTING and the browser retries; a fatal one leaves it
+    // CLOSED and it never comes back. Treating the second like the first is the
+    // original bug: the fast path dies silently and the panel looks healthy.
+    label: 'a stream that gave up is waited on forever',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `            if (opened.readyState !== 2) return`,
+    to: `            if (opened.readyState !== 3) return`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // Taking the slot back is half of it. `EventSource` does not retry a fatal
+    // failure, so without the clock the stream is gone for the rest of the
+    // session -- strictly worse than having never opened it.
+    label: 'and nothing ever opens another one',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (stream === null) startStream()
+        }, REFRESH_MS)`,
+    to: `          if (false) startStream()
+        }, REFRESH_MS)`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // `visibilitychange` also fires for a window that is merely uncovered. Tearing
+    // down a healthy stream for one of those costs the frame it was about to
+    // deliver, and the reopen has to re-ask for a number it already had.
+    label: 'coming back throws away a stream that is still good',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          // those would cost the frame it was about to deliver.
+          if (stream === null) startStream()`,
+    to: `          // those would cost the frame it was about to deliver.
+          startStream()`,
     suites: ['test/client.test.mjs'],
   },
 ]

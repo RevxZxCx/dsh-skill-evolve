@@ -396,7 +396,8 @@ Three modules, top to bottom:
    the same `sequence` tick the skills and MCP rows use), survives restarts, and
    is capped at 200 entries — the transcript caps a turn at 40, this is per
    session, so it is larger, but it is still capped because every panel read is
-   one `fs.stat` per entry, every eight seconds.
+   one `fs.stat` per entry — and that read now happens on every pushed frame, not
+   on a clock.
 
    The cap has to hold on three paths, not one: `rememberPaths`, the merge in
    `load` (a process that records a path before its first read would otherwise
@@ -763,17 +764,33 @@ cost this overlay cannot pay.
 
 `settling` draws the cards. So does a host that publishes no attribute at all.
 
-**How it learns: a timer.** The panel calls `GET /api/ui-evolve/panel` every eight
-seconds (`REFRESH_MS` in `lib/client.js`) and renders whatever comes back. There is
-no subscription and no server push; the numbers are re-derived on the host for each
-request, so there is nothing to invalidate and nothing to keep in sync.
+**How it learns: a pushed stream, with a slow timer behind it.** The client holds
+one `EventSource` open on `GET /api/ui-evolve/events?agent=…` and calls
+`GET /api/ui-evolve/panel` whenever a frame arrives (`D-216`). A frame carries an
+agent id and a counter and nothing else — it says only *that* this conversation may
+have changed — so `/panel` is still the single place that decides what the panel
+looks like. `REFRESH_MS` in `lib/client.js` is 60 seconds and is a
+floor, not the mechanism: it covers three things no event in this process can
+report — the pending-candidate count (read from a **global** queue that another
+session's detector writes), touched-file sizes (a `stat` taken at read time, so a
+file changed by another process produces no event at all), and the skill
+*catalog* — a skill appearing, disappearing or being shadowed on disk. A skill
+being **used** is a session event and does push; what the timer covers is the
+registry those uses are described against.
 
-An event stream was tried here and removed (`D-74`). It reported *that* this
-conversation changed, and the client answered with one `/panel` call — no payload,
-one place deciding what the panel looks like. It was taken out because the thing it
-replaced covered more than it did: the stream only spoke for one session, while the
-pending-candidate count is read from a **global** queue, and the touched-file sizes
-come from a `stat` taken at read time — a file changed by another process produced
-no event at all. Making the stream the fast path meant slowing the only channel that
-saw those changes from 8 seconds to 60, which is a narrower view of the world, not a
+An earlier stream is worth knowing about (`D-70` → `D-73` → `D-74`). It reported
+the same thing and was removed: back then it *was* the fast path, so the only
+channel that saw those three things had to be slowed from 8 seconds to 60, and
+nothing else got faster to make up for it — a narrower view of the world, not a
 fresher one.
+
+The trade here has the same shape, and it is worth stating rather than hiding:
+those three blind spots are still on a 60-second timer, so a change to the global
+candidate queue can now take up to a minute to appear where it used to take eight
+seconds. What the stream buys is the session-driven changes — a turn starting or
+ending, a skill use, an MCP call, a summary landing — which now arrive within a
+round trip instead of within eight seconds. The interval could have stayed at 8
+seconds and the blind spots would have kept their old latency for free; it did not
+because paying a request every 8 seconds forever to catch something rare is the
+cost this whole change exists to remove. `D-219` records why this is not a re-run
+of that decision.

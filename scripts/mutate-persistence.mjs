@@ -165,8 +165,8 @@ const mutations = [
     file: index,
     label: 'a finished turn is not worth writing down',
     suites: ['test/persistence.test.mjs'],
-    from: "    if (event?.type === 'turn/end') {\n      sessionState.rememberTurn(agentId)",
-    to: "    if (event?.type === 'turn/end') {\n      if (false) sessionState.rememberTurn(agentId)",
+    from: "      revisions.bump(agentId)\n      sessionState.rememberTurn(agentId)",
+    to: "      revisions.bump(agentId)\n      if (false) sessionState.rememberTurn(agentId)",
     why: 'Skills and MCP calls alone leave the file a turn behind: the panel describes the turn that ended, and until it is written the card shows yesterday\'s summary beside today\'s traffic.',
   },
   {
