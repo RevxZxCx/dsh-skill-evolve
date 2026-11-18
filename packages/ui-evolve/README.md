@@ -273,12 +273,17 @@ Five consequences worth knowing, because each one is a deliberate choice:
   shared x `1263..1291` but ran y `281..543` against `292..532` — an 11px offset that reads as
   the rail being misaligned. The stand-in also carries its own `@container (width<=900px)`, so
   the doubling appeared exactly when the column was dragged narrow (slot 978 − 64 padding =
-  914, just over its threshold) and vanished when it went under. While our column is open the
-  stand-in is hidden, leaving exactly one rail at every width; its markup is `aria-hidden`, so
-  nothing is lost for screen readers.
-  **When the sidebar opens, the column steps aside.** The host frame carries
-  `data-sidebar-collapsed` only while the sidebar *is* collapsed (React drops a `false`/`undefined`
-  attribute), so its absence means "open". While it is open the column is not drawn at all and
+  914, just over its threshold) and vanished when it went under. The stand-in is retired
+  unconditionally, leaving exactly one rail at every width and in every column state; its
+  markup is `aria-hidden`, so nothing is lost for screen readers. Scoping the rule to our
+  column was the bug: closing the column widens the scroll area from 764px back to ~984px,
+  over the stand-in's own 900px query, so the moment the rule went inert the theme drew its
+  rail beside the host's again.
+  **When the right sidebar opens, the column steps aside.** The host frame carries
+  `data-rightbar-collapsed` only while *that* column is collapsed (React drops a
+  `false`/`undefined` attribute), so its absence means "open". `data-sidebar-collapsed` is the
+  left session list and is absent on an ordinary screen, so reading it pinned the answer to
+  "open" forever. While the right sidebar is open the column is not drawn at all and
   the width goes back to the conversation: the prose is already at its 560px floor, and a
   half-width panel would have to be re-learned every time. Reading the attribute needs the frame
   element, which is found through its `[data-shell-overlay]` child — the layer this overlay
@@ -293,6 +298,13 @@ Five consequences worth knowing, because each one is a deliberate choice:
   itself, which is the element that should be clickable — raising it on the slot instead
   would make the full-width transparent layer eat the conversation's clicks.
 - **The column scrolls its own body, and the resize strip is wider than it looks.**
+  **Releasing the inline styles takes `removeProperty`, not `delete`.** Closing the column
+  hands the nav back to the host, and the first version of that release was `delete
+  node.style.display`. It returns `true` and removes nothing: `element.style` is a proxy over
+  the CSSOM and `display` is never one of its own properties. Measured on the live page, the
+  nav still carried `display: block; z-index: 21` after the delete and stayed on screen with
+  the column closed, while the theme's stand-in came back — two rails. `style.removeProperty`
+  is the call that actually clears a declaration.
   `.dsse-monitor-body` owns `overflow-y:auto` and the leftover height, and the embedded rail
   goes back to `position:static` inside it — otherwise the column's own `overflow:hidden`
   clips the cards and the rail inherits the old overlay's absolute positioning. The grab strip

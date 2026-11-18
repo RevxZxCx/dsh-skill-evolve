@@ -1123,6 +1123,31 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // Closing the column is the only time these declarations are released, and
+    // they were released with `delete` -- which returns true and removes
+    // nothing, because `element.style` is a proxy over the CSSOM with no own
+    // `display` key. Measured on the live page: after `delete`, the nav still
+    // carried display:block and stayed on screen after the column closed, while
+    // the theme's stand-in rail came back -- two rails, one of them the one we
+    // were supposed to have turned off.
+    label: 'closing the column releases the rail with a delete that does nothing',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (node.style.display === "block") node.style.removeProperty("display")`,
+    to: `          if (node.style.display === "block") delete node.style.display`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // "One rail, not two" is an invariant of the page, not of our column. Scoped
+    // to the column being open, the rule went inert the moment the column
+    // closed -- and closing the column widens the scroll area back over the
+    // stand-in's own 900px threshold, which is exactly when it reappears.
+    label: 'the stand-in rail is retired only while the column is on',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `[data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}`,
+    to: `html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
     // Both rules were deleted whole by the pass that removed the old gutter
     // layout, and the derived rules that survived kept the stylesheet looking
     // right. Without the body rule the column clips its own content at the first

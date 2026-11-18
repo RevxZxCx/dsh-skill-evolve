@@ -948,8 +948,16 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
    went as the column was dragged: a 978px slot minus 64px of padding is 914,
    just over its threshold, and narrowing the column pushed it back under.
    Hiding the stand-in leaves exactly one rail, the host's, at every width. Its
-   own markup is aria-hidden, so nothing is lost for screen readers. */
-html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
+   own markup is aria-hidden, so nothing is lost for screen readers.
+
+   Not scoped to the column being open. "One rail, not two" is an invariant of
+   the page, not of our column: with the column closed the scroll area is back to
+   its full width, which is exactly the case where the stand-in's 900px query
+   lets it through -- and the host's own rail is visible at that width too, so
+   the theme drew its rail beside the host's again. That was reported as "two
+   rails the moment the column is closed". Scoping this rule to the column made
+   it go inert at precisely that width, so it is retired unconditionally. */
+[data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
 
 /* No stacking lift is needed, and one was tried. The column is drawn beside the
    scroll area rather than over it: measured in a live session the scroll area
@@ -1219,10 +1227,17 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{d
           node.style.pointerEvents = "auto"
           touched++
         } else {
-          if (node.style.display === "block") delete node.style.display
-          if (node.style.zIndex === "21") delete node.style.zIndex
-          if (node.style.visibility === "visible") delete node.style.visibility
-          if (node.style.pointerEvents === "auto") delete node.style.pointerEvents
+          // `delete node.style.display` is a no-op in a real browser: the style
+          // declaration object is a proxy over the CSSOM, and `delete` removes a
+          // JS property that was never an own property. It returns true and
+          // leaves `display:block` in the inline style -- measured on the real
+          // page, where a nav closed with the column kept its forced display and
+          // the theme's stand-in rail came back beside it, giving two rails.
+          // `removeProperty` is the call that actually clears the declaration.
+          if (node.style.display === "block") node.style.removeProperty("display")
+          if (node.style.zIndex === "21") node.style.removeProperty("z-index")
+          if (node.style.visibility === "visible") node.style.removeProperty("visibility")
+          if (node.style.pointerEvents === "auto") node.style.removeProperty("pointer-events")
         }
       }
       return touched

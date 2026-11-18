@@ -3757,3 +3757,52 @@ headless Chrome（292×680，dpr 2）：总结 `max-height:86.645px`、`clientHe
 折叠 `{position:absolute, bottom:6px, left:109px, transform:matrix(1,0,0,1,-13,0), inList:true, listH:121, listOverflow:hidden, cardH:177}`；展开 `{position:static, marginTop:6px, belowList:true, listOverflow:auto, cardH:209}`。
 
 全量 **3924 passed / 0 failed**；`mutate-checklist-panel.mjs` 133 条全杀。
+
+## D-197 · 关掉监控列之后还剩两条轮次导航：一条没被松开，一条被错误地松开了
+
+**背景.** 用户 m08319：「当任务监控栏被收起时，又会出现两条轮次导航条，这应该是之前bug的遗留问题，是修复的缺口」。D-192 的替身轨道去重与 D-190/D-191 的强制显示各自都成立，但它们的边界条件在「列关闭」这个状态上刚好互补地错开了。
+
+**决策 1 · 释放内联样式必须用 `removeProperty`，不能用 `delete`.**
+`forceTurnRail(false)` 原来这样清场：
+```js
+if (node.style.display === "block") delete node.style.display
+```
+在真实页面实测（桌面 CDP 9222，同一个 nav）：
+```json
+{"deleted":true,
+ "afterDelete":{"display":"block","zIndex":"21","cssText":"display: block; z-index: 21;"},
+ "afterRemove":{"display":"","zIndex":"","cssText":""}}
+```
+`delete` 返回 `true`，声明却原样留着。原因：`element.style` 是 CSSOM 的代理对象，`display` 从来不是它的 own property，删一个不存在的键当然「成功」。只有 `style.removeProperty("display")` 真正清掉。后果很具体：列关掉后宿主 nav 仍带着 `display:block; visibility:visible; pointer-events:auto`，而我们自己的 `data-dsse-turn-rail` 已经变 `"0"`，那条 CSS 兜底失效——nav 靠内联样式继续显示。
+
+**决策 2 · 「只画一条轨道」是页面级不变量，不能绑在列开关上.**
+D-192 的规则是：
+```css
+html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
+```
+列一关 `data-dsse-turn-rail` 变 `"0"`，规则失效。而列关掉恰好把滚动区从 764px 放回约 984px，跨过主题替身自带的 `@container (width<=900px)` 阈值——**正是替身跑道重新出现的那种宽度**。于是：宿主 nav 被内联样式撑着、替身跑道被宽窗口放行，两条齐现。改成无条件：
+```css
+[data-conversation-scroll] .dsh-claude-turn-rail{display:none !important}
+```
+理由：这条规则与「我们的列开不开」无关。替身是主题给「被它隐藏的宿主轨道」画的替代品；一旦我们让宿主轨道重新可见，替代品的使命就结束了，不论列是什么状态。
+
+**为什么测试没抓到（两条都是测试替身的形状问题）**
+1. `railNode.style` 是字面量对象 `{ display:'', zIndex:'', visibility:'' }`。`delete obj.display` 在普通对象上**真的有效**，所以断言 `!railNode.style.display` 恒真——测试替身比真实 DOM 宽容，恰好宽容掉了唯一的失败模式。改成 `navStub()`：`style` 上的四个字段用 `Object.defineProperty(..., {configurable:false})` 定义，与 CSSOM 的访问器同性质，`delete` 恒返回 false 且删不掉；`removeProperty(name)` 按 CSS 名→JS 字段映射清空。
+2. 断言正则 `\[data-conversation-scroll\] \.dsh-claude-turn-rail\{...\}` 是**无锚点**的，`html[data-dsse-turn-rail="1"] [data-conversation-scroll] ...` 也能匹配上——所以「必须与列状态无关」这条断言在旧规则下同样通过。改成行首锚定 `^\[data-conversation-scroll\] \.dsh-claude-turn-rail\{display:none !important\}` + `m` 标志。
+
+**否决的方案**
+- 给 `forceTurnRail(false)` 改成整段重写 `cssText = ''`：会连带清掉宿主自己写在 nav 上的样式，越权。
+- 保留 `delete` 而在 `data-dsse-turn-rail="0"` 时用 CSS `display:none` 兜底：治的是症状，且列关闭后宿主本该自己决定 nav 的可见性。
+- 把替身规则拆成「列开一条、列关一条」：两条规则的差别只是条件，等于把同一个不变量写两遍，任何一边漏改就又不一致。
+- 用 `!important` 覆盖 `visibility`/`pointer-events` 而不清内联：我们自己写的就是内联，`!important` 覆盖不了同优先级的另一条内联声明。
+
+**代价**
+- `removeProperty` 之后若再次打开列，`forceTurnRail(true)` 会重新写一遍——多一次写，但幂等，且 `applyMonitorReserve` 已有同值短路。
+- 替身轨道现在无条件被收起：如果哪天用户只想要主题的替代轨道而不要宿主轨道，这个插件会挡住；但本插件的存在前提就是「宿主轨道可用」，所以这是可接受的单向选择。
+
+**变异验证**
+- `'closing the column releases the rail with a delete that does nothing'`（`removeProperty("display")` → `delete node.style.display`）→ 红 1。
+- `'the stand-in rail is retired only while the column is on'`（无锚点选择器 → 带 `html[data-dsse-turn-rail="1"]` 前缀）→ 红 1。
+
+**实测**
+真实 GUI（ego 1264×805，右栏收起，进入「界面位置重构」）：关列前 `{"mon":"0","rail":"0"}` 而 nav 仍带 `inlineDisp:"block"`/`inlineVis:"visible"`/`inlinePE:"auto"`；修复后同状态下 nav 的内联声明被清空，页面只剩一条轨道。

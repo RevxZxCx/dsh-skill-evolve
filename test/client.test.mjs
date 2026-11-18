@@ -168,6 +168,32 @@ function walk(node, visit) {
  * @param {any} node - the root.
  * @returns {string} all text joined.
  */
+// A nav stub whose `style` behaves like the real thing. In a browser,
+// `element.style` is a proxy over the CSSOM: it has no own `display` property,
+// so `delete node.style.display` returns true and removes nothing -- measured on
+// the live page, where a nav carried `display:block` after exactly that call and
+// the rail stayed on after the column closed. A plain object cannot fail that
+// way, which is why the first version of this file passed the very regression it
+// was meant to pin. `removeProperty` replicates the mapping a real declaration
+// applies between the CSS name and the JS field.
+function navStub(label) {
+  const fields = { display: 'display', 'z-index': 'zIndex', visibility: 'visibility', 'pointer-events': 'pointerEvents' }
+  const style = {
+    removeProperty(name) {
+      const field = fields[name]
+      if (field !== undefined) style[field] = ''
+    },
+  }
+  // Non-configurable, exactly like the CSSOM's own accessors. `delete
+  // element.style.display` on a real element returns false and removes nothing;
+  // on a plain object it returns true and the field really is gone, which is why
+  // a stub made of literals passed the very regression this file exists to pin.
+  for (const field of Object.values(fields)) {
+    Object.defineProperty(style, field, { value: '', writable: true, enumerable: true, configurable: false })
+  }
+  return { style, getAttribute: (n) => (n === 'aria-label' ? label : null) }
+}
+
 function textOf(node) {
   const out = []
   walk(node, (row) => {
@@ -1840,8 +1866,8 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  const railNode = { style: { display: '', zIndex: '', visibility: '' }, getAttribute: (n) => (n === 'aria-label' ? '轮次导航' : null) }
-  const breadcrumbNode = { style: { display: '', zIndex: '', visibility: '' }, getAttribute: (n) => (n === 'aria-label' ? 'session.hierarchy' : null) }
+  const railNode = navStub('轮次导航')
+  const breadcrumbNode = navStub('session.hierarchy')
   const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
   const instance = boot({
     rect,
@@ -1908,7 +1934,7 @@ check(
 // ---------------------------------------------------------------------------
 
 {
-  const railNode = { style: { display: '', zIndex: '' }, getAttribute: (n) => (n === 'aria-label' ? '轮次导航' : null) }
+  const railNode = navStub('轮次导航')
   // Mutable on purpose: the point is a nav that did not exist at mount time.
   const navs = []
   const rect = { left: 280, top: 120, right: 1440, bottom: 900, width: 1160, height: 780 }
@@ -6713,14 +6739,27 @@ async function openPanel(routes, options) {
   // reader sees as the rail being misaligned. The stand-in also carries its own
   // 900px container query, so the doubling came and went as the column was
   // dragged. Exactly one rail must survive.
-  const standIn = /html\[data-dsse-turn-rail="1"\] \[data-conversation-scroll\] \.dsh-claude-turn-rail\{display:none !important\}/.exec(source)
+  // Anchored at the start of the line on purpose: an unanchored pattern still
+  // matches `html[data-dsse-turn-rail="1"] [data-conversation-scroll] ...`,
+  // which is precisely the scoped form that went inert when the column closed.
+  const standIn = /^\[data-conversation-scroll\] \.dsh-claude-turn-rail\{display:none !important\}/m.exec(source)
   check(
     'and retires a theme stand-in rail so only one is drawn',
     standIn !== null,
     standIn === null ? 'no stand-in rule' : standIn[0],
   )
+  // "One rail, not two" is an invariant of the page, not of our column. Scoped
+  // to the column being open, the rule went inert the moment the column closed
+  // -- and closing the column widens the scroll area back over the stand-in's
+  // own 900px threshold, which is exactly when it comes back and doubles the
+  // host rail. The rule must therefore not name the column attribute at all.
   check(
-    'and retires it only while the column is on',
+    'and retires it whether or not the column is on',
+    standIn !== null && standIn[0].indexOf('data-dsse-turn-rail') === -1 && standIn[0].indexOf('data-dsse-monitor') === -1,
+    standIn === null ? 'no stand-in rule' : standIn[0],
+  )
+  check(
+    'and the rule sits inside the stylesheet',
     standIn !== null && source.indexOf('let typographyObserver') > source.indexOf('.dsh-claude-turn-rail{display:none !important}'),
     'the stand-in rule is outside the stylesheet',
   )
