@@ -397,7 +397,7 @@ Three modules, top to bottom:
    is capped at 200 entries — the transcript caps a turn at 40, this is per
    session, so it is larger, but it is still capped because every panel read is
    one `fs.stat` per entry — and that read now happens on every pushed frame, not
-   on a clock.
+   only on a clock.
 
    The cap has to hold on three paths, not one: `rememberPaths`, the merge in
    `load` (a process that records a path before its first read would otherwise
@@ -568,8 +568,8 @@ averages the whole conversation: by the twentieth turn that mostly describes the
 first nineteen.
 
 It reads from the `speed` route, which is a route of its own rather than a field on
-`/panel`: the panel changes when a turn ends, the speed changes while it is
-running, and one polling period cannot serve both. Nothing in the event stream
+`/panel`: the panel changes at turn boundaries, the speed changes while a turn
+is running, and one refresh cadence cannot serve both. Nothing in the event stream
 carries a token count during generation — the `usage` block arrives once, after
 `message_stop` — so the live number is `ceil(characters / 4)` per `text-delta` over
 a two-second window, rescaled by a ratio learned from the provider's real count
@@ -728,17 +728,17 @@ does not appear after restarting, the Plugins page names the reason per entry.
 
 **What it cannot do, on purpose.** Every number in the cards comes from the host
 route. The client holds no copy of the transcript; it re-reads `/panel` when the
-panel opens and on a timer thereafter. A failed
-background refresh keeps the last good cards visible beside the error instead of
-replacing them with an empty panel — and a *manual* refresh keeps them too: the
-loading state belongs to a session whose answer has never arrived, not to a reload
-of an answer already on screen. Dropping the payload there emptied the whole rail
-for the length of the request, and an open settings dialog went with it. The rail
-still uses measured geometry: `measure()` falls
-back to the documented clamp formula when the host does not publish a width, and
-the placement function reports `no-room` rather than overlapping the text. On a
-narrow window the cards disappear and the handle remains, because a panel that
-cannot fit should not squeeze the thing it is annotating.
+panel opens, on every frame the stream pushes, and on a 60-second timer behind
+those. A failed background refresh keeps the last good cards visible beside the
+error instead of replacing them with an empty panel — and a *manual* refresh keeps
+them too: the loading state belongs to a session whose answer has never arrived,
+not to a reload of an answer already on screen. Dropping the payload there emptied
+the whole rail for the length of the request, and an open settings dialog went with
+it. The rail still uses measured geometry: `measure()` falls back to the documented
+clamp formula when the host does not publish a width, and the placement function
+reports `no-room` rather than overlapping the text. On a narrow window the cards
+disappear and the handle remains, because a panel that cannot fit should not
+squeeze the thing it is annotating.
 
 ### When the panel is shown, and how it learns
 

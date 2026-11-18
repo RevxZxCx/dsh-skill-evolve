@@ -362,7 +362,7 @@ function json(res, code, payload, headOnly = false) {
     res.writeHead(code, {
       'content-type': 'application/json; charset=utf-8',
       'content-length': Buffer.byteLength(body),
-      // The panel polls these; a cached answer would show a stale turn.
+      // The panel reads these repeatedly; a cached answer would show a stale turn.
       'cache-control': 'no-store',
     })
     res.end(headOnly ? undefined : body)
@@ -894,9 +894,9 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
   const seen = new Set()
   const out = []
   // One `stat` per path, awaited in sequence, was measured at 17.5ms for two
-  // hundred paths against 2.6ms for the same set issued together. This runs
-  // inside a request the panel repeats every few seconds, so the difference
-  // lands on every refresh.
+  // hundred paths against 2.6ms for the same set issued together. This runs on
+  // every panel read -- once per pushed frame, and on the 60-second floor
+  // behind them -- so the difference lands on every refresh.
   //
   // Concurrency changes *when* the filesystem is asked, not *what* is reported:
   // the loop below only collects, the results are assembled in the original
@@ -1531,7 +1531,7 @@ async function viewOf(deps, agentId) {
   // turn ended — the exact window in which someone opens the panel.
   //
   // `load()` is the one that knows whether the disk still needs reading: it
-  // returns false for a record that has already read, so every poll after the
+  // returns false for a record that has already read, so every read after the
   // first one costs a map lookup.
   try {
     await state.load(agentId)

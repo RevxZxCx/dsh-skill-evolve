@@ -2917,10 +2917,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             // An unchanged answer keeps the object it already had. React compares
             // state by identity, so a fresh object with identical contents
             // re-renders the whole column: one hundred and fifty `jsx` calls to
-            // produce exactly the same output. Most reads land on an unchanged
-            // session -- the queue, the skill list and the file sizes only move
-            // when something happens -- so that was the common case, not the
-            // exceptional one.
+            // produce exactly the same output. Under the eight-second clock an
+            // unchanged answer was the common case, because the clock asked
+            // whether or not anything had happened. A read now follows a bump,
+            // so the answer has usually moved -- and the case this saves is the
+            // one that remains: coalesced frames, floor ticks, and coming back
+            // to a page that was hidden.
             //
             // The signature is the payload serialised. It costs a stringify of the
             // answer (the large field is the file list, bounded by MAX_PATHS) and
