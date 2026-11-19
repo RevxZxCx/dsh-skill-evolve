@@ -103,6 +103,7 @@
 | R-97 | 2026-11-18 | 监控列整轮 D-183~D-197（无独立审查者） | 未派审查者：diff 四天未稳定，每轮都在修上一条断言未覆盖的东西；以真实 DOM 取证代替阅读，三个根因（`visibility:hidden`、`pointer-events:none`、读错侧栏属性）源码推断合计八轮全落空、读到真实 DOM 各一轮定案；变异首轮 135 killed / 2 survived，两条存活的正是本轮新写、我以为有抓力的断言 | 修 2（均本轮） |
 | R-103 | 2026-11-19 | 面板从 8 秒轮询改成事件驱动（五轮审查） | 用户 m05581 拦下我第一版长轮询方案，要求先查 qoder 逆向与成熟实现 —— 调研改变了方案（qoder 用进程内 observable，跨 bundle 搬不过来；宿主转发事件白名单硬编码且被独占注册；官方 dsh-client-hmr 的 /plugins/events 可照抄）。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续并核正了他推断里的时间顺序。五轮审查：r1 失败无结论；r2 判词「实现的质量高于测试」（12 条变异 5 条存活）；r3 NOT CONVERGED，抓出 onError 从没人赋值、致命 error 分支零测试可达；r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（真缺口）、`has()` 缺失、`onError` 可能逃进宿主；r5 CONVERGED 无 must-fix，用真实 Node 探针证伪了 `req.once('close')` 会误触发的担心，剩下的全是文案时效（README 还写着「没有订阅也没有服务端推送」）。新增 revision.js 与 test/revision.test.mjs，8 处 bump，变异 143 + 230 全杀 | 修 36（另有自查 6 处）/ 推迟 1 |
 | R-104 | 2026-11-19 | 切换会话后监控列不跟随：三处修复、四条变异各由不同断言抓住 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他的推断「事件驱动在某种情况下未生效，等 60s 兜底」方向对但机制不同。根因是三处叠加：观察器挂在 `[data-slot]` 祖先上而后者的 `childList` 不看子树（宿主替换的是它下面第三层的 `[data-conversation-content]`，真机测得 `.root > .body > content`），于是切换可以零记录落地；`bridge.sessionId` 因此不动；而 `load()` 每次都重读 `liveSessionId()` 能自愈、`startStream()` 只在开流时绑一次，兜底写的是 `if (stream === null)` 而旧流还开着，**永不重绑** —— 两者不对称，正是「过一会儿数据自己对了、但流一直绑旧会话」。改①②③：渲染时读宿主属性、观察器加挂 content 的直接父节点、流记住绑定会话而兜底与回前台都比对。测试替身原来把 content 建模成 slot 的直接子节点（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1 与 M3 互为兜底全部 SURVIVED —— 因为测试在触发慢钟后又顺手渲染了一次，那次渲染替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把 `\n` 转成 `\r\n`） | 修 4 / 推迟 0 |
+| R-105 | 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 说「这一轮修复后问题依然存在，而且不切换的概率十分大，实际不通过，你是否做了真机实测」—— 我上一轮确实没做。这一轮的每一步都在活的宿主上做：登录 ego 浏览器、点侧边栏真实会话、抓 `/panel` 请求数、读 `console.error`。定因：宿主先把新会话 id 当 prop 交给 `Toggle`（它抢先写 `bridge` 并 notify，那次 notify 到达的渲染读到的还是**旧** attribute），随后替换会话子树、attribute 才追上 —— 此时 `syncSession` 里 `bridge.sessionId !== now` 为假，**通知被吞掉**，链断在这里。两处修复：`syncSession` 属性一变就 notify；`Cards` 按屏幕上的会话 id 加 `key` 强制重挂。真机 8/8 轮切换列内容逐轮正确| 修 2 / 无审查者 / 覆盖缺口 2 处（如实记录） |
 
 ---
 
@@ -4071,3 +4072,132 @@ Overlay 不重渲染 → `Cards` 拿到的还是 render 时快照的那个 id。
 3. 渲染期读 DOM 是这次为了让「任何一次重渲染都能自愈」而做的选择。它成本很低（一次属性查询），
    但严格说仍是渲染函数里的读取 —— 这一列本来就是手写 bundle，与文件里既有的 `liveSessionId()`
    调用同一风格
+
+## R-105 · 切会话监控列不跟随（第二轮）：真机定因，两处修复，两处覆盖缺口
+
+这一轮是从用户退回上一轮之后开始的。原话（m11145）：「这一轮修复后问题依然存在，而且不切换的概率
+十分大，实际不通过，**你是否做了真机实测**？我认为你应该从实测中找问题，现在虽然有时会正常切换，
+但已经是经常性的不切换了。」上一轮我把 4215 条测试跑绿、四条变异全杀就交付了，**一次真机都没点**。
+本轮所有结论都在活的宿主上取得，最后也是真机复测通过才停。
+
+### 起点的样子
+
+`packages/ui-evolve/lib/client.js` 里已有上一轮的三处修法（渲染时读 `liveSessionId()`、观察器加挂
+content 的父节点、流记住自己绑的会话）。它们在测试里全部成立，在真机上全部无效 —— 因为三条都建立在
+同一个前提上：**切换后 `Cards` 会重渲染**。本轮证明这个前提在真机上经常不成立。
+
+### 真机取证（先登录，再点，再看请求）
+
+ego 浏览器每个新文档都没有登录态，`/api/ui-evolve/panel` 返回 401 `error.auth.required`。签名 cookie
+由 `.tmp-test/gen_cookie.mjs` 现算（读 `~/.dsh/.credentials.yaml` 的 `secret`，HMAC 出
+`{version, authority, issuedAt, expiresAt}`，cookie 名 `dsh-auth-<base64url(sha256(authority))>`），
+`document.cookie = ...` 之后 `Page.reload`。随后侧边栏出现 6 个真实会话行
+（`.wnFoaW_sessionRow`，每行含 `[data-session-id]`）。
+
+探针全部装在活文档里（`Page.addScriptToEvaluateOnNewDocument` 经 `ego_cdp` 注入不跨调用生效）：
+包装 `fetch` 记下每个 `/api/ui-evolve/` 请求，包装 `EventSource`，用 `MutationObserver` 看
+`data-conversation-session` 与 `data-content-phase`，再包一层 `console.error`。
+
+第一次复现（干净代码、6 轮真实切换）就拿到了方向性的硬证据：
+
+```
+round0  want dcf55d54  →  /panel?agent=session-dcf55d54...  1 条   文字已更新
+round1  want 151cb1ab  →  2 条                                    文字已更新
+round2  want dcf55d54  →  []                                      文字停在 151cb1ab
+round3  want 151cb1ab  →  2 条                                    文字已更新
+round4  want dcf55d54  →  []                                      文字停在 151cb1ab
+round5  want 151cb1ab  →  2 条                                    文字已更新
+```
+
+`/panel` **零请求**是硬证据：`load()` 一进门就会发请求，零请求意味着它根本没被调用，也就意味着
+`Cards` 的 effect 没有重跑。同时 DOM 层级在同一批轮次里每轮都是 `cSame: false`（content 换新）、
+`pSame: false`（父节点 `.an3WzG_root` 也换新）、`sSame: true`（`[data-slot="main.conversation"]` 存活），
+`MutationObserver(document.documentElement, { childList, subtree })` 每轮都记到 slot 上
+`removed: 1` + `added: 1`。**失败轮与成功轮的 DOM 形态一模一样**，所以不是「观察器挂错了节点」。
+
+### 一处被真机推翻的推理（本轮最贵的教训）
+
+中途我一度得出结论：「`shell.overlay` 的 Overlay 组件被宿主卸载，之后再也没有挂载」，理由是
+`d.overCount` 停在 8–12 不再增长、`d.subs` 显示只剩 `Toggle` 一个订阅者、`bridge.listeners.size === 1`。
+
+**那条推理链是我自己的 bug 造出来的。** console 里躺着：
+
+```
+TypeError: Cannot read properties of undefined (reading 'push')
+    at Cards (.../@revxz/dsh-ui-evolve/client.js:80826:33)
+slot entry crashed in 'shell.overlay':
+```
+
+我加在 `Cards` 首行的埋点 `window.__DSSE_DBG.cards.push(...)` 跑在 `load()` 惰性创建该数组之前，
+于是 `Cards` **首次渲染必然抛异常**；宿主的 `SlotErrorBoundary`（`getDerivedStateFromError` →
+`state = { failed: true }`，`render()` 返回 `jsx(Anchor, { "data-slot-error": slotKey })`）接住后渲染一个
+`<div data-slot-error="shell.overlay">`，此条目永久失效。**调试代码改变了被测行为，而宿主的错误边界
+把崩溃伪装成「组件不见了」。**
+
+教训写进纪律：任何「组件不见了」的结论，先查 `[data-slot-error]` 与 `console.error`；埋点要么写在组件
+之外，要么先判空，绝不能直接 `.push`。
+
+### 定因（用 throw-proof 埋点，最后全部删除）
+
+重新埋点，这次 `function dbg(kind, detail)` 定义在 `const bridge = {...}` 之后、整体 `try/catch`、
+写 `window.__D.events` 上限 500 —— 它自己不可能弄崩渲染。真机上成功轮与失败轮的事件序列：
+
+```
+成功  NT(2) → sl → sync(n=新,a=旧,b=新) → NT(2) → overlay → cards(新) → RESET(新) → load → POLL
+失败  overlay → cards(旧) → NT(2) → cards(新, live=新 br=新) → sl → sync(n=新,a=旧,b=新) → NT(2) → overlay → cards(新)   ← 没有 RESET，没有 load
+```
+
+失败轮里 `sync` 那一步 `n` 已经是新会话、`b` 也已经是新会话：**`Toggle` 抢先写了 `bridge` 并
+notify 了一次**。宿主把新会话 id 当 prop 交给 `Toggle` 的时间点**早于**它替换会话子树，所以那次
+notify 到达的 `Cards` 渲染读 `liveSessionId()` 得到的还是**旧** attribute，`sessionId` 没变，effect 不重跑。
+等 attribute 真正追上时，`syncSession` 跑进来发现 `if (bridge.sessionId !== now)` 为假 —— **于是不再
+notify**。通知就在这里被吞掉，之后只能等一次与切换无关的渲染来救，那就是用户看到的「要等一段时间」。
+
+### 改动
+
+**一、`syncSession` 属性一变就 notify**（`packages/ui-evolve/lib/client.js`，`syncSession` 内）。
+原来的 `notify()` 在 `if (bridge.sessionId !== now)` 里面；现在无条件调用，并把理由写在注释里：
+attribute 变化本身是事件，「`bridge` 已经这么说」不是吞掉它的理由。
+
+**二、`Cards` 按屏幕上的会话 id 加 `key` 强制重挂**（`Overlay` 内 `if (phase === "hero") return null`
+之后定义 `const monitorKey = liveSessionId() || bridge.sessionId`，两处挂载点
+`jsx(Cards, { key: monitorKey, ... })`）。React 允许一次渲染不提交它的 effect；重挂把「那些 effect
+本来要做的事」（取数、开流、清回合标记）变成保证会发生，而不是第二条代码路径。
+
+最终 diff：`packages/ui-evolve/lib/client.js`，**24 insertions / 6 deletions**。
+
+### 真机复验
+
+修后连续 **10 轮真实切换，10/10 列内容逐轮对应新会话**（每轮 `loads: 3`、`resets: 1`）；此前同一
+脚本 6 轮里有 2 轮 `panels: []`、文字停在旧会话。埋点随后全部删除（`grep -c 'dbg('` = 0、
+`grep -c '__DSSE'` = 0）。
+
+### 测试与变异
+
+全量 `node test/run.mjs` → **4215 passed / 0 failed**；`node test/mutations.test.mjs` → 48 passed；
+`scripts/mutate-checklist-panel.mjs` → **148 killed / 0 survived / 0 not applied**。三套串行跑，
+不与任何进程并发。
+
+### 两处覆盖缺口（如实记录，不凑）
+
+1. **「`syncSession` 属性一变就 notify」没有测试。** `test/client.test.mjs` 的
+   `MutationObserverStub.trigger()` 无条件 `callback([], this)`，没有事件参数，而 `syncSession` 比较的
+   是真实 DOM 属性 —— 「`bridge` 已是新值、attribute 才追上」这个时序在替身里**构造不出来**。
+   我试过两次：断言 `stateChanges()` 增量（删掉 `notify()` 仍全绿，因为同一个观察器回调紧接着的
+   `remeasure()` 也会 setState）；改成断言 `/panel?agent=session-b` 的真请求（`trigger()` 之后
+   harness 不渲染就不发请求，而补上渲染它自己就会读新属性发请求，无法区分是 notify 还是渲染救的）。
+   两次都删掉了。
+2. **`key` 重挂没有测试。** `expand()`/`render()` 的替身里没有 remount 语义
+   （`cloneElement` 的注释明说「a real React also remounts on a changed key and re-resolves refs,
+   neither of which is observable here」）。
+
+两条都只有真机证据（10/10 轮）。这是本轮唯一的验收依据，也是必须写下来的诚实缺口。
+
+### 收尾数据
+
+- 全量 **4215 passed / 0 failed**
+- `mutate-checklist-panel` **148 killed / 0 survived**；`mutate-language-and-files` **230 killed / 0 survived**
+- 改动 **1 个文件，24 insertions / 6 deletions**（`packages/ui-evolve/lib/client.js`）
+- 真机 **10 轮切换 10/10 正确**（修前同脚本 6 轮 2 轮失败）
+- 独立审查：**无**。这一轮没有派审查者 —— 上一轮派了、也收敛了，但结论仍然被真机推翻，
+  说明这一段的瓶颈不在阅读而是在实测。审查放在用户复测之后

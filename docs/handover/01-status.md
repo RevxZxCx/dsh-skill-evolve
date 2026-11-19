@@ -70,6 +70,7 @@
 | 2026-11-18 | 监控列：从「浮在空白里」到「对话列右侧常驻」 | 用户说不清想要什么位置，只给了 Qoder 逆向成果作参照。查清 Qoder 把该功能叫**消息锚点**、只按视口宽度决定显示；宿主则用 900px 容器查询主动隐藏——这是我们反复踩坑的根源。用户随后明确「不是侧栏，是实时监控」，放弃复刻三形态，改做**对话列内常驻让宽列**：给 `[data-conversation-scroll]` 加 `margin-right` 即真实让宽。随后九轮界面迭代与四个真根因（`sidebarOpen()` 绑错列、`visibility` 继承、`pointer-events:none`、`delete` 清不掉 CSSOM 声明）。3928 断言全绿，变异 137 全杀 |
 | 2026-11-19 | 面板改成事件驱动：一条长连接说「变了」才取数 | 用户 m05226 说「我更希望是事件驱动的，只有事件驱动走不通时，才降级为轮询」。第一版我直接写了长轮询 /watch，被用户 m05581 拦下要求先查 qoder 逆向与成熟实现 —— 调研推翻了自己三个判断：qoder 用的是进程内 observable（跨 bundle 无等价物）、宿主转发事件白名单硬编码且被 api-remotes 独占注册（插件无法扩展）、官方 dsh-client-hmr 的 /plugins/events 才是可照抄的 SSE 参考。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续，并核正了他推断里的时间顺序（计数移除 d5cc753 2026-11-17，晚于撤流 8457751 十天）。新增 revision.js + test/revision.test.mjs，/events 路由 + 8 处 bump，客户端 EventSource + 60 秒兜底。五轮审查：r1 失败无结论，r2 判词「实现的质量高于测试」，r3 NOT CONVERGED（onError 从没人赋值、致命 error 分支零测试可达），r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（唯一真缺口）、has() 缺失、onError 可能逃进宿主，r5 **判定收敛、无 must-fix** —— 它用真实 Node 探针证伪了「`req.once('close')` 会在开流时误触发」的担心，剩下的全是文案时效（README 那一节还写着「没有订阅，也没有服务端推送」，而这一节整段讲的就是取数机制）。全量 4198 断言全绿，变异 143 + 230 全杀。真机已验证 /events 返回 200 并在 214 秒后收到真帧；界面层待验 |
 | 2026-11-19 | 切会话时监控列不跟随：三条救援路径，替身原来建模了一个不存在的宿主 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他猜「事件驱动未生效、等 60s 兜底」方向对但机制不同 —— 切换会话本身从来不是事件驱动的（靠 MutationObserver → syncSession → bridge.sessionId），R-103 没碰它。三处叠加：观察器挂在 `[data-slot]` 祖先上而 `childList` 不看子树（真机层级 `.an3WzG_root > .an3WzG_body > content`，宿主只替换 content 时 slot 上零记录），`bridge.sessionId` 因此不动，而 `load()` 每次重读 `liveSessionId()` 能自愈、`startStream()` 只绑一次且兜底写的是 `if (stream === null)`（旧流还开着，永不重绑）—— 数据自愈、流不自愈，正是「过一会儿列自己对了、但每轮又等一分钟」。改①②③：渲染时读宿主属性、观察器加挂 content 父节点、流记住绑定会话。**替身原来把 content 建在 slot 直接子节点下（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因**；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1/M3 互为兜底全部存活 —— 测试在触发慢钟后又顺手渲染一次，替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把换行转成 CRLF） | 4215 passed；变异 148 + 230 全杀 |
+| 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 退回上一轮：「实际不通过，你是否做了真机实测」。本轮全程在活宿主上取证：6 轮真实切换里 2 轮 `/panel` 零请求、列文字停在旧会话；埋点证明 `Toggle` 抢先写 `bridge` 并 notify，那次渲染读到的还是旧 attribute，等 attribute 追上时 `syncSession` 已不再通知。两处修复后真机 10/10 轮正确 | 4215 passed；变异 148 + 230 全杀；**两处无测试，只有真机证据** |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5361,3 +5362,68 @@ insertions / 17 deletions。
    造不出切换）。三处修法对这个推论都是下界，即使推论过头，改 1 与改 3 也各自独立成立
 3. R-102 遗留的 `liveSessionId()` 多对话根加固（用户已同意暂不处理）
 
+## 2026-11-19（第二轮）· 切会话时监控列不跟随：真机定因，两处修复
+
+### 起点的样子
+
+上一轮（R-104）交了三处修法、四条互不兜底的变异，全量 4215 条测试全绿。用户退回：
+「这一轮修复后问题依然存在，而且不切换的概率十分大，实际不通过，**你是否做了真机实测**？」
+答案是没做。这一轮从零开始，每一步都在活的宿主上。
+
+### 真机取证
+
+ego 浏览器每个新文档都没有登录态，先算签名 cookie（`.tmp-test/gen_cookie.mjs`）再 reload，
+侧边栏才出现 6 个真实会话行。探针全部装在活文档里：包 `fetch` 记 `/api/ui-evolve/` 请求、
+包 `EventSource`、`MutationObserver` 看 `data-conversation-session`、再包一层 `console.error`。
+
+干净代码上 6 轮真实切换：`round0` ✅、`round1` ✅、**`round2` `panels: []`**、`round3` ✅、
+**`round4` `panels: []`**、`round5` ✅。失败轮 `/panel` **一条请求都没有** —— `load()` 一进门就会发请求，
+零请求意味着它根本没被调用。DOM 层级在同一批轮次里每轮都是 content 换新、父节点换新、
+`[data-slot="main.conversation"]` 存活，失败轮与成功轮一模一样。
+
+### 一处被真机推翻的推理
+
+中途我判定「Overlay 被宿主卸载且不再挂载」，依据是 `overCount` 不再增长、只剩一个订阅者。
+**那是我自己的埋点造的假象**：加在 `Cards` 首行的 `window.__DSSE_DBG.cards.push(...)` 跑在数组
+惰性创建之前，`Cards` 首次渲染必抛异常，宿主的 `SlotErrorBoundary` 接住后渲染
+`<div data-slot-error="shell.overlay">`，该 slot 条目永久失效。调试代码改变了被测行为，而错误边界
+把崩溃伪装成「组件消失」。
+
+### 定因
+
+换成 throw-proof 埋点后，成功轮与失败轮的事件序列差异只有一处：
+
+```
+成功  ... sync(n=新,a=旧,b=新) → NT(2) → overlay → cards(新) → RESET(新) → load → POLL
+失败  ... cards(旧) → NT(2) → cards(新) → sl → sync(n=新,a=旧,b=新) → NT(2) → overlay → cards(新)   ← 无 RESET、无 load
+```
+
+失败轮里 `sync` 时 `n` 与 `b` 都已是新会话：`Toggle` 抢先写了 `bridge` 并 notify 了一次，而那次 notify
+到达的渲染读到的还是**旧** attribute，`sessionId` 没变、effect 不重跑；等 attribute 追上，
+`syncSession` 里 `if (bridge.sessionId !== now)` 为假 —— **通知被吞掉**。
+
+### 改动
+
+1. `syncSession` 在 attribute 每次变化时**无条件** `notify()`（`packages/ui-evolve/lib/client.js`）
+2. `Cards` 加上以屏幕会话 id 为值的 `key`，切换即重挂（`Overlay` 内，两处挂载点）
+
+diff：**1 个文件，24 insertions / 6 deletions**。
+
+### 测试
+
+- 全量 `node test/run.mjs` → **4215 passed / 0 failed**
+- `node test/mutations.test.mjs` → 48 passed
+- `mutate-checklist-panel.mjs` → **148 killed / 0 survived**；`mutate-language-and-files.mjs` → **230 killed / 0 survived**
+
+### 真机
+
+修后 **10 轮真实切换 10/10 列内容逐轮对应新会话**（每轮 `loads: 3`、`resets: 1`）。埋点已全部删除
+（`grep -c 'dbg('` = 0、`grep -c '__DSSE'` = 0）。
+
+### 尚未做
+
+1. **两处修复都没有测试**，只有真机证据。`MutationObserverStub.trigger()` 不带事件参数，
+   「`bridge` 已新值、attribute 才追上」的时序构造不出来（试过断言 `stateChanges()` 与断言真实
+   `/panel` 请求，两次都因观测点不干净或需要渲染而自相矛盾，已删）；替身也没有 `key` 重挂语义
+2. **独立审查未派**。上一轮派了、也收敛了，但结论仍被真机推翻 —— 这一段的瓶颈不在阅读。审查放在用户复测之后
+3. 推送仍未成功：代理 `127.0.0.1:7890` 连不上（`581ee24` 也还在本地）

@@ -4252,10 +4252,18 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           const now = liveSessionId()
           if (now === "" || now === anchor) return
           anchor = now
-          if (bridge.sessionId !== now) {
-            bridge.sessionId = now
-            notify()
-          }
+          bridge.sessionId = now
+          // Notify on every change of the attribute, not only when `bridge` had
+          // to move. `bridge` can already hold this id: `Toggle` publishes the
+          // session the host handed it as a prop, and the host hands that over
+          // before it replaces the conversation element. That earlier notify
+          // reaches a `Cards` whose render still reads the *old* attribute, so
+          // its `sessionId` never changed and no effect reran. By the time the
+          // attribute catches up, `bridge` matches and this used to stay silent,
+          // leaving the column on the previous conversation until some unrelated
+          // render happened to save it. The attribute changing is the event; what
+          // `bridge` already says is not a reason to swallow it.
+          notify()
         }
 
         let phaseObserver = null
@@ -4446,6 +4454,16 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       const phase = (monitor.visible === true ? monitor.phase : place.phase) ?? ""
       if (phase === "hero") return null
 
+      // The column belongs to one conversation, so it is keyed by the one on
+      // screen. A switch then remounts it instead of asking React to notice a
+      // changed dependency: a render whose effects never commit -- which React is
+      // free to do -- would otherwise leave the column showing the previous
+      // conversation, fetched under the previous `sessionId`, with nothing
+      // scheduled to try again. Remounting does exactly the work those effects
+      // would have done (fetch, open a stream, reset the turn tags), so this is
+      // not a second code path, only a guarantee that the first one runs.
+      const monitorKey = liveSessionId() || bridge.sessionId
+
       // The monitor column, when it is on and has room, is the whole panel: the
       // header toggle opened it, so there is no second thing to open. `collapsed`
       // is deliberately not read here — it started life as "the cards are folded
@@ -4538,7 +4556,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
               // either. What the old header carried — nothing but a label and a
               // close button — is exactly what the top row of the cards already
               // is once you stop separating them.
-              jsx("div", { className: "dsse-monitor-body", children: jsx(Cards, { place: monitor, embedded: true }) }),
+              jsx("div", { className: "dsse-monitor-body", children: jsx(Cards, { key: monitorKey, place: monitor, embedded: true }) }),
             ],
           }),
         })
@@ -4556,7 +4574,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         style: { position: "absolute", inset: 0, pointerEvents: "none" },
         children: jsx("div", {
           style: { pointerEvents: "auto", display: "contents" },
-          children: jsx(Cards, { place }),
+          children: jsx(Cards, { key: monitorKey, place }),
         }),
       })
     }
