@@ -166,6 +166,8 @@
 | DEF-161 | 2026-11-18 | `pointer-events` 被算成 `none`，元素看得见、尺寸正确，但鼠标事件全部穿透到滚动体 | 基于 `getBoundingClientRect`/颜色/尺寸/`display` 的断言全部通过；一条「元素可见」的断言对「元素可交互」零覆盖 |
 | DEF-162 | 2026-11-18 | `delete node.style.display` 返回 `true` 却什么都没删 —— `element.style` 是 CSSOM 代理，`display` 不是 own property；列关掉后宿主 nav 仍被强制显示，与替身形成两条轨道 | 替身 `railNode.style` 是字面量普通对象，`delete` 在它上面真的有效，于是 `!railNode.style.display` 这条断言恒真；变异首轮 SURVIVED 才暴露（135 killed / 2 survived） |
 | DEF-163 | 2026-11-18 | 替身轨道的隐藏规则绑在 `html[data-dsse-turn-rail="1"]` 上，而「只画一条轨道」是页面级不变量、与监控列开关无关；列一关规则自己失效 | 断言把错误的作用域写成了正确契约（要求规则以该前缀开头），且正则未锚定行首，新旧两种形态都能匹配，改完仍通过 |
+| DEF-164 | 2026-11-19 | 会话切换的通知被吞掉：`syncSession` 只在 `bridge` 需要改动时才 `notify()` | 替身没有「bridge 已是新值、属性才追上」这个时序（`trigger()` 不带事件参数）
+| DEF-165 | 2026-11-19 | 列的会话身份靠 effect 依赖推断，而 React 允许一次渲染不提交它的 effect | 替身没有 key 的 remount 语义，`cloneElement` 注释自己写明了这一点
 
 ---
 
@@ -2891,3 +2893,54 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] .dsh-claude-turn-rail{d
 **通用判据**：一条规则的作用域里出现某个状态属性时，先问「这个不变量在状态变化后还成立吗」。
 如果答案是不成立而规则本来该一直生效，作用域就是错的。这里的状态属性是 `data-dsse-turn-rail`，
 不变量是「宿主轨道与主题替身不能同时可见」，两者没有关系。
+
+## DEF-164 · 会话切换的通知被 `bridge` 的旧值吞掉
+
+**症状**：切会话后监控列不跟随，列内容停在上一个会话；用户报「不切换的概率十分大」「要一段时间后
+才会切换到正确的侧栏」。真机上复现为 6 轮切换里 2 轮 `/panel` **一条请求都没发**。
+
+**根因**：宿主把新会话 id 当 prop 交给 `Toggle` 的时间点**早于**它替换会话子树。`Toggle` 抢先写了
+`bridge.sessionId` 并 `notify()`，而那次 notify 到达的 `Cards` 渲染读 `liveSessionId()` 得到的还是
+**旧** attribute，`sessionId` 没变、effect 不重跑。等 attribute 真正追上，`syncSession` 里
+
+```js
+if (bridge.sessionId !== now) { bridge.sessionId = now; notify() }
+```
+
+为假 —— **通知在这里被吞掉**。之后只能等一次与切换无关的渲染偶然救回来。
+
+**为什么测试没抓到**：`test/client.test.mjs` 的 `MutationObserverStub.trigger()` 无条件调用
+`callback([], this)`，没有事件参数，而 `syncSession` 比较的是真实 DOM 属性，所以「`bridge` 已是新值、
+attribute 才追上」这个时序**构造不出来**。我试过两条替代观测点，都不成立：
+
+1. 断言 `stateChanges()` 增量 —— 删掉 `notify()` 仍全绿，因为同一个观察器回调紧接着的 `remeasure()`
+   也会 `setState`
+2. 断言真发一次 `/panel?agent=session-b` —— `trigger()` 之后 harness 不渲染就不发请求；补上渲染，
+   渲染自己就会读新属性发请求，无法区分是 notify 还是渲染救的
+
+两次都删掉了，没有留下假的安慰。
+
+**修法**：`syncSession` 在 attribute 每次变化时**无条件** `notify()`。注释写明「attribute 变了是事件，
+`bridge` 已经这么说不是丢弃它的理由」。另给 `Cards` 加 `key={屏幕会话 id}`（见 DEF-165）。
+
+**通用判据**：当「我们知道的状态」与「宿主刚说的是什么」来自两条不同时序的通道时，**通知要挂在
+宿主那条通道上**。拿自己的状态判断「这次变化值不值得广播」，等于把一条通道的延迟转移到另一条上。
+
+## DEF-165 · 列的会话身份靠 effect 依赖推断
+
+**症状**：与 DEF-164 同一个用户报障，但它是独立的一条：即使通知送到了，面板也可能不更新。
+
+**根因**：`Cards` 的取数与开流都挂在 `useEffect(..., [sessionId])` 上，即「依赖变了 → effect 重跑」。
+React 允许一次渲染**不提交** effect（并发渲染下被丢弃的那次渲染就是），于是依赖推断会静默失效，
+而没有任何东西被安排重试。
+
+**为什么测试没抓到**：替身根本没有 key 的 remount 语义 —— `cloneElement` 的注释自己写着
+「a real React also remounts on a changed key and re-resolves refs, neither of which is observable here」。
+所以这条改动在这个 harness 里是**不可观测的**，写测试只能写出恒真的断言。
+
+**修法**：`Overlay` 里 `const monitorKey = liveSessionId() || bridge.sessionId`，两处挂载点
+`jsx(Cards, { key: monitorKey, ... })`。重挂做的是那些 effect 本来要做的事（取数、开流、清回合标记），
+不是第二条代码路径，只是保证第一条一定会跑。
+
+**通用判据**：「A 变了所以要去做 B」用 `useEffect` 依赖表达时，问一句「这次渲染一定会提交吗」。
+身份变化（属于哪个会话/文档/文件）该用 `key` 表达，那是 React 保证重挂的唯一手段。
