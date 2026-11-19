@@ -187,7 +187,7 @@ Qoder 选了一个信息量更小、但几乎不需要清洗的口径（「模�
 
 ---
 
-## 5.4 一处必须纠正的说法：`origin` 不在产出卡上
+### 5.4 一处必须纠正的说法：`origin` 不在产出卡上
 
 我在 `docs/21` §7 P2 里写过「Qoder 的做法是标 `origin`、显示前 7 个」，
 读代码后需要收窄：
@@ -203,12 +203,56 @@ Qoder 选了一个信息量更小、但几乎不需要清洗的口径（「模�
 这个区分重要，因为它决定了我们该抄哪一半：
 抄「口径」要改采集层（重），抄「`origin` 标记」只能改展示层，而它解释不了 Qoder 为什么少。
 
-## 6. 本文没有证明的事
+## 6. 行渲染器 `ma2` 的字段清单（它到底知道什么）
+
+完整签名（`gtd.js`，`ha2` 内部 `v.map` 的那一行实例化的组件）：
+
+```js
+function ma2({ sessionId, file, labels, onOpenFile, onPreviewFile,
+               remoteExecution, sessionFileAccessEnabled, onRevealFile,
+               onReadArtifactPreview, onOpenHtmlInBuiltInBrowser,
+               onOpenInNewWindow, onOpenSpecArtifact })
+```
+
+`file` 上被**实际读取**的字段只有五个：
+
+| 字段 | 用在哪 | 说明 |
+| --- | --- | --- |
+| `absolutePath` | `JZ1()`、`MN1(e, ...)`、`vo1()`、每个回调的入参 | **行身份**（`ha2` 的 `key` 就是它） |
+| `filename` | `wA()`、`JY()`、`ga2()` | 决定图标、是否可预览 |
+| `kind` | `t.kind !== "spec"` | 只区分「spec 文档」与其它 |
+| `typeLabel` | 预览头（`KR` 组件的 `typeLabel`） | 大写扩展名 |
+| （`path`/`rootId`/`messageId`） | **行渲染里都没读** | 采集层的账，不是展示层的 |
+
+**这里没有任何一个字段能用于「这条该不该显示」**。没有 `origin`、没有 `noise`、没有 `score`、
+没有 `relevance`。`ma2` 拿到什么就画什么，唯一的删减发生在上一层 `ha2` 的 `slice(0, 7)`。
+
+对照我们的 `packages/ui-evolve/lib/client.js`：行渲染器读了 `path`/`address`/`bytes`/`status`/
+`noise`/`stale`/`turn`/`source` **八个**字段，其中 `noise`/`stale`/`source` 三个的存在意义就是
+「决定这一行怎么显示」。**这就是 4,000 行的差距所在 —— 不是代码写得啰嗦，是要回答的问题更多。**
+
+### 6.1 顺带：行内的动作我们几乎都做过
+
+`ma2` 的动作面：`moreActions` / `revealFile` / `copyAbsolutePath` / `copyRelativePath` /
+`copyAbsolutePathSucceeded` / `copyRelativePathSucceeded` / `copyPathFailed`，加上打开方式
+`openInBuiltInBrowser` / `openInNewWindow` / `openInSystemApplication` / `openInSystemBrowser` /
+`openInWorkspace`。
+
+我们的 S3 只做了「复制绝对/相对路径」两项，并在 `docs/18` §五写明**不做**「在文件管理器中显示」
+（需要宿主 `shell` 能力，`shell.overlay` 拿不到）与「四种打开方式」（`openResource` 只有一个入口）。
+**这次逆向确认了那个判断：Qoder 能提供这些，是因为它自己就是浏览器 + 编辑器宿主。**
+
+---
+
+## 7. 本文没有证明的事
+
 
 - `artifacts` 记录的真实表名与写入时机（主进程侧被字符串表编码，未解出；只确认了 IPC 名
   `chatSessions.listTurnArtifacts` 与字段形状）。
-- `present_files` 在本地模式下是否**每次都**产生 artifact（只确认了工具描述与
-  `ma2` 渲染组件读取 `kind`/`origin` 字段，未追到主进程写入点）。
-- Qoder 的 artifact 是否有「自动」来源（如 `Write` 工具隐式交付）。若存在，我们的差距比本文
-  描述的更小。
+- `present_files` 在本地模式下是否**每次都**产生 artifact（只确认了工具名、描述
+  `Deliver artifact files to the user.` 与字段形状，未追到主进程写入点）。
+  §6 已确认行渲染器 `ma2` **不读 `origin`**（这一句原写作「读取 `kind`/`origin` 字段」，是错的）。
+- Qoder 的 artifact 是否有「自动」来源（如 `Write` 工具隐式交付）。`origin:"automatic"` 确实存在，
+  但已确认它出现在视频卡 `i$` 与技能进化建议 `sD1`，**不是 artifact**；artifact 的自动来源仍未有证据。
+  若存在，我们的差距比本文描述的更小。
 - 用户实际看到的 Qoder 卡片条数（本文的全部结论来自代码，没有对真实 Qoder 会话计数）。
