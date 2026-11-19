@@ -69,6 +69,7 @@
 | 2026-11-16 | 一行被判生成，读者就看不见这一轮 | 用户实测报原型文件被归入生成文件、产出卡为空。两处根因：祖先目录套用了为文件名写的下划线规则（`scratchName` 的注释早写明不该这么用，遍历侧已排除、卡片侧漏了同步）；零人写时头部只剩「N 个生成文件」且列表折叠成空。拆出 `scratchDirectory`、`filesOpen` 加第三态 `null`、零人写换成整句并自动展开。真机 b5ee3f88：25 行 → 人写 14 / 生成 11，头部回到「14 个文件」。新增 34 条断言、5 条突变（195 全杀）、三处注入验证；3863 断言全绿。新增 DEF-157/158、D-181/182、R-96 |
 | 2026-11-18 | 监控列：从「浮在空白里」到「对话列右侧常驻」 | 用户说不清想要什么位置，只给了 Qoder 逆向成果作参照。查清 Qoder 把该功能叫**消息锚点**、只按视口宽度决定显示；宿主则用 900px 容器查询主动隐藏——这是我们反复踩坑的根源。用户随后明确「不是侧栏，是实时监控」，放弃复刻三形态，改做**对话列内常驻让宽列**：给 `[data-conversation-scroll]` 加 `margin-right` 即真实让宽。随后九轮界面迭代与四个真根因（`sidebarOpen()` 绑错列、`visibility` 继承、`pointer-events:none`、`delete` 清不掉 CSSOM 声明）。3928 断言全绿，变异 137 全杀 |
 | 2026-11-19 | 面板改成事件驱动：一条长连接说「变了」才取数 | 用户 m05226 说「我更希望是事件驱动的，只有事件驱动走不通时，才降级为轮询」。第一版我直接写了长轮询 /watch，被用户 m05581 拦下要求先查 qoder 逆向与成熟实现 —— 调研推翻了自己三个判断：qoder 用的是进程内 observable（跨 bundle 无等价物）、宿主转发事件白名单硬编码且被 api-remotes 独占注册（插件无法扩展）、官方 dsh-client-hmr 的 /plugins/events 才是可照抄的 SSE 参考。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续，并核正了他推断里的时间顺序（计数移除 d5cc753 2026-11-17，晚于撤流 8457751 十天）。新增 revision.js + test/revision.test.mjs，/events 路由 + 8 处 bump，客户端 EventSource + 60 秒兜底。五轮审查：r1 失败无结论，r2 判词「实现的质量高于测试」，r3 NOT CONVERGED（onError 从没人赋值、致命 error 分支零测试可达），r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（唯一真缺口）、has() 缺失、onError 可能逃进宿主，r5 **判定收敛、无 must-fix** —— 它用真实 Node 探针证伪了「`req.once('close')` 会在开流时误触发」的担心，剩下的全是文案时效（README 那一节还写着「没有订阅，也没有服务端推送」，而这一节整段讲的就是取数机制）。全量 4198 断言全绿，变异 143 + 230 全杀。真机已验证 /events 返回 200 并在 214 秒后收到真帧；界面层待验 |
+| 2026-11-19 | 切会话时监控列不跟随：三条救援路径，替身原来建模了一个不存在的宿主 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他猜「事件驱动未生效、等 60s 兜底」方向对但机制不同 —— 切换会话本身从来不是事件驱动的（靠 MutationObserver → syncSession → bridge.sessionId），R-103 没碰它。三处叠加：观察器挂在 `[data-slot]` 祖先上而 `childList` 不看子树（真机层级 `.an3WzG_root > .an3WzG_body > content`，宿主只替换 content 时 slot 上零记录），`bridge.sessionId` 因此不动，而 `load()` 每次重读 `liveSessionId()` 能自愈、`startStream()` 只绑一次且兜底写的是 `if (stream === null)`（旧流还开着，永不重绑）—— 数据自愈、流不自愈，正是「过一会儿列自己对了、但每轮又等一分钟」。改①②③：渲染时读宿主属性、观察器加挂 content 父节点、流记住绑定会话。**替身原来把 content 建在 slot 直接子节点下（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因**；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1/M3 互为兜底全部存活 —— 测试在触发慢钟后又顺手渲染一次，替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把换行转成 CRLF） | 4215 passed；变异 148 + 230 全杀 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5259,3 +5260,104 @@ GET /api/ui-evolve/panel?agent=session-517e1902-…   → 1838 / 545 / 488 / 537
 2. 这是一笔交换而不是纯赚：收益是会话驱动的变化从「最多等 8 秒」变成「一个往返」，空转时钟请求从每分钟约 7.5 次降到 1 次；代价是那三处事件说不准的盲区从 8 秒变成 60 秒（全局候选队列的一次变化可能晚一分钟才出现），外加一条常驻连接。净请求量取决于一轮里有多少 MCP 调用（每次一帧、一帧一次取数），这个分布我没有统计
 3. 三件事事件说不准所以 60 秒兜底是必需：全局候选队列、文件 size/mtime、技能目录
 4. R-102 遗留的 `liveSessionId()` 多对话根加固（用户已同意暂不处理）
+
+
+## 2026-11-19 · 切会话时监控列不跟随
+
+### 起点的样子
+
+用户 m10257 报障，并给出了他自己的推断：
+
+> 切换会话时的侧栏切换是通过事件驱动的吗？目前实测：切换会话时，监控侧栏不更新的概率变高了，
+> 并且要一段时间后才会切换到正确的侧栏。我怀疑是是事件驱动在某种情况下未生效，等待 60s 后
+> 触发兜底进行的切换更新。
+
+「退到兜底」这一半猜对了，机制不是他说的那个。**切换会话本身从来不是事件驱动的**：靠
+`MutationObserver` → `syncSession()` 写 `bridge.sessionId` + `notify()` → Overlay 重渲染 →
+`Cards` 拿到新 id。R-103 把面板取数改成推送流时一个字没动这条链。
+
+### 三处叠加的根因
+
+1. **观察器挂在宿主不替换的那一层。** `attachSlotObserver` 从 `[data-conversation-content]` 向上
+   爬到最近的 `data-slot` 祖先，装 `childList: true`（无 `subtree`）。真机测到的层级是
+   `[data-slot="main.conversation"] > .an3WzG_root > .an3WzG_body > [data-conversation-content]`，
+   三层之隔，中间两层保留自己的子节点 —— 宿主**只替换 content** 时，slot 上一条记录都没有，
+   content 的父节点上正好一条。R-102 当年在 slot 上看到过「1 条 `{added:1, removed:1}`」，那是
+   整个 wrapper 一起被换的另一条路径。两条路径都在，所以这是概率性的
+2. **`bridge.sessionId` 因此不动**，Overlay 不重渲染，`Cards` 一直按 render 时的快照渲染
+3. **最要命的不对称。** `load()` 每次调用都重读 `liveSessionId()`，所以**数据会自愈**；
+   `startStream()` 只在开流那一刻绑一次，而兜底判断的是 `stream === null` —— 绑在旧会话上的流
+   开着、健康、只是安静，这个条件永不成立，**重绑那一行永不执行**。于是数据对了、流还错着，
+   下一轮又等一分钟。用户看到的「过一段时间会切到正确的侧栏」正是第 3 条的前半段
+
+### 改动（三条互相独立的救援路径）
+
+1. `Cards` 渲染时读宿主属性：`const liveId = liveSessionId(); const sessionId = liveId === "" ? bridge.sessionId : liveId`
+2. `attachSlotObserver` 在 content 的**直接父节点**上再装一个观察器（`parentNode` 记忆 + 判重）
+3. 流记住绑定会话：`let streamFor = ""`、`watchTarget()`，慢钟与 `onVisible` 都改成
+   `if (stream === null || streamFor !== watchTarget()) startStream()`
+
+### 一处被测试替身掩盖的设计（本轮最重要的教训）
+
+原来的 `test/client.test.mjs` 把 `[data-conversation-content]` 建成 `slot` 的**直接子节点** —— 在
+那个世界里，「观察 slot」与「观察被替换的节点」是同一件事。于是 984 条断言全绿，而真机上的漏检
+一次都测不出来。这**不是「漏了某条路径」，是替身与真机的树形不一样，让整类失效不可见**。
+
+改法：`boot({ conversationDepth: 2 })` 建出三层嵌套，`swapConversation()` 把记录写在
+`contentParent` 而不是 `slot` 上。**换成三层之后旧套件仍是 984 passed / 0 failed** —— 这本身就是
+证据：旧断言若能抓住这个 bug，重建替身就该有红的。
+
+### 四条变异最初全部存活（第二个教训）
+
+原因不是断言太弱，而是**测试自己替被测的修法干了活**：那一块在触发慢钟之后又调了一次
+`deepRender`，那次渲染走了改 1 的渲染时读取，于是改 1 救了改 3 的场，反过来也一样。两条修法
+互为兜底 = 两条都不会被单独抓住。拆成三个**互不渲染**的块（只渲染 / 只触发慢钟 / 只回前台）后
+4/4 KILLED，且四条各由不同断言抓住。
+
+第三条最早写的是「隐藏 → 切 → 恢复可见」，那条测的是假的：隐藏分支已 `stopStream()`，
+`stream === null` 恒成立。真正需要那半的场景是**页面从未离开**（窗口被遮住、标签页切前台），
+此时 `visibilitychange` 触发而 `hidden` 已是 false、流开着且健康、却绑在旧会话上。
+
+### 一次自己造成的全仓库 CRLF 污染
+
+`node test/mutations.test.mjs` 报 12 条「missing 锚点」，`bundle 21965 chars vs generated 21564`。
+根因：Python `Path.write_text(text, encoding='utf-8')` 在 Windows 上把换行写成 CRLF，三个文件
+（`client.js` 4709 行、`test/client.test.mjs` 7962、`scripts/mutate-checklist-panel.mjs` 1397）
+全成了 CRLF。症状特征：**只有多行锚点报 missing，单行锚点全对**。修法：
+`read_bytes().replace(b'\r\n', b'\n')` + `write_bytes`；**今后 Python 写文件必须 `newline='\n'`
+或 `write_bytes`**。转换后回到 48 passed，`git diff --stat` 也从「整文件重写」回到 3 files / 329
+insertions / 17 deletions。
+
+### 独立审查（一位审查者，无 must-fix）
+
+它读了磁盘活文件，基线自测通过，变异演练在 scratch 副本里做、一次没碰仓库。判定：三条触发路径
+都在，**没有路径能让一次切换被无限期漏掉**；三条改动各自无泄漏、无双触发；四条变异各由不同断言
+抓住。三条 should-fix 全部属实、已全部修，其中一条是**真缺陷**：`error` 处理器关的是**当前**那条
+流而不是注册它的那条 —— 改 3 让开关次数变多后，一个陈旧处理器会关掉健康的新流，让面板退回慢钟，
+正是本次要消除的症状类。已加 `if (stream !== opened) return`。
+
+**为它补测试时我写的第一版是假通过。** 第一版用「切会话 → 新流 → 旧流补发 error」构造，删掉守卫
+仍然全绿：切会话会重跑 effect，旧处理器闭包里的 `stream` 属于上一轮、cleanup 早已置空，守卫在那
+一幕里没有机会起作用。改成「页面从未离开（窗口被遮住）→ 切会话 → 重放 `visibilitychange`」——
+同一个闭包内换源 —— 删守卫立刻红（两条流都 `closed: true`）。
+
+### 测试
+
+`test/client.test.mjs` 984 → 1001（新增「切会话三条救援路径」五个块 + 陈旧处理器一个块）。
+全量 **4215 passed / 0 failed**；变异 `mutate-checklist-panel.mjs` **148 killed / 0 survived /
+0 not applied**、`mutate-language-and-files.mjs` **230 killed / 0 survived / 0 crashed**；
+`node test/mutations.test.mjs` 48 passed。
+
+### 真机
+
+**未做。** 宿主内存里是旧模块，需要重启桌面端才生效 —— 这一步只能由人做。而这个 bug 是概率性的
+（取决于宿主走哪条替换路径），单次「没再出现」不构成证据。
+
+### 尚未做
+
+1. **真机复测**，理由同上
+2. **「切换可以零记录落地」这条推论没有在真机上单独钉死**。测到的是层级与「只替换 content 时
+   slot 上无记录」这个 DOM 事实，加上用户报告的间歇性；没能抓到一次完整的现场（hero 页没有会话，
+   造不出切换）。三处修法对这个推论都是下界，即使推论过头，改 1 与改 3 也各自独立成立
+3. R-102 遗留的 `liveSessionId()` 多对话根加固（用户已同意暂不处理）
+

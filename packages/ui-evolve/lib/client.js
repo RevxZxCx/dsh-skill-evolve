@@ -2812,7 +2812,19 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // can skip the render entirely. Null means "no comparable answer yet".
       const panelSignatureRef = React.useRef(null)
 
-      const sessionId = bridge.sessionId
+      // The host's attribute is the authority, and it is read here rather than
+      // trusted from `bridge`. `bridge` only moves when an observer fires, and
+      // the observer that watches for a swap can be parked above the node the
+      // host actually replaces, so a switch can land with no notification at
+      // all while this column keeps rendering. Reading on every render costs
+      // one attribute query and cannot disagree with `load`, which reads the
+      // same thing before every request.
+      const liveId = liveSessionId()
+      // `""` means the host is between conversations -- it removed the node and
+      // has not mounted the next one yet. Falling back to `bridge` keeps this
+      // render a no-op instead of a flicker to a third state, and the render
+      // that follows the mount reads the new id for itself.
+      const sessionId = liveId === "" ? bridge.sessionId : liveId
       const closeSettings = React.useCallback(() => setSettingsOpen(false), [])
 
       /**
@@ -3043,11 +3055,22 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // Coming back asks once, immediately, because the numbers on screen are
         // from before the tab went away.
         let stream = null
+        // Which session the open stream is bound to. `stream` alone cannot say:
+        // a stream bound to the session the reader left stays open, healthy and
+        // silent, so `stream === null` never becomes true and the line that
+        // reopens it never runs. Remembering the name is what lets the slow
+        // clock and the visibility handler notice that the *binding*, not the
+        // connection, is the thing that went stale.
+        let streamFor = ""
+
+        // The session on screen right now, by the same rule `load` uses.
+        const watchTarget = () => liveSessionId() || bridge.sessionId
 
         const stopStream = () => {
           if (stream === null) return
           stream.close()
           stream = null
+          streamFor = ""
         }
 
         const startStream = () => {
@@ -3062,7 +3085,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // more branch to keep honest, and this one survived a mutation run
           // with the check deleted -- unreachable code looks identical to
           // untested code from the outside.
-          const target = liveSessionId() || bridge.sessionId
+          const target = watchTarget()
           stopStream()
           // Through `resolveUrl` like every other request: the GUI can be
           // mounted under a path prefix, and a root-relative URL would miss the
@@ -3071,6 +3094,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // to the minute clock while looking perfectly healthy.
           const opened = new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(target)}`))
           stream = opened
+          streamFor = target
           // A notice means the payload could have changed, so fetch it. Not
           // droppable: this is the whole point of the stream.
           opened.addEventListener('message', () => {
@@ -3087,6 +3111,13 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // stayed on stale data until the reader switched conversations.
           opened.addEventListener('error', () => {
             if (opened.readyState !== 2) return
+            // Only ever close the stream this handler was registered for. A
+            // handler fires on its own source, but by the time it runs this may
+            // no longer be the open one: a rebind closes `opened` and opens a
+            // replacement, and a handler that then called `stopStream()` would
+            // close the healthy new stream and drop the panel back to the slow
+            // clock -- the same symptom this whole change exists to remove.
+            if (stream !== opened) return
             // Given up for good, so give the slot back and let the slow clock
             // retry it rather than spinning here: the route may come back when
             // the plugin reloads, and a reconnect storm costs more than the
@@ -3102,7 +3133,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // this, a fatal failure -- a host that had not loaded the plugin yet,
           // a reload in progress -- cost the fast path for the rest of the
           // session, which is exactly the outcome `error` was written to avoid.
-          if (stream === null) startStream()
+          if (stream === null || streamFor !== watchTarget()) startStream()
         }, REFRESH_MS)
 
         const onVisible = () => {
@@ -3116,13 +3147,16 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // Coming back is a reader action, and the numbers on screen are from
           // before the tab went away. Not droppable.
           load(true, true)
-          // The stream was closed on the way out (or never opened), so it has to
-          // begin again or the fast path would stay dead for the rest of the
-          // session. Only when there is nothing open: `visibilitychange` also
-          // fires for reasons other than the tab leaving (a window that is
-          // merely uncovered), and tearing down a healthy stream for one of
-          // those would cost the frame it was about to deliver.
-          if (stream === null) startStream()
+          // Two reasons to reopen, and both are checked before anything is
+          // torn down. `stream === null`: it was closed on the way out, or never
+          // opened, and the fast path would otherwise stay dead for the rest of
+          // the session. `streamFor !== watchTarget()`: it is open and healthy
+          // but bound to a conversation the reader has left -- the case a page
+          // that never went away still hits, because `visibilitychange` also
+          // fires for a window that is merely uncovered. A healthy stream bound
+          // to the right session is left alone either way: tearing it down would
+          // cost the frame it was about to deliver.
+          if (stream === null || streamFor !== watchTarget()) startStream()
         }
         if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {
           document.addEventListener('visibilitychange', onVisible)
@@ -3143,6 +3177,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             document.removeEventListener('visibilitychange', onVisible)
           }
         }
+        // `load` already depends on `sessionId`, so it is a new function on
+        // every switch and this effect would rerun for that reason alone. The
+        // name is kept because the effect reads `sessionId` directly as well,
+        // and a list that omits something the body reads is a bug waiting for
+        // the next person to trust it.
       }, [load, sessionId])
 
       React.useEffect(() => {
@@ -4234,18 +4273,28 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
 
         // The attribute observer above only fires if the host *edits* the
         // conversation element in place. The live host does not: it unmounts
-        // the whole `[data-conversation-content]` tree and mounts a new one, so
-        // a switch is two `childList` records on the slot that owns it and zero
-        // attribute records anywhere. A column that watched only the attribute
-        // kept asking the previous session until something else re-rendered it
-        // — the reported bug, and the reason this second observer exists.
+        // `[data-conversation-content]` and mounts a new one, so a switch shows
+        // up as `childList` records and as zero attribute records anywhere. A
+        // column that watched only the attribute kept asking the previous
+        // session until something else re-rendered it — the reported bug, and
+        // the reason this second observer exists.
         //
-        // It watches the slot rather than the document: the slot is the nearest
+        // Which node receives that record depends on how much the host
+        // replaces, and both depths were measured on the running page: once the
+        // whole subtree below the slot was swapped and the slot saw two records
+        // (one removed, one added); once only the content node was replaced,
+        // three wrappers down, and the slot saw **nothing at all**. Watching the
+        // slot alone is what let that second case go unnoticed until the slow
+        // clock came round, so this watches the slot *and* the content's own
+        // parent — see the comment where it is attached.
+        //
+        // It watches nodes rather than the document: the slot is the nearest
         // ancestor the host does not replace, so a swap is one record instead of
         // one per streamed token. `subtree` stays off for the same reason, and
         // `childList` alone is what an unmount/remount produces.
         let slotObserver = null
         let slotNode = null
+        let parentNode = null
         const attachSlotObserver = () => {
           if (typeof MutationObserver === "undefined" || typeof document === "undefined") return
           const content = document.querySelector("[data-conversation-content]")
@@ -4258,9 +4307,21 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             slot = slot.parentElement
           }
           if (slot === null || slot === undefined || typeof slot.hasAttribute !== "function") return
-          if (slot === null || slot === slotNode) return
+          // Two targets, because they catch two different replacements and
+          // neither covers both. The slot is the nearest ancestor the host
+          // keeps across a switch, so watching it survives a replacement of any
+          // wrapper in between. The content's own parent is where the swap
+          // actually happens: measured on the live page the tree is
+          // `[data-slot="main.conversation"] > .root > .body >
+          // [data-conversation-content]`, three levels apart, so a host that
+          // replaces only the content writes one record on the parent and
+          // nothing at all on the slot. Watching the slot alone is what let a
+          // switch go unnoticed until the slow clock came round.
+          const parent = content.parentElement ?? null
+          if (slot === slotNode && parent === parentNode) return
           if (slotObserver !== null) slotObserver.disconnect()
           slotNode = slot
+          parentNode = parent
           slotObserver = new MutationObserver(() => {
             syncSession()
             // The replacement also invalidates every measurement and both
@@ -4270,6 +4331,9 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             attachSlotObserver()
           })
           slotObserver.observe(slot, { childList: true })
+          // In a tree where the content really does sit directly under the slot
+          // these are the same node, and observing one node twice buys nothing.
+          if (parent !== null && parent !== slot) slotObserver.observe(parent, { childList: true })
         }
         // The attribute can also be right already at mount — a reload, or a
         // conversation that was open before this overlay existed.

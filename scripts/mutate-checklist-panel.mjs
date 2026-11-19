@@ -1217,6 +1217,79 @@ const mutations = [
     suites: ['test/client.test.mjs'],
   },
   {
+    // The switch happens, the observer above the replaced node sees nothing, and
+    // `bridge.sessionId` keeps saying the old session. Every render of the
+    // column reads the host attribute for itself, which is the rescue this
+    // drops. Without it the column renders the conversation the reader left
+    // until something else moves `bridge`.
+    label: 'a column renders the session it was told about, not the one on screen',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `      const liveId = liveSessionId()
+      // \`""\` means the host is between conversations -- it removed the node and
+      // has not mounted the next one yet. Falling back to \`bridge\` keeps this
+      // render a no-op instead of a flicker to a third state, and the render
+      // that follows the mount reads the new id for itself.
+      const sessionId = liveId === "" ? bridge.sessionId : liveId`,
+    to: `      const sessionId = bridge.sessionId`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The host replaces `[data-conversation-content]`, which sits three levels
+    // below the `data-slot` ancestor the observer used to watch on its own. A
+    // `childList` observer does not see inside its subtree, so watching only the
+    // slot means the swap can land with no record at all -- which is what made
+    // this bug intermittent rather than constant.
+    label: 'nothing watches the node the conversation is replaced in',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `        if (parent !== null && parent !== slot) slotObserver.observe(parent, { childList: true })`,
+    to: '',
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The stream is bound to a session when it opens and never asked again. If
+    // the switch arrives while it is open -- no observer record, no re-render --
+    // `stream === null` stays false, so the rebind never runs and the fast path
+    // keeps writing frames about the conversation the reader left. Only the
+    // slow clock rescues it.
+    label: 'a stream stays bound to the session it was opened on',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (stream === null || streamFor !== watchTarget()) startStream()
+        }, REFRESH_MS)`,
+    to: `          if (stream === null) startStream()
+        }, REFRESH_MS)`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // The same rebind on the way back to the page, and it is a different path:
+    // `visibilitychange` also fires for a window that was merely uncovered, when
+    // `document.hidden` is already false and the stream is open, healthy, and
+    // bound to a session the reader has left. The `stream === null` half does
+    // not cover that case; only the comparison does.
+    label: 'coming back to the page keeps a stream bound to the old session',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `          if (stream === null || streamFor !== watchTarget()) startStream()
+        }
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {`,
+    to: `          if (stream === null) startStream()
+        }
+        if (typeof document !== 'undefined' && typeof document.addEventListener === 'function') {`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
+    // A handler fires on its own source, but by the time it runs that source may
+    // no longer be the open one: the visibility path reopens the stream without
+    // re-running the effect, so the same closure sees a new `stream`. Without
+    // the guard the stale handler calls `stopStream()` and closes the healthy
+    // replacement -- the panel drops back to the minute clock, which is the
+    // symptom this whole change exists to remove.
+    label: 'a failure on a replaced stream closes its replacement',
+    file: 'packages/ui-evolve/lib/client.js',
+    from: `            if (stream !== opened) return
+            // Given up for good`,
+    to: `            // Given up for good`,
+    suites: ['test/client.test.mjs'],
+  },
+  {
     // The half of `error` that shipped untested. A dropped connection leaves
     // `readyState` CONNECTING and the browser retries; a fatal one leaves it
     // CLOSED and it never comes back. Treating the second like the first is the
@@ -1233,9 +1306,11 @@ const mutations = [
     // session -- strictly worse than having never opened it.
     label: 'and nothing ever opens another one',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `          if (stream === null) startStream()
+    from: `          // session, which is exactly the outcome \`error\` was written to avoid.
+          if (stream === null || streamFor !== watchTarget()) startStream()
         }, REFRESH_MS)`,
-    to: `          if (false) startStream()
+    to: `          // session, which is exactly the outcome \`error\` was written to avoid.
+          if (false) startStream()
         }, REFRESH_MS)`,
     suites: ['test/client.test.mjs'],
   },
@@ -1245,8 +1320,9 @@ const mutations = [
     // deliver, and the reopen has to re-ask for a number it already had.
     label: 'coming back throws away a stream that is still good',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `          // those would cost the frame it was about to deliver.
-          if (stream === null) startStream()`,
+    from: `          // to the right session is left alone either way: tearing it down would
+          // cost the frame it was about to deliver.
+          if (stream === null || streamFor !== watchTarget()) startStream()`,
     to: `          // those would cost the frame it was about to deliver.
           startStream()`,
     suites: ['test/client.test.mjs'],

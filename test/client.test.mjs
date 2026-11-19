@@ -617,6 +617,18 @@ function boot(options) {
       const list = this.listeners.get('error') ?? []
       for (const handler of list.slice()) handler({})
     }
+
+    // An `error` that was already on its way when the plugin closed this source.
+    // `close()` does not cancel a queued event, and this is the only shape in
+    // which a handler can run against a source that is no longer the current
+    // one -- so it is the only shape that can catch a handler closing the wrong
+    // stream. `failFatal` deliberately returns early on a closed source and
+    // therefore cannot.
+    failFatalQueued() {
+      this.readyState = 2
+      const list = this.listeners.get('error') ?? []
+      for (const handler of list.slice()) handler({})
+    }
   }
 
   const hostStyle = new Map()
@@ -685,6 +697,25 @@ function boot(options) {
   // So the node itself is replaceable here, and `swapConversation` below models
   // the swap: new object, new identity, one childList record on the slot.
   const slot = { hasAttribute: (name) => name === 'data-slot', parentElement: null, children: [] }
+  // How many nodes sit between the slot and the content. The live page has two
+  // -- `[data-slot="main.conversation"] > .root > .body > [data-conversation-content]`,
+  // measured on the running host -- and the difference is not cosmetic: a host
+  // that replaces only the content writes a `childList` record on the content's
+  // parent and *nothing* on the slot, so an observer parked on the slot alone
+  // never hears about the switch.
+  //
+  // The fixture used to put the content directly under the slot, which is a
+  // host that does not exist, and that is why a switch could go unnoticed on
+  // the real page while every assertion here stayed green.
+  let contentParent = slot
+  const wrappers = []
+  const wrapperCount = settings.conversationDepth ?? 2
+  for (let level = 0; level < wrapperCount; level += 1) {
+    const wrapper = { hasAttribute: () => false, parentElement: contentParent, children: [] }
+    contentParent.children = [wrapper]
+    contentParent = wrapper
+    wrappers.push(wrapper)
+  }
   let conversation =
     rect === null ? null : {
       getBoundingClientRect: () => ({ ...rect }),
@@ -706,12 +737,12 @@ function boot(options) {
       setPhase: (next) => { phaseValue = next },
       setSession: (next) => { sessionValue = next },
       querySelector: (selector) => (selector === 'code, pre' ? code : null),
-      // The slot is the nearest ancestor the host keeps across a switch. The
-      // column climbs to it so it can watch for the replacement instead of
-      // waiting for an edit that never comes.
-      parentElement: slot,
+      // The parent is where the host writes the replacement: it unmounts this
+      // node and mounts a new one in its place. The slot further up is kept, so
+      // a replacement here is invisible from there.
+      parentElement: contentParent,
     }
-  if (conversation !== null) slot.children = [conversation]
+  if (conversation !== null) contentParent.children = [conversation]
 
   // One session switch, the way the page performs it: throw the node away and
   // put a different one in its place. Every observer parked on the slot hears
@@ -724,16 +755,23 @@ function boot(options) {
         if (name === 'data-conversation-session') return session
         return null
       },
-      parentElement: slot,
+      parentElement: contentParent,
     }
+  // The swap the live page performs: a new content node in the parent it lived
+  // in, and one `childList` record **on that parent**. The slot above keeps its
+  // child -- the wrapper is not replaced -- so a suite can tell an observer that
+  // watches the right node from one that only watches an ancestor.
   const swapConversation = (session) => {
     sessionValue = session
     const next = makeConversation(session)
+    const previous = conversation
     conversation = next
-    slot.children = next === null ? [] : [next]
+    contentParent.children = next === null ? [] : [next]
     for (const observer of mutationObservers) {
-      const watchingSlot = observer.targets.some((row) => row.target === slot && row.options?.childList === true)
-      if (watchingSlot) observer.trigger([{ type: 'childList', target: slot, addedNodes: next === null ? [] : [next], removedNodes: [] }])
+      const watching = observer.targets.some((row) => row.target === contentParent && row.options?.childList === true)
+      if (watching) {
+        observer.trigger([{ type: 'childList', target: contentParent, addedNodes: next === null ? [] : [next], removedNodes: previous === null ? [] : [previous] }])
+      }
     }
     return next
   }
@@ -1111,6 +1149,11 @@ function boot(options) {
     // holds a different object, so suites that need the current one read this.
     get liveConversation() { return conversation },
     swapConversation,
+    // The nearest `data-slot` ancestor and the node the host actually replaces
+    // inside. They are two different nodes on purpose -- see the comment where
+    // they are built.
+    slot,
+    get contentParent() { return contentParent },
     scrollArea,
     rafQueue,
     // One frame's worth of work: the observer schedules into this queue, so a
@@ -4510,10 +4553,253 @@ function byAction(node, action) {
   // restarts the polling effect, so the first request for the new conversation
   // is issued at once. That is the difference being asserted.
   check('the switch reaches the column without waiting for a timer', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+  // Weak on purpose, and labelled: this ticks the sixty-second callback and
+  // asserts the same expression as the line above, so it would still pass if the
+  // callback were emptied out. It is here to prove the timer does not *undo* a
+  // switch that already happened, which is all it claims.
   const poll = watched.timers.filter((row) => row.ms === 60000 && row.cleared === false)
   if (poll.length >= 1) poll[poll.length - 1].fn()
   await settle()
-  check('and the timer that arrives later agrees', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+  check('a later tick does not undo the switch', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+}
+
+// ---------------------------------------------------------------------------
+// A switch the slot cannot see still has to reach the column
+// ---------------------------------------------------------------------------
+//
+// The host does not edit the conversation when somebody switches sessions: it
+// unmounts `[data-conversation-content]` and mounts a new one. The question
+// this suite answers is *where* that record lands.
+//
+// Measured on the running page, the tree is
+// `[data-slot="main.conversation"] > .root > .body > [data-conversation-content]`
+// — the content is three levels below the slot, and the wrappers between them
+// keep their children. So a host that replaces only the content writes one
+// `childList` record on the content's parent and **nothing on the slot**.
+//
+// The fixture used to model the content as a direct child of the slot, which is
+// a host that does not exist, and an observer parked on the slot looked correct
+// in every assertion while missing the real switch. It now nests them the way
+// the page does, and the two suites below hold the two halves of the fix:
+// noticing the switch, and rebinding the stream that a switch invalidates.
+{
+  const asked = []
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/panel': (init, target) => {
+      const agent = decodeURIComponent(String(target).split('agent=')[1] ?? '')
+      asked.push(agent)
+      return { ok: true, data: { ...panelRoutes()['/api/ui-evolve/panel'].data, agent } }
+    },
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check('the column opens on the conversation on screen', asked[0] === 'session-a', JSON.stringify(asked))
+  // The premise of the whole suite: the two nodes are not the same, so an
+  // observer of the slot is not an observer of the replacement.
+  check(
+    'the fixture separates the slot from the node the host replaces',
+    instance.slot !== instance.contentParent && instance.contentParent.parentElement !== instance.slot,
+    'the content sat directly under the slot',
+  )
+  // Structural, not behavioural, and named that way on purpose. The check below
+  // this one is the behaviour — but it passes whether or not this observer
+  // exists, because change 1 re-reads the host attribute on the next render and
+  // rescues the switch either way. So this is the only assertion that fails when
+  // the parent observer is deleted, and a test that names itself behavioural
+  // while being carried by a different mechanism is worse than one that says
+  // what it is. (Same reasoning as the `notify()` gap recorded above.)
+  const watchingParent = instance.mutationObservers.find((observer) =>
+    observer.targets.some((row) => row.target === instance.contentParent && row.options?.childList === true))
+  check(
+    'structurally, something watches the node the conversation is replaced in',
+    watchingParent !== undefined,
+    JSON.stringify(instance.mutationObservers.map((observer) => observer.targets.map((row) => row.options))),
+  )
+  // A swap writes its record on the parent and nowhere else — the slot keeps
+  // its wrappers, which is exactly what happens on the page.
+  instance.swapConversation('session-b')
+  await settle()
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check('a switch three levels down still reaches the column', asked[asked.length - 1] === 'session-b', JSON.stringify(asked))
+}
+
+{
+  // The other half. Noticing the switch is not enough: the push stream was
+  // opened for the session the reader left, and a stream bound to an abandoned
+  // session stays open, healthy and silent. `stream === null` never becomes
+  // true, so the line that reopens it never runs, and the column waits for the
+  // sixty-second clock after every switch.
+  //
+  // The assertion that matters is on the *stream's* url rather than on a fetch:
+  // the failure mode is a stream that looks fine and answers nothing.
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  const first = instance.streamFor('session-a')
+  check('the column watches the conversation it opened on', first !== undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+  instance.swapConversation('session-b')
+  await settle()
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check('and follows it to the next one', instance.streamFor('session-b') !== undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+  check('leaving no stream behind on the one it left', instance.streamFor('session-a') === undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+}
+
+{
+  // A switch the observers miss entirely — the case that produced the report.
+  // The attribute moves and the node is replaced, but no record is delivered,
+  // so `bridge.sessionId` stays behind. Every render of the column re-reads the
+  // host's attribute, which is the only thing that can still rescue it, and the
+  // slow clock is what eventually notices that the stream is bound to the wrong
+  // session.
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  check('the column opened on the first conversation', instance.streamFor('session-a') !== undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+  // Move the page without telling any observer: no record, no notify, and
+  // `bridge.sessionId` still says `session-a`.
+  instance.conversation.setSession('session-b')
+  // No clock tick here, and nothing else announces the switch: the only thing
+  // that can move the stream is the column rendering again and reading the host
+  // attribute for itself. That is the first of the two rescues, and it is
+  // asserted on its own because the other one would otherwise stand in for it.
+  await instance.renderer.deepRender(instance.seat('cards'))
+  await settle()
+  check(
+    'a switch nobody announced is picked up by the next render',
+    instance.streamFor('session-b') !== undefined,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+}
+
+{
+  // The same missed switch, with no render to rescue it. A column nobody has
+  // asked to draw again is the ordinary state of a background tab, and the slow
+  // clock is the only thing left that can notice the stream is bound to a
+  // session the reader left. Asserted before any render so the render cannot
+  // take the credit: under a mutation that drops the clock's rebind, the stream
+  // stays where it was and this fails.
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  instance.conversation.setSession('session-b')
+  const clock = instance.timers.filter((row) => row.ms === 60000 && row.cleared === false)
+  check('a slow clock is running behind the stream', clock.length >= 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+  clock[clock.length - 1].fn()
+  await settle()
+  check(
+    'a switch nobody announced still rebinds the stream when the clock comes round',
+    instance.streamFor('session-b') !== undefined,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+  check(
+    'leaving no stream behind on the one it left',
+    instance.streamFor('session-a') === undefined,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+}
+
+{
+  // The third rescue, asserted on its own for the same reason as the other two.
+  //
+  // It is written against the case that actually needs it, and the obvious
+  // version of this test does not: if the page really went away, `onVisible`
+  // closed the stream on the way out, so on the way back `stream === null` is
+  // already true and the rebind would happen with or without the session check.
+  // The case that needs the check is a page that never went away -- a window
+  // merely uncovered, a tab brought forward -- where `visibilitychange` fires
+  // with `document.hidden` already false and the stream is open, healthy, and
+  // bound to the session the reader left. Nothing here renders the column, so
+  // the render-time read cannot take the credit either.
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  const opened = instance.streamFor('session-a')
+  check('the column opened on the first conversation', opened !== undefined, JSON.stringify(instance.eventSources.map((row) => row.url)))
+  // The session moves while the page stays visible, and no observer reports it.
+  instance.conversation.setSession('session-b')
+  // A visibilitychange with `hidden` still false: the stream was never closed,
+  // so it is still open and still bound to `session-a`.
+  instance.document.hidden = false
+  for (const listener of instance.document.visibilityListeners) listener()
+  await settle()
+  check(
+    'a stream left open on the old session is rebound when the page is looked at again',
+    instance.streamFor('session-b') !== undefined,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+  check(
+    'leaving no stream behind on the one it left',
+    instance.streamFor('session-a') === undefined,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+}
+
+{
+  // A queued failure from a stream this effect has already replaced.
+  //
+  // `close()` does not cancel an `error` that was already on its way, so a
+  // handler registered on the replaced source can still run afterwards. It
+  // shares this effect's `stream` binding, so without a guard it would call
+  // `stopStream()` and close the healthy replacement -- silently costing the
+  // fast path and dropping the column back to the minute clock, which is the
+  // exact symptom this change exists to remove.
+  //
+  // The replacement has to happen *inside one effect run*. A conversation switch
+  // does not qualify: it re-runs the effect, and the old handlers then close over
+  // the old run's bindings, which no longer name the open stream. Reopening from
+  // the visibility path does qualify -- same closure, same `stream`, new source.
+  const routes = {
+    ...panelRoutes(),
+    '/api/ui-evolve/speed': { ok: true, data: { tokens: 0, ms: 0, tps: 0, active: false } },
+  }
+  const instance = boot({ routes, conversationSession: 'session-a', conversationDepth: 2 })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  await instance.renderer.deepRender(instance.seat('cards'))
+  const abandoned = instance.streamFor('session-a')
+  // The page was never hidden -- the window was covered, or the tab came back to
+  // the foreground -- so nothing closed the stream, and only the rebind check
+  // inside the visibility handler can notice it is bound to the old session.
+  instance.conversation.setSession('session-b')
+  for (const listener of instance.document.visibilityListeners) listener()
+  await settle()
+  const current = instance.streamFor('session-b')
+  check(
+    'the reopen left a replacement stream open',
+    abandoned !== undefined && current !== undefined && current !== abandoned,
+    JSON.stringify(instance.eventSources.map((row) => row.url)),
+  )
+  abandoned.failFatalQueued()
+  await settle()
+  check(
+    'a failure queued on a replaced stream does not close its replacement',
+    current.closed === false && instance.streamFor('session-b') !== undefined,
+    JSON.stringify(instance.eventSources.map((row) => ({ url: row.url, closed: row.closed }))),
+  )
 }
 
 // ---------------------------------------------------------------------------

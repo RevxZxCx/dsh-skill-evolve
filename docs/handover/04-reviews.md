@@ -102,6 +102,7 @@
 | R-96 | 2026-11-16 | 产出卡噪声修复（无独立审查者） | 本轮以三处注入验证代替阅读审查：每处都让预期的那几条断言变红并校验 sha256 复原；另加 5 条永久突变与真机验收 | 修 2 / 推迟 2 |
 | R-97 | 2026-11-18 | 监控列整轮 D-183~D-197（无独立审查者） | 未派审查者：diff 四天未稳定，每轮都在修上一条断言未覆盖的东西；以真实 DOM 取证代替阅读，三个根因（`visibility:hidden`、`pointer-events:none`、读错侧栏属性）源码推断合计八轮全落空、读到真实 DOM 各一轮定案；变异首轮 135 killed / 2 survived，两条存活的正是本轮新写、我以为有抓力的断言 | 修 2（均本轮） |
 | R-103 | 2026-11-19 | 面板从 8 秒轮询改成事件驱动（五轮审查） | 用户 m05581 拦下我第一版长轮询方案，要求先查 qoder 逆向与成熟实现 —— 调研改变了方案（qoder 用进程内 observable，跨 bundle 搬不过来；宿主转发事件白名单硬编码且被独占注册；官方 dsh-client-hmr 的 /plugins/events 可照抄）。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续并核正了他推断里的时间顺序。五轮审查：r1 失败无结论；r2 判词「实现的质量高于测试」（12 条变异 5 条存活）；r3 NOT CONVERGED，抓出 onError 从没人赋值、致命 error 分支零测试可达；r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（真缺口）、`has()` 缺失、`onError` 可能逃进宿主；r5 CONVERGED 无 must-fix，用真实 Node 探针证伪了 `req.once('close')` 会误触发的担心，剩下的全是文案时效（README 还写着「没有订阅也没有服务端推送」）。新增 revision.js 与 test/revision.test.mjs，8 处 bump，变异 143 + 230 全杀 | 修 36（另有自查 6 处）/ 推迟 1 |
+| R-104 | 2026-11-19 | 切换会话后监控列不跟随：三处修复、四条变异各由不同断言抓住 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他的推断「事件驱动在某种情况下未生效，等 60s 兜底」方向对但机制不同。根因是三处叠加：观察器挂在 `[data-slot]` 祖先上而后者的 `childList` 不看子树（宿主替换的是它下面第三层的 `[data-conversation-content]`，真机测得 `.root > .body > content`），于是切换可以零记录落地；`bridge.sessionId` 因此不动；而 `load()` 每次都重读 `liveSessionId()` 能自愈、`startStream()` 只在开流时绑一次，兜底写的是 `if (stream === null)` 而旧流还开着，**永不重绑** —— 两者不对称，正是「过一会儿数据自己对了、但流一直绑旧会话」。改①②③：渲染时读宿主属性、观察器加挂 content 的直接父节点、流记住绑定会话而兜底与回前台都比对。测试替身原来把 content 建模成 slot 的直接子节点（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1 与 M3 互为兜底全部 SURVIVED —— 因为测试在触发慢钟后又顺手渲染了一次，那次渲染替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把 `\n` 转成 `\r\n`） | 修 4 / 推迟 0 |
 
 ---
 
@@ -3871,3 +3872,202 @@ req close @1527ms。teardown 路由是安全的。
 ` 的帧格式，
    以及宿主压缩中间件显式跳过 `text/event-stream`（`dsh-host-webserver/lib/index.js` 的 filter）。
    我**没有**核过的是：宿主是否在两帧之间做别的写入（比如 keep-alive 探测）、以及它的连接有没有上限。
+
+---
+
+## R-104 · 切换会话后监控列不跟随（用户报障，三处修复 + 四条互不兜底的变异）
+
+覆盖 D-224 ~ D-226。这是 R-103 上线后的第一个报障，而且**是 R-103 把它从偶发放大成显眼的**：
+同一处漏检，8 秒兜底时最坏等 8 秒，60 秒兜底时最坏等一分钟。
+
+### 用户报的是什么
+
+> 切换会话时的侧栏切换是通过事件驱动的吗？目前实测：切换会话时，监控侧栏不更新的概率变高了，
+> 并且要一段时间后才会切换到正确的侧栏。我怀疑是是事件驱动在某种情况下未生效，等待 60s 后
+> 触发兜底进行的切换更新。
+
+他猜的方向对（确实退到了兜底），机制不同：**切换会话本身从来不是事件驱动的**，它靠
+`MutationObserver` → `syncSession()` → `bridge.sessionId` 这条链，R-103 一个字没碰。失效的是
+两件本来能兜住它的事：观察器挂错了层，以及流只绑一次会话、兜底判断的是「有没有流」而不是
+「流绑的是谁」。
+
+### 三处叠加的根因
+
+**一、观察器挂在宿主不替换的那一层。** `attachSlotObserver` 从 `[data-conversation-content]`
+向上爬到最近的 `data-slot` 祖先，在它上面装 `childList: true`（无 `subtree`）。宿主切换会话时
+**整体替换** `[data-conversation-content]`，而真机测到的层级是
+
+    [data-slot="main.conversation"] > .an3WzG_root > .an3WzG_body > [data-conversation-content]
+
+三层之隔，且中间两层保留自己的子节点 —— 所以只替换 content 的那次操作在 slot 上**一条记录都没有**，
+在 content 的父节点上正好一条。R-102 当年在 slot 上看到「切换时 1 条 `{added:1, removed:1}`」，
+那是**整个 wrapper 一起被换**的另一条路径；两条路径都存在，所以这是概率性的，不是必现。
+
+**二、`bridge.sessionId` 因此不动。** 观察器不响 → `syncSession()` 不跑 → `notify()` 不发 →
+Overlay 不重渲染 → `Cards` 拿到的还是 render 时快照的那个 id。
+
+**三、最要命的不对称。** `load()` 每次调用都重读 `const target = liveSessionId() || bridge.sessionId`，
+所以**数据会自愈** —— 兜底时钟一到，`/panel` 问的就是新会话，载荷回来了，列就对了。这正是用户
+看到的「过一段时间会切到正确的侧栏」。但 `startStream()` 只在开流那一刻读一次 `target`，之后再也
+不复核；兜底时钟里写的是 `if (stream === null) startStream()`，而绑在旧会话上的流**开着、健康、
+只是安静**，`stream === null` 永远不成立 —— **重绑那一行永远不会执行**。于是数据对了、流还错着，
+下一轮仍然要等一分钟。数据自愈与流不自愈，是同一个函数里两条相邻的语句。
+
+### 改动
+
+1. **渲染时读宿主属性**（`packages/ui-evolve/lib/client.js`，`Cards` 内）：
+   ```js
+   const liveId = liveSessionId()
+   const sessionId = liveId === "" ? bridge.sessionId : liveId
+   ```
+   原来只有 `const sessionId = bridge.sessionId`。属性是权威，`bridge` 只在观察器响时动，而观察器
+   可能恰好挂在宿主不替换的那一层 —— 一旦漏报，这一列就会一直按旧 id 渲染。每次渲染多一次
+   `querySelector` + `getAttribute`，换来的是与 `load` 同一套判断，两者不会再打架。
+2. **观察器加挂 content 的直接父节点**（`attachSlotObserver`）：新增 `parentNode` 记忆，
+   `if (slot === slotNode && parent === parentNode) return`，末尾
+   `if (parent !== null && parent !== slot) slotObserver.observe(parent, { childList: true })`。
+   两个目标各覆盖一种替换：slot 覆盖「wrapper 一起换」，父节点覆盖「只换 content」。同一个节点时
+   （测试替身或别的宿主形态）只装一份。
+3. **流记住自己绑的会话**：新增 `let streamFor = ""` 与
+   `const watchTarget = () => liveSessionId() || bridge.sessionId`；`stopStream()` 里清空
+   `streamFor`；`startStream()` 里 `const target = watchTarget()` 且 `streamFor = target`；慢钟与
+   `onVisible` 两处判断从 `if (stream === null)` 改成
+   `if (stream === null || streamFor !== watchTarget())`。
+
+三处是**三条独立的救援路径**，任何一条生效都不会让用户等一分钟：观察器知道切换（改 2）、
+下一次渲染读到新属性（改 1）、下一次兜底或回前台发现流绑错（改 3）。
+
+### 测试替身一直建模了一个不存在的宿主（本轮最重要的发现）
+
+原来的 `test/client.test.mjs` 把 `[data-conversation-content]` 建成 `slot` 的**直接子节点**。
+在那个世界里，「观察 slot」与「观察被替换的节点」是同一件事 —— 于是 984 条断言全绿，而真机上的
+漏检一次都测不出来。这不是「测漏了某条路径」，是**替身与真机的树形不一样，导致整类失效不可见**。
+
+改法：`boot({ conversationDepth: 2 })` 建出 `slot > wrapper > wrapper > content`，
+`contentParent` 指向真正的父节点；`swapConversation()` 把新记录写在 `contentParent` 上而不是
+`slot` 上，并对 `row.target === contentParent && row.options?.childList === true` 的观察器触发。
+
+**换成三层嵌套之后，旧套件仍然是 984 passed / 0 failed** —— 这一条本身就是证据：如果旧断言真能
+抓住这个 bug，重建替身就该有红的。
+
+### 四条变异，最初全部存活（第二个教训）
+
+第一轮 `r104_verify.py` 的结果是三条 SURVIVED。原因不是断言太弱，而是**测试自己替被测的修法干了活**：
+第三块在触发慢钟之后又调了一次 `instance.renderer.deepRender(instance.seat('cards'))`，那次渲染走了
+改 1 的渲染时读取，于是改 1 救了改 3 的场；反过来改 3 也让改 1 的缺失不明显。两条修法互为兜底 =
+两条都不会被单独抓住。
+
+拆法：**一个变异一条路径，每个块只允许一条救援通道，且全程不渲染**。
+
+- `a switch nobody announced is picked up by the next render`：只渲染，不触发慢钟 → 只有改 1 能救
+- `a switch nobody announced still rebinds the stream when the clock comes round`：只触发慢钟，
+  此后不再渲染 → 只有改 3 的慢钟那一半能救
+- `a stream left open on the old session is rebound when the page is looked at again`：**不渲染、
+  也不隐藏** → 只有改 3 的回前台那一半能救
+
+第三条最早写的是「隐藏 → 切会话 → 恢复可见」，那条测的是假的：`onVisible` 的隐藏分支会
+`stopStream()`，`stream` 已经成 `null`，回到前台时 `stream === null` 恒成立，`||` 右边那半从不
+决定结果。真正需要那半的场景是**页面从未离开**（窗口只是被别的窗口遮住、标签页切到前台），此时
+`visibilitychange` 触发而 `document.hidden` 已是 false、流开着且健康、却绑在旧会话上。改成这个
+场景后 M3b 立刻被抓。
+
+### 变异表（每条都亲自跑，跑完从备份恢复并 node --check）
+
+| 变异 | 结果 |
+|---|---|
+| 删掉渲染时读取，退回 `const sessionId = bridge.sessionId` | 红 1：`a switch nobody announced is picked up by the next render` → `[".../events?agent=session-a"]` |
+| 删掉 `slotObserver.observe(parent, ...)` 一行 | 红 1：`something watches the node the conversation is replaced in` |
+| 慢钟退回 `if (stream === null) startStream()` | 红 2：`...when the clock comes round` + `leaving no stream behind on the one it left` |
+| 回前台退回 `if (stream === null) startStream()` | 红 2：`...when the page is looked at again` + `leaving no stream behind on the one it left` |
+| 删掉 error 处理器里的 `if (stream !== opened) return` | 红 1：`a failure queued on a replaced stream does not close its replacement` → 两条流都 `closed: true` |
+
+前四条各自由**不同的断言**抓住，没有两条共用同一句。这一点是专门核过的：第一轮三条存活正是因为共用。
+第五条是审查后才补的，见下。
+
+### 独立审查（一位审查者，无 must-fix，三条 should-fix 全部属实）
+
+审查者读了磁盘活文件（上一轮的教训是快照会过期），基线自测 999 passed / 48 passed，**变异演练
+在 scratch 副本里做，一次没碰仓库**。它的判定：
+
+- **三条触发路径确实存在**（content 父节点的 `childList` 记录 / 任何一次重渲染 / 60 秒慢钟与
+  `visibilitychange`），**没有路径能让一次切换被无限期漏掉**。唯一剩余的零记录情形是宿主替换
+  content 父节点**之上**的层（换 `.body`）—— 改 2 不监视它，但 `watchTarget()` 每次重读属性，
+  慢钟一分钟内治好，这是推流之前的同等上界，不是挂死
+- **改 1 可接受**：`sessionId` 只作为依赖，每个请求都从新的 `liveSessionId()` 读并在接受前复核，
+  渲染期读取与后来提交不一致只多花一次抓取、不会显示错数据
+- **改 2 无泄漏、无双触发、无漏重挂**：一个观察器两个目标，重建前 disconnect、teardown 时
+  disconnect、`parent === slot` 时跳过第二次 observe
+- **改 3 的窗口真实但无害**：DOM 换掉到下一次 `startStream` 之间，旧流送来的帧调
+  `load(true, true)` 会重读目标并抓**新**会话 —— 那些帧反而成了变化探测器
+- **四条变异各由不同断言抓住**（它在副本里独立复核）
+
+三条 should-fix 全是真问题，已全部修：
+
+1. 同一函数里两处注释互相矛盾（一处说「切换是 slot 上的两条记录」，另一处说「slot 上一条都没有」）。
+   已整段重写为「哪一层收到记录取决于宿主替换了多少」
+2. 回前台那段注释只解释了「别拆健康的流」，没解释 `:3145` 现在还会重开**绑错会话**的流。已改成
+   两个理由并列
+3. **一条真实缺陷**：`error` 处理器调的是 `stopStream()`，关的是**当前**那条流而不是捕获的
+   `opened`。改 3 让开关次数变多之后，一个陈旧处理器会**关掉健康的新流**，让面板退回慢钟 ——
+   正是本次要消除的症状类。已加 `if (stream !== opened) return`
+
+它也点出两处测试诚实性问题：一条自称为行为测试的断言其实是白盒（删掉父节点观察器时它变红，但
+它旁边的行为兄弟因为改 1 兜底仍然通过），已改名为 `structurally, …` 并写清原因；另一条
+`and the timer that arrives later agrees` 重复断言了上一行的表达式，已改名为
+`a later tick does not undo the switch`。
+
+### 为那条真实缺陷补测试时，我写的第一版是假通过
+
+第一版用「切会话 → 新流 → 让旧流补发一个 error」构造。删掉守卫，测试**仍然绿**。
+
+原因写在代码里了：切会话会**重跑 effect**，旧处理器闭包里的 `stream` 属于上一轮，cleanup 早已
+把它置 `null`，`stream !== opened` 恒真 —— 守卫在这一幕里根本没机会起作用。守卫真正防的是
+**同一个 effect 闭包内重开**：慢钟或回前台把 `stream` 换成新源，而旧源的处理器仍指着同一个
+`stream` 变量。
+
+改成「页面从未离开（窗口被遮住）→ 切会话 → 重放 `visibilitychange`」之后，删守卫立刻红：
+两条流都 `closed: true`。**教训与上一节同源——测试若走的路径不经过被测代码，它证明的是别的
+东西。**
+
+### 一次自己造成的全仓库 CRLF 污染
+
+`node test/mutations.test.mjs` 报 **12 条「missing 锚点」**，且
+`bundle 21965 chars vs generated 21564`。根因：我用 Python
+`Path.write_text(text, encoding='utf-8')` 改文件 —— **Windows 上它把换行符逐字转成 CRLF**。
+三个文件全成了 CRLF：`packages/ui-evolve/lib/client.js`（4709 行）、`test/client.test.mjs`（7962）、
+`scripts/mutate-checklist-panel.mjs`（1397）。本仓库 `.gitattributes` 是 `* text=auto eol=lf`，
+`git config core.autocrlf` = `true`。
+
+症状特征值得记住：**只有多行锚点报 missing，单行锚点全对** —— 因为源码里的换行变成了 CRLF。
+
+排查时误判过两次：①先 `git checkout` 还原 client.js 再跑仍红 —— 因为**脚本本身也已经是 CRLF**；
+②`git show HEAD:... | grep -c` 数得 2/1（HEAD 是 LF），与工作树不一致，让我一度怀疑锚点配对错位，
+最后写了个逐条打印 idx + 文件 + 锚点前缀的脚本，才看到「文件里真有 CRLF」。
+
+修法：`read_bytes().replace(b'\r\n', b'\n')` + `write_bytes` 逐文件转；**今后所有 Python 写文件
+必须 `newline='\n'` 或用 `write_bytes`**。转换后 `node test/mutations.test.mjs` 回到 48 passed，
+`git diff --stat` 也从「整文件重写」回到 3 files / 329 insertions / 17 deletions
+（那是当时的数字；审查意见落地后又加了 `client.js` 的一条守卫与一个测试块，最终见下方收尾数据）。
+
+### 收尾数据
+
+- 全量（仓库外 TMPDIR）**4215 passed / 0 failed**
+- `node test/client.test.mjs` → 1001 passed / 0 failed
+- `node test/mutations.test.mjs` → 48 passed / 0 failed
+- `node scripts/mutate-checklist-panel.mjs` → **148 killed, 0 survived, 0 not applied**
+- `node scripts/mutate-language-and-files.mjs` → **230 killed, 0 survived, 0 not applied, 0 crashed**
+- 六个改动文件逐字节 `CR=0`；`git diff --stat` 6 files changed, 753 insertions(+), 31 deletions(-)
+- 数字分两批：审查意见落地前是 4213 / 999 / 147，补上那条第 3 条缺陷的测试与变异后是 4215 /
+  1001 / 148。两批都在安静树上串行跑完（变异脚本不与任何套件并发）
+
+### 诚实缺口
+
+1. **真机复测未做。** 宿主内存里是旧模块，需要重启桌面端才生效 —— 只能由人做。而且这个 bug 是
+   概率性的（取决于宿主走哪条替换路径），单次「没再出现」不构成证据
+2. **「切换可以零记录落地」这条推论没有在真机上单独钉死。** 我测到的是层级与「只替换 content 时
+   slot 上无记录」这个 DOM 事实，以及用户报告的间歇性；但没能在真机上抓到一次完整的
+   「切换瞬间 slot 零记录」现场（hero 页没有会话，造不出切换）。三处修法对这个推论都是**下界**：
+   即使推论过头，改 1 与改 3 也各自独立成立
+3. 渲染期读 DOM 是这次为了让「任何一次重渲染都能自愈」而做的选择。它成本很低（一次属性查询），
+   但严格说仍是渲染函数里的读取 —— 这一列本来就是手写 bundle，与文件里既有的 `liveSessionId()`
+   调用同一风格
