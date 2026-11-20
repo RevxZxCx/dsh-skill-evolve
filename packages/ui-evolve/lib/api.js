@@ -471,299 +471,81 @@ function newestFirstOf(paths, newestFirst) {
 }
 
 // ---------------------------------------------------------------------------
-// What counts as generated, in one place.
+// What counts as a deliverable.
 //
-// These tables live at module scope, not inside `isNoisePath`, because the
-// output card is no longer the only reader: the S7 workspace walk has to skip
-// the same directories before it reads them, and a second copy of this list
-// would drift from the first. The drift would be silent and expensive — the
-// walk would collect a thousand rows under `node_modules` that the card then
-// filters out, or skip a directory the card would have shown.
+// The card answers one question: which documents did this session hand over for
+// a person to read. Not "which files changed" -- that question has four answers
+// that all disagree, and every one of them put source code on a card nobody
+// wanted to read.
 //
-// `isNoisePath` still owns the decision. Nothing below decides anything on its
-// own; the walker only asks `isGeneratedDirectory` before descending.
+// A deliverable is a document, an image, a sheet, a deck or a video: the
+// formats a person opens to look at, as opposed to the ones a program opens to
+// run. That is the whole filter, and it is why the nine noise tables this file
+// used to carry are gone -- none of their subjects can reach a card any more.
+//
+// The list is Qoder's, copied rather than invented. It was measured against 31
+// real deliverables across 14 real sessions and scored 31 of 31 with no false
+// positive; a list re-derived from taste would have to earn that score again.
 // ---------------------------------------------------------------------------
-// Never classify the file itself by extension alone: `package.json` and
-// `cargo.lock` both live at the root and only the latter is generated.
-const GENERATED_DIRS = new Set(['node_modules', 'dist', 'build', 'out', '.next', '.nuxt', '.turbo', '.cache', '__pycache__', '.venv', 'venv', 'target', 'coverage', '.pytest_cache', '.mypy_cache', '.gradle', '.idea', '.git'])
-const GENERATED_FILES = new Set(['package-lock.json', 'yarn.lock', 'pnpm-lock.yaml', 'bun.lockb', 'cargo.lock', 'poetry.lock', 'pipfile.lock', 'composer.lock', 'gemfile.lock', 'uv.lock', 'go.sum'])
-const GENERATED_SUFFIXES = ['.min.js', '.min.css', '.map', '.pyc', '.pyo', '.class', '.o', '.obj']
+const DELIVERABLE_SUFFIXES = new Set([
+  'pdf', 'doc', 'docx', 'md', 'markdown', 'txt',
+  'xls', 'xlsx', 'xlsm', 'csv', 'tsv',
+  'ppt', 'pptx', 'html', 'htm',
+  'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg',
+  'mp4', 'webm',
+])
 
-// Scratch files, which turn out to be most of what a long session leaves
-// behind. Measured before this rule existed: 276 tracked paths across every
-// stored session, zero of them classified as generated — the filter looked
-// broken, and was, because none of the rules above described the data. One
-// 175-file session was 130 rows of `_peek2.py`, `_r062_snapx.py`, `_dump.json`:
-// scripts written to answer a single question, never meant to be read again.
+// Names that are never a hand-over, whatever the extension says: Office lock
+// files (`~$Report.docx`) and the truncated temporaries some editors leave
+// (`~WRL0001.tmp`). A person never opens one, and they sit beside the real file
+// under a name that sorts next to it.
+const TEMPORARY_NAME = /^(?:~\$|\.~|~)/u
+
+// Directory segments that never hold a deliverable, wherever they sit in the
+// path. Two groups, both defensible without knowing which project this is:
+// dependency and build scratch (Qoder's own list), and the directories whose
+// contents are either secrets or another program's private state.
 //
-// The leading underscore is the load-bearing half. It is the oldest convention
-// there is for "scratch, or not part of the interface", and it is what these
-// sessions actually produce.
-/**
- * How long a remembered path stays in the reader's view before it is demoted.
- *
- * Seven days is a judgement, not a measurement. The two ends are: a session that
- * ran this morning must not shuffle its rows under the reader, and a session from
- * last month should not greet them with a hundred rows of scratch files. Nothing
- * is deleted at this boundary — the rows move one group down and the header says
- * how many there are — so the cost of being wrong is a group label, and the cost
- * of being too eager is a file the reader wanted to click parked one group lower.
- */
-const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
-
-const TEMP_DIRS = new Set(['tmp', 'temp', 'scratch', '.tmp', '.temp', '.scratch', '.research', '.probe', '.sandbox', '.playground', '.trash'])
-// Dunder names are the exception that makes the underscore rule safe. Two
-// families live here and both belong to the project: directories such as
-// `__tests__/`, `__mocks__/`, `__fixtures__/`, and Python's dunder modules
-// `__init__.py`, `__main__.py`, `__about__.py`. The first draft required the
-// name to *end* with `__`, which protected the directories and hid
-// `__init__.py` — the one file every Python package has. A leading `__` is
-// the whole test: no scratch convention starts a name that way, and the cost
-// of guessing wrong is a package marker hidden from the card.
-const dunderName = (segment) => segment.startsWith('__')
-// Files only. `scratchDirectory` below is the half of this that may be asked
-// about a directory, and it deliberately leaves one rule out.
-const scratchName = (segment) => {
-  if (dunderName(segment)) return false
-  if (TEMP_DIRS.has(segment)) return true
-  return segment.startsWith('_')
-}
+// What is deliberately absent: this repository's own scratch trees -- `_tmp-test`,
+// `_qoder_rev`, `.review` -- and the prefix rules that grew around them. Those
+// suppressed rows the four collectors produced in bulk. The only source now is a
+// declaration, which is the model saying "this is for you"; a table about the
+// author's directory habits has no business overriding an explicit act. If a
+// declared file lives somewhere odd, showing it is the honest answer.
+const UNDELIVERABLE_DIRS = new Set([
+  '.cache', 'cache', 'tmp', 'temp', 'node_modules', '__pycache__',
+  '.git', '.ssh', '.aws', '.qoder', '.qoder-cn', '.lingma',
+])
 
 /**
- * Whether a directory is a scratch tree, i.e. a place nobody keeps source.
+ * Whether this path is a document a person could open.
  *
- * The same convention as `scratchName` minus one rule, and the missing rule is
- * the whole point. A leading underscore was written for scratch FILES —
- * `_slot_probe.mjs`, `_probe5.mjs`, names a session typed and then abandoned.
- * Asked about a DIRECTORY it catches `_prototype/`, `_posts/`, `_layouts/`,
- * `_build/`: a preview someone asked to see, a Jekyll site, a Hugo theme.
+ * Case-insensitive on the extension, because Windows and macOS write `PDF` and
+ * `pdf` for the same file and the list is written in lower case.
  *
- * Measured on one real session: fourteen files under `_prototype/` — an
- * `index.html`, a stylesheet, four scripts and eight screenshots — were all
- * filed as generated. Every row was generated, so the header had no number left
- * to show, and the turn looked like it had produced nothing. Those files were
- * the turn.
- *
- * `isGeneratedDirectory` already refuses this rule for directories and wrote
- * down why: "a traversal that pruned a subtree can never get it back". The card
- * keeps its rows, so its version of the mistake is smaller — but it is the same
- * mistake. A row filed under "generated" sits behind a disclosure the reader
- * has no reason to open, which for them is also gone.
- *
- * A named temp directory is a different claim and is kept: nobody keeps source
- * in `tmp/` or `.probe/`, so that half holds whether the question is about a
- * file or a directory.
- *
- * @param {string} segment - one directory name, already case-folded, not a path.
- * @returns {boolean} whether the directory is a scratch tree.
+ * @param {string} path - an absolute path, in either slash style.
+ * @returns {boolean} whether the card may show it.
  */
-const scratchDirectory = (segment) => TEMP_DIRS.has(segment)
-
-// Dot files are the other half of the convention (`.probe-slice.mjs`), but a
-// dot file is far more often part of the project than temporary, and the cost
-// is lopsided: hiding `.gitignore` hides something the reader may have just
-// asked for, while showing `.probe-slice.mjs` costs one row they scroll past.
-// So the config names stay, and everything else dotted is treated as scratch.
-const CONFIG_FILES = new Set(['.gitignore', '.gitattributes', '.gitmodules', '.editorconfig', '.npmrc', '.nvmrc', '.node-version', '.python-version', '.tool-versions', '.dockerignore', '.gitkeep', '.yarnrc'])
-const CONFIG_PREFIXES = ['.env', '.eslintrc', '.prettierrc', '.stylelintrc', '.babelrc', '.swcrc', '.markdownlint', '.commitlintrc', '.lintstagedrc', '.prettierignore', '.eslintignore']
-const configName = (segment) => {
-  if (CONFIG_FILES.has(segment)) return true
-  return CONFIG_PREFIXES.some((prefix) => segment === prefix || segment.startsWith(`${prefix}.`))
-}
-const dotName = (segment) => segment.startsWith('.') && segment.length > 1
-
-/**
- * Whether a directory may be skipped without reading it.
-
- * The walker asks this before descending. It is the same test `isNoisePath`
- * applies to every ancestor segment, lifted so it can be asked one level at a
- * time during a traversal instead of once per finished path.
- *
- * Case-folded here rather than at the call sites: a directory name read from
- * the filesystem arrives in whatever case the disk uses, while the tables are
- * written in lower case.
- *
- * @param {string} segment - one directory name, not a path.
- * @returns {boolean} whether its contents cannot be output.
- */
-function isGeneratedDirectory(segment) {
-  if (typeof segment !== 'string' || segment.length === 0) return false
-  // GENERATED_DIRS only. `scratchName` is deliberately NOT applied here: its
-  // leading-underscore rule was written for scratch FILES, and on directories it
-  // would prune `_posts`/`_layouts`/`_data` in every Jekyll site and `_build` in
-  // Hugo — all source. The card can filter a row after reading it; a traversal
-  // that pruned a subtree can never get it back, so when the two rules disagree
-  // this one must be the narrower of the two.
-  //
-  // The card used to disagree anyway, through `scratchName` on ancestors, and it
-  // cost a real session fourteen files. `scratchDirectory` exists so the two
-  // now answer with the same narrower rule.
-  return GENERATED_DIRS.has(segment.toLowerCase())
-}
-
-// Directories a traversal may refuse to enter, which is a STRICTER question than
-// whether the card hides a row, and the two lists therefore differ on purpose.
-//
-// `isGeneratedDirectory` above answers "would a reader rather not see this row".
-// It counts `dist` as generated, and it is right: a bundle is not something
-// anyone wrote. But the S8 walk exists precisely because git cannot see ignored
-// files, and a build output directory is the one place where those two facts
-// coincide — `dist/` is in `.gitignore` in every JavaScript project, and it is
-// where a script's output lands. Measured on a real repository: with
-// `dist`/`build`/`out`/`target`/`coverage` pruned, the walk returned four files
-// and `check-ignore` was asked about none of the two that mattered, so the
-// bracket added to cover git's blind spot was blind in the same spot.
-//
-// What stays pruned is everything that cannot hold a turn's output at all:
-// dependency trees, version-control internals, tool caches, virtualenvs, IDE
-// indexes. `node_modules` is the only one that matters for the entry budget —
-// the same reason the walk does not descend into everything.
-const UNWALKABLE_DIRS = new Set(['node_modules', '.git', '.svn', '.hg', '__pycache__', '.venv', 'venv', '.cache', '.pytest_cache', '.mypy_cache', '.gradle', '.turbo', '.idea', '.next', '.nuxt'])
-
-// Working copies and scratch trees, which are dot-prefixed rather than named.
-//
-// Measured on the largest stored session: 200 remembered paths, 114 under
-// `.rv-head/`, 62 under `.tmp-test/`, 21 under `.review/` — 197 of them review
-// copies, test scratch and probe files. `isUnwalkableDirectory` refused none of
-// them, because the table above matches whole names and these are prefixed.
-//
-// This list is the walker's, not the card's. A row under `.rv-head/` is still
-// worth showing if a turn somehow produced one; what is not worth doing is
-// reading a thousand files of a copy to find out. The same walk therefore both
-// prunes these and keeps classifying what it does read through `isNoisePath`.
-//
-// Prefixes rather than a name list because the suffix is the part that varies:
-// `.rv-head`, `.rv-prev`, `.rv-sbx`, `.audit-s8e2b` are all the same thing a
-// different reviewer made, and a table of exact names would miss the next one.
-const UNPRODUCTIVE_DIRS = new Set(['.tmp-test', '.review', '.nyc_output', '.parcel-cache', '.rollup.cache', '.vitest', '.jest'])
-const UNPRODUCTIVE_PREFIXES = ['.rv-', '.audit-', '.tmp-', '.probe-', '.scratch-', '.sandbox-', '.playground-']
-
-// A separator or a digit right after a listed name, as in `.review-tmp` or `.review2`.
-//
-// The prefix table above already carries the reasoning - "the suffix is the part that
-// varies" - but the names above were written as exact strings, so the same directory
-// under a different suffix slipped through both tables: `.review-tmp` was neither
-// pruned from the walk nor called generated by the card, and 78 of its 83 files
-// reached the panel as work a person had done. A name that is followed by a letter is
-// a different word (`.reviewer-notes`), so letters do not count.
-const SUFFIX_BREAK = /^[-_.\d]$/u
-
-/**
- * Whether a directory name belongs to either working-copy table.
- *
- * One definition, two callers: the walker and `isNoisePath`. They used to spell the
- * same test out twice, and the second copy's comment already warned that repeating it
- * is what lets the two drift.
- *
- * @param {string} segment - one directory name, not a path.
- * @returns {boolean} whether the table calls it a working copy or scratch tree.
- */
-function isUnproductiveDirectory(segment) {
-  if (typeof segment !== 'string' || segment.length === 0) return false
-  const folded = segment.toLowerCase()
-  if (UNPRODUCTIVE_DIRS.has(folded) === true) return true
-  for (const listed of UNPRODUCTIVE_DIRS) {
-    if (folded.startsWith(listed) === true && SUFFIX_BREAK.test(folded.charAt(listed.length)) === true) return true
+function isDeliverable(path) {
+  if (typeof path !== 'string' || path.length === 0) return false
+  const slashed = path.replace(/\\/gu, '/')
+  // A trailing separator says "this is a directory" and nothing else. Splitting
+  // and filtering empty segments would throw that away and let `report.pdf/`
+  // through as a document, which is how a directory ends up on a card.
+  if (slashed.endsWith('/') === true) return false
+  const segments = slashed.split('/').filter((segment) => segment.length > 0)
+  if (segments.length === 0) return false
+  const name = segments[segments.length - 1]
+  if (TEMPORARY_NAME.test(name) === true) return false
+  for (const segment of segments.slice(0, -1)) {
+    const folded = segment.toLowerCase()
+    if (UNDELIVERABLE_DIRS.has(folded) === true) return false
   }
-  return UNPRODUCTIVE_PREFIXES.some((prefix) => folded.startsWith(prefix))
-}
-
-/**
- * Whether a traversal should refuse to enter a directory.
- *
- * A strict subset of `isGeneratedDirectory`: see the table above for why the
- * build-output directories are walked even though the card calls them generated.
- * The walk still classifies what it finds through `isNoisePath`, so a bundle in
- * `dist/` lands in the card's "generated" group rather than among the sources.
- *
- * Three tests, narrowest first. The name table is kept apart from the prefix
- * table because they fail differently: a name is either in the set or not, while
- * a prefix can collide with real source (`.probing/` would match `.probe-` only
- * if the dash were dropped, so the dash is load-bearing).
- *
- * @param {string} segment - one directory name, not a path.
- * @returns {boolean} whether its contents are unreachable for this purpose.
- */
-function isUnwalkableDirectory(segment) {
-  if (typeof segment !== 'string' || segment.length === 0) return false
-  const folded = segment.toLowerCase()
-  if (UNWALKABLE_DIRS.has(folded)) return true
-  return isUnproductiveDirectory(folded)
-}
-
-/**
- * Paths that a person did not write.
- *
- * The output card answers "what did this session produce". Lockfiles, build
- * output, dependency trees and caches are produced by tools the session ran,
- * not chosen by anyone, and a single `npm install` can put two hundred of them
- * on a list whose useful length is three. Claude Code's diff panel makes the
- * same call and skips test and generated files outright.
- *
- * The predicate is deliberately conservative: a false negative costs one scrolled
- * past row, while a false positive hides something the reader asked about. So it
- * matches whole directory segments and known generated filenames only, never a
- * substring and never a source directory — `src/build/`, `docs/dist.md` and
- * `test/fixtures/lock.json` all stay visible.
- *
- * Filtering is not deletion. The client shows the counts and offers the same
- * disclosure control it uses for the fold, so a skill that writes a lockfile is
- * still auditable.
- *
- * @param {string} path - an absolute path.
- * @param {string} [cwd] - the session's working directory, if known.
- * @returns {boolean} whether the path is machine-generated.
- */
-function isNoisePath(path, cwd) {
-  const normalized = String(path).replace(/\\/g, '/')
-  // Only the segments below the workspace count. A checkout can live anywhere:
-  // CI puts it at `/build/<repo>`, a developer at `D:/build/mine`, and some people
-  // open the output folder itself as a workspace. Judging the ancestors would
-  // call every file in all three generated, hide the whole list, and leave the
-  // card announcing "0 个文件" for a session that edited a dozen.
-  const root = typeof cwd === 'string' && cwd.length > 0 ? cwd.replace(/\\/g, '/').replace(/\/+$/, '') : ''
-  // Compared, and cut, without case. The two halves come from different places
-  // and neither normalises: `cwd` is whatever the session header says, the path is
-  // whatever the tool argument said. On Windows and macOS they are routinely the
-  // same directory written differently, and a case-sensitive comparison would
-  // decline to strip the prefix, fall through to judging every ancestor, and hide
-  // the whole list — the same mistake this parameter exists to prevent.
-  //
-  // The cut is taken from the folded string rather than from the original with the
-  // folded prefix's length: lowercasing is not length-preserving (`İ` becomes two
-  // code units), so slicing the original by the prefix length can land a character
-  // past the separator and turn `dist/` into `ist/` — which reads as a source file
-  // and hides a generated one, or the other way round. Every use of these segments
-  // below compares case-insensitively anyway, so folding the whole remainder costs
-  // nothing.
-  const folded = normalized.toLowerCase()
-  const foldedRoot = root.toLowerCase()
-  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded
-  const segments = scoped.split('/').filter((segment) => segment.length > 0)
-
-  // Tables and name predicates are at module scope; see the block above
-  // `isNoisePath`. Repeating them here is what let them drift.
-  const name = segments[segments.length - 1] ?? ''
-  const lowerName = name.toLowerCase()
-  // Working copies first, and by the same two tables the walker uses. A row under
-  // `.rv-head/` or `.tmp-test/` is a copy a review made or a scratch file a test
-  // wrote — nobody typed it, and the largest stored session was 197 such rows out
-  // of 200. The card's test is the WIDER of the two on purpose (it also counts
-  // `out`/`dist`/`build`, which the walk still enters), so sharing the tables here
-  // is what keeps the two from answering differently about the same directory.
-  if (segments.slice(0, -1).some((segment) => isUnproductiveDirectory(segment))) return true
-  // Directories next: anything under a scratch directory is scratch, whatever
-  // it is called. Dot directories are deliberately not covered wholesale —
-  // `.github/` and `.vscode/` are project directories — only the named ones.
-  //
-  // `scratchDirectory`, not `scratchName`: the underscore rule does not survive
-  // being asked about a directory. See that function for the fourteen real files
-  // it hid.
-  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true
-  if (GENERATED_FILES.has(lowerName)) return true
-  if (GENERATED_SUFFIXES.some((suffix) => lowerName.endsWith(suffix))) return true
-  if (scratchName(lowerName)) return true
-  return dotName(name) && configName(lowerName) === false
+  const dot = name.lastIndexOf('.')
+  // No extension at all is not a document: a `Makefile` or a `LICENSE` is a
+  // project file, and the card is not a project browser.
+  if (dot <= 0) return false
+  return DELIVERABLE_SUFFIXES.has(name.slice(dot + 1).toLowerCase())
 }
 
 /**
@@ -881,7 +663,7 @@ function cannotBeAPath(path) {
  *
  * @param {(path: string) => Promise<{ isFile: () => boolean, size: number, mtimeMs: number }>} [input.readStat] - how to stat a path, for tests. `isFile()` returning false is not a failure: it is how a folder is told apart from an unreadable path, and the row reports it as `folder`.
  * @param {number} [input.now] - the clock `stale` is measured against, for tests.
- * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved' | 'folder', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, noise: boolean, stale: boolean, source: 'git' | 'scan' | null }>>} one row per candidate.
+ * @returns {Promise<Array<{ path: string, status: 'available' | 'missing' | 'invalid' | 'unresolved' | 'folder', bytes: number | null, mtimeMs: number | null, at: number | null, address: string, turn: boolean, deliverable: boolean }>>} one row per candidate.
  */
 
 // Mirrors `MAX_PATHS` in session-state.js on purpose: the list that comes from
@@ -925,13 +707,10 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
     seen.add(absolute)
     const recordedTurn = typeof raw === 'object' && raw !== null ? raw.turn : undefined
     const recordedAt = typeof raw === 'object' && raw !== null ? raw.at : undefined
-    // Which bracket found this file: `git` for the diff, `scan` for the directory
-    // walk that fills in what git cannot see. Passed through untouched — this
-    // layer has no opinion about provenance, and re-deriving it here would mean
-    // guessing from a path what only the collector knows. Absent for a bare
-    // string (the `previous.paths` fallback) and for documents written before
-    // the field existed, so the card must treat `undefined` as "unknown".
-    const recordedSource = typeof raw === 'object' && raw !== null ? raw.source : undefined
+    // What the model said about this file, carried through unchanged. A bare
+    // string and an object without a description both mean "nothing was said",
+    // which is one value, not two.
+    const recordedDescription = typeof raw === 'object' && raw !== null && typeof raw.description === 'string' ? raw.description : ''
     // "This turn" means the turn the card is describing, and the card describes
     // `previous` — its head counts and its path list both come from there. So the
     // path comparison answers whenever a snapshot exists.
@@ -953,13 +732,20 @@ async function statTouchedFiles({ paths, cwd, sessionId, turnPaths, turnNow, rea
       path: absolute,
       address: resourceAddress(sessionId ?? '', cwd, absolute),
       turn,
-      noise: isNoisePath(absolute, cwd),
       at: Number.isFinite(recordedAt) ? recordedAt : null,
-      // Three states, like the file's own status: recent, old, unknown. "Unknown"
-      // is not "old" — a record written before `at` was kept cannot be aged, and
-      // demoting it would be sorting on a number that was never recorded.
-      stale: Number.isFinite(recordedAt) && Number.isFinite(clock) ? clock - recordedAt >= STALE_AFTER_MS : false,
-      source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,
+      description: recordedDescription,
+      // Asked here, on the way out, rather than at collection time. Two reasons.
+      //
+      // The list this reads is a session's own history, and a session that ran
+      // before the card meant "delivered documents" recorded source files in it.
+      // Those records are still on disk and still arrive here, so the question
+      // has to be answered again on every read or the card keeps showing what the
+      // old rule let in.
+      //
+      // And it is the only place that sees the absolute path. The record stores
+      // what the model declared, which is usually absolute already but need not
+      // be; a whitelist applied before the join would be judging a fragment.
+      deliverable: isDeliverable(absolute),
     }
     pending.push({ path, absolute, isAbsolute, base })
   }
@@ -1635,11 +1421,6 @@ async function readPanel(deps, agentId) {
     // to describe the same turn or the three numbers read as one set while one
     // of them is about the whole session. The cumulative list is `files`.
     turnFiles: Array.isArray(previous?.paths) ? previous.paths.length : 0,
-    // What the last sweep could see, not how many files it found. The card needs
-    // this to tell "nothing else was produced" apart from "nothing else was
-    // produced that I could see", and only the sweep knows which one it is. Null
-    // when no sweep has reported — an older build, or a turn before this existed.
-    sweep: typeof deps.sweepSeen === 'function' ? (deps.sweepSeen(id) ?? null) : null,
     commands: previous?.commands ?? [],
     tools: previous?.tools ?? [],
     calls: previous?.calls ?? 0,
@@ -1771,7 +1552,5 @@ export {
   decideCandidate,
   clampText,
   MAX_BODY_BYTES,
-  isNoisePath,
-  isGeneratedDirectory,
-  isUnwalkableDirectory,
+  isDeliverable,
 }

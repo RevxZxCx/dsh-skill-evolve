@@ -2617,66 +2617,6 @@ try {
 // The reader is injected through the third `apply` argument, which exists for
 // exactly this: the alternative is a test that needs a repository on disk, and a
 // test nobody can run is not a test.
-{
-  const root = await makeTempRoot('skill-evolve-git-')
-  process.env.DSH_HOME = root
-
-  const answers = [
-    // `turn/start`: the working tree already holds one untracked file.
-    ['C:/work/old.txt'],
-    // `turn/end`: a script wrote a new one, and the old one is still uncommitted.
-    ['C:/work/old.txt', 'C:/work/report.docx'],
-  ]
-  const asked = []
-  const changes = async (cwd) => {
-    asked.push(cwd)
-    const next = answers.shift()
-    return next === undefined ? [] : next
-  }
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes })
-
-  const agent = fakeAgent('git-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '跑一下生成脚本' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, toolCall('ops_bash', 'git_call_1'))
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 4, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  // The start reading is taken in a microtask so a slow `git status` never
-  // blocks the turn, so nothing is measured yet at this point. Both readings are
-  // asserted after they have had their chance to land — and the stream is what
-  // is under test here, not the ordering inside `GitWatch`, which
-  // `git-watch.test.mjs` owns.
-  await new Promise((done) => { setTimeout(done, 10) })
-  check('the bracket reads the workspace the session runs in', asked.length === 2 && asked[0] === 'C:/work', JSON.stringify(asked))
-  check('and reads it again when the turn ends', asked.length === 2 && asked[1] === 'C:/work', JSON.stringify(asked))
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    // The route drains on 'close' and writes a status head; a stub without
-    // these throws inside `json()` instead of exercising the route.
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const paths = (payload.data?.files ?? []).map((file) => file.path)
-  check('a file a script wrote appears on the card', paths.some((path) => path.endsWith('report.docx')) === true, JSON.stringify(paths))
-  check('and the file that was already dirty is not attributed to the turn', paths.some((path) => path.endsWith('old.txt')) === false, JSON.stringify(paths))
-}
 
 {
   // A workspace that is not a repository has to be a quiet no-op. `F:\test` —
@@ -2721,278 +2661,17 @@ try {
   check('and adds no rows of its own', (payload.data?.files ?? []).length <= 1, JSON.stringify(payload.data?.files))
 }
 
-{
-  // Coverage is the sweep's confession, and a confession nobody reads is not a
-  // confession. `session-state.test.mjs` proves it is stored; this proves it
-  // reaches the panel payload — the only place the card could learn it. It runs
-  // as its own stream because the interesting case ends a turn with no new files:
-  // the doubt exists precisely when there is nothing to show.
-  const root = await makeTempRoot('skill-evolve-git-partial-')
-  process.env.DSH_HOME = root
-
-  const answers = [
-    { paths: [], coverage: 'partial' },
-    { paths: [], coverage: 'partial' },
-  ]
-  const changes = async () => {
-    const next = answers.shift()
-    return next === undefined ? { paths: [], coverage: 'complete' } : next
-  }
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes })
-
-  const agent = fakeAgent('git-partial-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '看看那个大仓库' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  // The turn wrote nothing, so the caveat is the only thing it has to say — and
-  // that is exactly the case where silence would be read as "clean".
-  check('a half-read sweep reaches the panel', payload.data?.sweep?.coverage === 'partial', JSON.stringify(payload.data?.sweep))
-  check('and it names the turn it could not finish reading', payload.data?.sweep?.turn === 1, JSON.stringify(payload.data?.sweep))
-}
-
-{
-  // A session that has never been swept answers `null`, not `complete`. The panel
-  // has to be able to tell "no claim was made" from "a claim of completeness" —
-  // otherwise every session from before this feature existed looks verified.
-  const root = await makeTempRoot('skill-evolve-git-unswept-')
-  process.env.DSH_HOME = root
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), { changes: async () => ({ paths: [], coverage: 'complete' }) })
-
-  const agent = fakeAgent('git-unswept-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  check('a session no sweep has visited makes no claim', payload.data?.sweep === null, JSON.stringify(payload.data?.sweep))
-}
 
 
 
-{
-  // The case that motivated S7, and the reason it exists at all: a workspace
-  // that is not a repository. Measured on this machine — `F:\\test` answers
-  // `fatal: not a git repository`, so the git sweep can only say "nothing", and
-  // until now that silence was reported as "the turn produced nothing".
-  //
-  // The scan is injected rather than run against a real tree: what this block
-  // has to prove is the wiring — that a scan answer reaches the card when git
-  // had none — and a real tree would prove the walker, which
-  // `scan-changes.test.mjs` already does with a budget it can drive.
-  const root = await makeTempRoot('skill-evolve-scan-only-')
-  process.env.DSH_HOME = root
 
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => ({ paths: [], coverage: 'complete' }),
-    scan: async () => ({ paths: ['C:/work/out/report.docx'], coverage: 'complete' }),
-  })
 
-  const agent = fakeAgent('scan-only-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
 
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '生成一份报告' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
 
-  await new Promise((done) => { setTimeout(done, 10) })
 
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const paths = (payload.data?.files ?? []).map((file) => file.path)
-  check('a workspace git cannot read is covered by the scan', paths.includes('C:/work/out/report.docx'), JSON.stringify(paths))
-  check('and the turn counts as read', payload.data?.sweep?.coverage === 'complete', JSON.stringify(payload.data?.sweep))
-}
 
-{
-  // When both brackets answer, git wins. Not because it is newer, but because it
-  // knows *why* a file changed: a modification time cannot tell a file this turn
-  // wrote from one a `git checkout` rewrote. Merging them into one list would put
-  // the second kind on the card under a heading that says "produced".
-  const root = await makeTempRoot('skill-evolve-scan-shadowed-')
-  process.env.DSH_HOME = root
 
-  // The git bracket is a difference, so the baseline has to say something
-  // different from the finish. Returning the same list twice makes the two
-  // readings cancel out and the sweep answer "nothing changed" — which is how
-  // this block first failed, and worth stating here so the next reader does not
-  // mistake it for a merge bug.
-  const gitAnswers = [{ paths: [], coverage: 'complete' }, { paths: ['C:/work/src/real.ts'], coverage: 'complete' }]
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
-    scan: async () => ({ paths: ['C:/work/stale.json'], coverage: 'complete' }),
-  })
 
-  const agent = fakeAgent('scan-shadowed-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '改一下' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const paths = (payload.data?.files ?? []).map((file) => file.path)
-  check('git answers, so the scan does not add a row', paths.includes('C:/work/stale.json') === false, JSON.stringify(paths))
-  check('and the git answer is the one on the card', paths.includes('C:/work/src/real.ts'), JSON.stringify(paths))
-}
-
-{
-  // A truncated walk is the scan's own `partial`. It only becomes the turn's
-  // caveat when the scan was the one answering — a truncated scan behind a
-  // complete git reading says nothing about the files git already named.
-  const root = await makeTempRoot('skill-evolve-scan-partial-')
-  process.env.DSH_HOME = root
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => ({ paths: [], coverage: 'complete' }),
-    scan: async () => ({ paths: [], coverage: 'partial' }),
-  })
-
-  const agent = fakeAgent('scan-partial-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '看看' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  check('a walk that gave up reaches the panel as partial', payload.data?.sweep?.coverage === 'partial', JSON.stringify(payload.data?.sweep))
-}
-
-{
-  // The third state, end to end. A bracket that reports `none` never looked at
-  // the workspace: no baseline, no cwd, or a reader that was never wired. If the
-  // merge flattens that into `complete`, the card tells the reader "nothing else
-  // was produced" about a turn nobody swept -- and it also overwrites a standing
-  // `partial` caveat from the turn before. Where the caveat is written, the third
-  // state is checked here rather than in a unit, because the merge is the only
-  // place both brackets are visible at once.
-  const root = await makeTempRoot('skill-evolve-scan-none-')
-  process.env.DSH_HOME = root
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => ({ paths: [], coverage: 'none' }),
-    scan: async () => ({ paths: [], coverage: 'complete' }),
-  })
-
-  const agent = fakeAgent('scan-none-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '看看' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  check('a bracket that never looked is not reported as clean', payload.data?.sweep?.coverage === 'none', JSON.stringify(payload.data?.sweep))
-  check('and it still names the turn', payload.data?.sweep?.turn === 1, JSON.stringify(payload.data?.sweep))
-}
 
 // ------------------------------------------------------------ S8: merge --
 //
@@ -3004,325 +2683,31 @@ try {
 // that git is unable to name". These blocks drive that split through the real
 // collector with the ignore check substituted, because what has to be proved is
 // which list reaches the store and what each row says about where it came from.
-{
-  const root = await makeTempRoot('skill-evolve-merge-split-')
-  process.env.DSH_HOME = root
 
-  const gitAnswers = [
-    { paths: [], coverage: 'complete' },
-    { paths: ['C:/work/src/real.ts'], coverage: 'complete' },
-  ]
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
-    // `touched.ts` is the case the ignore filter exists for: the walk saw its mtime
-    // move (a checkout, a formatter, an editor rewriting the same bytes) but the
-    // diff reports no change. It is not ignored -- it is a tracked file -- so only
-    // keeping the walk to its ignored list keeps it off the card.
-    scan: async () => ({ paths: ['C:/work/dist/bundle.js', 'C:/work/src/real.ts', 'C:/work/src/touched.ts'], coverage: 'complete' }),
-    ignored: async ({ paths }) => ({ ignored: paths.filter((path) => path.includes('/dist/')), known: true, repository: true }),
-  })
-
-  const agent = fakeAgent('merge-split-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '打包一下' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-  const byPath = new Map(rows.map((file) => [file.path, file]))
-
-  check('the diff reaches the card', byPath.has('C:/work/src/real.ts'), JSON.stringify([...byPath.keys()]))
-  check('and so does the file git cannot see', byPath.has('C:/work/dist/bundle.js'), JSON.stringify([...byPath.keys()]))
-  check('the overlap is one row, not two', rows.length === 2, JSON.stringify(rows.map((file) => file.path)))
-  check('the row the diff named says git found it', byPath.get('C:/work/src/real.ts')?.source === 'git', JSON.stringify(byPath.get('C:/work/src/real.ts')))
-  check('the row only the walk saw says so', byPath.get('C:/work/dist/bundle.js')?.source === 'scan', JSON.stringify(byPath.get('C:/work/dist/bundle.js')))
-  // A file whose mtime moved but whose content did not is not output of this
-  // turn. It is neither ignored nor changed, so it must fall through both
-  // brackets rather than ride in on the walk's list.
-  check('a file only touched, not changed, is not on the card', byPath.has('C:/work/src/touched.ts') === false, JSON.stringify([...byPath.keys()]))
-}
 
 // A walk that duplicates the diff must not add rows. This is the failure mode of
 // a naive union: the same file reported twice, once by each bracket, on a card
 // whose head counts rows.
-{
-  const root = await makeTempRoot('skill-evolve-merge-dup-')
-  process.env.DSH_HOME = root
 
-  const gitAnswers = [
-    { paths: [], coverage: 'complete' },
-    { paths: ['C:/work/src/only.ts'], coverage: 'complete' },
-  ]
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  // The overlap has to reach the store twice for "credited to the diff" to mean
-  // anything: with an empty answer the walk wrote nothing, so the row would say
-  // `git` no matter which way the merge leaned. Returning the path makes the
-  // walk a real claimant, and the credit then depends on write order.
-  let askedFor = []
-  let askedFrom = ''
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
-    scan: async () => ({ paths: ['C:/work/src/only.ts'], coverage: 'complete' }),
-    ignored: async ({ paths, cwd }) => {
-      askedFor = paths.slice()
-      askedFrom = cwd
-      return { ignored: paths.slice(), known: true, repository: true }
-    },
-  })
-
-  const agent = fakeAgent('merge-dup-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '改个名字' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-
-  check('a file both brackets saw is one row', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
-  check('and the diff is credited, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
-  // The walk really did claim this path, so the row above is a verdict rather
-  // than an absence.
-  check('the walk did offer the same file', askedFor.includes('C:/work/src/only.ts') === true, JSON.stringify(askedFor))
-  // And it was asked about this workspace, not some default. Without the cwd the
-  // real check returns `repository: false`, which silently empties the list.
-  check('and it was asked about the right workspace', askedFrom === 'C:/work', String(askedFrom))
-}
 
 // Outside a repository the ignore check has nothing to classify against, so the
 // walk is not filling a gap in a diff — it is the only witness. Reporting
 // `repository: false` is what keeps the two cases apart; without it the caller
 // cannot tell "git hid this" from "there is no git here".
-{
-  const root = await makeTempRoot('skill-evolve-merge-norepo-')
-  process.env.DSH_HOME = root
 
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => ({ paths: [], coverage: 'none' }),
-    scan: async () => ({ paths: ['C:/plain/out/report.docx'], coverage: 'complete' }),
-    ignored: async () => ({ ignored: [], known: true, repository: false }),
-  })
-
-  const agent = fakeAgent('merge-norepo-agent', 'C:/plain')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '生成报告' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-
-  check('with no repository the walk is the only witness', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
-  check('and its row is still marked as the walk', rows[0]?.source === 'scan', JSON.stringify(rows[0]))
-}
 
 // A git too old to know `check-ignore --stdin` cannot answer the question, and
 // "no answer" must not be read as "nothing is hidden". The walk keeps its whole
 // list: dropping it would turn a missing capability into a silently empty card.
-{
-  const root = await makeTempRoot('skill-evolve-merge-noanswer-')
-  process.env.DSH_HOME = root
 
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => ({ paths: [], coverage: 'complete' }),
-    scan: async () => ({ paths: ['C:/work/dist/a.js', 'C:/work/dist/b.js'], coverage: 'complete' }),
-    ignored: async () => ({ ignored: [], known: false, repository: true }),
-  })
-
-  const agent = fakeAgent('merge-noanswer-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '构建一下' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-
-  check('an unanswered question keeps the whole walk', rows.length === 2, JSON.stringify(rows.map((file) => file.path)))
-  check('and neither row claims to be a diff', rows.every((file) => file.source === 'scan'), JSON.stringify(rows.map((file) => file.source)))
-}
 
 // The mirror case: a diff that exists while no repository does. The walk then has
 // nothing to classify against, and its list is most likely files that are merely
 // untracked in a repository git was told nothing about — so it is dropped rather
 // than piled on. Two rows for one file is the failure this prevents.
-{
-  const root = await makeTempRoot('skill-evolve-merge-diffnorepo-')
-  process.env.DSH_HOME = root
 
-  const gitAnswers = [
-    { paths: [], coverage: 'complete' },
-    { paths: ['C:/work/src/main.ts'], coverage: 'complete' },
-  ]
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => gitAnswers.shift() ?? { paths: [], coverage: 'complete' },
-    scan: async () => ({ paths: ['C:/work/src/main.ts', 'C:/work/dist/x.js'], coverage: 'complete' }),
-    ignored: async () => ({ ignored: [], known: true, repository: false }),
-  })
 
-  const agent = fakeAgent('merge-diffnorepo-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
 
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '改一下主文件' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-
-  check('a diff with no repository to explain it stands alone', rows.length === 1, JSON.stringify(rows.map((file) => file.path)))
-  check('and the row is the diff, not the walk', rows[0]?.source === 'git', JSON.stringify(rows[0]))
-}
-
-{
-  // The ignore check is a supplement, so its failure must cost only the walk's
-  // rows. Letting the throw escape would empty the turn entirely -- including the
-  // diff, which had already arrived and needs nothing from git's ignore rules.
-  const root = await makeTempRoot('skill-evolve-merge-throw-')
-  process.env.DSH_HOME = root
-
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    // Baseline first, then the post-turn reading: the fake has to differ across
-    // the two calls or the difference is empty and nothing is recorded.
-    changes: (() => {
-      const answers = [{ paths: [], coverage: 'complete' }, { paths: ['C:/work/src/tracked.ts'], coverage: 'complete' }]
-      return async () => answers.shift() ?? { paths: [], coverage: 'complete' }
-    })(),
-    scan: async () => ({ paths: ['C:/work/dist/bundle.js'], coverage: 'complete' }),
-    ignored: async () => { throw new Error('git went away') },
-  })
-
-  const agent = fakeAgent('merge-throw-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  host.emit('session/event', agent.session, {
-    type: 'user/message',
-    seq: 1,
-    time: Date.now(),
-    data: { message: { role: 'user', content: [{ type: 'text', text: '构建' }] }, source: { kind: 'user' } },
-  })
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 3, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-
-  await new Promise((done) => { setTimeout(done, 10) })
-
-  const route = host.routes.get('/api/ui-evolve')
-  const res = {
-    statusCode: 0,
-    headers: {},
-    setHeader(name, value) { this.headers[name] = value; return this },
-    once() { return this },
-    writeHead(code) { this.statusCode = code; return this },
-    end(body) { this.writableEnded = true; this.body = body; return this },
-  }
-  await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, res)
-  const payload = JSON.parse(res.body)
-  const rows = payload.data?.files ?? []
-  const byPath = new Map(rows.map((file) => [file.path, file]))
-  check('a failing ignore check keeps the diff rows', byPath.has('C:/work/src/tracked.ts') === true, JSON.stringify(rows.map((file) => file.path)))
-  check('and it does not smuggle the walk in either', byPath.has('C:/work/dist/bundle.js') === false, JSON.stringify(rows.map((file) => file.path)))
-}
 
 // ---------------------------------------------------------------------------
 // The push channel, wired to the host's events
@@ -3463,12 +2848,14 @@ try {
   const afterEnd = frames(res).length
   check('a turn ending reaches the panel', afterEnd > afterMcp, `${afterMcp} -> ${afterEnd}`)
 
-  // The second notice. `sweep` and the turn's `files` are written after two
-  // subprocesses answer, so the bump at the top of `turn/end` wakes a fetch that
-  // reads the previous turn's answer. Without this one the panel shows a stale
-  // file list until the minute clock.
-  await new Promise((done) => { setTimeout(done, 30) })
-  check('and so does the answer that arrives after it', frames(res).length > afterEnd, `${afterEnd} -> ${frames(res).length}`)
+  // There used to be a second notice here: `turn/end` bumped once on entry and
+  // again when two subprocesses answered, so a client that read the first fetch
+  // saw the previous turn's file list. Those subprocesses are gone -- the panel
+  // now records what the transcript declared, which is already in hand when
+  // `turn/end` runs -- so one bump is the whole story. The assertion that used to
+  // sit here would now pass without anything happening, which is why it is not
+  // kept as "no further frames arrive": silence is the expected state, and an
+  // assertion cannot tell expected silence from a broken emitter.
 
   // Measured immediately before disposal, not from `afterEnd`: the async bump
   // above already raised the count past that number, so a comparison against it
@@ -3596,102 +2983,7 @@ try {
   )
 }
 
-{
-  // A sweep that fails is not a hypothetical: `git status` fails on a directory
-  // that is not a repository, and the scan fails on a path that went away
-  // between turns. Both watchers answer that with `coverage: 'none'` rather than
-  // a rejection -- so what this proves is the shape of the *reachable* path: a
-  // broken git must not cost the turn its second bump, or the panel waits for
-  // the minute clock, which is the delay this channel exists to remove.
-  const root = await makeTempRoot('skill-evolve-stream-reject-')
-  process.env.DSH_HOME = root
 
-  const host = fakeHost()
-  apply(host.ctx, Config({ mode: 'suggest' }))
-  applyPanel(host.ctx, PanelConfig({ panelSummary: false }), {
-    changes: async () => {
-      throw new Error('not a repository')
-    },
-  })
-
-  const agent = fakeAgent('reject-agent', 'C:/work')
-  host.agents.set(agent.id, agent)
-
-  const res = {
-    statusCode: 0,
-    headers: {},
-    written: [],
-    destroyed: false,
-    writableEnded: false,
-    listeners: [],
-    setHeader(name, value) {
-      this.headers[name] = value
-      return this
-    },
-    writeHead(code, headers) {
-      this.statusCode = code
-      Object.assign(this.headers, headers ?? {})
-      return this
-    },
-    write(chunk) {
-      this.written.push(String(chunk))
-      return true
-    },
-    end(body) {
-      this.writableEnded = true
-      if (body !== undefined) this.written.push(String(body))
-      return this
-    },
-    destroy() {
-      this.destroyed = true
-      return this
-    },
-    once(event, handler) {
-      this.listeners.push([event, handler])
-      return this
-    },
-    on(event, handler) {
-      this.listeners.push([event, handler])
-      return this
-    },
-    removeListener(event, handler) {
-      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
-      if (at >= 0) this.listeners.splice(at, 1)
-      return this
-    },
-  }
-  const req = {
-    url: `/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`,
-    method: 'GET',
-    headers: { host: '127.0.0.1:19387' },
-    listeners: [],
-    once(event, handler) {
-      this.listeners.push([event, handler])
-      return this
-    },
-    on(event, handler) {
-      this.listeners.push([event, handler])
-      return this
-    },
-    removeListener(event, handler) {
-      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
-      if (at >= 0) this.listeners.splice(at, 1)
-      return this
-    },
-  }
-  const route = host.routes.get('/api/ui-evolve')
-  await route.handler(req, res)
-  const frames = () => res.written.filter((line) => line.startsWith('data: ')).length
-
-  host.emit('session/event', agent.session, { type: 'turn/start', seq: 1, time: Date.now(), data: { turn: 1 } })
-  host.emit('session/event', agent.session, { type: 'turn/end', seq: 2, time: Date.now(), data: { turn: 1, reason: { kind: 'completed' } } })
-  const afterEnd = frames()
-
-  // The watchers answer asynchronously and reject; the handler then answers the
-  // reader. Waiting is the only way to see it -- there is no event to hook.
-  await new Promise((done) => { setTimeout(done, 40) })
-  check('a turn whose git sweep failed still reaches the panel', frames() > afterEnd, `${afterEnd} -> ${frames()}`)
-}
 
 {
   // Approving a candidate moves `pendingCandidates`, which is part of the payload,
@@ -3841,44 +3133,46 @@ try {
 // point: with an instant model and an instant sweep, "a frame arrived after
 // `turn/end`" is true whichever of them was announced, and deleting either
 // notice would leave the suite green.
+//
+// The sweep half is gone: the panel no longer runs a git diff or a directory
+// walk, so there is no second answer to wait for. The summary half remains and
+// is the three blocks below.
+
 {
+  // A landing with text wakes the reader.
+  //
+  // Everything here is measured against a stream opened through the real route,
+  // because the bump is only observable as a frame. The model is a stub pinned
+  // through the config, so no provider has to exist.
   const root = await makeTempRoot('skill-evolve-summary-landing-')
   process.env.DSH_HOME = root
 
-  /**
-   * A model service that answers after a delay.
-   *
-   * The delay is what makes the summary distinguishable from the sweep in time;
-   * it is not padding. The catalogue is walked rather than pinned because
-   * `fakeAgent` has no `requestContext`, which is the ordinary case for a
-   * session that has not made its first request yet.
-   *
-   * @param {number} delayMs - how long the call takes to answer.
-   */
-  // `listProviders` is synchronous on purpose: the host's service returns an
-  // array, and `resolveRoute` checks it with `Array.isArray` without awaiting.
-  // An `async` double hands back a promise, that check fails, and every summary
-  // quietly reports "no model route is available" -- which is exactly how the
-  // first version of this block passed every assertion while never once calling
-  // the model.
-  const fakeLlm = (delayMs) => ({
-    listProviders() {
-      return [{ id: 'prov-a' }]
-    },
-    async listModels() {
-      return [{ id: 'model-a', name: 'A' }]
-    },
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+
+  /** A model call that answers with one text delta and a clean finish. */
+  const answerWith = (text) => ({
     async prepareCall(route) {
       return {
         config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
         async *stream() {
-          await new Promise((done) => { setTimeout(done, delayMs) })
-          yield { type: 'text-delta', text: '本轮改了两个文件。' }
-          yield { type: 'finish', reason: { kind: 'stop' } }
+          if (text !== undefined) yield { type: 'text-delta', text }
+          yield { type: 'finish', reason: 'stop' }
         },
       }
     },
   })
+
+  host.ctx.services.set('llm', answerWith('这一轮把卡片的数据源换成了汇报。'))
+
+  applyPanel(
+    host.ctx,
+    PanelConfig({ panelSummary: true, summaryProvider: 'stub', summaryModel: 'stub-model' }),
+    { changes: async () => [] },
+  )
+
+  const agent = fakeAgent('summary-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
 
   const streamRes = () => ({
     statusCode: 0,
@@ -3923,7 +3217,6 @@ try {
       return this
     },
   })
-
   const streamReq = (url) => ({
     url,
     method: 'GET',
@@ -3943,212 +3236,397 @@ try {
       return this
     },
   })
-
   const frames = (res) =>
     res.written
       .filter((line) => line.startsWith('data: '))
       .map((line) => JSON.parse(line.slice('data: '.length)))
 
-  const wait = (ms) => new Promise((done) => { setTimeout(done, ms) })
+  const route = host.routes.get('/api/ui-evolve')
+  const res = streamRes()
+  await route.handler(streamReq(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
 
-  /**
-   * Mount both plugins, open a stream, and record a reader.
-   *
-   * `markViewed` is called from the panel route, so the `/panel` request below is
-   * not setup noise -- without it `warm` returns before doing anything and every
-   * assertion here would hold for the wrong reason.
-   *
-   * @param {string} id - the session id.
-   * @param {object} options - what to slow down.
-   * @param {number} options.llmDelayMs - how long the model takes.
-   * @param {number} options.sweepDelayMs - how long `git status` takes.
-   * @param {object} [options.llm] - a stand-in that replaces the fake outright,
-   *   for the paths a working model cannot reach: a provider that refuses, a
-   *   call that times out, a host with no route at all.
-   */
-  const openWatched = async (id, { llmDelayMs, sweepDelayMs, llm }) => {
-    const host = fakeHost()
-    apply(host.ctx, Config({ mode: 'suggest' }))
-    applyPanel(host.ctx, PanelConfig({ panelSummary: true }), {
-      changes: async () => {
-        await wait(sweepDelayMs)
-        return []
-      },
-    })
-    host.provide('llm', llm ?? fakeLlm(llmDelayMs))
+  // `warm` refuses a session nobody has looked at, and the panel route is the
+  // only thing that records a look. So this is not setup for the test -- it is
+  // the gate itself, driven the way a browser drives it.
+  await route.handler(
+    { url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' }, listeners: [] },
+    streamRes(),
+  )
 
-    const agent = fakeAgent(id, 'C:/work')
-    host.agents.set(agent.id, agent)
-    const route = host.routes.get('/api/ui-evolve')
-
-    const panel = {
-      statusCode: undefined,
-      writableEnded: false,
-      once() {
-        return this
-      },
-      writeHead(code) {
-        this.statusCode = code
-        return this
-      },
-      end(body) {
-        this.writableEnded = true
-        this.body = body
-        return this
-      },
-    }
-    await route.handler({ url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } }, panel)
-
-    const res = streamRes()
-    await route.handler(streamReq(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
-    return { host, agent, route, res }
-  }
-
-  /**
-   * One complete turn: the message that opens it, a tool call inside it, the end.
-   *
-   * A turn opens only on a real human message -- a bare tool/call leaves `turn`
-   * undefined and `turn/end` folds nothing, which would make every assertion
-   * below compare against an empty snapshot.
-   */
-  const runTurn = (host, agent) => {
+  const runTurn = async (turn) => {
     host.emit('session/event', agent.session, {
       type: 'user/message',
-      seq: 1,
+      seq: turn * 10,
       time: Date.now(),
-      data: { turn: 1, message: { role: 'user', content: [{ type: 'text', text: '把构建修一下' }] }, source: { kind: 'user' } },
+      data: { turn, message: { role: 'user', content: [{ type: 'text', text: `第 ${turn} 轮` }] }, source: { kind: 'user' } },
     })
-    host.emit('session/event', agent.session, { type: 'turn/start', seq: 2, time: Date.now(), data: { turn: 1 } })
-    host.emit('session/event', agent.session, toolCall('edit', 'landing_edit_1'))
+    host.emit('session/event', agent.session, { type: 'turn/start', seq: turn * 10 + 1, time: Date.now(), data: { turn } })
     host.emit('session/event', agent.session, {
-      type: 'turn/end',
-      seq: 4,
+      type: 'assistant/message',
+      seq: turn * 10 + 2,
       time: Date.now(),
-      data: { turn: 1, reason: { kind: 'completed' } },
+      data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `做完了第 ${turn} 轮` }], id: `m-${turn}` } },
     })
+    host.emit('session/event', agent.session, { type: 'turn/end', seq: turn * 10 + 3, time: Date.now(), data: { turn, reason: { kind: 'completed' } } })
   }
 
-  // --- the summary landing, told apart from the sweep by its delay -----------
-  {
-    const { host, agent, res } = await openWatched('landing-agent', { llmDelayMs: 60, sweepDelayMs: 0 })
-    runTurn(host, agent)
-    const afterEnd = frames(res).length
-    check('the turn ending announces itself', afterEnd >= 2, String(afterEnd))
+  // A turn has to have *ended* for there to be a previous turn to summarise, so
+  // the first landing follows turn 2. Turn 1 is here only to give it one.
+  await runTurn(1)
+  await runTurn(2)
 
-    // The sweep is immediate here, so by 20ms it has landed and announced. The
-    // model is still thinking.
-    await wait(20)
-    const afterSweep = frames(res).length
-    check('the sweep announces itself as soon as it answers', afterSweep > afterEnd, `${afterEnd} -> ${afterSweep}`)
-
-    // Past the model's 60ms. This frame can only be the summary: the sweep's
-    // notice already went out above.
-    await wait(200)
-    const afterLanding = frames(res).length
-    check('and the summary landing announces itself again', afterLanding > afterSweep, `${afterSweep} -> ${afterLanding}`)
-    check('with the session it belongs to', frames(res)[afterLanding - 1]?.agent === agent.id, JSON.stringify(frames(res)[afterLanding - 1]))
-  }
-
-  // --- a summary that lands after its session closed says nothing -----------
+  // The baseline is taken *after* `runTurn(2)` returns, and that placement is
+  // the whole test. Every bump the turn itself causes is synchronous, so by the
+  // time this line runs they are all in `res.written`. The landing is the only
+  // frame that arrives later, from a promise.
   //
-  // The sweep is immediate and the model is slow, so disposal happens strictly
-  // between the two. Once `agent/disposed` has forgotten the counter, the
-  // landing has nothing to announce to and must say so by staying quiet.
-  {
-    const { host, agent, res } = await openWatched('landing-disposed-agent', { llmDelayMs: 60, sweepDelayMs: 0 })
-    runTurn(host, agent)
-    await wait(20)
-    const beforeDispose = frames(res).length
-    host.emit('agent/disposed', { agent })
-    const afterDispose = frames(res).length
-    check('a session ending announces itself', afterDispose > beforeDispose, `${beforeDispose} -> ${afterDispose}`)
+  // The first version of this test measured from before turn 2 and waited for
+  // "two more frames than that". Turn 2 pushes four of its own, so the
+  // assertion was satisfied before the model call had been made at all, and the
+  // mutation that deletes the landing notice survived -- the check was watching
+  // the turn, not the landing.
+  const beforeLanding = frames(res).length
 
-    await wait(80)
-    check(
-      'but a summary landing after it says nothing',
-      frames(res).length === afterDispose,
-      `${afterDispose} -> ${frames(res).length}`,
-    )
+  // Nothing else can add a frame here: the turn is over, and the landing is the
+  // only remaining notice.
+  const settled = async (limit) => {
+    for (let attempt = 0; attempt < limit; attempt += 1) {
+      if (frames(res).length > beforeLanding) return true
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    return false
   }
+  const landed = await settled(50)
+  check('a summary that lands wakes the reader', landed, `${beforeLanding} -> ${frames(res).length}`)
 
-  // --- and a sweep that answers after its session closed says nothing too ---
-  //
-  // The mirror case, and it needs its own block: here the model is immediate and
-  // `git status` is slow, so the sweep is the one still running at disposal.
-  // Without this the two guards look interchangeable, and only one of them is
-  // exercised by the block above.
-  {
-    const { host, agent, res } = await openWatched('sweep-disposed-agent', { llmDelayMs: 0, sweepDelayMs: 60 })
-    runTurn(host, agent)
-    await wait(20)
-    const beforeDispose = frames(res).length
-    host.emit('agent/disposed', { agent })
-    const afterDispose = frames(res).length
-    check('a session ending announces itself before its sweep answers', afterDispose > beforeDispose, `${beforeDispose} -> ${afterDispose}`)
-
-    // Long enough for both of the sweep's readings, not just one: `turn/start`
-    // opens the baseline through the same injected `changes`, so the closing
-    // reading cannot begin until one whole `sweepDelayMs` has passed, and the
-    // notice lands at roughly twice that. An 80ms window here waited for a
-    // landing that had not happened yet, which made the assertion true whether
-    // or not the guard existed.
-    await wait(250)
-    check(
-      'but a sweep landing after it says nothing',
-      frames(res).length === afterDispose,
-      `${afterDispose} -> ${frames(res).length}`,
-    )
-  }
-
-  // --- a summary that failed says nothing, and must not wake anybody --------
-  //
-  // `summarise` answers every failure with a value instead of throwing: timeout,
-  // cancellation, a provider that refused, no route to a model at all. None of
-  // those changed a single field the panel draws, so announcing them would only
-  // redraw a card that already says the summary failed. The guard that keeps
-  // them quiet is a check on the answer's text, and without this block nothing
-  // reaches it: every other summary in this file succeeds.
-  {
-    const { host, agent, res } = await openWatched('landing-failed-agent', {
-      llmDelayMs: 0,
-      sweepDelayMs: 0,
-      llm: {
-        listProviders() {
-          return [{ id: 'prov-a' }]
-        },
-        listModels() {
-          return [{ id: 'model-a', name: 'A' }]
-        },
-        // Slow *and* failing: the refusal has to land after the 20ms reading
-        // below, or both frames arrive before it and the assertion holds for
-        // either answer.
-        prepareCall() {
-          return {
-            config: { model: 'model-a' },
-            async *stream() {
-              await wait(60)
-              throw new Error('the provider refused the call')
-            },
-          }
-        },
-      },
-    })
-    runTurn(host, agent)
-    await wait(20)
-    const afterSweep = frames(res).length
-    check('the sweep announces itself even when the summary cannot', afterSweep > 1, String(afterSweep))
-
-    // The failed call answers past the reading above, and with no text at all.
-    // A frame after this point could only be the landing, and there is nothing
-    // to land.
-    await wait(200)
-    check(
-      'but a summary that failed says nothing',
-      frames(res).length === afterSweep,
-      `${afterSweep} -> ${frames(res).length}`,
-    )
-  }
+  // The payload the frame points at carries the text, which is what makes the
+  // extra frame worth sending at all. Read through the same route the client
+  // would use.
+  const panelRes = streamRes()
+  await route.handler(
+    { url: `/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' }, listeners: [] },
+    panelRes,
+  )
+  const body = JSON.parse(panelRes.written.join(''))
+  check(
+    'and the summary it announced is the text the model gave',
+    body?.data?.summary?.text === '这一轮把卡片的数据源换成了汇报。',
+    JSON.stringify(body?.data?.summary),
+  )
 }
+
+{
+  // A landing with no text does not wake the reader.
+  //
+  // A failed call answers with a value too -- "no model route", a timeout, a
+  // cancelled call -- and each of those would repaint an unchanged card on a
+  // route already reporting itself broken. The distinction is the whole point of
+  // the guard, so it needs its own test: with text, a frame; without, silence.
+  const root = await makeTempRoot('skill-evolve-summary-silent-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+  // A model that finishes cleanly having produced nothing. `collectText` returns
+  // an empty string, `tidy` keeps it empty, and the summary record carries no
+  // text -- so the caller's guard is what decides, not the model.
+  host.ctx.services.set('llm', {
+    async prepareCall(route) {
+      return {
+        config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+        async *stream() {
+          yield { type: 'finish', reason: 'stop' }
+        },
+      }
+    },
+  })
+  applyPanel(
+    host.ctx,
+    PanelConfig({ panelSummary: true, summaryProvider: 'stub', summaryModel: 'stub-model' }),
+    { changes: async () => [] },
+  )
+
+  const agent = fakeAgent('silent-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const res = {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const request = (url) => ({
+    url,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+  const frames = (out) =>
+    out.written
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+
+  const route = host.routes.get('/api/ui-evolve')
+  await route.handler(request(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
+  await route.handler(request(`/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`), {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    writeHead() {},
+    write() {
+      return true
+    },
+    end() {},
+    destroy() {},
+    once() {},
+    on() {},
+    removeListener() {},
+  })
+
+  const turn = (number) => {
+    host.emit('session/event', agent.session, {
+      type: 'user/message',
+      seq: number * 10,
+      time: Date.now(),
+      data: { turn: number, message: { role: 'user', content: [{ type: 'text', text: '继续' }] }, source: { kind: 'user' } },
+    })
+    host.emit('session/event', agent.session, { type: 'turn/start', seq: number * 10 + 1, time: Date.now(), data: { turn: number } })
+    host.emit('session/event', agent.session, {
+      type: 'assistant/message',
+      seq: number * 10 + 2,
+      time: Date.now(),
+      data: { turn: number, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '好' }], id: `n-${number}` } },
+    })
+    host.emit('session/event', agent.session, { type: 'turn/end', seq: number * 10 + 3, time: Date.now(), data: { turn: number, reason: { kind: 'completed' } } })
+  }
+
+  turn(1)
+  turn(2)
+  const afterBoth = frames(res).length
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  check(
+    'a landing with no text wakes nobody',
+    frames(res).length === afterBoth,
+    `${afterBoth} -> ${frames(res).length}`,
+  )
+}
+
+{
+  // A landing after the session is gone wakes nobody either.
+  //
+  // A model call outlives the session that started it: `agent/disposed` has
+  // already forgotten the counter by the time the answer arrives, and `bump`
+  // would create a fresh one that nothing ever forgets again -- one retained
+  // number per conversation on a process that runs for weeks. The guard is
+  // `revisions.has` before `bump`, and the only way to see it is to dispose the
+  // session while the call is still in flight.
+  const root = await makeTempRoot('skill-evolve-summary-disposed-')
+  process.env.DSH_HOME = root
+
+  const host = fakeHost()
+  apply(host.ctx, Config({ mode: 'suggest' }))
+
+  // A model held open until the test says so, so disposal happens while the
+  // call is still pending. The promise is the seam: nothing else can make the
+  // answer arrive late on demand.
+  let release
+  const held = new Promise((resolve) => {
+    release = resolve
+  })
+  host.ctx.services.set('llm', {
+    async prepareCall(route) {
+      return {
+        config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+        async *stream() {
+          await held
+          yield { type: 'text-delta', text: '迟到的摘要' }
+          yield { type: 'finish', reason: 'stop' }
+        },
+      }
+    },
+  })
+  applyPanel(
+    host.ctx,
+    PanelConfig({ panelSummary: true, summaryProvider: 'stub', summaryModel: 'stub-model' }),
+    { changes: async () => [] },
+  )
+
+  const agent = fakeAgent('disposed-agent', 'C:/work')
+  host.agents.set(agent.id, agent)
+
+  const res = {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    listeners: [],
+    setHeader(name, value) {
+      this.headers[name] = value
+      return this
+    },
+    writeHead(code, headers) {
+      this.statusCode = code
+      Object.assign(this.headers, headers ?? {})
+      return this
+    },
+    write(chunk) {
+      this.written.push(String(chunk))
+      return true
+    },
+    end(body) {
+      this.writableEnded = true
+      if (body !== undefined) this.written.push(String(body))
+      return this
+    },
+    destroy() {
+      this.destroyed = true
+      return this
+    },
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  }
+  const request = (url) => ({
+    url,
+    method: 'GET',
+    headers: { host: '127.0.0.1:19387' },
+    listeners: [],
+    once(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    on(event, handler) {
+      this.listeners.push([event, handler])
+      return this
+    },
+    removeListener(event, handler) {
+      const at = this.listeners.findIndex((row) => row[0] === event && row[1] === handler)
+      if (at >= 0) this.listeners.splice(at, 1)
+      return this
+    },
+  })
+  const frames = (out) =>
+    out.written
+      .filter((line) => line.startsWith('data: '))
+      .map((line) => JSON.parse(line.slice('data: '.length)))
+
+  const route = host.routes.get('/api/ui-evolve')
+  await route.handler(request(`/api/ui-evolve/events?agent=${encodeURIComponent(agent.id)}`), res)
+  await route.handler(request(`/api/ui-evolve/panel?agent=${encodeURIComponent(agent.id)}`), {
+    statusCode: 0,
+    headers: {},
+    written: [],
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    writeHead() {},
+    write() {
+      return true
+    },
+    end() {},
+    destroy() {},
+    once() {},
+    on() {},
+    removeListener() {},
+  })
+
+  const turn = (number) => {
+    host.emit('session/event', agent.session, {
+      type: 'user/message',
+      seq: number * 10,
+      time: Date.now(),
+      data: { turn: number, message: { role: 'user', content: [{ type: 'text', text: '继续' }] }, source: { kind: 'user' } },
+    })
+    host.emit('session/event', agent.session, { type: 'turn/start', seq: number * 10 + 1, time: Date.now(), data: { turn: number } })
+    host.emit('session/event', agent.session, {
+      type: 'assistant/message',
+      seq: number * 10 + 2,
+      time: Date.now(),
+      data: { turn: number, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '好' }], id: `d-${number}` } },
+    })
+    host.emit('session/event', agent.session, { type: 'turn/end', seq: number * 10 + 3, time: Date.now(), data: { turn: number, reason: { kind: 'completed' } } })
+  }
+
+  turn(1)
+  turn(2)
+  // The second `turn/end` has started the held call. Dispose, then let it
+  // finish: the answer arrives for a session whose counter is already gone.
+  const beforeDispose = frames(res).length
+  host.emit('agent/disposed', { agent })
+  const afterDispose = frames(res).length
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  check(
+    'a landing after the session is gone wakes nobody',
+    frames(res).length === afterDispose,
+    `${beforeDispose} -> ${afterDispose} -> ${frames(res).length}`,
+  )
+}
+
 
 console.log(`\n${pass} passed, ${fail} failed`)
 process.exit(fail === 0 ? 0 : 1)

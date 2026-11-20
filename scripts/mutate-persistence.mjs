@@ -558,38 +558,10 @@ const mutations = [
     to: '',
     why: 'A turn that edited no file and loaded no skill still produces a summary, and the summary is then the only thing in the document. Without this line such a session is never written, and its stored summary is the one fact worth keeping across a restart.',
   },
-  {
-    file: state,
-    label: 'the first write after a restart forgets how much the sweep could see',
-    suites: ['test/session-state.test.mjs'],
-    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        const theirs = state.sweep\n        if (mine === undefined || mine.turn === undefined) {\n          current.sweep = theirs\n        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n          current.sweep = theirs\n        } else if (theirs.turn === mine.turn) {\n          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n        }\n      }\n',
-    to: '',
-    why: 'A partial git scan is the one claim that keeps a short file list from reading as a clean one. Dropped on the way in, the next write states a complete coverage the sweep never claimed, and the panel stops caveating its own list exactly when it should.',
-  },
-  {
-    file: state,
-    label: 'a sweep this process ran loses to the one in the file',
-    suites: ['test/session-state.test.mjs'],
-    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        const theirs = state.sweep\n        if (mine === undefined || mine.turn === undefined) {\n          current.sweep = theirs\n        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n          current.sweep = theirs\n        } else if (theirs.turn === mine.turn) {\n          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n        }\n      }\n',
-    to: '      if (state.sweep !== undefined) current.sweep = state.sweep\n',
-    why: 'The merge has to have a direction, and it is by turn: the file is older than this process, so an unnumbered claim in memory is a scan this process ran after reading it. Unconditional assignment hands every read to a scan that has already been superseded, and a clean sweep can never be recorded.',
-  },
-  {
-    file: state,
-    label: 'a merge that lets the older claim win',
-    suites: ['test/session-state.test.mjs'],
-    from: '        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n',
-    to: '        } else if (theirs.turn !== undefined && theirs.turn < mine.turn) {\n',
-    why: 'Turn numbers are the only ordering these two claims have. Reversed, a caveat from turn seven replaces a complete scan from turn nine, and the panel keeps telling the user its file list may be partial after it stopped being partial. The tie arm below it does not rescue this: a reversed comparison sends every strictly-newer file claim into the merge branch instead of replacing, so a stale partial turn keeps its number and only its coverage is weakened.',
-  },
-  {
-    file: state,
-    label: 'a merge that never lets the file speak',
-    suites: ['test/session-state.test.mjs'],
-    from: '        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n',
-    to: '        } else if (false) {\n',
-    why: 'A sweep in memory is not automatically newer: a restart reads the file, and the events that rebuild the record can carry a scan from before the one the file kept. With this arm gone the file can only speak on an exact tie, so a caveat about a newer turn that the last process recorded is silently replaced by whatever this process measured earlier.',
-  },
+
+
+
+
   {
     file: state,
     label: 'the first write after a restart erases the summary the file held',
@@ -670,14 +642,7 @@ const mutations = [
     to: '    if (false) {\n      const still = await this.store.inspect(sessionId)\n',
     why: 'The gate asks whether the record holds facts, and a record that merged another process\'s facts does. That other process can then remove its own file — its sweep, its cleanup, a person with `rm` — and the facts in memory become facts about a file nobody wants. Only the disk can say it is gone, which is why the answer is not in the gate. Measured: without this, the file comes back holding a summary of a conversation both sweeps had agreed to delete.',
   },
-  {
-    file: state,
-    label: 'an equal turn lets memory decide on its own',
-    suites: ['test/session-state.test.mjs'],
-    from: '          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n',
-    to: '          current.sweep = mine\n',
-    why: 'Two claims about the same turn cannot be ordered: one was measured before the process restarted, one after. Picking memory throws away the caveat the earlier process recorded, at exactly the restart boundary where that caveat is most likely to be the only evidence a sweep stopped early. The tie has to go through the coverage lattice, which keeps the weaker of the two.',
-  },
+
   {
     file: index,
     label: 'a skill loaded mid-turn never lifts a sweep verdict',

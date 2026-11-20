@@ -30,14 +30,8 @@ const client = path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
 const index = path.join(repo, 'packages', 'ui-evolve', 'lib', 'index.js')
 const state = path.join(repo, 'packages', 'ui-evolve', 'lib', 'session-state.js')
 const summarise = path.join(repo, 'packages', 'ui-evolve', 'lib', 'summarise.js')
-const shellpaths = path.join(repo, 'packages', 'core', 'lib', 'shellpaths.js')
 const transcript = path.join(repo, 'packages', 'ui-evolve', 'lib', 'transcript.js')
 const report = path.join(repo, 'packages', 'ui-evolve', 'lib', 'report-tool.js')
-const coverage = path.join(repo, 'packages', 'ui-evolve', 'lib', 'coverage.js')
-const gitChanges = path.join(repo, 'packages', 'ui-evolve', 'lib', 'git-changes.js')
-const gitWatch = path.join(repo, 'packages', 'ui-evolve', 'lib', 'git-watch.js')
-const scanChanges = path.join(repo, 'packages', 'ui-evolve', 'lib', 'scan-changes.js')
-const scanWatch = path.join(repo, 'packages', 'ui-evolve', 'lib', 'scan-watch.js')
 
 /**
  * Failures reported by a suite, or -1 when it printed no tally at all.
@@ -223,8 +217,8 @@ const mutations = [
     file: state,
     label: 're-editing a file leaves it where it was',
     suites: ['test/session-state.test.mjs'],
-    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: kept })',
-    to: '      entry.paths.set(file, { seq: previous === undefined ? ++entry.sequence : previous.seq, turn: stamp, at, source: kept })',
+    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, description: kept })',
+    to: '      entry.paths.set(file, { seq: ++entry.sequence, turn: undefined, at, description: kept })',
     why: 'the list is ordered by this stamp, so reusing the old one leaves a file the agent just wrote sitting wherever it first appeared, and the card claims it was not touched this turn',
   },
   {
@@ -355,7 +349,7 @@ const mutations = [
     file: state,
     label: 'the turn a file was written in is not recorded',
     suites: ['test/session-state.test.mjs'],
-    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: kept })',
+    from: '      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, description: kept })',
     to: '      entry.paths.set(file, { seq: ++entry.sequence, turn: undefined, at, source: kept })',
     why: 'without the number the card can only compare against the previous turn snapshot, which is empty after a restart — every file silently becomes "earlier"',
   },
@@ -508,16 +502,16 @@ const mutations = [
     file: client,
     label: 'every bucket is painted the same colour',
     suites: ['test/client.test.mjs'],
-    from: '.dsse-fileicon[data-bucket="style"]{color:#8a6aa8}',
-    to: '.dsse-fileicon[data-bucket="style"]{color:#4c7fb8}',
+    from: '.dsse-fileicon[data-bucket="sheet"]{color:#2f8a72}',
+    to: '.dsse-fileicon[data-bucket="sheet"]{color:#4c7fb8}',
     why: 'the six tints are the cue the reader scans by; two buckets sharing one hue puts a stylesheet and a source file in the same group, which is worse than no colour at all',
   },
   {
     file: client,
     label: 'a bucket that claims nothing is given a colour anyway',
     suites: ['test/client.test.mjs'],
-    from: '.dsse-fileicon[data-bucket="archive"]{color:#b08a3e}',
-    to: '.dsse-fileicon[data-bucket="archive"]{color:#b08a3e}\n.dsse-fileicon[data-bucket="file"]{color:#4c7fb8}',
+    from: '.dsse-fileicon[data-bucket="slide"]{color:#b08a3e}',
+    to: '.dsse-fileicon[data-bucket="slide"]{color:#b08a3e}\n.dsse-fileicon[data-bucket="file"]{color:#4c7fb8}',
     why: 'the bucket for unknown extensions deliberately makes no claim; tinting it says the reader should be able to tell what the file is, and there is nothing to tell',
   },
   {
@@ -532,8 +526,8 @@ const mutations = [
     file: client,
     label: 'every bucket is drawn on the same silhouette again',
     suites: ['test/client.test.mjs'],
-    from: "      code: ['M10 4.5c-2.6 0-2.6 7.5-5.4 7.5 2.8 0 2.8 7.5 5.4 7.5M14 4.5c2.6 0 2.6 7.5 5.4 7.5-2.8 0-2.8 7.5-5.4 7.5'],",
-    to: "      code: ['M5 3.5h10l4 4v13H5zM15 3.5v4h4'],",
+    from: "      doc: ['M5 3.5h14v17H5zM8.5 8h7M8.5 12h7M8.5 16h4'],",
+    to: "      doc: ['M5 3.5h10l4 4v13H5zM15 3.5v4h4'],",
     why: 'this is the defect the eight outlines exist to fix: one page silhouette told apart by a four-pixel mark was, at sixteen pixels, one glyph repeated eight times',
   },
   {
@@ -574,8 +568,8 @@ const mutations = [
     file: transcript,
     label: 'the declaration is read as one path instead of a list',
     suites: ['test/transcript.test.mjs'],
-    from: "      for (const declared of readPathListArgument(call.arguments)) this.declared.push(canonicalPath(declared))",
-    to: "      for (const declared of [readPathArgument(call.arguments)].filter(Boolean)) this.declared.push(canonicalPath(declared))",
+    from: "      for (const declared of readPathListArgument(call.arguments)) this.deliver(declared, '')",
+    to: "      for (const declared of [readPathArgument(call.arguments)].filter(Boolean)) this.deliver(declared, '')",
     why: 'readPathArgument only looks at scalar fields, so an array-shaped argument yields nothing — the card would lose every declared file while the tool reported success',
   },
   {
@@ -654,8 +648,8 @@ const mutations = [
     label: 'only the first presented file is collected',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(canonicalPath(delivered))",
-    to: "      for (const delivered of readPresentedPaths(call.arguments).slice(0, 1)) this.declared.push(canonicalPath(delivered))",
+    from: "      for (const entry of readPresentedEntries(call.arguments)) this.deliver(entry.path, entry.description)",
+    to: "      this.delivered = readPresentedEntries(call.arguments).map((entry) => ({ path: canonicalPath(entry.path), description: entry.description }))",
     why: 'present carries up to four files; keeping one is the failure mode that looks like it works',
   },
   {
@@ -671,23 +665,23 @@ const mutations = [
     file: transcript,
     suites: ['test/transcript.test.mjs'],
     from: "    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue",
-    to: "    if (typeof entry === 'string') { found.push(entry.trim()); continue }",
+    to: "    if (typeof entry === 'string') { found.push({ path: entry.trim(), description: '' }); continue }",
     why: 'present entries are objects; accepting bare strings would also accept the description field if a caller ever flattened the shape',
   },
   {
     label: 'a presentation replaces the turn instead of adding to it',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(canonicalPath(delivered))",
-    to: "      this.paths = readPresentedPaths(call.arguments)",
+    from: "      for (const entry of readPresentedEntries(call.arguments)) this.deliver(entry.path, entry.description)",
+    to: "      this.delivered = readPresentedEntries(call.arguments)",
     why: 'assigning instead of appending still shows the presented files, so the card looks right while every file the turn edited before the model spoke is gone',
   },
   {
     label: 'declared paths are kept in call order, so a busy turn drops them',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "      paths: [...new Set([...this.declared, ...this.paths])].slice(0, MAX_CARD_PATHS),",
-    to: "      paths: [...new Set([...this.paths, ...this.declared])].slice(0, MAX_CARD_PATHS),",
+    from: "      paths: this.delivered.slice(0, MAX_CARD_PATHS).map((entry) => entry.path),",
+    to: "      paths: this.delivered.slice(-MAX_CARD_PATHS).map((entry) => entry.path),",
     why: 'the cap keeps the first forty; shell redirects arrive early and declarations arrive last, so call order drops exactly the files the model named out loud',
   },
   {
@@ -702,16 +696,16 @@ const mutations = [
     label: 'a blank presented path is kept as a row',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "    const candidate = /** @type {Record<string, unknown>} */ (entry).path\n    if (typeof candidate !== 'string') continue\n    const trimmed = candidate.trim()\n    if (trimmed.length > 0) found.push(trimmed)",
-    to: "    const candidate = /** @type {Record<string, unknown>} */ (entry).path\n    if (typeof candidate !== 'string') continue\n    const trimmed = candidate.trim()\n    found.push(trimmed)",
+    from: "    if (typeof row.path !== 'string') continue\n    const path = row.path.trim()\n    if (path.length === 0) continue",
+    to: "    if (typeof row.path !== 'string') continue\n    const path = row.path.trim()",
     why: 'a blank path becomes a row with no name that cannot be opened; the stat that follows fails and the card shows a deleted file that never existed',
   },
   {
     label: 'a presented path is not trimmed',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "    const candidate = /** @type {Record<string, unknown>} */ (entry).path\n    if (typeof candidate !== 'string') continue\n    const trimmed = candidate.trim()",
-    to: "    const candidate = /** @type {Record<string, unknown>} */ (entry).path\n    if (typeof candidate !== 'string') continue\n    const trimmed = candidate",
+    from: "    const path = row.path.trim()",
+    to: "    const path = row.path",
     why: 'the padded string is not a path, so the row records a file nobody can open and the real one never appears',
   },
   {
@@ -738,283 +732,23 @@ const mutations = [
     to: "      'Declare existing files as final deliverables for the user.",
     why: 'this sentence exists because the first version of this tool lost to present on a real run; a description that reads like present hands the model no reason to prefer either',
   },
-  // ---------------------------------------------------------------------
-  // Git is a third collector
-  // ---------------------------------------------------------------------
-  //
-  // The two collectors above read what the tools and the model said. Neither can
-  // see a script's output, which is what put eight files on disk and five in the
-  // card. These guard the bracket that measures the turn instead of listening to
-  // it: the readings, the subtraction between them, and the two places the
-  // wiring can silently answer an empty workspace.
-  {
-    file: gitChanges,
-    label: "the rename's old path is recorded as a change of its own",
-    suites: ['test/git-changes.test.mjs'],
-    from: "    if (PAIRED_CODES.has(status.charAt(0)) === true) index += 1",
-    to: "    if (false) index += 1",
-    why: 'a rename is two NUL records in -z output, new path then old; without the pairing the old path is reported as changed, so the card lists a file that no longer exists next to the one that replaced it',
-  },
-  {
-    file: gitChanges,
-    label: 'a path from a subdirectory is joined to the session instead of the repository',
-    suites: ['test/git-changes.test.mjs'],
-    from: '      const absolute = toAbsolute(described.root, record.path)',
-    to: '      const absolute = toAbsolute(cwd, record.path)',
-    why: 'git prints paths relative to the repository root, so joining to the session directory invents a path that exists nowhere whenever the session sits below the root',
-  },
-  {
-    file: gitChanges,
-    label: 'every uncommitted change is credited to the turn',
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/git-changes.test.mjs', 'test/git-watch.test.mjs'],
-    from: "    if (known.has(path) === true) continue",
-    to: "    if (false) continue",
-    why: 'git status is cumulative; without the subtraction the whole dirty tree is recorded again every turn, pushing work from five turns ago to the top and calling it new',
-  },
-  {
-    file: gitWatch,
-    label: 'the baseline is kept after the turn that used it',
-    suites: ['test/git-watch.test.mjs'],
-    from: "    const pending = this.baselines.get(agentId)\n    this.baselines.delete(agentId)",
-    to: "    const pending = this.baselines.get(agentId)",
-    why: 'a kept baseline is one reading too old for the next turn, which then reports everything that changed since a turn it no longer matches',
-  },
-  {
-    file: gitWatch,
-    label: 'a turn with no baseline is measured against the whole dirty tree',
-    suites: ['test/git-watch.test.mjs'],
-    from: "    if (pending === undefined) return nothing",
-    to: "    if (pending === undefined) return asReading(await this.changes(cwd))",
-    why: 'no baseline means the turn began in another process; answering the full uncommitted set credits the turn with work it never did, and nothing in the panel would show the difference',
-  },
-  {
-    file: gitWatch,
-    label: 'a sweep that could only half see reports a clean interval',
-    suites: ['test/git-watch.test.mjs'],
-    from: "    const coverage = mergeCoverage(before.coverage, after.coverage)",
-    to: "    const coverage = 'complete'",
-    why: 'coverage has exactly one job: survive from the sweep to the card. Flattening it here means a turn that read half a workspace is indistinguishable from one that read all of it, and the caveat is lost silently because nothing throws',
-  },
-  {
-    file: gitChanges,
-    label: 'a root that cannot answer still counts as read',
-    suites: ['test/git-changes.test.mjs'],
-    from: "      // workspace itself is not a repository, nothing was expected anyway.\n      if (directory !== cwd) coverage = 'partial'",
-    to: '      // workspace itself is not a repository, nothing was expected anyway.\n      coverage = coverage',
-    why: 'a child repository that fails to answer is a hole in the answer; recording it as read is how a partial sweep silently claims to be complete',
-  },
-  {
-    file: index,
-    label: 'the workspace is only read from an agent, never from a session',
-    suites: ['test/index.test.mjs'],
-    from: '    const cwd = subject?.session?.header?.cwd ?? subject?.header?.cwd',
-    to: '    const cwd = subject?.session?.header?.cwd',
-    why: 'the git bracket is driven from the event stream, which hands over the session; reading only the agent shape answers an empty workspace for every session and disables the bracket with no error anywhere',
-  },
-  {
-    file: index,
-    label: 'the bracket opens and nothing is recorded from it',
-    suites: ['test/index.test.mjs'],
-    from: "            if (blind.length > 0) sessionState.rememberPaths(agentId, blind, endedTurn, 'scan')",
-    to: "",
-    why: 'measuring the turn and dropping the answer reads exactly like a workspace with no repository: the card simply never grows, and the collector is dead code that still costs two git calls per turn',
-  },
-  {
-    file: index,
-    label: 'a sweep that could only half see says nothing to the panel',
-    suites: ['test/index.test.mjs'],
-    from: '          sessionState.rememberSweep(agentId, endedTurn, claim)',
-    to: "          sessionState.rememberSweep(agentId, endedTurn, 'complete')",
-    why: 'the coverage is written before the early return for a reason: a turn that produced nothing in a half-read repository still has something to admit. Deleting the call turns doubt back into silence',
-  },
-  {
-    file: state,
-    label: 'a sweep of a half-read repository is remembered as a clean one',
-    suites: ['test/session-state.test.mjs'],
-    from: "    const claim = coverage === 'partial' || coverage === 'none' ? coverage : 'complete'\n    const next = { turn: stamp, coverage: claim }",
-    to: "    const next = { turn: stamp, coverage: 'complete' }",
-    why: 'the whole value of the field is that it survives a refresh. Flattening it on the way in makes a half-read turn indistinguishable from a complete one, and no caller can tell the difference afterwards',
-  },
-  {
-    file: api,
-    label: 'the panel is not told what the sweep could see',
-    suites: ['test/index.test.mjs'],
-    from: "    sweep: typeof deps.sweepSeen === 'function' ? (deps.sweepSeen(id) ?? null) : null,",
-    to: '    sweep: null,',
-    why: 'storing coverage and never reading it is the same defect as not storing it, and it survives every test that only inspects the store. The panel payload is the only path from the fact to the person',
-  },
 
-  {
-    label: 'the scan reads directories the card hides',
-    file: scanChanges,
-    from: '        if (skipDirectory(entry.name) === true) continue',
-    to: '        if (false) continue',
-    why: 'The walk descends into node_modules and collects a thousand rows the card then filters out, so the entry budget is spent on files nobody will ever see.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'the scan treats a directory as a file',
-    file: scanChanges,
-    from: '      if (entry.isDirectory() === true) {',
-    to: '      if (false) {',
-    why: 'Every subdirectory is stat-ed and reported as a produced file; the card shows a row for `src` next to a row for the file inside it.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'a file written at the exact turn boundary is missed',
-    file: scanChanges,
-    from: '    if (typeof info.mtimeMs === \'number\' && info.mtimeMs >= since) paths.push(absolute)',
-    to: '    if (typeof info.mtimeMs === \'number\' && info.mtimeMs > since) paths.push(absolute)',
-    why: 'A turn that starts and finishes inside one filesystem tick reports nothing at all — the feature failing on the fastest turns.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'the scan never admits it stopped early',
-    file: scanChanges,
-    from: '      if (outOfBudget()) {\n        truncated = true\n        return\n      }',
-    to: '      if (outOfBudget()) {\n        return\n      }',
-    why: 'The panel says the turn produced nothing rather than that the walk gave up, which is the one thing a partial read must not say.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'the entry budget is never consulted',
-    file: scanChanges,
-    from: '  const outOfBudget = () => scanned >= maxEntries || now() - started >= maxMs',
-    to: '  const outOfBudget = () => now() - started >= maxMs',
-    why: 'A workspace with a hundred thousand files is walked to completion on every turn end; the panel request waits for all of it.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'the depth budget is ignored',
-    file: scanChanges,
-    from: '    if (depth > maxDepth) {\n      truncated = true\n      return\n    }',
-    to: '    if (false) {\n      truncated = true\n      return\n    }',
-    why: 'A deeply nested tree consumes the whole entry budget in one branch, and every other part of the workspace goes unread.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'a directory that cannot be read looks empty',
-    file: scanChanges,
-    from: '      truncated = true\n      return undefined',
-    to: '      return undefined',
-    why: 'A permission error or a vanished directory is reported as "I read it and found nothing", so a half-read workspace passes for a clean one.',
-    suites: ['test/scan-changes.test.mjs'],
-  },
-  {
-    label: 'the scan bracket opens after the turn already started',
-    file: scanWatch,
-    from: '    this.baselines.set(agentId, stamp)',
-    to: '    this.baselines.set(agentId, stamp + 60000)',
-    why: 'Everything the turn wrote in its first minute is older than the baseline and therefore reported as nothing.',
-    suites: ['test/scan-watch.test.mjs'],
-  },
-  {
-    label: 'the scan baseline survives the turn that consumed it',
-    file: scanWatch,
-    from: '    const since = this.baselines.get(agentId)\n    this.baselines.delete(agentId)',
-    to: '    const since = this.baselines.get(agentId)',
-    why: 'The next turn is measured from the previous turn opening, so old work is credited to a turn that never touched it.',
-    suites: ['test/scan-watch.test.mjs'],
-  },
-  {
-    label: 'a truncated walk is reported as a complete answer',
-    file: scanWatch,
-    from: "    coverage: found.truncated === true ? 'partial' : 'complete',",
-    to: "    coverage: 'complete',",
-    why: 'The caveat exists precisely so a partial read is not mistaken for a clean one; dropping it here makes the whole field decorative.',
-    suites: ['test/scan-watch.test.mjs'],
-  },
-  {
-    label: 'the scan is asked even when git already answered',
-    file: index,
-    from: '                blind = answer.known === true ? answer.ignored : fromScan',
-    to: '                blind = fromScan',
-    why: 'A modification time cannot tell a file this turn wrote from one a checkout rewrote, so the card fills with rows the turn did not produce.',
-    suites: ['test/index.test.mjs'],
-  },
-  {
-    label: 'the scan never contributes at all',
-    file: index,
-    from: '          const fromScan = Array.isArray(scan?.paths) ? scan.paths : []',
-    to: '          const fromScan = []',
-    why: 'A workspace that is not a repository goes back to reporting nothing, which is the exact gap S7 was built to close.',
-    suites: ['test/index.test.mjs'],
-  },
-  {
-    label: 'a partial scan is not allowed to taint the turn',
-    file: index,
-    from: "    return mergeCoverage(git, scan)",
-    to: "    return 'complete'",
-    why: 'A walk that gave up reports a clean turn, so the reader is told nothing was produced when the truth is that half the workspace was never read.',
-    suites: ['test/index.test.mjs'],
-  },
-   {
-    file: api,
-    label: 'the walk is handed the card filter instead of its own',
-    suites: ['test/scan-changes.test.mjs'],
-    from: '  if (UNWALKABLE_DIRS.has(folded)) return true\n  return isUnproductiveDirectory(folded)',
-    to: '  if (GENERATED_DIRS.has(folded)) return true\n  return isUnproductiveDirectory(folded)',
-    why: 'This is the defect the two predicates were split to fix, and it is invisible from either file alone: the card is right to call `dist` generated, and the walk is right to want it anyway, because `dist` is where scripts write and it is in `.gitignore` in every project that has one. Collapsing the two back into one list makes the S8 bracket blind exactly where git is blind too -- measured on a real repository, four rows came back and neither ignored file that mattered was asked about.',
-  },
-  {
-    file: api,
-    label: 'the walk may enter a dependency tree',
-    suites: ['test/scan-changes.test.mjs'],
-    from: '  if (UNWALKABLE_DIRS.has(folded)) return true\n  return isUnproductiveDirectory(folded)',
-    to: '  return false',
-    why: 'The entry budget is 5000 for the whole workspace. `node_modules` alone routinely holds more, so a walk that descends into it spends the entire budget inside one dependency tree and reports those files as the turn output while the file that was actually written is never reached. This is also why the predicate defaults rather than being passed in: the caller did not pass one for two years.',
-  },
- {
-    file: api,
-    label: 'the directory filter also hides source trees that start with an underscore',
-    suites: ['test/scan-changes.test.mjs'],
-    from: '  if (UNWALKABLE_DIRS.has(folded)) return true\n  return isUnproductiveDirectory(folded)',
-    to: "  if (UNWALKABLE_DIRS.has(folded) || folded.startsWith('_')) return true\n  return isUnproductiveDirectory(folded)",
-    why: 'This is the exact mistake the predicate was narrowed to avoid: `scratchName` treats a leading underscore as scratch, which is right for temp FILES and wrong for directories. Re-admitting it quietly prunes `_posts`, `_layouts`, `_data` and `_build` -- source in Jekyll and Hugo -- and a pruned subtree is never recovered, so the card reports fewer files than the turn wrote with no way to notice.',
-  },
-  {
-    file: scanWatch,
-    label: 'a bracket that never looked reports a clean sweep',
-    suites: ['test/scan-watch.test.mjs'],
-    from: "const emptyReading = () => ({ paths: [], coverage: 'none' })",
-    to: "const emptyReading = () => ({ paths: [], coverage: 'complete' })",
-    why: 'No baseline means nobody looked, and `complete` claims somebody looked and found nothing. Collapsing the two lets the card vouch for a turn that was never swept -- after a host restart, for every session -- and it also overwrites a standing `partial` caveat from the turn before.',
-  },
-  {
-    file: coverage,
-    label: 'a half-read bracket is vouched for as complete',
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/index.test.mjs', 'test/coverage.test.mjs'],
-    from: "  if (left === 'partial' || right === 'partial') return 'partial'",
-    to: "  if (left === 'partial' || right === 'partial') return 'complete'",
-    why: 'The merge is the only place both brackets are visible at once, so it is the only place the weaker claim can be lost. Returning `complete` here tells the reader nothing else was produced when half the workspace was never read.',
-  },
-  {
-    file: client,
-    label: 'the caveat about a half-read sweep is never drawn',
-    suites: ['test/client.test.mjs'],
-    from: "                  blindNote === '' || (filesExpanded === false && hiddenFiles > 0) ? null : jsx('p', { className: 'dsse-note', children: blindNote }),",
-    to: "",
-    why: 'The only place the collector\'s doubt reaches the reader. Without it "nothing was produced" and "nothing was produced that I could see" render identically, and the second one is the sentence that should worry somebody.',
-  },
-  {
-    file: client,
-    label: 'the card never reads what the sweep could see',
-    suites: ['test/client.test.mjs'],
-    from: "      const coverage = typeof sweep?.coverage === 'string' ? sweep.coverage : ''",
-    to: "      const coverage = ''",
-    why: 'The payload carries the caveat and the card must repeat it; reading the field and ignoring it is indistinguishable from never sending it, except that the serving side looks finished.',
-  },
+
+
+
+
+
+
+
+
+
+
+
   {
     file: client,
     label: 'the header goes back to counting only the files a person wrote',
     suites: ['test/client.test.mjs'],
-    from: "                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(current.length) }), jsx('span', { children: '个文件' })] })",
+    from: "                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(delivered.length) }), jsx('span', { children: '个文件' })] })",
     to: "                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(ordered.length) }), jsx('span', { children: '个文件' })] })",
     why: 'The old header counted people\'s files and named the generated ones beside it, which left two counts of two lists next to a badge naming a third. The header is supposed to answer one question: how much did this session produce.',
   },
@@ -1028,63 +762,17 @@ const mutations = [
   },
   {
     file: client,
-    label: 'the folded row count is assumed to be a full fold',
+    label: 'the card refuses files without saying how many',
     suites: ['test/client.test.mjs'],
-    from: "      const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length",
-    to: "      const foldedRows = FOLDED_FILES",
+    from: "      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个文件不是交付文档`)",
+    to: "      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个`)",
     why: 'A session with two written files draws two rows, not four. Assuming a full fold makes the badge claim four rows are hidden on a card that hides none, which is the "展开全部 1 个" bug wearing new words.',
   },
-  {
-    file: gitChanges,
-    label: 'a workspace with no repository is answered as if it had one',
-    // Measured: only this suite fails under the mutation. The ones this
-    // replaces passed with it in place, so they were paying for a run and
-    // covering nothing.
-    suites: ['test/git-changes.test.mjs'],
-    from: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: false }",
-    to: "  if (prefixes.length === 0) return { ignored: [], known: true, repository: true }",
-    why: 'With `repository: true` and no ignored paths the merge treats the walk as fully redundant and drops it, so a session in a plain folder loses every file it wrote -- the exact turn where the walk is the only witness.',
-  },
-  {
-    file: state,
-    label: 'the bracket that found a file is not recorded',
-    suites: ['test/session-state.test.mjs'],
-    from: "    const origin = source === 'git' || source === 'scan' ? source : undefined",
-    to: "    const origin = undefined",
-    why: 'After the merge nothing else can say which bracket saw a file, and that is the only clue left when a row is surprising later. Dropping it at the write makes the field permanently null and the card cannot tell the two apart.',
-  },
-  {
-    file: state,
-    label: 'a late report about an older turn replaces the newer one',
-    suites: ['test/session-state.test.mjs'],
-    from: '      (stamp === undefined || previous.turn > stamp)',
-    to: '      (stamp !== undefined && previous.turn > stamp)',
-    why: 'the merge reports after awaiting a git subprocess, so an older turn can arrive last; without the number comparison its caveat becomes the one shown about the newer turn',
-  },
-  {
-    file: state,
-    label: 'a re-record forgets which bracket found the file',
-    suites: ['test/session-state.test.mjs'],
-    from: '      const kept = origin === undefined && previous !== undefined ? previous.source : origin',
-    to: '      const kept = origin',
-    why: 'turn/end re-records the whole path list every turn with no bracket named, so provenance would survive exactly one turn and the card would lose the only record of why a row is there',
-  },
-  {
-    file: state,
-    label: 'a bracket word this build does not know is carried anyway',
-    suites: ['test/session-state.test.mjs'],
-    from: '    source: raw.source === \'git\' || raw.source === \'scan\' ? raw.source : undefined,',
-    to: '    source: raw.source,',
-    why: 'the field exists to answer why this row is here; carrying a word no reader understands puts an uninterpretable claim in the document a future build must read',
-  },
-  {
-    file: index,
-    label: 'a failing ignore check costs the turn its diff',
-    suites: ['test/index.test.mjs'],
-    from: '              } catch {\n                answer = undefined\n              }',
-    to: '              } catch {\n                throw new Error(\'no answer\')\n              }',
-    why: 'the walk is a supplement to the diff; letting its failure escape empties the whole turn, including the half that had already arrived',
-  },
+
+
+
+
+
   {
     file: client,
     label: 'the copy buttons offer a path the workspace does not contain',
@@ -1330,148 +1018,15 @@ const mutations = [
     why: "the twenty-two pixels the button occupies are the same twenty-two the size is right-aligned into, and the button is transparent until hover; with no background of its own a focused row draws the glyph over the number, and '1.2 KB' reads as '1.2 <icon>B'",
   },
 
-  {
-    file: api,
-    label: "the walk forgets the working copies",
-    suites: ["test/api.test.mjs"],
-    from: '  if (UNPRODUCTIVE_DIRS.has(folded) === true) return true\n  for (const listed of UNPRODUCTIVE_DIRS) {\n    if (folded.startsWith(listed) === true && SUFFIX_BREAK.test(folded.charAt(listed.length)) === true) return true\n  }\n  return UNPRODUCTIVE_PREFIXES.some((prefix) => folded.startsWith(prefix))',
-    to: '  return false',
-    why: "On the largest stored session the copies were 114 rows under .rv-head/, 62 under .tmp-test/ and 21 under .review/; entering them spends the whole 5000-entry budget on copies and pushes the turn's own files out of the result.",
-  },
-  {
-    file: api,
-    label: "the card counts a working copy as written work",
-    suites: ["test/api.test.mjs"],
-    from: '  if (segments.slice(0, -1).some((segment) => isUnproductiveDirectory(segment))) return true',
-    to: '',
-    why: "Sharing the tables is the whole point: the two predicates may differ about dist/, never about what a person typed. Without this the header says the 197 copied rows were written by someone.",
-  },
-  {
-    file: api,
-    label: "a path with no recorded time is called old",
-    suites: ["test/api.test.mjs"],
-    from: "stale: Number.isFinite(recordedAt) && Number.isFinite(clock) ? clock - recordedAt >= STALE_AFTER_MS : false,",
-    to: "stale: Number.isFinite(clock) ? !(Number.isFinite(recordedAt) && clock - recordedAt < STALE_AFTER_MS) : false,",
-    why: "A record written before at was kept has no age. Calling it old demotes it on a number that was never recorded, and every session from an older build opens with its list parked under 较早.",
-  },
-  {
-    file: api,
-    label: "the age threshold is a day instead of a week",
-    suites: ["test/api.test.mjs"],
-    from: "const STALE_AFTER_MS = 7 * 24 * 60 * 60 * 1000",
-    to: "const STALE_AFTER_MS = 24 * 60 * 60 * 1000",
-    why: "The threshold is a judgement, so the only thing a test can hold is the boundary; this is the mutation the two boundary assertions exist for.",
-  },
-  {
-    file: client,
-    label: "an old row is drawn with the current ones",
-    suites: ["test/client.test.mjs"],
-    from: "      const stale = people.filter((file) => file.stale === true)\n      const current = people.filter((file) => file.stale !== true)",
-    to: "      const stale = []\n      const current = people",
-    why: "The demotion then is only a colour, with no group and no count to explain it, and the fourth heading never appears.",
-  },
-  {
-    file: client,
-    label: "the header counts the whole list again",
-    suites: ["test/client.test.mjs"],
-    from: "children: [jsx('b', { children: String(current.length) }), jsx('span', { children: '个文件' })]",
-    to: "children: [jsx('b', { children: String(ordered.length) }), jsx('span', { children: '个文件' })]",
-    why: "The returning regression. The quiet note still names the remainder, so the two lines describe different lists and the reader's own addition no longer lands on the badge.",
-  },
-  {
-    file: client,
-    label: "the quiet note forgets the old rows",
-    suites: ["test/client.test.mjs"],
-    from: "      if (staleCount > 0) keptNotes.push(`${staleCount} 个较早`)",
-    to: "      if (staleCount > 0) keptNotes.push('')",
-    why: "Demoted out of the main number and unnamed in the note is counted nowhere; a row the card neither counts nor labels is one it pretends not to have.",
-  },
-  {
-    file: client,
-    label: "an old row is struck through like a deleted one",
-    suites: ["test/client.test.mjs"],
-    from: ".dsse-row[data-stale=\"true\"] .dsse-name{color:var(--dsw-alias-label-secondary,#5b6270)}",
-    to: ".dsse-row[data-stale=\"true\"] .dsse-name{color:var(--dsw-alias-label-secondary,#5b6270);text-decoration:line-through}",
-    why: "A strikethrough is the missing file's word on this card; borrowing it for a row that still opens tells the reader the file is gone when it is there.",
-  },
-  {
-    label: "the grey line says \"besides\" to a number that is missing",
-    file: client,
-    from: `      if (nothingStillStands === true) {`,
-    to: `      if (false) {`,
-    suites: ['test/client.test.mjs'],
-    why: "With every row generated the main number is not drawn, and \"besides\" then points at nothing; one real session spent its whole list on a reviewer copy of the repository and the header read 另有 200 个生成文件 above an empty card.",
-  },
-  {
-    file: shellpaths,
-    label: 'a shell target is stored without the base it was written in',
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
-    from: '    add(isAbsolute(spelled) === true ? spelled : join(cwd, spelled))',
-    to: '    add(spelled)',
-    why: 'this is the whole defect: storing `packages/lib/a.js` from a command that ran in a subdirectory made the card join it to the session root, find nothing, and draw a line through a file the turn had just written',
-  },
-  {
-    file: shellpaths,
-    label: 'a cd does not move what follows it',
-    suites: ['test/shellpaths.test.mjs'],
-    from: '      } else if (cwd !== undefined) {\n        moveTo = resolve(cwd, destination)',
-    to: "      } else if (cwd !== undefined) {\n        cwd = cwd",
-    why: 'a command that changes directory before writing is the ordinary case, and ignoring the cd puts every such file in the wrong place',
-  },
-  {
-    file: shellpaths,
-    label: 'a variable in a cd is followed as though it were a directory name',
-    suites: ['test/shellpaths.test.mjs'],
-    from: '      const knowable =\n        destination !== undefined &&\n        destination.startsWith(\'$\') === false &&\n        destination.startsWith(\'~\') === false &&\n        destination !== \'-\'',
-    to: "      const knowable =\n        destination !== undefined &&\n        destination !== '-'",
-    why: 'resolving `cd $DIR` against the current directory writes a confident wrong absolute path — worse than the relative one it replaced, because a relative path can still be resolved by a reader who knows more',
-  },
-  {
-    file: shellpaths,
-    label: 'one file keeps two spellings',
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
-    from: '  return path.split(\'/\').join(\'\\\\\')',
-    to: '  return path',
-    why: 'the path list is keyed by the string, so `F:/a/b.js` and `F:\\a\\b.js` are two rows for one file — and the one that is not there gets struck through',
-  },
-  {
-    file: shellpaths,
-    label: 'an msys drive path is resolved as a directory called f',
-    suites: ['test/shellpaths.test.mjs'],
-    from: '  const matched = candidate.match(POSIX_DRIVE)\n  if (matched === null) return undefined',
-    to: '  if (true) return undefined\n  const matched = candidate.match(POSIX_DRIVE)',
-    why: 'a Windows shell is often an MSYS shell writing `/f/repo`; without the fold it resolves to `F:\\f\\repo`, which is a different directory that does not exist',
-  },
-  {
-    file: transcript,
-    label: 'the transcript forgets where the command ran',
-    suites: ['test/transcript.test.mjs'],
-    from: '    if (typeof cwd === \'string\' && cwd.length > 0) this.cwd = cwd',
-    to: '    if (false) this.cwd = cwd',
-    why: 'the base is the one thing the caller knows and the parser does not; dropping it silently restores the reported relative paths',
-  },
-  {
-    file: transcript,
-    label: 'a shell call is parsed without the workspace it ran in',
-    suites: ['test/transcript.test.mjs'],
-    from: '    for (const target of writtenPaths(command, this.cwd)) this.paths.push(target)',
-    to: '    for (const target of writtenPaths(command)) this.paths.push(target)',
-    why: 'same defect one layer out: the argument is there, and not passing it looks exactly like the old behaviour',
-  },
-  {
-    file: transcript,
-    label: 'a file tool keeps its own spelling',
-    suites: ['test/transcript.test.mjs'],
-    from: '    if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(canonicalPath(path))',
-    to: '    if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(path)',
-    why: 'the file tools write forward slashes and the shell parser writes backslashes; without one spelling the same file is two rows and one of them is a ghost',
-  },
+
+
+
+
+
+
+
+
+
   {
     file: api,
     label: 'a guessed path that is not there is called deleted',
@@ -1534,138 +1089,10 @@ const mutations = [
     why: 'a directory has no size to print, and formatBytes(null) renders as a number: the row would claim a folder is an empty file',
   
   },
-  {
-    file: shellpaths,
-    label: "a descriptor merge becomes a file once it has a base",
-    // Measured: only this suite fails under the mutation. The ones this
-    // replaces passed with it in place, so they were paying for a run and
-    // covering nothing.
-    suites: ['test/shellpaths.test.mjs'],
-    from: "    if (recordable(spelled) === false) return",
-    to: "    if (false) return",
-    why: "filtering after resolution instead of before let `2>&1` through as a path beginning with a drive letter, because every test in recordable() looks at the start of the string",
-  },
-  {
-    file: shellpaths,
-    label: "a separator glued to a word is not a boundary",
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
-    from: "    if (ch === ';' || ch === '|' || ch === '&') {",
-    to: "    if (ch === ';;' || ch === '|||' || ch === '&&&') {",
-    why: "the boundary rule only fired when the punctuation stood alone as a token, so `a.txt; cd sub && b` stayed one segment and the cd inside it was invisible",
-  },
-  {
-    file: shellpaths,
-    label: "a cd through a variable keeps the directory it was leaving",
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
-    from: '      if (knowable === false) {\n        // `cd $DIR`, `cd ~/x`, `cd -`, a bare `cd`: the result is not in this\n        // command. Staying put would resolve later targets against a directory\n        // the shell has already left, which is how a wrong absolute path gets\n        // written with full confidence.\n        moveTo = undefined',
-    to: "      if (knowable === false) {\n        cwd = cwd",
-    why: "a cd through a variable resolved later targets against the directory the shell had just left, which is a confident wrong answer rather than an admitted unknown",
-  },
-  {
-    file: shellpaths,
-    label: "a popd pretends to know where it went back to",
-    // shellpaths only: the transcript corpus contains no `popd` command, so
-    // running that suite here spends its runtime to learn nothing. Measured with
-    // this mutation in place: transcript reported 158 passed while shellpaths
-    // failed, which is the whole difference between a suite that covers a change
-    // and a suite that merely runs beside it.
-    suites: ['test/shellpaths.test.mjs'],
-    from: "    } else if (word === \'popd\') {\n      // Returning to a remembered directory needs a stack, and no stack is kept.\n      // Guessing \"back to the base\" is right only for a single pushd.\n      moveTo = undefined",
-    to: "    } else if (word === \'popd\') {\n      // Returning to a remembered directory needs a stack, and no stack is kept.\n      // Guessing \"back to the base\" is right only for a single pushd.\n      moveTo = null",
-    why: "no stack is kept, so after a popd the only honest answer is that the directory is unknown; keeping the pushed-to one puts later writes where the shell no longer is",
-  },
-  {
-    file: shellpaths,
-    label: "a subshell writes into the directory outside it",
-    // Measured: both suites fail under this mutation. They are not
-    // alternates for the same behaviour -- one reads the write, the other
-    // reads the read-back -- so neither one can be dropped.
-    suites: ['test/shellpaths.test.mjs', 'test/transcript.test.mjs'],
-    from: "    const opens = substituted === true || (raw.startsWith(\'(\') === true && raw.startsWith(\'((\') === false)\n    if (opens === true) scopes.push(cwd)",
-    to: "    const opens = substituted === true || (raw.startsWith(\'(\') === true && raw.startsWith(\'((\') === false)\n    if (false) scopes.push(cwd)",
-    why: "a subshell changes directory in a scope that ends with the closing paren; carrying the outer directory through it names files outside the subshell",
-  },
-  {
-    file: shellpaths,
-    label: "a target under a variable is resolved against the base",
-    // Measured: only this suite fails under the mutation. The ones this
-    // replaces passed with it in place, so they were paying for a run and
-    // covering nothing.
-    suites: ['test/shellpaths.test.mjs'],
-    from: "    const unexpanded = spelled.includes('$') || spelled.includes('`') || spelled.startsWith('~')",
-    to: "    const unexpanded = false",
-    why: "joining the base to `$OUT/x.txt` yields a path that looks resolved and names nothing; the card then reports a file nobody wrote, in a directory nobody chose",
-  },
-  {
-    file: shellpaths,
-    label: "a noclobber redirect loses its file",
-    suites: ['test/shellpaths.test.mjs'],
-    from: "      const redirectPipe = ch === '|' && text[i - 1] === '>'",
-    to: "      const redirectPipe = false",
-    why: "`>|` is a redirect operator the scan downstream knows about; splitting it into `>` and `|` makes the operator unreachable and the target disappears from the card",
-  },
-  {
-    file: shellpaths,
-    label: "a both-stream redirect loses its file",
-    suites: ['test/shellpaths.test.mjs'],
-    from: "      const both = token.match(/^>>?&(.+)$/)",
-    to: "      const both = null",
-    why: "`cmd &>out.log` is how a build log gets written; dropping it hides the one file the reader wanted",
-  },
-  {
-    file: shellpaths,
-    label: "a descriptor number becomes a file name",
-    suites: ['test/shellpaths.test.mjs'],
-    from: "      if (both !== null && /^[0-9]+$/u.test(both[1]) === false) {",
-    to: "      if (both !== null) {",
-    why: "`2>&1` would put `&1` on the card -- the pseudo-file this whole pass exists to remove",
-  },
-  {
-    file: shellpaths,
-    label: "a command glued to its redirect keeps its own name",
-    suites: ['test/shellpaths.test.mjs'],
-    from: "        if (ch === '&' && next === '>' && started === true) {",
-    to: "        if (false) {",
-    why: "the word `cmd&>both.txt` never splits, so no redirect is read and the file vanishes",
-  },
-  {
-    file: client,
-    suites: ['test/client.test.mjs'],
-    label: "the tooltip starts saying where the row came from",
-    from: "const hint = [absolute, note].filter((part) => part !== '').join('\\n')",
-    to: "const hint = [absolute, note, file.source === 'git' ? '由 git 差分找到' : file.source === 'scan' ? '由目录扫描找到，git 差分未确认' : ''].filter((part) => part !== '').join('\\n')",
-    why: "The bracket is carried as a data-source attribute now, and nobody wants it read aloud: someone asking what changed is not asking which collector noticed. Putting the sentence back is the regression this guards. It also cannot stay true -- `source` is stored per path and outlives the turn, so the same file gains the sentence and loses it between turns, which reads as a change in the file.",
-  },
-  {
-    file: client,
-    suites: ['test/client.test.mjs'],
-    label: "the row stops carrying its bracket at all",
-    from: "                            'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown',\n",
-    to: "",
-    why: "Flattening the attribute to one value is caught; removing it is not caught by that assertion, which reads a property off a node and would be comparing undefined to undefined if the line went away. With the tooltip silenced the attribute is the only copy of the fact, so losing the line loses the bracket entirely.",
-  },
-  {
-    file: client,
-    suites: ['test/client.test.mjs'],
-    label: "the row stops saying which bracket it came from",
-    from: "                            'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown',",
-    to: "                            'data-source': 'unknown',",
-    why: "The attribute is the assertion that survives a rewording, and flattening it makes the three-way split unobservable without reading prose. A tooltip-only test would still pass here, which is why the attribute is asserted separately.",
-  },
-  {
-    file: client,
-    suites: ['test/client.test.mjs'],
-    label: "the two brackets are recorded as each other",
-    from: "                            'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown',\n",
-    to: "                            'data-source': file.source === 'git' ? 'scan' : file.source === 'scan' ? 'git' : 'unknown',\n",
-    why: "Swapping the two branches leaves the attribute well formed and every row carrying a bracket -- just the wrong one. This is the failure that misleads instead of omitting, and it is now the only place the difference is recorded at all.",
-  },
+
+
+
+
   {
     file: client,
     suites: ["test/client.test.mjs"],
@@ -1674,22 +1101,7 @@ const mutations = [
     to: "                                    title: `点击在侧栏预览\\n${hint}`,",
     why: "The invitation belongs last: the path is what a reader hunts for, and a tooltip that opens with a verb buries it. Membership checks cannot see the order, which is why the assertion asks where the sentence ends rather than whether it is present.",
   },
-  {
-    file: client,
-    suites: ['test/client.test.mjs'],
-    label: "the hint keeps the empty parts it was told to drop",
-    from: "const hint = [absolute, note].filter((part) => part !== '').join('\\n')",
-    to: "const hint = [absolute, note].join('\\n')",
-    why: "A row with no note would end in a blank line, and every assertion that asks what a line says still passes -- they never ask whether a line is blank. With provenance gone the filter has one real job left, and this is the mutation that checks it still does it.",
-  },
-  {
-    file: api,
-    suites: ["test/api.test.mjs"],
-    label: "the stored source is passed through without being narrowed",
-    from: "      source: recordedSource === 'git' || recordedSource === 'scan' ? recordedSource : null,",
-    to: "      source: recordedSource ?? null,",
-    why: "The narrowing is what makes 'unknown' in the panel mean 'no bracket was recorded' rather than 'a word this build cannot read'. Passing the raw value through lets any future server word reach the row, where it becomes indistinguishable from a missing record.",
-  },
+
   {
     file: api,
     suites: ['test/api.test.mjs'],
@@ -1722,44 +1134,16 @@ const mutations = [
     to: "",
     why: "The glued-paren spelling `/dev/null)` is what a subshell redirection leaves behind and it exists nowhere, so nothing else in the function catches it once this clause is gone.",
   },
-  {
-    file: api,
-    suites: ['test/api.test.mjs'],
-    label: 'a working copy that grew a suffix is no longer one',
-    from: "    if (folded.startsWith(listed) === true && SUFFIX_BREAK.test(folded.charAt(listed.length)) === true) return true",
-    to: "    if (false) return true",
-    why: 'The name table matched whole names, so .review-tmp slipped past both it and the prefix table. Before the fix that directory put 78 rows on a 200-row card as work a person had done.',
-  },
-  {
-    file: api,
-    suites: ['test/api.test.mjs'],
-    label: 'every longer word looks like a variant of the shorter one',
-    from: "const SUFFIX_BREAK = /^[-_.\\d]$/u",
-    to: "const SUFFIX_BREAK = /^[\\s\\S]$/u",
-    why: 'Widening the separator class to everything makes .reviewer-notes and .reviews working copies, which is how a real source directory would disappear from the card.',
-  },
-  {
-    file: api,
-    label: "a working copy is hidden because of the folder it was asked about",
-    suites: ["test/api.test.mjs"],
-    from: "  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true",
-    to: "  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchName(segment))) return true",
-    why: "The underscore rule was written for scratch files and does not survive being asked about a folder. Restoring it buries `_prototype/`, `_posts/` and `_build/` — sixteen real files in the session that reported this, every one of them the thing the turn was asked to make.",
-  },
-  {
-    file: api,
-    label: "a folder named like a scratch tree stops being one",
-    suites: ["test/api.test.mjs"],
-    from: "const scratchDirectory = (segment) => TEMP_DIRS.has(segment)",
-    to: "const scratchDirectory = (segment) => false",
-    why: "The narrowed rule still has to hide a named temp tree, or a session that ran its build in `tmp/` gets the build output counted as work. This is the half that was kept on purpose, and dropping it is the failure the narrowing was most likely to cause.",
-  },
+
+
+
+
   {
     file: client,
     label: "the card decides for the reader and never lets go",
     suites: ["test/client.test.mjs"],
     from: "      const filesExpanded = filesOpen === null ? nothingStillStands : filesOpen === true",
-    to: "      const filesExpanded = nothingStillStands === true ? true : filesOpen === true",
+    to: "      const filesExpanded = filesOpen === null ? false : filesOpen === true",
     why: "Opening itself is a default, not a rule. Starting from `false` instead of `null` means the badge cannot close a card whose rows are all generated — the one card where the reader most wants it out of the way.",
   },
   {
@@ -1774,7 +1158,7 @@ const mutations = [
     file: client,
     label: "the grey line says \"besides\" with nothing before it",
     suites: ["test/client.test.mjs"],
-    from: "      if (nothingStillStands === true) {",
+    from: "      const filesExpanded = filesOpen === null ? nothingStillStands : filesOpen === true",
     to: "      if (false) {",
     why: "`另有` points at the number before it. With every row generated there is no such number, and the line has to state the whole list instead of referring back to a count the card did not draw.",
   },
@@ -1897,18 +1281,7 @@ const mutations = [
     to: `    openStreams.delete(stop)`,
     suites: ['test/api.test.mjs'],
   },
-  {
-    // The first bump wakes a fetch that reads the previous turn's sweep: `sweep`
-    // and this turn's `files` are written by an async block that has not run yet.
-    // Without the second notice the panel shows a stale file list for a whole
-    // minute, which is exactly the delay the channel exists to remove.
-    label: 'the sweep answers without telling anyone',
-    file: index,
-    from: `            if (revisions.has(agentId) === true) revisions.bump(agentId)
-          } catch {`,
-    to: `          } catch {`,
-    suites: ['test/index.test.mjs'],
-  },
+
   {
     // A turn beginning moves the payload's `turn` field, so it is a visible change
     // even before anything happens inside the turn.
@@ -2109,24 +1482,125 @@ const mutations = [
     to: '            if (answer === null) return',
     why: 'a refusal, a timeout and a cancellation all answer with a value and no text: announcing them redraws a card that already says the summary failed',
   },
+
+  // -------------------------------------------------------------------------
+  // The delivery card: a declared document, and nothing else
+  // -------------------------------------------------------------------------
+
   {
-    file: index,
-    label: 'the sweep landing announces nothing',
-    suites: ['test/index.test.mjs'],
-    from: '            if (revisions.has(agentId) === true) revisions.bump(agentId)',
-    to: '            if (false) revisions.bump(agentId)',
-    why: 'files and sweep are written by the answer that arrives after the turn ended, so the frame already sent could not have carried them',
+    file: api,
+    label: 'every declared file is a document',
+    suites: ['test/api.test.mjs'],
+    from: `  return DELIVERABLE_SUFFIXES.has(name.slice(dot + 1).toLowerCase())`,
+    to: `  return true`,
+    why: 'the whitelist is the only thing keeping source files off a card whose job is to hand the reader something to open; without it every path the model mentions comes back',
   },
   {
-    file: index,
-    label: 'a sweep landing after disposal is announced anyway',
-    suites: ['test/index.test.mjs'],
-    from: '            if (revisions.has(agentId) === true) revisions.bump(agentId)',
-    to: '            revisions.bump(agentId)',
-    why: 'the same leak as the summary landing, through the other late answer: a closed session keeps a counter nobody forgets',
+    file: api,
+    label: 'a document with no extension is a document',
+    suites: ['test/api.test.mjs'],
+    from: `  if (dot <= 0) return false`,
+    to: `  if (dot <= 0) return true`,
+    why: 'a bare name like `Makefile` has no suffix to match, so the whitelist cannot answer for it; letting it through reopens the door the whitelist closes',
+  },
+  {
+    file: api,
+    label: 'a directory that only ends in a suffix is a document',
+    suites: ['test/api.test.mjs'],
+    from: `  if (slashed.endsWith('/') === true) return false`,
+    to: `  if (false) return false`,
+    why: '`/w/report.pdf/` is a directory named like a document; the trailing slash is the only evidence, because splitting on slashes throws it away',
+  },
+  {
+    file: api,
+    label: 'a dependency tree ships its contents',
+    suites: ['test/api.test.mjs'],
+    from: `    if (UNDELIVERABLE_DIRS.has(folded) === true) return false`,
+    to: `    if (false) return false`,
+    why: 'a document inside node_modules is a dependency, not something the reader asked for; the directory check is what keeps a package README off the card',
+  },
+  {
+    file: api,
+    label: 'an office lock file is a document',
+    suites: ['test/api.test.mjs'],
+    from: `  if (TEMPORARY_NAME.test(name) === true) return false`,
+    to: `  if (false) return false`,
+    why: 'a `.docx` being edited leaves a `~$name.docx` beside it; it matches the whitelist, so only the temporary-name rule refuses it',
+  },
+  {
+    file: transcript,
+    label: 'a presented path keeps the whitespace around it',
+    suites: ['test/transcript.test.mjs'],
+    from: `    const path = row.path.trim()`,
+    to: `    const path = row.path`,
+    why: 'a path with a trailing newline is a different key from the same path without one, so the card would list one file twice',
+  },
+  {
+    file: transcript,
+    label: 'a declaration without a description is described as undefined',
+    suites: ['test/transcript.test.mjs'],
+    from: `    const description = typeof row.description === 'string' ? row.description.trim() : ''`,
+    to: `    const description = String(row.description)`,
+    why: 'the string "undefined" is truthy, so it reaches the tooltip and the card says the file was delivered as undefined',
+  },
+  {
+    file: transcript,
+    label: 'the same file declared twice is two rows',
+    suites: ['test/transcript.test.mjs'],
+    from: `    const existing = this.delivered.find((entry) => entry.path === absolute)`,
+    to: `    const existing = undefined`,
+    why: 'a turn that declares a file in two steps would list it twice, and the second row would carry the empty description',
+  },
+
+  {
+    file: transcript,
+    label: 'the event and the call are not both read',
+    suites: ['test/transcript.test.mjs'],
+    from: `  if (type === PRESENTED_EVENT) {`,
+    to: `  if (false) {`,
+    why: 'the event is the structured announcement and the call is the fallback; dropping the event leaves only the argument text, which the host may truncate',
+  },
+  {
+    file: client,
+    label: 'the card draws the files it declined',
+    suites: ['test/client.test.mjs'],
+    from: `      const delivered = ordered.filter((file) => file.deliverable === true)`,
+    to: `      const delivered = ordered`,
+    why: 'the whole point of the change is that a source file does not reach this card; drawing every row puts it back',
+  },
+  {
+    file: client,
+    label: 'a session that delivered nothing still draws a card',
+    suites: ['test/client.test.mjs'],
+    from: `  const showFiles = delivered.length > 0`,
+    to: `  const showFiles = ordered.length > 0`,
+    why: 'a card saying "0 个文件 另有 12 个文件不是交付文档" is about what it is not showing; a conversation with nothing to hand over should draw nothing',
+  },
+  {
+    file: client,
+    label: 'the header counts the whole record instead of what it drew',
+    suites: ['test/client.test.mjs'],
+    from: `children: [jsx('b', { children: String(delivered.length) })`,
+    to: `children: [jsx('b', { children: String(ordered.length) })`,
+    why: 'the number beside the card has to be the rows behind the badge; counting the refused files too makes the two halves not add up',
+  },
+  {
+    file: client,
+    label: 'a spreadsheet is drawn as a blank page',
+    suites: ['test/client.test.mjs'],
+    from: `      if (SHEET_EXTENSIONS.has(ext) === true) return "sheet"`,
+    to: `      if (SHEET_EXTENSIONS.has(ext) === true) return "file"`,
+    why: 'the card is for documents people open, and a spreadsheet is one of the six shapes it can draw; falling back to the blank page loses the only cue the icon carries',
+  },
+  {
+    file: client,
+    label: 'a row hides the sentence it was delivered with',
+    suites: ['test/client.test.mjs'],
+    from: `const hint = [absolute, said, note].filter((part) => part !== '')`,
+    to: `const hint = [absolute, note].filter((part) => part !== '')`,
+    why: 'the description is the one field the host gives that Qoder does not have; dropping it leaves the row with a path and nothing about why the file exists',
   },
 ]
-
 
 // Baseline first: a workspace that already fails turns every mutation into a
 // false KILLED, because "the suite has failures after the mutation" is then true

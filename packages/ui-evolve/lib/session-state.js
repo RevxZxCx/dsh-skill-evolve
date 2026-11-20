@@ -39,7 +39,6 @@
  */
 
 import { SessionStore } from './session-store.js'
-import { mergeCoverage } from './coverage.js'
 
 /**
  * How long an event may sit in memory before it is written.
@@ -110,7 +109,7 @@ function isRecord(value) {
  * front of the person reading the panel.
  *
  * @param {any} stored - what `SessionStore.read` returned.
- * @returns {{ skills: Map<string, { via: string, at: number }>, tools: Set<string>, servers: Map<string, number>, paths: Map<string, object>, sweep: object | undefined, summary: object | undefined, sequence: number } | undefined}
+ * @returns {{ skills: Map<string, { via: string, at: number }>, tools: Set<string>, servers: Map<string, number>, paths: Map<string, object>, summary: object | undefined, sequence: number } | undefined}
  */
 function readState(stored) {
   if (!isRecord(stored)) return undefined
@@ -167,59 +166,37 @@ function readState(stored) {
     paths.clear()
     for (const [file, entry] of newest) paths.set(file, entry)
   }
-  return { skills, tools, servers, paths, sweep: readSweep(stored.sweep), summary: readSummary(stored.summary), sequence }
+  return { skills, tools, servers, paths, summary: readSummary(stored.summary), sequence }
 }
 
 /**
  * One remembered file, in whichever shape the file on disk used.
  *
- * @param {any} raw - a `{ seq, turn, at, source? }` object (v2) or a bare position (v1).
- * @returns {{ seq: number, turn: number | undefined, at: number | undefined, source: string | undefined } | undefined} the entry, or undefined when the value says nothing usable.
+ * @param {any} raw - a `{ seq, turn, at, description? }` object (v2) or a bare position (v1).
+ * @returns {{ seq: number, turn: number | undefined, at: number | undefined, description: string } | undefined} the entry, or undefined when the value says nothing usable.
  */
 function readPathEntry(raw) {
   const finite = value => typeof value === 'number' && Number.isFinite(value)
-  // `source` is deliberately absent from the v1 shape: a document written before
-  // it existed cannot say which bracket found a file, and inventing `'git'` for
-  // it would put a provenance claim on the card that no build ever made.
-  if (finite(raw)) return { seq: raw, turn: undefined, at: undefined, source: undefined }
+  // `description` is absent from the v1 shape, and that is honest: a document
+  // written before the card had descriptions cannot say what a model called the
+  // file. Empty means "nothing was said about it", which is also what a
+  // `report_output_files` call produces, so the two are the same row.
+  if (finite(raw)) return { seq: raw, turn: undefined, at: undefined, description: '' }
   if (isRecord(raw) === false) return undefined
   if (finite(raw.seq) === false) return undefined
   // A wrong-typed `turn` or `at` is dropped to undefined rather than clamped: a
   // turn of `"3"` is not turn 3, and inventing one would move a file into this
   // turn's group on the strength of a value the writer never meant as a number.
+  //
+  // `description` is the one field read as text, because it is the only one that
+  // is text. A wrong-typed one becomes `''` rather than being carried: a row
+  // quoting `[object Object]` under a filename is worse than a row with one line.
   return {
     seq: raw.seq,
     turn: finite(raw.turn) ? raw.turn : undefined,
     at: finite(raw.at) ? raw.at : undefined,
-    // Only the two words this build knows survive; anything else is dropped
-    // rather than carried, because the field exists to answer "why is this row
-    // here" and an unrecognised answer is not an answer. `undefined` is the
-    // honest value for "no bracket claimed it".
-    source: raw.source === 'git' || raw.source === 'scan' ? raw.source : undefined,
+    description: typeof raw.description === 'string' ? raw.description : '',
   }
-}
-
-/**
- * The sweep's own account of the last turn, in whichever shape the file used.
- *
- * Two fields only: which turn was swept and whether the sweep could see all of
- * it. A document written before this existed has no `sweep` at all, and that is
- * not an error — it means "this turn made no claim about completeness", which is
- * exactly what an older build could honestly say.
- *
- * @param {any} raw - the stored value.
- * @returns {{ turn: number | undefined, coverage: 'complete' | 'partial' | 'none' } | undefined} the entry, or undefined when unusable.
- */
-function readSweep(raw) {
-  if (isRecord(raw) === false) return undefined
-  const turn = typeof raw.turn === 'number' && Number.isFinite(raw.turn) ? raw.turn : undefined
-  // `none` and `partial` survive a round trip; anything else is read as
-  // `complete`. The asymmetry is deliberate: a value this build does not
-  // recognise is not evidence that something was skipped, and claiming doubt the
-  // writer never expressed would put an apology on the card — but the two words
-  // that DO carry doubt must not be lost, or the field would only ever weaken.
-  const coverage = raw.coverage === 'partial' || raw.coverage === 'none' ? raw.coverage : 'complete'
-  return { turn, coverage }
 }
 
 /**
@@ -258,8 +235,9 @@ function readSummary(raw) {
  * that records what a model just said, and `document`, which puts it back on
  * disk. Written as three field lists they drift — one gains a field the others
  * drop, and the field survives a restart only if all three agree. The `sweep`
- * field upstream was written the other way and the merge in `readInto` forgot
- * it completely, which is the same failure in a different field.
+ * field this file used to carry was written the other way and its merge was
+ * forgotten completely, which is the same failure in a different field; that
+ * field is gone now that nothing measures a sweep.
  *
  * Both identities are allowed to be absent, and absent means "no claim" rather
  * than "mismatch". `model` is the resolved route the text came from, and
@@ -312,27 +290,6 @@ function blankRecord() {
      * holds a position, `sequence` hands out the next one.
      */
     paths: new Map(),
-    /**
-     * What the last turn's git sweep could see.
-     *
-     * Not a file list — `paths` is that. This is the sweep's own admission about
-     * its reach: a turn that produced nothing inside a repository the sweep could
-     * only half read is a different fact from a turn that produced nothing at
-     * all. Both look identical in `paths`, so the doubt has to be stored beside
-     * it or it is lost.
-     *
-     * `undefined` until a sweep reports, and that means "no claim", not "clean".
-     */
-    sweep: undefined,
-    /**
-     * The last summary this session was given.
-     *
-     * `undefined` until one is produced, and for a session whose summary is
-     * turned off, which is "no claim" rather than "an empty summary". The panel
-     * asks for the newest turn only, so one record is the whole of what it needs;
-     * see `readSummary` for why the key rather than the text decides whether a
-     * stored answer still applies.
-     */
     summary: undefined,
     sequence: 0,
     snapshot: undefined,
@@ -747,41 +704,6 @@ class SessionState {
       // memory has nothing, which is the ordinary "events arrived before the
       // panel's first read" order that `flush` exists to handle.
       if (current.summary === undefined) current.summary = state.summary
-      // `sweep` merges the same way and was missing from this branch entirely.
-      // It is the sweep's own caveat about how much of the last turn it could
-      // see, so losing it does not lose files — it loses the warning that the
-      // file list may be short, which is the one thing that keeps a partial scan
-      // from reading as a clean one. The same "event arrives before the first
-      // read" order reaches it, and the next write then states a complete
-      // coverage the sweep never claimed.
-      // `sweep` is ordered, so unlike the other fields the file may legitimately
-      // be the newer of the two: a sweep whose git subprocess reported after the
-      // following turn had already done so is exactly what `rememberSweep`'s own
-      // stale rule is about. Copying the file's value unconditionally would
-      // reinstate a caveat this process already superseded; keeping memory
-      // unconditionally would throw away a caveat about a *newer* turn that was
-      // written by the last process before it exited. So the same rule as the
-      // writer: an unnumbered claim yields to a numbered one, and a numbered one
-      // yields to a newer turn.
-      // Equal turns do not pick a winner, because neither side can prove it is
-      // newer: both measured the same turn, one before the process restarted and
-      // one after. `mergeCoverage` is the answer the rest of the codebase uses
-      // for two claims about the same interval — it keeps the weaker one, since
-      // what the reader needs is what *both* measurements could see. Falling
-      // back to "memory wins ties" would make the file's caveat disappear at
-      // exactly the restart boundary where it is most likely to be the only
-      // record of a partial sweep.
-      if (state.sweep !== undefined) {
-        const mine = current.sweep
-        const theirs = state.sweep
-        if (mine === undefined || mine.turn === undefined) {
-          current.sweep = theirs
-        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {
-          current.sweep = theirs
-        } else if (theirs.turn === mine.turn) {
-          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }
-        }
-      }
       current.empty = false
       current.loaded = true
     }
@@ -864,45 +786,43 @@ class SessionState {
    * "earlier" and the card quietly forgot which work was the latest.
    *
    * @param {string} sessionId - the session.
-   * @param {string[]} paths - the paths the finished turn wrote.
-   * @param {number | undefined} [turn] - the turn that wrote them, when known.
-   * @param {'git' | 'scan' | undefined} [source] - which bracket found them.
+   * @param {Array<string | { path: string, description?: string }>} paths - the files the finished turn delivered.
+   * @param {number | undefined} [turn] - the turn that delivered them, when known.
    * @returns {void}
    */
-  rememberPaths(sessionId, paths, turn, source) {
+  rememberPaths(sessionId, paths, turn) {
     if (!Array.isArray(paths) || paths.length === 0) return
     const entry = this.entry(sessionId)
     if (entry === undefined) return
     const stamp = Number.isFinite(turn) ? turn : undefined
-    // Provenance is recorded, not inferred later: once the paths are merged into
-    // one list the fact that git could not see a file — and that only the
-    // directory walk did — is gone, and it is the one thing needed to answer
-    // "why did this appear" months later. A value outside the vocabulary is
-    // dropped so the field never carries a claim no reader can interpret.
-    const origin = source === 'git' || source === 'scan' ? source : undefined
     // Through the injected clock, like every other timestamp this module writes.
     // Reading `Date.now()` directly let one document carry two contradictory
     // times — the paths' `at` in real wall-clock time while `updated` followed the
     // clock the tests (and any future caller) supply.
     const at = this.now()
     let touched = false
-    for (const file of paths) {
+    for (const raw of paths) {
+      // Two shapes, like the reader in `api.js`: an object carrying a
+      // description, and a bare string from a caller that has only paths. A bare
+      // string means exactly what an object with no description means.
+      const file = typeof raw === 'string' ? raw : raw?.path
       if (typeof file !== 'string' || file.length === 0) continue
-      // A re-record that names no bracket is not evidence that the previous one
-      // was wrong: `turn/end` re-records the turn's whole path list, and that
-      // list is mostly transcript paths which never had a bracket at all. Writing
-      // `undefined` here would erase, on the very next turn, the provenance the
-      // bracket had just established for the files the card cares about most.
-      // A named bracket does replace the old one — the most recent find is the
-      // true answer to "where did this come from".
+      const said = typeof raw === 'object' && raw !== null && typeof raw.description === 'string' ? raw.description : ''
+      // A re-record that carries no description is not evidence the previous one
+      // was wrong: `turn/end` re-records the whole turn, and the second visit to
+      // a file usually comes from a call that says nothing about it. Writing
+      // `''` here would erase what the model wrote on the first visit — which is
+      // the only reason the card has a second line at all. A non-empty
+      // description does replace the old one: the newest thing said about a file
+      // is the true answer.
       //
       // No delete-before-set here, unlike `rememberSkill`: order in this list
       // comes from `seq` (`pathsSeen` sorts by it), not from the Map's insertion
       // order, so dropping the old entry would change nothing. A mutation that
       // removed it changed no assertion, which is how this was noticed.
       const previous = entry.paths.get(file)
-      const kept = origin === undefined && previous !== undefined ? previous.source : origin
-      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, source: kept })
+      const kept = said.length === 0 && previous !== undefined ? previous.description : said
+      entry.paths.set(file, { seq: ++entry.sequence, turn: stamp, at, description: kept })
       touched = true
     }
     if (touched === true) {
@@ -946,14 +866,14 @@ class SessionState {
    * than when it was last written to disk, which is what `mtimeMs` reports.
    *
    * @param {string} sessionId - the session.
-   * @returns {Array<{ path: string, turn: number | undefined, at: number | undefined }>} the files, or an empty list.
+   * @returns {Array<{ path: string, turn: number | undefined, at: number | undefined, description: string }>} the files, or an empty list.
    */
   pathsSeen(sessionId) {
     const entry = this.bySession.get(sessionId)
     if (entry === undefined || entry.paths.size === 0) return []
     return [...entry.paths.entries()]
       .sort((a, b) => b[1].seq - a[1].seq)
-      .map(([file, at]) => ({ path: file, turn: at.turn, at: at.at, source: at.source }))
+      .map(([file, at]) => ({ path: file, turn: at.turn, at: at.at, description: at.description }))
   }
 
   /**
@@ -1007,65 +927,6 @@ class SessionState {
     const entry = this.entry(sessionId)
     if (entry === undefined) return
     this.schedule(sessionId)
-  }
-
-  /**
-   * A turn was swept, and this is how much of it the sweep could see.
-   *
-   * Written even when the sweep found no files, because the two facts it can
-   * record — "clean" and "could only half see" — are both invisible in `paths`.
-   * A turn that produced nothing inside a repository the sweep could only
-   * partially read looks exactly like a turn that produced nothing at all, and
-   * only one of those deserves to be believed without a caveat.
-   *
-   * Deliberately not subject to `keepsDocument`: coverage with no files is a
-   * claim about a turn, not content of its own. A session whose only fact is
-   * "I could not see everything" still has nothing to show.
-   *
-   * @param {string} sessionId - the session.
-   * @param {number | undefined} turn - the turn that was swept, when known.
-   * @param {'complete' | 'partial' | 'none'} coverage - how much the sweep could see, or `none` when no sweep ran.
-   * @returns {void}
-   */
-  rememberSweep(sessionId, turn, coverage) {
-    const entry = this.entry(sessionId)
-    if (entry === undefined) return
-    const stamp = typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
-    // Both words that carry doubt are stored as given. `complete` is the plain
-    // case, and writing it for every ordinary turn would grow the file to say
-    // nothing. Same vocabulary as `readSweep`, from the other side.
-    const claim = coverage === 'partial' || coverage === 'none' ? coverage : 'complete'
-    const next = { turn: stamp, coverage: claim }
-    // Replacing rather than accumulating: this describes the newest sweep, and a
-    // list of historical coverage claims is not something any reader wants.
-    //
-    // "Newest" has to be decided rather than assumed. The caller runs after an
-    // `await` on a git subprocess, so a slow turn can report after the following
-    // turn has already done so; replacing blindly would let the older turn's
-    // caveat — or its all-clear — become the one the card shows about the newer
-    // one. A claim with no turn number is kept when nothing newer is on record,
-    // and yields to any numbered claim, since a number is evidence of when it was
-    // measured and the absence of one is not.
-    const previous = entry.sweep
-    const stale =
-      previous !== undefined &&
-      previous.turn !== undefined &&
-      (stamp === undefined || previous.turn > stamp)
-    if (stale === false) {
-      entry.sweep = next
-      this.schedule(sessionId)
-    }
-  }
-
-  /**
-   * What the last sweep could see, for the panel to caveat its own file list.
-   *
-   * @param {string} sessionId - the session.
-   * @returns {{ turn: number | undefined, coverage: 'complete' | 'partial' | 'none' } | undefined} the claim, or undefined when no sweep has reported.
-   */
-  sweepSeen(sessionId) {
-    const entry = this.bySession.get(sessionId)
-    return entry === undefined ? undefined : entry.sweep
   }
 
   /**
@@ -1210,7 +1071,7 @@ class SessionState {
     const servers = {}
     for (const [server, at] of entry.servers) servers[server] = at
     const paths = {}
-    for (const [file, remembered] of entry.paths) paths[file] = { seq: remembered.seq, turn: remembered.turn, at: remembered.at, source: remembered.source }
+    for (const [file, remembered] of entry.paths) paths[file] = { seq: remembered.seq, turn: remembered.turn, at: remembered.at, description: remembered.description }
     return {
       state: STATE_VERSION,
       turns: snapshot?.turns,
@@ -1219,7 +1080,6 @@ class SessionState {
       tools: [...entry.tools],
       servers,
       paths,
-      sweep: entry.sweep === undefined ? undefined : { turn: entry.sweep.turn, coverage: entry.sweep.coverage },
       // Handed over as it stands, because `entry.summary` cannot be anything but
       // normalised: it is written in exactly two places and both of them are the
       // reader — `rememberSummary` and the `readInto` merge, which takes the

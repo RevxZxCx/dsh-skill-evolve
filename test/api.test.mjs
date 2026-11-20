@@ -26,9 +26,7 @@ import {
   decideCandidate,
   readPanel,
   statTouchedFiles,
-  isNoisePath,
-  isGeneratedDirectory,
-  isUnwalkableDirectory
+  isDeliverable
 } from '../packages/ui-evolve/lib/api.js'
 
 let passed = 0
@@ -471,27 +469,35 @@ check('a malformed origin is refused', checkOrigin(fakeReq({ headers: { origin: 
 // ---------------------------------------------------------------------------
 
 {
-  // Where a row came from is recorded by the collector, and this layer's only job
-  // is to pass it through. A bare string is what the legacy `previous.paths`
-  // fallback holds and what documents written before the field existed contain;
-  // both must arrive as `null`, because "nobody wrote it down" and "git found it"
-  // are different sentences on a card, and inventing the second one is a claim
-  // nobody made.
+  // What the model said about a file is recorded by the collector, and this
+  // layer's only job is to pass it through. A bare string is what the legacy
+  // `previous.paths` fallback holds and what documents written before the field
+  // existed contain; both must arrive as an empty string, because "nobody said
+  // anything about it" is not the same as "the model called it X", and inventing
+  // the second one is a claim nobody made.
   const dir = tempDir('skill-evolve-stat-source-')
-  const present = join(dir, 'present.js')
+  const present = join(dir, 'report.docx')
   writeFileSync(present, 'x')
 
   const legacy = await statTouchedFiles({ paths: [present] })
-  check('a path with no recorded provenance says null', legacy[0]?.source === null, JSON.stringify(legacy[0]))
+  check('a path with no recorded description says so with an empty one', legacy[0]?.description === '', JSON.stringify(legacy[0]))
 
-  const credited = await statTouchedFiles({ paths: [{ path: present, source: 'git' }] })
-  check('a recorded provenance is passed through', credited[0]?.source === 'git', JSON.stringify(credited[0]))
+  const described = await statTouchedFiles({ paths: [{ path: present, description: 'the onboarding deck' }] })
+  check('a recorded description is passed through', described[0]?.description === 'the onboarding deck', JSON.stringify(described[0]))
 
-  const walked = await statTouchedFiles({ paths: [{ path: present, source: 'scan' }] })
-  check('and the walk is its own word', walked[0]?.source === 'scan', JSON.stringify(walked[0]))
+  // A description that is not text is dropped rather than coerced: a row
+  // quoting `[object Object]` under a filename is worse than a row with one line.
+  const nonsense = await statTouchedFiles({ paths: [{ path: present, description: { said: 'x' } }] })
+  check('a description that is not text becomes empty', nonsense[0]?.description === '', JSON.stringify(nonsense[0]))
 
-  const nonsense = await statTouchedFiles({ paths: [{ path: present, source: 'guess' }] })
-  check('a word this build does not know is not repeated', nonsense[0]?.source === null, JSON.stringify(nonsense[0]))
+  // And the same file named twice is one row, carrying the *first* description
+  // it was handed -- because the caller has already resolved which visit wins.
+  // `pathsSeen` sorts by `seq` descending, so the first entry in the list it
+  // returns is the newest thing said about that file. Reading past it would let
+  // an older visit's words overwrite the newest ones.
+  const twice = await statTouchedFiles({ paths: [{ path: present, description: 'newest' }, { path: present, description: 'older' }] })
+  check('a file named twice is one row', twice.length === 1, String(twice.length))
+  check('and it carries the first description it was handed', twice[0]?.description === 'newest', JSON.stringify(twice[0]))
 }
 
 // ---------------------------------------------------------------------------
@@ -807,158 +813,94 @@ function deps(overrides = {}) {
   // client that worked either out for itself would be guessing at path shapes it
   // never sees.
   const dir = tempDir('skill-evolve-files-flags-')
-  const written = join(dir, 'src', 'app.js')
-  const bundled = join(dir, 'node_modules', 'lib', 'index.js')
-  const lockfile = join(dir, 'package-lock.json')
-  const named = join(dir, 'docs', 'dist.md')
-  const built = join(dir, 'src', 'build', 'gen.js')
-  const builder = join(dir, 'src', 'builder', 'gen.js')
-  for (const file of [written, bundled, lockfile, named, built, builder]) {
+  const written = join(dir, 'docs', 'guide.md')
+  const bundled = join(dir, 'node_modules', 'lib', 'README.md')
+  const script = join(dir, 'src', 'app.js')
+  const image = join(dir, 'shots', 'card.png')
+  const built = join(dir, 'src', 'out', 'report.pdf')
+  const temporary = join(dir, 'tmp', 'notes.md')
+  for (const file of [written, bundled, script, image, built, temporary]) {
     mkdirSync(dirname(file), { recursive: true })
     writeFileSync(file, 'e')
   }
   const payload = await readPanel(
     deps({
       transcripts: { view: () => ({ turns: 1, previous: { turn: 1, calls: 5, failed: 0, paths: [written, bundled], commands: [], said: 'wrote five', tools: [] } }) },
-      filesSeen: () => [written, bundled, lockfile, named, built, builder],
-      // The fixtures live under the OS temp dir, which is not the workspace, so
-      // `isNoisePath` cannot strip a prefix and falls back to judging every
-      // segment — and `Temp` is a generated directory name. Declaring the temp
-      // dir as the workspace is what makes this block assert noise rules rather
-      // than where the tests happen to run.
+      filesSeen: () => [written, bundled, script, image, built, temporary],
       cwdFor: () => dir,
     }),
     'agent-1',
   )
   const byPath = new Map(payload.files.map((file) => [file.path, file]))
-  check('a file this turn wrote says so', byPath.get(written)?.turn === true, JSON.stringify(byPath.get(written)))
-  check('and a file it did not write says so too', byPath.get(named)?.turn === false, JSON.stringify(byPath.get(named)))
-  // A build dependency is not the reader's work, and neither is a lockfile. The
-  // judgement is made on whole path segments and whole file names, so a project
-  // that owns `src/build/` or `docs/dist.md` keeps its files visible.
-  check("a dependency of the build is not the reader's work", byPath.get(bundled)?.noise === true, JSON.stringify(byPath.get(bundled)))
-  check('a lockfile is not either', byPath.get(lockfile)?.noise === true, JSON.stringify(byPath.get(lockfile)))
-  check('an output directory is one wherever it sits', byPath.get(built)?.noise === true, JSON.stringify(byPath.get(built)))
+  check('a file this turn delivered says so', byPath.get(written)?.turn === true, JSON.stringify(byPath.get(written)))
+  check('and a file it did not deliver says so too', byPath.get(image)?.turn === false, JSON.stringify(byPath.get(image)))
+  // Every row carries the flag, whatever its value. The fixtures live under the OS
+  // temp dir, and a `.md` there is a delivery: the directory list names dependency
+  // and build scratch, not wherever a test happens to run. The rules themselves
+  // are asserted on synthetic paths below, where the directory is part of the
+  // input instead of an accident of the machine.
+  for (const file of payload.files) {
+    check(`the row for ${basename(file.path)} answers the flag`, typeof file.deliverable === 'boolean', JSON.stringify(file.deliverable))
+  }
+  check('and the document written here is one, wherever the test runs', byPath.get(written)?.deliverable === true, JSON.stringify(byPath.get(written)))
   // The card subtracts this from every absolute path to show the directory under
   // each name, so the panel has to send it; a client cannot guess it.
   check('the payload carries the workspace the paths are relative to', payload.cwd === dir, String(payload.cwd))
-  check("a directory that merely shares a prefix is still the reader's", byPath.get(builder)?.noise === false, JSON.stringify(byPath.get(builder)))
-  check('and so is a file that merely shares one', byPath.get(named)?.noise === false, JSON.stringify(byPath.get(named)))
 }
 
 {
-  // A checkout can live under a directory that happens to be called `build`. CI
-  // puts it at `/build/<repo>` and a developer may open `D:/build/mine` directly.
-  // Judging the whole absolute path would call every file inside generated: the
-  // card would draw no rows and announce "0 个文件" for a session that edited real
-  // source, and the turn grouping would go with them. Only the segments below the
-  // workspace may decide.
-  const parent = tempDir('skill-evolve-noise-ancestor-')
-  const dir = join(parent, 'build', 'project')
-  const source = join(dir, 'src', 'app.js')
-  const bundled = join(dir, 'node_modules', 'lib', 'index.js')
-  for (const file of [source, bundled]) {
-    mkdirSync(dirname(file), { recursive: true })
-    writeFileSync(file, 'e')
+  // The whitelist is the whole answer to "what belongs on this card". It is
+  // copied from Qoder's `C_0` set on purpose: a shared vocabulary is the only
+  // way two products can mean the same thing by a delivered file, and inventing
+  // a longer list would quietly make the card noisier than the one it models.
+  const delivered = ['a.pdf', 'b.doc', 'c.docx', 'd.md', 'e.markdown', 'f.txt', 'g.xls', 'h.xlsx', 'i.xlsm', 'j.csv', 'k.tsv', 'l.ppt', 'm.pptx', 'n.html', 'o.htm', 'p.png', 'q.jpg', 'r.jpeg', 's.gif', 't.webp', 'u.svg', 'v.mp4', 'w.webm']
+  for (const name of delivered) {
+    check(`${name} is something a person reads`, isDeliverable(`/w/out/${name}`) === true, String(isDeliverable(`/w/out/${name}`)))
   }
-  const payload = await readPanel(
-    deps({
-      cwdFor: () => dir,
-      filesSeen: () => [source, bundled],
-    }),
-    'agent-1',
-  )
-  const byPath = new Map(payload.files.map((file) => [file.path, file]))
-  check('a workspace under a directory called build keeps its source', byPath.get(source)?.noise === false, JSON.stringify(byPath.get(source)))
-  check('and still knows its own dependency directory', byPath.get(bundled)?.noise === true, JSON.stringify(byPath.get(bundled)))
-
-  // The two halves of the comparison come from different places and neither
-  // normalises its case: `cwd` is whatever the session header says, the file path
-  // is whatever the tool argument said. On Windows and macOS they are routinely
-  // the same directory written differently, and a case-sensitive prefix check
-  // would fail to strip, fall back to judging every ancestor, and hide the list.
-  const payloadCased = await readPanel(
-    deps({
-      // Uppercased on every platform: `cwd` only ever reaches string comparisons
-      // here (the stat call uses the absolute `source` unchanged), so a Host that
-      // reports one case and a tool argument that reports the other is ordinary
-      // anywhere. Guarding this on `win32` made the assertion tautological
-      // everywhere else, and the mutation it exists to kill would survive.
-      cwdFor: () => dir.toUpperCase(),
-      filesSeen: () => [source],
-    }),
-    'agent-1',
-  )
-  check('the workspace is recognised in either case', payloadCased.files[0]?.noise === false, JSON.stringify(payloadCased.files))
-
-  // Folding is not length-preserving: `İ` lowercases to two code units. Comparing
-  // folded while cutting the original by the folded prefix's length therefore
-  // leaves a few characters of the workspace's own name at the front of the
-  // remainder — and if that fragment happens to be a generated directory name, a
-  // source file is hidden as though a build had written it. The five-`İ` prefix
-  // and the workspace named `…build` are chosen so the fragment is exactly
-  // `build`; one `İ` would leave a fragment the segment filter absorbs, and the
-  // defect would not show.
-  const dotted = '\u0130'.repeat(5)
-  const plain = 'i\u0307'.repeat(5)
-  const foldedParent = tempDir('skill-evolve-noise-fold-')
-  const foldedDir = join(foldedParent, `${plain}build`)
-  const foldedSource = join(foldedDir, 'src', 'app.js')
-  mkdirSync(dirname(foldedSource), { recursive: true })
-  writeFileSync(foldedSource, 'e')
-  const payloadFolded = await readPanel(
-    deps({
-      cwdFor: () => join(foldedParent, `${dotted}build`),
-      filesSeen: () => [foldedSource],
-    }),
-    'agent-1',
-  )
-  check('a folded prefix does not leave a fragment of its own name behind', payloadFolded.files[0]?.noise === false, JSON.stringify(payloadFolded.files))
+  // Every extension this project itself writes, and every one a build leaves
+  // behind, must stay off the card -- that is the entire point of the change.
+  const refused = ['a.js', 'b.mjs', 'c.ts', 'd.tsx', 'e.json', 'f.jsonl', 'g.yaml', 'h.yml', 'i.toml', 'j.py', 'k.sh', 'l.ps1', 'm.bat', 'n.exe', 'o.log', 'p.zip', 'q.sha256', 'r.map', 's.css', 't.scss', 'u.xml', 'v.sql', 'w.diff', 'x.patch']
+  for (const name of refused) {
+    check(`${name} is not a delivery`, isDeliverable(`/w/out/${name}`) === false, String(isDeliverable(`/w/out/${name}`)))
+  }
+  // Case is not a decision: a build on Windows writes `REPORT.PDF`.
+  check('an upper-case extension is the same extension', isDeliverable('/w/REPORT.PDF') === true, String(isDeliverable('/w/REPORT.PDF')))
+  // A name with no extension at all is a directory, a binary, or a licence file;
+  // none of the three is a document the reader opens from a card.
+  check('a name with no extension is not a delivery', isDeliverable('/w/Makefile') === false, String(isDeliverable('/w/Makefile')))
+  check('nor is a dot file', isDeliverable('/w/.gitignore') === false, String(isDeliverable('/w/.gitignore')))
+  // A directory named `report.pdf` is not a document, and the trailing separator
+  // is how the caller says so without a second argument.
+  check('a directory is never a delivery, whatever it is called', isDeliverable('/w/report.pdf/') === false, String(isDeliverable('/w/report.pdf/')))
+  // Qoder refuses office lock files by name prefix. They are real files with a
+  // real extension, so only the name rule can catch them.
+  check('an office lock file is not a delivery', isDeliverable('/w/~$report.docx') === false, String(isDeliverable('/w/~$report.docx')))
+  // The directory rule is segment-wise, so a project that owns `src/build/`
+  // keeps its documents: a build output directory is where a real delivery
+  // lands, and refusing it was the old filter's mistake in the other direction.
+  check('a document under a dependency tree is refused', isDeliverable('/w/node_modules/pkg/README.md') === false, String(isDeliverable('/w/node_modules/pkg/README.md')))
+  check('a document under a temp directory is refused', isDeliverable('/w/tmp/notes.md') === false, String(isDeliverable('/w/tmp/notes.md')))
+  check('a document under a cache is refused', isDeliverable('/w/.cache/x.png') === false, String(isDeliverable('/w/.cache/x.png')))
+  // A scratch folder this build has never heard of is somebody's project
+  // directory. The card is not allowed to have opinions about names it invented
+  // for its own author's habits.
+  check('a document under an unknown scratch folder is a delivery', isDeliverable('/w/.probe-x/report.md') === true, String(isDeliverable('/w/.probe-x/report.md')))
+  check('a document under a git directory is refused', isDeliverable('/w/.git/notes.md') === false, String(isDeliverable('/w/.git/notes.md')))
+  // A directory that merely starts with a listed name is somebody's source.
+  check('a directory that merely starts like a cache is entered', isDeliverable('/w/cachetools/report.md') === true, String(isDeliverable('/w/cachetools/report.md')))
+  check('and one that merely starts like a scratch folder too', isDeliverable('/w/.probing/report.md') === true, String(isDeliverable('/w/.probing/report.md')))
+  check('a build output directory is not refused', isDeliverable('/w/dist/report.pdf') === true, String(isDeliverable('/w/dist/report.pdf')))
+  check('nor is out', isDeliverable('/w/out/report.pdf') === true, String(isDeliverable('/w/out/report.pdf')))
+  // Windows separators are the normal case here, not an edge case.
+  check('a backslash path is read the same way', isDeliverable('F:\\work\\docs\\guide.md') === true, String(isDeliverable('F:\\work\\docs\\guide.md')))
+  check('and a backslash path under a dependency is refused', isDeliverable('F:\\work\\node_modules\\x\\README.md') === false, String(isDeliverable('F:\\work\\node_modules\\x\\README.md')))
 }
 
-{
-  // Lowercasing is not length-preserving: `İ` (U+0130) becomes `i` plus a combining
-  // dot, so the folded prefix is one code unit longer than the original. Cutting
-  // the original by the folded length therefore lands past the separator and eats
-  // the first character of the first segment — `node_modules/` reads as
-  // `ode_modules/`, matches nothing, and a dependency is listed as the reader's own
-  // work. Folding the remainder and cutting that instead costs nothing, because
-  // every comparison below ignores case anyway.
-  // The path carries the long form and the cwd the short one, so folding grows the
-  // prefix by a code unit: the folded prefix measures six and the original path
-  // only five before the separator. Cutting the original by six eats the `n`.
-  check('a folded prefix does not eat the first segment', isNoisePath('/W/\u0130/node_modules/a.js', '/w/i\u0307') === true, String(isNoisePath('/W/\u0130/node_modules/a.js', '/w/i\u0307')))
-  check('and the same path outside it is still the reader\'s', isNoisePath('/W/\u0130/src/a.js', '/w/i\u0307') === false, String(isNoisePath('/W/\u0130/src/a.js', '/w/i\u0307')))
-}
 
-{
-  // Most of what a long session leaves behind is scratch: scripts written to
-  // answer one question. Measured before this rule existed, across every stored
-  // session, 276 tracked paths and zero classified as generated — the filter
-  // looked broken and was, because no rule described the data. One 175-file
-  // session was 130 rows of `_peek2.py`, `_r062_snapx.py`, `_dump.json`.
-  check('a scratch script is not the reader\'s work', isNoisePath('/w/_peek2.py', '/w') === true, String(isNoisePath('/w/_peek2.py', '/w')))
-  check('neither is one under a scratch folder', isNoisePath('/w/.research/x.md', '/w') === true, String(isNoisePath('/w/.research/x.md', '/w')))
-  check('a tmp directory is scratch wherever it sits', isNoisePath('/w/src/tmp/a.js', '/w') === true, String(isNoisePath('/w/src/tmp/a.js', '/w')))
-  check('a dotted scratch file is scratch too', isNoisePath('/w/.probe-slice.mjs', '/w') === true, String(isNoisePath('/w/.probe-slice.mjs', '/w')))
 
-  // The underscore rule is only safe because of its exception. A dunder name
-  // belongs to the project: `__tests__/` holds the tests, and `__init__.py` is
-  // the one file every Python package has. The first draft required the segment
-  // to *end* with `__`, which protected the directories and hid every package
-  // marker — a hidden test suite and a hidden `__init__.py` are both worse than
-  // no rule at all.
-  check('a dunder directory keeps its files', isNoisePath('/w/tests/__tests__/a.test.js', '/w') === false, String(isNoisePath('/w/tests/__tests__/a.test.js', '/w')))
-  check('and a dunder module is not scratch', isNoisePath('/w/mypkg/__init__.py', '/w') === false, String(isNoisePath('/w/mypkg/__init__.py', '/w')))
-  check('nor is a dunder entry point', isNoisePath('/w/__main__.py', '/w') === false, String(isNoisePath('/w/__main__.py', '/w')))
 
-  // A dot file is far more often part of the project than temporary, and the
-  // cost is lopsided: hiding `.gitignore` hides something the reader may have
-  // just asked for, while showing one stray dotted file costs a row.
-  check('a config file is not scratch', isNoisePath('/w/.gitignore', '/w') === false, String(isNoisePath('/w/.gitignore', '/w')))
-  check('a config prefix keeps its variants', isNoisePath('/w/.env.local', '/w') === false, String(isNoisePath('/w/.env.local', '/w')))
-  check('a directory that merely shares a prefix is still the reader\'s', isNoisePath('/w/src/builder/gen.js', '/w') === false, String(isNoisePath('/w/src/builder/gen.js', '/w')))
-}
+
+
 
 {
   // The turn's `paths` are whatever the tool call carried, which in real sessions
@@ -1566,26 +1508,34 @@ async function route(overrides, req) {
 // answer up to eight seconds late — which is the whole generation.
 {
   const asked = []
-  const res = await route(
+  // Held, not bare: this host half has no `speedRevision`, and a wait that never
+  // settles would leave the top-level await pending forever. Node then prints
+  // "unsettled top-level await" and the suite ends with no tally line at all --
+  // which the mutation runner reports as CRASHED rather than as the caught
+  // defect it is. `routeHeld` turns the same bug into one red assertion.
+  const res = await routeHeld(
     { speedOf: (id) => { asked.push(id); return { tokens: 100, ms: 1000, tps: 100, active: true } } },
     fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=agent-7` }),
   )
   check('the speed route answers 200', res.statusCode === 200, String(res.statusCode))
-  check('and hands back the reading', bodyOf(res).data.tps === 100, String(res.body))
+  check('and hands back the reading', heldBodyOf(res).data?.tps === 100, String(res.body))
   check('and it asks about the session in the query', asked[0] === 'agent-7', JSON.stringify(asked))
-  check('and it says the reading is active', bodyOf(res).data.active === true, String(res.body))
+  check('and it says the reading is active', heldBodyOf(res).data?.active === true, String(res.body))
 }
 
 {
   // An idle session is a 200 with an inactive reading, not an error: the client
   // needs to tell "nothing is being written" from "this host cannot say", and
   // those are the same status code only if the body is read.
-  const res = await route(
+  // Held for the same reason as the block above: this host half has no counter,
+  // so a wait that never settles must fail an assertion rather than leave the
+  // top-level await pending and the suite without a tally.
+  const res = await routeHeld(
     { speedOf: () => ({ tokens: 0, ms: 0, tps: 0, active: false }) },
     fakeReq({ url: `${ROUTE_PREFIX}/speed?agent=idle` }),
   )
   check('an idle session is not an error', res.statusCode === 200, String(res.statusCode))
-  check('and it reports itself inactive rather than absent', bodyOf(res).ok === true && bodyOf(res).data.active === false, String(res.body))
+  check('and it reports itself inactive rather than absent', heldBodyOf(res).ok === true && heldBodyOf(res).data?.active === false, String(res.body))
 }
 
 {
@@ -2323,186 +2273,8 @@ function heldBodyOf(res) {
   check('and it says why', String(body.data?.reason).includes('skill half is not installed'), String(body.data?.reason))
 }
 
-{
-  // The walk and the card answer different questions, and the difference is
-  // load-bearing: the walk may refuse to enter node_modules, while the card must
-  // still be able to call a row it did read generated. What must never happen is
-  // the reverse — a directory the walk enters while the card counts its files as
-  // a person's work.
-  //
-  // Measured on the largest stored session: 200 remembered paths, 114 under
-  // .rv-head/, 62 under .tmp-test/, 21 under .review/. The walk refused none of
-  // them and the card called three rows out of two hundred generated, so both were
-  // answering about a repository this plugin had never looked inside.
-  const walkerSkips = [
-    '.rv-head', '.tmp-test', '.review', '.audit-s8e2b', '.probe-r1', 'node_modules',
-    // The same tables written as whole names only matched the exact spelling. A
-    // separator or a digit keeps a name a variant of the listed one.
-    '.review-tmp', '.review2', '.review_old', '.review.bak', '.tmp-test2',
-    '.jest-cache', '.nyc_output-x', '.vitest',
-  ]
-  const walkerEnters = [
-    'packages', 'src', 'out', 'dist', 'build', '.github', '.probing', '_posts',
-    // A letter after a listed name is a different word, not a variant of it.
-    '.reviewer-notes', '.reviews', '.jesting', 'review', 'tmp-test',
-  ]
-  for (const name of walkerSkips) {
-    check(`the walk refuses ${name}`, isUnwalkableDirectory(name) === true, String(isUnwalkableDirectory(name)))
-  }
-  const variants = ['.review', '.tmp-test', '.vitest', '.jest', '.nyc_output']
-  for (const name of variants) {
-    for (const suffix of ['-tmp', '2', '_old', '.bak']) {
-      check(
-        `a working copy that grew a suffix is still one: ${name}${suffix}`,
-        isUnwalkableDirectory(name + suffix) === true,
-        name + suffix,
-      )
-      check(
-        `and the card does not call it a person's work: ${name}${suffix}`,
-        isNoisePath('/w/' + name + suffix + '/probe.mjs', '/w') === true,
-        name + suffix,
-      )
-    }
-    // The longer-word direction is only meaningful for names the prefix table does
-    // not already claim. `.tmp-test` starts with the `.tmp-` prefix, so `.tmp-tests`
-    // was a working copy long before this rule - asserting otherwise would be
-    // asserting that the prefix table does not exist.
-    for (const suffix of name === '.tmp-test' ? [] : ['er-notes', 's', 'ing']) {
-      check(
-        `a longer word that only starts the same is not a working copy: ${name}${suffix}`,
-        isUnwalkableDirectory(name + suffix) === false,
-        name + suffix,
-      )
-      check(
-        `and the card leaves it among the sources: ${name}${suffix}`,
-        isNoisePath('/w/' + name + suffix + '/a.js', '/w') === false,
-        name + suffix,
-      )
-    }
-  }
-  check(
-    'a prefix that was already there still claims its names',
-    isUnwalkableDirectory('.tmp-tests') === true && isUnwalkableDirectory('.tmp-tester-notes') === true,
-    '.tmp-tests',
-  )
-  for (const name of walkerEnters) {
-    check(`the walk still enters ${name}`, isUnwalkableDirectory(name) === false, String(isUnwalkableDirectory(name)))
-  }
-  // The one place the two deliberately disagree. A build output directory is where
-  // a script puts a turn's result, so the walk enters it: the S8 bracket exists
-  // because git cannot see ignored files, and dist/ is ignored in every JavaScript
-  // project, so pruning it made the bracket blind exactly where it was needed.
-  check('a build directory is entered even though the card calls it generated', isUnwalkableDirectory('out') === false && isGeneratedDirectory('out') === true, `${String(isUnwalkableDirectory('out'))} / ${String(isGeneratedDirectory('out'))}`)
-  // Case folding: disks deliver whatever case they please, the tables are lower.
-  check('a working copy spelled in capitals is refused too', isUnwalkableDirectory('.RV-HEAD') === true, String(isUnwalkableDirectory('.RV-HEAD')))
-  // The dash in .probe- is what keeps this from eating a real source directory.
-  check('a source directory that merely starts like a probe is entered', isUnwalkableDirectory('.probing') === false, String(isUnwalkableDirectory('.probing')))
-  // The card is never narrower than the walk. If it were, a path could be read and
-  // then counted as a person's work — the 197-of-200 reading.
-  const bothSides = walkerSkips.concat(walkerEnters).map((name) => [name, isUnwalkableDirectory(name), isNoisePath(`/w/${name}/a.js`, '/w')])
-  check('every directory the walk skips is generated to the card', bothSides.every((row) => row[1] === false || row[2] === true), JSON.stringify(bothSides))
-  check('a working copy is generated to the card too', isNoisePath('/w/.rv-head/a.js', '/w') === true, String(isNoisePath('/w/.rv-head/a.js', '/w')))
-  check('and the source beside it is still written by a person', isNoisePath('/w/src/a.js', '/w') === false, String(isNoisePath('/w/src/a.js', '/w')))
-  // The underscore rule answers about a FILE. Asked about a directory it eats
-  // source that the convention never meant to hide.
-  //
-  // A real session asked for a prototype and got fourteen files under
-  // `_prototype/` — the HTML, its stylesheet, the capture scripts and six
-  // screenshots. Every one of them was called generated, the main number
-  // disappeared from the header, and the turn read as though it had produced
-  // nothing. `isGeneratedDirectory` had already refused this rule for
-  // directories and written down why; the card was the half that still applied
-  // it, so the two disagreed about the same folder.
-  const underscoreSources = [
-    '_prototype', '_posts', '_layouts', '_data', '_build', '_includes', '_drafts',
-  ]
-  for (const name of underscoreSources) {
-    check(
-      `a leading underscore does not make ${name} generated`,
-      isNoisePath(`/w/${name}/a.js`, '/w') === false,
-      String(isNoisePath(`/w/${name}/a.js`, '/w')),
-    )
-  }
-  check(
-    'and the walk enters it as it always did',
-    isUnwalkableDirectory('_prototype') === false && isUnwalkableDirectory('_posts') === false,
-    `${String(isUnwalkableDirectory('_prototype'))} / ${String(isUnwalkableDirectory('_posts'))}`,
-  )
-  // The file half of the rule is the half that was written on purpose. Losing it
-  // would put a session's own probe scripts among the work it did.
-  const underscoreScratch = ['_probe5.mjs', '_slot_probe.mjs', '_scratch.py', '_tmp.txt']
-  for (const name of underscoreScratch) {
-    check(
-      `a leading underscore still makes ${name} scratch`,
-      isNoisePath(`/w/${name}`, '/w') === true,
-      String(isNoisePath(`/w/${name}`, '/w')),
-    )
-  }
-  check(
-    'a dunder name is a project marker, not scratch',
-    isNoisePath('/w/__tests__/a.test.js', '/w') === false && isNoisePath('/w/pkg/__init__.py', '/w') === false,
-    `${String(isNoisePath('/w/__tests__/a.test.js', '/w'))} / ${String(isNoisePath('/w/pkg/__init__.py', '/w'))}`,
-  )
-  // What the narrowed rule still hides: a named scratch directory, whatever the
-  // files inside it are called. Nobody keeps source in `tmp/`.
-  const namedScratch = ['tmp', 'temp', 'scratch', '.probe', '.sandbox', '.trash']
-  for (const name of namedScratch) {
-    check(
-      `a directory named ${name} is still scratch`,
-      isNoisePath(`/w/${name}/out.js`, '/w') === true,
-      String(isNoisePath(`/w/${name}/out.js`, '/w')),
-    )
-  }
-  check(
-    'and a build directory is still generated to the card',
-    isNoisePath('/w/dist/a.js', '/w') === true && isNoisePath('/w/build/a.js', '/w') === true,
-    `${String(isNoisePath('/w/dist/a.js', '/w'))} / ${String(isNoisePath('/w/build/a.js', '/w'))}`,
-  )
-}
 
-{
-  // `stale` ages a remembered path by when the session recorded it, not by the
-  // file's mtime. In a shared checkout an mtime belongs to whoever last ran a
-  // build, checked out a branch or committed — none of which say when this session
-  // last touched the thing.
-  //
-  // Three states, and the third is the one that matters: unknown is not old. A
-  // record written before `at` was kept cannot be aged, and demoting it would be
-  // sorting on a number that was never recorded.
-  const dir = tempDir('skill-evolve-stale-')
-  const fresh = join(dir, 'fresh.js')
-  const old = join(dir, 'old.js')
-  const unknown = join(dir, 'unknown.js')
-  for (const file of [fresh, old, unknown]) writeFileSync(file, 'x')
-  const DAY = 24 * 60 * 60 * 1000
-  const now = 1_800_000_000_000
-  // Rows come back in the order they were handed in, so index is enough and no
-  // path has to be compared — which matters, because a path comparison here would
-  // have to agree with the layer about separators.
-  const files = await statTouchedFiles({
-    paths: [
-      { path: fresh, at: now - 2 * 60 * 1000 },
-      { path: old, at: now - 30 * DAY },
-      { path: unknown },
-    ],
-    now,
-  })
-  check('a path recorded minutes ago is current', files[0]?.stale === false, JSON.stringify(files[0]?.stale))
-  check('a path recorded a month ago is stale', files[1]?.stale === true, JSON.stringify(files[1]?.stale))
-  check('a path with no recorded time is not aged', files[2]?.stale === false, JSON.stringify(files[2]?.stale))
-  check('and it says the time is unknown rather than zero', files[2]?.at === null, JSON.stringify(files[2]?.at))
-  // The threshold is a judgement, so the boundary is the only part worth pinning:
-  // seven days exactly is stale, one millisecond less is not. Otherwise a later
-  // change to the constant would move both sides together and nothing would notice.
-  const edge = await statTouchedFiles({ paths: [{ path: fresh, at: now - 7 * DAY }], now })
-  const near = await statTouchedFiles({ paths: [{ path: fresh, at: now - 7 * DAY + 1 }], now })
-  check('seven days exactly is stale', edge[0]?.stale === true, JSON.stringify(edge[0]?.stale))
-  check('one millisecond short of seven days is not', near[0]?.stale === false, JSON.stringify(near[0]?.stale))
-  // Without an injected clock the predicate still has to answer, or a caller that
-  // forgets `now` would silently get false for everything and nothing would age.
-  const unclocked = await statTouchedFiles({ paths: [{ path: old, at: Date.now() - 30 * DAY }] })
-  check('a caller that passes no clock still measures against the real one', unclocked[0]?.stale === true, JSON.stringify(unclocked[0]?.stale))
-}
+
 
 
 {

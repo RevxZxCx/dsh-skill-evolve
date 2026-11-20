@@ -527,73 +527,74 @@ window.__ModuleLoader__.load({
     /**
      * Which glyph a file gets, by extension.
      *
-     * Eight buckets, not eighty: the row is 28 pixels tall and the icon answers
-     * "what kind of thing is this" at a glance, not "which language exactly". The
-     * buckets are chosen so that a wrong guess is impossible to make — a `.json`
-     * and a `.yaml` really are both structured data — and everything unlisted
-     * lands on the blank page rather than on a guess. A wrong icon is worse than a
-     * generic one: it tells the reader something false about a file they wrote.
+     * Six buckets, not sixty: the row is 28 pixels tall and the icon answers "what
+     * kind of document is this" at a glance. The buckets are the distinctions a
+     * reader of a delivery list actually makes -- prose, a spreadsheet, a deck, a
+     * web page, a picture, a recording -- and everything else lands on the blank
+     * page rather than on a guess. A wrong icon is worse than a generic one: it
+     * tells the reader something false about a document they are about to open.
+     *
+     * There is no `code` bucket any more. The card lists delivered documents, and
+     * no source file is one, so the braces outline and the four other language
+     * buckets described a card that no longer exists.
      *
      * @param {string} name - the file name, extension included.
-     * @returns {string} one of `code`, `markup`, `style`, `data`, `doc`, `image`,
-     *   `archive`, `file`.
+     * @returns {string} one of `doc`, `sheet`, `slide`, `markup`, `image`,
+     *   `video`, `file`.
      */
     function fileBucket(name) {
       if (typeof name !== "string") return "file"
       const dot = name.lastIndexOf(".")
       if (dot <= 0 || dot === name.length - 1) return "file"
       const ext = name.slice(dot + 1).toLowerCase()
-      if (CODE_EXTENSIONS.has(ext) === true) return "code"
-      if (MARKUP_EXTENSIONS.has(ext) === true) return "markup"
-      if (STYLE_EXTENSIONS.has(ext) === true) return "style"
-      if (DATA_EXTENSIONS.has(ext) === true) return "data"
       if (DOC_EXTENSIONS.has(ext) === true) return "doc"
+      if (SHEET_EXTENSIONS.has(ext) === true) return "sheet"
+      if (SLIDE_EXTENSIONS.has(ext) === true) return "slide"
+      if (MARKUP_EXTENSIONS.has(ext) === true) return "markup"
       if (IMAGE_EXTENSIONS.has(ext) === true) return "image"
-      if (ARCHIVE_EXTENSIONS.has(ext) === true) return "archive"
+      if (VIDEO_EXTENSIONS.has(ext) === true) return "video"
       return "file"
     }
 
     // Extensions are the only evidence a row has, so these lists are the whole
-    // classifier. They are deliberately generous inside a bucket and deliberately
-    // empty across them: a name appears in exactly one set, so the answer cannot
-    // depend on the order the checks run in.
-    const CODE_EXTENSIONS = new Set([
-      "js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx", "py", "rb", "go", "rs",
-      "java", "kt", "kts", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "cs", "php",
-      "swift", "m", "mm", "scala", "clj", "cljs", "ex", "exs", "erl", "hs", "lua",
-      "pl", "pm", "r", "jl", "dart", "vue", "svelte", "astro", "sh", "bash", "zsh",
-      "fish", "ps1", "bat", "cmd", "asm", "sol", "zig", "nim", "cr",
-    ])
-    const MARKUP_EXTENSIONS = new Set(["html", "htm", "xhtml", "xml", "xsl", "xslt", "plist", "rss", "atom"])
-    const STYLE_EXTENSIONS = new Set(["css", "scss", "sass", "less", "styl", "stylus", "pcss"])
-    const DATA_EXTENSIONS = new Set([
-      "json", "jsonc", "json5", "yaml", "yml", "toml", "ini", "cfg", "conf", "env",
-      "csv", "tsv", "sql", "db", "sqlite", "lock", "ndjson", "jsonl", "avro", "parquet",
-    ])
-    const DOC_EXTENSIONS = new Set(["md", "markdown", "mdx", "txt", "rst", "adoc", "asciidoc", "tex", "pdf", "doc", "docx", "rtf", "odt", "org"])
-    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico", "icns", "avif", "svg", "tif", "tiff", "psd", "heic"])
-    const ARCHIVE_EXTENSIONS = new Set(["zip", "tar", "gz", "tgz", "bz2", "xz", "zst", "7z", "rar", "jar", "war", "whl", "nupkg", "vsix", "apk", "ipa"])
+    // classifier. Every one of them is a subset of the delivery whitelist in
+    // `api.js` -- a row that reaches this function is a delivered document, so an
+    // extension outside that whitelist is unreachable here and listing it would be
+    // a table nobody can enter. `test/client.test.mjs` asserts the coverage: each
+    // whitelisted suffix has to land on a bucket that is not the blank page, and
+    // the blank page is what an unlisted suffix gets.
+    //
+    // The buckets answer "what kind of document is this", which is the question the
+    // card raises. A spreadsheet, a slide deck and a recording are not variations
+    // on prose -- a reader scanning for the deck they asked for should not have to
+    // open three rows to find it.
+    const DOC_EXTENSIONS = new Set(["md", "markdown", "txt", "pdf", "doc", "docx"])
+    const SHEET_EXTENSIONS = new Set(["xls", "xlsx", "xlsm", "csv", "tsv"])
+    const SLIDE_EXTENSIONS = new Set(["ppt", "pptx"])
+    const MARKUP_EXTENSIONS = new Set(["html", "htm"])
+    const IMAGE_EXTENSIONS = new Set(["png", "jpg", "jpeg", "gif", "webp", "svg"])
+    const VIDEO_EXTENSIONS = new Set(["mp4", "webm"])
 
     /**
      * One outline per bucket, on the same 24-unit grid as `Icon`.
      *
      * These used to share a page silhouette and differ only in a small mark on
-     * it. At fourteen pixels that mark was under four pixels wide — the eight
-     * buckets were, in practice, one page. So the silhouettes themselves differ
-     * now: braces for code, angle brackets for markup, a hash for style, a grid
-     * for data, ruled lines for prose, a hill and a sun for pictures, a box for
-     * archives, and the page kept for the bucket that knows nothing.
+     * it. At fourteen pixels that mark was under four pixels wide — the buckets
+     * were, in practice, one page. So the silhouettes themselves differ now:
+     * ruled lines for prose, a grid for spreadsheets, a screen with a stand for
+     * slide decks, angle brackets for markup, a hill and a sun for pictures, a
+     * frame with a play mark for recordings, and the page kept for the bucket that
+     * knows nothing.
      *
      * @type {Record<string, string[]>}
      */
     const FILE_MARKS = {
-      code: ['M10 4.5c-2.6 0-2.6 7.5-5.4 7.5 2.8 0 2.8 7.5 5.4 7.5M14 4.5c2.6 0 2.6 7.5 5.4 7.5-2.8 0-2.8 7.5-5.4 7.5'],
-      markup: ['M9.5 4.5L3.5 12l6 7.5M14.5 4.5l6 7.5-6 7.5'],
-      style: ['M10.4 3.5L7.6 20.5M16.4 3.5l-2.8 17M3.5 9h17M3.5 15h17'],
-      data: ['M3.5 5h17v14h-17zM3.5 10h17M3.5 14.5h17M9.2 5v14M14.8 5v14'],
       doc: ['M5 3.5h14v17H5zM8.5 8h7M8.5 12h7M8.5 16h4'],
+      sheet: ['M3.5 5h17v14h-17zM3.5 10h17M3.5 14.5h17M9.2 5v14M14.8 5v14'],
+      slide: ['M3.5 4.5h17v12h-17zM12 16.5v3M8.5 19.5h7'],
+      markup: ['M9.5 4.5L3.5 12l6 7.5M14.5 4.5l6 7.5-6 7.5'],
       image: ['M3.5 18.5l4.8-6.2 3.7 4.4 2.9-3.5 5.6 5.3z'],
-      archive: ['M4 8.5h16M4 8.5v11h16v-11M10 8.5V4.5h4v4M12 11.5v5M10.8 11.5h2.4'],
+      video: ['M3.5 5.5h17v13h-17z', 'M10.2 9.4l4.6 2.6-4.6 2.6z'],
       file: ['M5 3.5h10l4 4v13H5zM15 3.5v4h4'],
     }
 
@@ -609,6 +610,9 @@ window.__ModuleLoader__.load({
      * inherited from the row, round caps and joins — but one step bolder: a sixth
      * of a pixel more stroke, at sixteen rather than fourteen. The bucket also
      * picks a colour, which is the one place this card stops being monochrome.
+     * `doc` and `file` deliberately carry no colour: one is the commonest row and
+     * the other is the admission that nothing is known, so neither is claiming a
+     * kind.
      * Colour is carried by the class name's sibling attribute rather than by the
      * `stroke` attribute so a missing row can drop it back to grey in CSS; an
      * inline attribute would win the cascade and leave a bright icon beside
@@ -744,12 +748,11 @@ window.__ModuleLoader__.load({
    than as a second palette. Size goes to 16px here because a 14px row cannot show
    an outline's shape — the shape is the whole point of having eight of them. */
 .dsse-fileicon{width:16px;height:16px;flex:0 0 auto;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--dsw-alias-label-tertiary,#8b92a1)}
-.dsse-fileicon[data-bucket="code"]{color:#4c7fb8}
 .dsse-fileicon[data-bucket="markup"]{color:#b06a4a}
-.dsse-fileicon[data-bucket="style"]{color:#8a6aa8}
-.dsse-fileicon[data-bucket="data"]{color:#2f8a72}
+.dsse-fileicon[data-bucket="sheet"]{color:#2f8a72}
 .dsse-fileicon[data-bucket="image"]{color:#a8654f}
-.dsse-fileicon[data-bucket="archive"]{color:#b08a3e}
+.dsse-fileicon[data-bucket="slide"]{color:#b08a3e}
+.dsse-fileicon[data-bucket="video"]{color:#8a6aa8}
 /* doc and file stay grey on purpose: they are the two buckets that make no claim
    about what the file is worth reading as. */
 .dsse-row[data-status="missing"] .dsse-fileicon,.dsse-row[data-status="invalid"] .dsse-fileicon{color:var(--dsw-alias-label-tertiary,#8b92a1)}
@@ -842,12 +845,6 @@ window.__ModuleLoader__.load({
 .dsse-group{display:grid;gap:3px}
 .dsse-group + .dsse-group{margin-top:6px}
 .dsse-group-label{margin:0;padding:2px 6px 0;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.8em,10px);letter-spacing:.02em}
-.dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
-/* Older, not gone and not generated: the name steps back a shade, nothing else.
-   No strikethrough — that belongs to the missing state, which means the file is
-   not there. A stale row is still a live link to a real file, and drawing it like
-   a deleted one would make the reader think the work was lost. */
-.dsse-row[data-stale="true"] .dsse-name{color:var(--dsw-alias-label-secondary,#5b6270)}
 .dsse-row[data-status="missing"] .dsse-name,.dsse-row[data-status="invalid"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1);text-decoration:line-through}
 .dsse-row[data-status="unresolved"] .dsse-name,.dsse-row[data-status="folder"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}
 
@@ -3292,108 +3289,61 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // filtering trustworthy. So the fold counts people's files, and opening the
       // card shows everything with the generated ones labelled in their own
       // group.
-      const noisy = ordered.filter((file) => file.noise === true)
-      const people = ordered.filter((file) => file.noise !== true)
-      // Stale is a third question about the same rows: people wrote it, but not
-      // any time recently. Measured on a real session, 197 of 200 remembered paths
-      // were review copies and test scratch — the sort of thing that is real work
-      // on the day and noise a week later.
+      // One filter, and it is the whole design: a row is drawn only when the model
+      // said it was delivering a document. `deliverable` is the whitelist verdict
+      // -- markdown, images, office files, pdf, video -- and it is computed in
+      // `api.js` from the suffix, not here, so the rule has one home.
       //
-      // It is not deleted, and not merged into `generated`: a copy of a file that
-      // a reviewer once asked about is still a copy *of a file someone wrote*, and
-      // calling it machine output would be a second wrong label on top of the
-      // first. It gets its own group, one shade quieter, and the header says how
-      // many there are.
-      const stale = people.filter((file) => file.stale === true)
-      const current = people.filter((file) => file.stale !== true)
-      const fresh = current.filter((file) => file.turn === true)
-      const earlier = current.filter((file) => file.turn !== true)
-      // Folded, the four rows are the reader's own work, this turn's first. Open,
-      // the whole session is there in four labelled groups, so nothing is
-      // hidden without a way to see it.
-      //
-      // The folded list is `fresh.concat(earlier)` and not `current`, even though
-      // they hold the same rows: `current` is in the order the session remembered
-      // them, which is oldest first, so slicing it would show the oldest four and
-      // push this turn's work below the fold — the one thing a folded card exists
-      // to prevent.
-      // A card whose only rows are demoted ones has nothing to put behind a
+      // Everything else the session touched is still stored and still counted, in
+      // one quiet line. A turn that delivered two documents and rewrote thirty
+      // source files delivered two documents, and the card says that rather than
+      // listing thirty-two rows nobody would open.
+      const delivered = ordered.filter((file) => file.deliverable === true)
+      const skipped = ordered.length - delivered.length
+      // A delivered document that has since been deleted is still something the
+      // turn delivered, so it keeps its row -- struck through and not clickable,
+      // the way Qoder draws a missing artifact. Dropping it would rewrite history:
+      // the reader would see a card that never mentioned the file they remember.
+      const gone = delivered.filter((file) => file.status === 'missing')
+      const live = delivered.filter((file) => file.status !== 'missing')
+      // Two groups, because the card answers two questions: what did this turn
+      // hand me, and what has this conversation handed me. The turn that just
+      // ended comes first -- that is the sentence the card exists to say.
+      const fresh = live.filter((file) => file.turn === true)
+      const earlier = live.filter((file) => file.turn !== true)
+      // A card whose only rows are deleted ones has nothing to put behind a
       // disclosure: folded, it draws the first four of `fresh.concat(earlier)`,
       // which is empty, so the reader gets a header naming a number and no rows
-      // under it. That is the same failure as a filter nobody can reach, one
-      // step worse — the rows exist and the card declines to show them.
-      //
-      // So when the main number has nothing left to count, the card opens. The
-      // reader can still fold it back; `filesOpen` remembers that and wins.
-      const nothingStillStands = current.length === 0 && ordered.length > 0
+      // under it. So when the live list is empty the card opens. The reader can
+      // fold it back; `filesOpen` remembers that and wins.
+      const nothingStillStands = live.length === 0 && delivered.length > 0
       const filesExpanded = filesOpen === null ? nothingStillStands : filesOpen === true
       const groups = filesExpanded === true
         ? [
             { key: 'fresh', label: '', files: fresh },
             { key: 'earlier', label: earlier.length > 0 && fresh.length > 0 ? '更早' : '', files: earlier },
-            { key: 'stale', label: stale.length > 0 ? '较早' : '', files: stale },
-            { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },
+            { key: 'gone', label: gone.length > 0 ? '已不存在' : '', files: gone },
           ]
         : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]
-      // What the header promises, and it promises one thing: how much of this list
-      // still describes the session as it stands. It used to count everything,
-      // which was truthful about the collector and a lie to the reader — one real
-      // session showed `200 个文件` above four rows, and 197 of those rows were a
-      // reviewer's copy of the repository.
+      // What the header promises. The bold number is how many documents this
+      // session delivered; the grey line says what was left out of it and why.
       //
-      // The main number leaves demoted rows out too (see `stale` below), which is
-      // the same claim one step further: a path nobody has touched in a week is
-      // part of the history, not of the current work.
-      //
-      // The other two numbers are still said, in the same breath and in a quieter
-      // voice, because leaving them out would make the badge's remainder
-      // unexplainable: a reader who adds up what the header says must arrive at
-      // the same total the badge counts down from.
-      const staleCount = stale.length
-      const noiseCount = noisy.length
+      // It used to count everything the session touched, which was truthful about
+      // the collector and a lie to the reader: one real session showed `200 个文件`
+      // above four rows, and 197 of those rows were a reviewer's copy of the
+      // repository. A second number then split those into "generated" and "older",
+      // and a third tried to explain the split. All three questions went away with
+      // the collectors that raised them: the model says what it delivered, and the
+      // whitelist says whether that is a document.
       const keptNotes = []
-      // With nothing to put in the main number, the grey line has to carry the whole
-      // header: `另有 200 个生成文件` says "besides" to a number that is not there.
-      // A real session reached exactly this state — a reviewer's copy of the
-      // repository left two hundred rows and not one of them a person's.
-      //
-      // Saying it about the whole list is not the same as leading with a count. One
-      // real turn put every row in that group — fourteen files under `_prototype/`,
-      // a preview someone had asked to see — so the header was a bare `N 个生成文件`
-      // and the reader reported "产出文件是空的". The count was right and the sentence
-      // was wrong. The rule that produced it is fixed elsewhere, but this line still
-      // has to survive the next rule that is wrong, so it says what the list *is*
-      // rather than repeating a number twice.
-      if (nothingStillStands === true) {
-        if (noiseCount > 0 && staleCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件里，${noiseCount} 个生成文件 · ${staleCount} 个较早`)
-        else if (noiseCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件都是生成文件`)
-        else if (staleCount > 0) keptNotes.push(`全部 ${ordered.length} 个文件都较早`)
-      } else {
-        if (noiseCount > 0) keptNotes.push(`另有 ${noiseCount} 个生成文件`)
-        if (staleCount > 0) keptNotes.push(`${staleCount} 个较早`)
-      }
+      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个文件不是交付文档`)
       // How many rows the folded card actually draws. Equality with
-      // `FOLDED_FILES` is not assumed: a session with two written files shows two.
+      // `FOLDED_FILES` is not assumed: a session with two documents shows two.
       const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length
       // Still counted against the whole list, not against the header's number.
-      // The badge answers "how much of this list am I not seeing", and the list
-      // is every row the card holds — saying `200 - 4 = 196` while the header
-      // says 3 is only confusing if the two are read as the same quantity, so
-      // the header states the remainder explicitly rather than leaving it to be
-      // subtracted.
-      const hiddenFiles = ordered.length - (filesExpanded === true ? ordered.length : foldedRows)
-      // What the sweep could see, said out loud. `paths` empty reads as "this turn
-      // produced nothing", and that is a different sentence from "nothing I could
-      // see" — only the collector knows which one happened, so it sends `sweep`
-      // and the card repeats it rather than guessing. `complete` says nothing:
-      // a caveat on every card is a caveat nobody reads.
-      const sweep = typeof data?.sweep === 'object' && data.sweep !== null ? data.sweep : undefined
-      const coverage = typeof sweep?.coverage === 'string' ? sweep.coverage : ''
-      const blindNote = coverage === 'partial'
-        ? '目录没读完，可能还有文件没列出'
-        : coverage === 'none'
-          ? '这一轮没有检查目录，列表可能不全'
-          : ''
+      // The badge answers "how much of this list am I not seeing", and the list is
+      // every row the card holds.
+      const hiddenFiles = delivered.length - (filesExpanded === true ? delivered.length : foldedRows)
       // How many files the turn that just ended wrote. `files` is the whole
       // session's work now, so it cannot answer that question, and the two other
       // numbers on the same row are turn-scoped.
@@ -3677,7 +3627,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         ((summary?.text !== undefined && String(summary.text).length > 0) || (data.calls ?? 0) > 0 || (data.failed ?? 0) > 0 || turnFiles > 0)
       const showTurn = turnHasContent
       const showActivity = activity.length > 0
-      const showFiles = ordered.length > 0
+      // Only when something was delivered. A card that says "0 个文件 另有 12 个
+      // 文件不是交付文档" is a card about the files it is not showing, and the
+      // reader's question is what the turn handed them. A session that delivered
+      // nothing shows nothing, which is the same rule the other cards follow.
+      const showFiles = delivered.length > 0
       const pendingCandidates = Number.isFinite(data?.pendingCandidates) ? data.pendingCandidates : 0
       // Pending candidates count as content too. The header button is the panel's
       // only route to the review dialog, so hiding it while the queue holds work
@@ -3846,8 +3800,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                 head: jsxs('div', {
                   className: 'dsse-head-stats',
                   children: [
-                    current.length > 0
-                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(current.length) }), jsx('span', { children: '个文件' })] })
+                    delivered.length > 0
+                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(delivered.length) }), jsx('span', { children: '个文件' })] })
                       : null,
                     keptNotes.length === 0
                       ? null
@@ -3937,29 +3891,26 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                                     ? '这是一个目录，不是一个文件'
                                     : ''
                           const absolute = String(file.path)
-                          // Which bracket found this file stays a value, not a sentence.
-                          // `api.js` normalises the stored value to 'git' | 'scan' | null
-                          // and the row carries it as a `data-source` attribute, so the two
-                          // brackets stay tellable apart while developing or while triaging a
-                          // report. A value is checkable; a sentence in a tooltip was read
-                          // once and then had to stay true forever.
+                          // The description the model delivered the file with. It is the
+                          // one field this build has that Qoder does not -- the Host sends
+                          // it with the delivery, so it costs nothing and it says what the
+                          // file is for rather than what it is called.
                           //
-                          // It is deliberately not shown. Someone reading this card is asking
-                          // what changed, not which of the collectors happened to notice it,
-                          // and a sentence about provenance invites a question the card cannot
-                          // answer. Worse, `source` is stored per path and outlives the turn
-                          // that wrote it: the same file can gain the sentence on one turn
-                          // and lose it on the next as the brackets disagree, which reads as a
-                          // change in the file. The attribute keeps the fact without the claim.
+                          // It goes in the tooltip, not on a second line. The row is 28px
+                          // and the card can be 168px wide; a description long enough to be
+                          // useful would wrap, and one short enough not to wrap would be a
+                          // worse name. Qoder makes the same choice for the same reason:
+                          // its artifact row shows the label and keeps the path in the
+                          // accessible text.
                           //
-                          // One place that assembles the tooltip, because the row and the
-                          // opener are separate elements and each shows its own title. The
-                          // opener covers most of the row's width, so anything added only to
-                          // the row would be invisible over the part people actually point at.
-                          // `note` is empty for the ordinary available row, so the empty parts
-                          // are dropped rather than joined: a plain join would leave the path
-                          // followed by a blank line.
-                          const hint = [absolute, note].filter((part) => part !== '').join('\n')
+                          // One place assembles the tooltip, because the row and the opener
+                          // are separate elements and each shows its own title. The opener
+                          // covers most of the row's width, so anything added only to the
+                          // row would be invisible over the part people actually point at.
+                          // Empty parts are dropped rather than joined: a plain join would
+                          // leave the path followed by a blank line.
+                          const said = typeof file.description === 'string' ? file.description.trim() : ''
+                          const hint = [absolute, said, note].filter((part) => part !== '').join('\n')
                           // Undefined for a file outside the workspace, which is what
                           // makes the second copy button disappear rather than copy a
                           // path with `..` in it that no build system ever wrote.
@@ -4061,9 +4012,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                           // copy button keeps its place on the line.
                           return [jsxs('div', {
                             className: 'dsse-row',
-                            'data-noise': file.noise === true ? 'true' : 'false',
-                            'data-stale': file.stale === true ? 'true' : 'false',
-                            'data-source': file.source === 'git' || file.source === 'scan' ? file.source : 'unknown',
                             'data-status': status,
                             'data-actions': copyButton === null ? 'false' : 'true',
                             'data-menu': open === true ? 'true' : 'false',
@@ -4089,19 +4037,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                       ],
                     }, group.key)),
                   }),
-                  // The caveat sits under the rows, where it explains them. It is
-                  // the collector's doubt, repeated verbatim rather than softened:
-                  // "nothing was produced" and "nothing was produced that I could
-                  // see" look identical in a list, and only this line tells them
-                  // apart. Nothing is drawn for a complete sweep.
-                  //
-                  // Folded away with the rows it explains. The note is a caveat
-                  // about a list the reader is not looking at while the card is
-                  // closed, and on a closed card it is the only line besides the
-                  // rows that is always there — a permanent "the directory may not
-                  // be complete" under a list of three files reads as a warning
-                  // about the three files. Opened, it comes back with them.
-                  blindNote === '' || (filesExpanded === false && hiddenFiles > 0) ? null : jsx('p', { className: 'dsse-note', children: blindNote }),
                 ],
               }),
           settings,

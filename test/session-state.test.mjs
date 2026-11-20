@@ -2084,136 +2084,69 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
-{
-  // What a sweep could see is a fact about a turn, not a file. It has to survive a
-  // refresh — the whole point is that a later reader can caveat the file list it
-  // was handed — so the same round trip `paths` gets is asserted here.
-  const { state, store, root } = await fixture()
-  check('a session nothing has swept claims nothing', state.sweepSeen('swept') === undefined, JSON.stringify(state.sweepSeen('swept')))
-  state.rememberSweep('swept', 3, 'partial')
-  // A path too: coverage alone is not content, so without one `document()` refuses
-  // the file and the round trip below would prove nothing.
-  state.rememberPaths('swept', ['out/doc.docx'], 3)
-  check('a partial sweep is remembered', state.sweepSeen('swept')?.coverage === 'partial', JSON.stringify(state.sweepSeen('swept')))
-  check('and it names the turn it swept', state.sweepSeen('swept')?.turn === 3, JSON.stringify(state.sweepSeen('swept')))
-  await state.flush('swept')
-  const stored = await store.read('swept')
-  check('the doubt is written down, not just held in memory', stored?.sweep?.coverage === 'partial', JSON.stringify(stored?.sweep))
-  // A second sweep replaces the first: this describes the newest turn, and a
-  // history of coverage claims is something no reader asks for.
-  state.rememberSweep('swept', 4, 'complete')
-  check('a later clean sweep replaces the caveat', state.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(state.sweepSeen('swept')))
-  await state.flush('swept')
-  const replaced = await store.read('swept')
-  check('and the file agrees', replaced?.sweep?.coverage === 'complete' && replaced?.sweep?.turn === 4, JSON.stringify(replaced?.sweep))
-  const reloaded = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
-  await reloaded.load('swept')
-  check('coverage survives a reload', reloaded.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(reloaded.sweepSeen('swept')))
-  await done(root)
-}
 
 {
-  // Coverage on its own is not content. A session whose only recorded fact is
-  // "I could not see everything" has nothing to show, and giving it a file would
-  // make the pruner carry a document that says nothing for every session that
-  // ever finished a turn in a half-readable repository.
+  // The description is the one thing a row carries besides its path. It arrives
+  // with the declaration — the Host's own sentence about the file — and it is the
+  // only field on the card the collector era never had, because a collector can
+  // see that a file changed but not what it was for.
   const { state, store, root } = await fixture()
-  state.rememberSweep('only-coverage', 1, 'partial')
-  check('coverage alone is not a reason to write a file', state.document('only-coverage') === undefined, JSON.stringify(state.document('only-coverage')))
-  await done(root)
-}
-
-{
-  // A stored value this build does not recognise is read as the plain case: not
-  // knowing a word is not evidence that something was skipped, and inventing a
-  // caveat would put an apology on a card that has nothing to apologise for.
-  const { state, store, root } = await fixture()
-  await store.write('odd-coverage', {
-    state: 2,
-    turns: 1,
-    previous: null,
-    skills: {},
-    tools: [],
-    servers: {},
-    sequence: 1,
-    paths: {},
-    sweep: { turn: 2, coverage: 'mostly' },
-  })
-  await state.load('odd-coverage')
-  check('an unknown coverage word reads as complete', state.sweepSeen('odd-coverage')?.coverage === 'complete', JSON.stringify(state.sweepSeen('odd-coverage')))
-  check('and the turn it names is kept', state.sweepSeen('odd-coverage')?.turn === 2, JSON.stringify(state.sweepSeen('odd-coverage')))
-  // A sweep entry that is not an object at all is refused rather than guessed at,
-  // for the same reason `readPathEntry` refuses a non-number position.
-  await store.write('bad-sweep', { state: 2, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 1, paths: {}, sweep: 'partial' })
-  const other = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
-  await other.load('bad-sweep')
-  check('a sweep that is not an object is not read as one', other.sweepSeen('bad-sweep') === undefined, JSON.stringify(other.sweepSeen('bad-sweep')))
-  await done(root)
-}
-
-
-{
-  // Which bracket found a file survives the round trip. After the merge this is
-  // the only record of it: the diff's list and the walk's list are folded into one
-  // map keyed by path, so a row that surprises somebody later cannot be traced
-  // back to the collector that produced it unless the write kept the name.
-  const { state, store, root } = await fixture()
-  state.rememberPaths('sourced', ['/work/a.ts'], 3, 'git')
-  state.rememberPaths('sourced', ['/work/dist/c.js'], 3, 'scan')
-  check('the bracket that found a file is kept', state.pathsSeen('sourced').find((one) => one.path === '/work/a.ts')?.source === 'git', JSON.stringify(state.pathsSeen('sourced')))
-  check('and the other bracket is kept too', state.pathsSeen('sourced').find((one) => one.path === '/work/dist/c.js')?.source === 'scan', JSON.stringify(state.pathsSeen('sourced')))
-  // A name this build does not know is not a third provenance, and it is not
-  // guessed into one either.
-  state.rememberPaths('sourced', ['/work/d.ts'], 4, 'screenshot')
-  check('a bracket name this build does not know is not stored', state.pathsSeen('sourced').find((one) => one.path === '/work/d.ts')?.source === undefined, JSON.stringify(state.pathsSeen('sourced')))
-  await state.flush('sourced')
+  state.rememberPaths('described', [{ path: '/work/a.md', description: '定稿方案：对照四份实现后的施工版' }], 3)
+  state.rememberPaths('described', ['/work/b.md'], 3)
+  const rows = state.pathsSeen('described')
+  const byPath = new Map(rows.map((row) => [row.path, row]))
+  check('the sentence a file was delivered with is kept', byPath.get('/work/a.md')?.description === '定稿方案：对照四份实现后的施工版', JSON.stringify(byPath.get('/work/a.md')))
+  // A bare path is still a legal input — `report_output_files` carries no
+  // description — and it stores an empty string rather than the word "undefined".
+  check('a file delivered without one stores an empty sentence', byPath.get('/work/b.md')?.description === '', JSON.stringify(byPath.get('/work/b.md')))
+  await state.flush('described')
 
   const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
-  await second.load('sourced')
-  check('and the bracket survives a reload', second.pathsSeen('sourced').find((one) => one.path === '/work/dist/c.js')?.source === 'scan', JSON.stringify(second.pathsSeen('sourced')))
-  check('the unknown one is still unknown after a reload', second.pathsSeen('sourced').find((one) => one.path === '/work/d.ts')?.source === undefined, JSON.stringify(second.pathsSeen('sourced')))
+  await second.load('described')
+  const reloaded = new Map(second.pathsSeen('described').map((row) => [row.path, row]))
+  check('and it survives a reload', reloaded.get('/work/a.md')?.description === '定稿方案：对照四份实现后的施工版', JSON.stringify(reloaded.get('/work/a.md')))
+  check('while the empty one is still empty', reloaded.get('/work/b.md')?.description === '', JSON.stringify(reloaded.get('/work/b.md')))
   await done(root)
 }
 
 {
-  // The card lists the files a turn produced; `turn/end` re-records that whole
-  // list every turn, with no bracket named. If that re-record overwrote the
-  // stored value, the provenance would survive exactly until the next turn --
-  // which is the only moment anybody looks at it.
+  // `turn/end` re-records the whole delivered list every turn. A declaration that
+  // arrives without a sentence must not overwrite one that arrived with it, or the
+  // description would survive exactly until the next turn — which is the only
+  // moment anybody reads it.
   const { state, store, root } = await fixture()
   try {
-    state.rememberPaths('kept', ['/work/a.ts'], 5, 'git')
-    state.rememberPaths('kept', ['/work/a.ts'], 6)
+    state.rememberPaths('kept', [{ path: '/work/a.md', description: '第一版方案' }], 5)
+    state.rememberPaths('kept', ['/work/a.md'], 6)
     const after = state.pathsSeen('kept')
-    check('a later re-record keeps the bracket it already knew', after[0]?.source === 'git', JSON.stringify(after))
+    check('a later re-record keeps the sentence it already knew', after[0]?.description === '第一版方案', JSON.stringify(after))
     check('and it does move the row to the newer turn', after[0]?.turn === 6, String(after[0]?.turn))
 
-    // A named bracket does replace it: the newer find is the better answer.
-    state.rememberPaths('kept', ['/work/a.ts'], 7, 'scan')
-    check('a named bracket replaces the old one', state.pathsSeen('kept')[0]?.source === 'scan', JSON.stringify(state.pathsSeen('kept')))
+    // A newer sentence does replace it: the later declaration is the better answer.
+    state.rememberPaths('kept', [{ path: '/work/a.md', description: '第二版方案' }], 7)
+    check('a newer sentence replaces the old one', state.pathsSeen('kept')[0]?.description === '第二版方案', JSON.stringify(state.pathsSeen('kept')))
 
-    // A path that was never attributed stays unattributed; silence about one
-    // file must not invent a bracket for it out of some other file's history.
-    state.rememberPaths('kept', ['/work/b.ts'], 8)
-    const both = state.pathsSeen('kept')
-    const b = both.find((row) => row.path === '/work/b.ts')
-    check('a file no bracket ever named stays unknown', b?.source === undefined, JSON.stringify(b))
+    // A path that was never described stays empty; silence about one file must not
+    // invent a sentence for it out of some other file's history.
+    state.rememberPaths('kept', ['/work/b.md'], 8)
+    const b = state.pathsSeen('kept').find((row) => row.path === '/work/b.md')
+    check('a file nobody described stays empty', b?.description === '', JSON.stringify(b))
 
     await state.flush('kept')
     const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
     await second.load('kept')
     const reloaded = second.pathsSeen('kept')
-    check('and the kept bracket is still there after a reload', reloaded.find((row) => row.path === '/work/a.ts')?.source === 'scan', JSON.stringify(reloaded))
+    check('and the kept sentence is still there after a reload', reloaded.find((row) => row.path === '/work/a.md')?.description === '第二版方案', JSON.stringify(reloaded))
   } finally {
     await done(root)
   }
 }
 
 {
-  // The writer already refuses words it does not know, so this guard can only be
-  // exercised by a document this build did not write: an older build, a hand
-  // edit, or a future build that added a third bracket. That is precisely the
-  // case a round trip through `rememberPaths` cannot reach.
+  // A document this build did not write: an older build, a hand edit, or a future
+  // build that added a field. Rows written before the card narrowed still carry a
+  // `source` word — the collector that found them — and reading one must neither
+  // crash nor resurrect the field.
   const { state, store, root } = await fixture()
   try {
     await writeFile(
@@ -2224,7 +2157,7 @@ for (const reason of ['gone', 'archived']) {
         state: 2,
         turns: 1,
         paths: {
-          '/work/a.ts': { seq: 3, turn: 1, at: 111, source: 'git' },
+          '/work/a.ts': { seq: 3, turn: 1, at: 111, source: 'git', description: '旧记录' },
           '/work/b.ts': { seq: 2, turn: 1, at: 111, source: 'screenshot' },
           '/work/c.ts': { seq: 1, turn: 1, at: 111 },
         },
@@ -2235,10 +2168,10 @@ for (const reason of ['gone', 'archived']) {
     await state.load('foreign')
     const rows = state.pathsSeen('foreign')
     const byPath = new Map(rows.map((row) => [row.path, row]))
-    check('a bracket word this build does not know is dropped on read', byPath.get('/work/b.ts')?.source === undefined, JSON.stringify(byPath.get('/work/b.ts')))
+    check('a collector word is dropped on read', byPath.get('/work/b.ts')?.source === undefined, JSON.stringify(byPath.get('/work/b.ts')))
     check('but the row itself survives', byPath.has('/work/b.ts') === true, JSON.stringify(rows))
-    check('a known bracket is read back as itself', byPath.get('/work/a.ts')?.source === 'git', JSON.stringify(byPath.get('/work/a.ts')))
-    check('a row with no bracket says so', byPath.get('/work/c.ts')?.source === undefined, JSON.stringify(byPath.get('/work/c.ts')))
+    check('a description written by an older build is read back', byPath.get('/work/a.ts')?.description === '旧记录', JSON.stringify(byPath.get('/work/a.ts')))
+    check('and a row with no description says so', byPath.get('/work/c.ts')?.description === '', JSON.stringify(byPath.get('/work/c.ts')))
   } finally {
     await done(root)
   }
@@ -2259,36 +2192,6 @@ for (const reason of ['gone', 'archived']) {
     state.rememberPaths('order', ['/work/old.ts'], 3, 'git')
     check('a re-edited file moves back to the top', state.pathsSeen('order')[0]?.path === '/work/old.ts', JSON.stringify(state.pathsSeen('order').map((row) => row.path)))
     check('and the list is still just those two', state.pathsSeen('order').length === 2, String(state.pathsSeen('order').length))
-  } finally {
-    await done(root)
-  }
-}
-
-{
-  // The merge reports after awaiting a git subprocess, so a slow turn can land
-  // after the next one has already spoken. The claim describes the newest turn;
-  // letting the late one replace it would point the card's caveat at work the
-  // reader is no longer looking at.
-  const { state, root } = await fixture()
-  try {
-    state.rememberSweep('swept', 2, 'complete')
-    state.rememberSweep('swept', 1, 'none')
-    check('an older turn cannot replace a newer claim', state.sweepSeen('swept')?.turn === 2, JSON.stringify(state.sweepSeen('swept')))
-    check('and the newer coverage is what stands', state.sweepSeen('swept')?.coverage === 'complete', JSON.stringify(state.sweepSeen('swept')))
-
-    // The same turn reporting twice does replace: a second measurement of the
-    // same interval is a correction, not a stale arrival.
-    state.rememberSweep('swept', 2, 'partial')
-    check('the same turn may correct itself', state.sweepSeen('swept')?.coverage === 'partial', JSON.stringify(state.sweepSeen('swept')))
-
-    // A claim with no turn number cannot prove it is newer, so any numbered
-    // claim wins over it.
-    state.rememberSweep('swept', undefined, 'none')
-    check('a claim with no turn number yields to a numbered one', state.sweepSeen('swept')?.turn === 2, JSON.stringify(state.sweepSeen('swept')))
-
-    // And when nothing numbered is on record, the unnumbered one is all there is.
-    state.rememberSweep('bare', undefined, 'partial')
-    check('an unnumbered claim still records itself', state.sweepSeen('bare')?.coverage === 'partial', JSON.stringify(state.sweepSeen('bare')))
   } finally {
     await done(root)
   }
@@ -2496,66 +2399,6 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
-{
-  // The same order that erased the summary erases the sweep's caveat, and it was
-  // already doing so before this change touched the file. \`readInto\` merges the
-  // file into a record that an event created, and the field was not on the list,
-  // so a restart reached through an event forgot that the last git scan could
-  // only see part of the turn. The next write then stated a clean coverage the
-  // sweep never claimed — which is the one direction this field exists to
-  // prevent, because a short file list that reads as complete is worse than one
-  // that admits its reach.
-  const root = join(tmpdir(), `dsse-session-state-sweep-merge-${randomUUID()}`)
-  await mkdirp(root)
-  const store = new SessionStore({ root })
-  const first = new SessionState({ store, snapshotOf: () => ({ turns: 3, previous: null }), restore: () => {}, delayMs: 0 })
-  first.rememberPaths('merges', ['a.js'])
-  first.rememberSweep('merges', 3, 'partial')
-  await first.flush('merges')
-  check('the caveat is on disk before the restart', (await store.read('merges'))?.sweep?.coverage === 'partial', JSON.stringify((await store.read('merges'))?.sweep))
-
-  const second = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 4, previous: null }), restore: () => {}, delayMs: 100000 })
-  second.rememberPaths('merges', ['b.js'])
-  await second.load('merges')
-  check('the caveat survives the event then read order', second.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(second.sweepSeen('merges')))
-  check('and so does the turn it names', second.sweepSeen('merges')?.turn === 3, JSON.stringify(second.sweepSeen('merges')))
-  await second.flush('merges')
-  check('so the next write still admits a partial scan', (await store.read('merges'))?.sweep?.coverage === 'partial', JSON.stringify((await store.read('merges'))?.sweep))
-
-  // A sweep this process ran is newer than the file's, so it must win. Without
-  // the direction the merge would resurrect the file's older claim on every
-  // read.
-  const third = new SessionState({ store, now: () => 9900, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
-  third.rememberSweep('merges', 5, 'complete')
-  await third.load('merges')
-  check('this process sweep beats the file older caveat', third.sweepSeen('merges')?.coverage === 'complete', JSON.stringify(third.sweepSeen('merges')))
-  await third.flush('merges')
-
-  // The two claims can name the same turn. Neither can then prove it is newer:
-  // both measured turn 3, one before the process restarted and one after, and
-  // the turn number is the only ordering either of them has. Whichever side is
-  // picked by habit, the other one's caveat disappears — and the file's caveat
-  // is the one that only exists because a walk really did stop early. So the tie
-  // goes through the coverage lattice and keeps the weaker claim, which is the
-  // same answer `rememberSweep` gives two claims about one turn.
-  const fourth = new SessionState({ store, now: () => 11000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
-  fourth.rememberSweep('merges', 5, 'complete')
-  await fourth.flush('merges')
-  const tied = new SessionState({ store, now: () => 12000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
-  tied.rememberSweep('merges', 5, 'partial')
-  await tied.load('merges')
-  check('an equal turn keeps the weaker claim', tied.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(tied.sweepSeen('merges')))
-  check('and still names that turn', tied.sweepSeen('merges')?.turn === 5, JSON.stringify(tied.sweepSeen('merges')))
-
-  // Written down first, or the next state reads the pair the tie test started
-  // from rather than the merged one, and the other direction is never exercised.
-  await tied.flush('merges')
-  const other = new SessionState({ store, now: () => 13000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
-  other.rememberSweep('merges', 5, 'complete')
-  await other.load('merges')
-  check('the same tie in the other direction keeps it too', other.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(other.sweepSeen('merges')))
-  await done(root)
-}
 
 {
   // The guard refuses a late summary only while nothing owns the id. Once a live
@@ -2709,46 +2552,6 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
-{
-  // `sweep` is ordered, so "the file wins" and "memory wins" are both wrong as
-  // rules. A caveat about a newer turn that the previous process wrote before it
-  // exited outranks this process's older one; this process's numbered claim
-  // outranks an unnumbered file.
-  const root = join(tmpdir(), `dsse-session-state-sweep-newer-${randomUUID()}`)
-  await mkdirp(root)
-  const store = new SessionStore({ root })
-  const older = new SessionState({ store, snapshotOf: () => ({ turns: 7, previous: null }), restore: () => {}, delayMs: 0 })
-  older.rememberPaths('newer', ['a.js'])
-  older.rememberSweep('newer', 7, 'partial')
-  await older.flush('newer')
-  check('the newer caveat is on disk', (await store.read('newer'))?.sweep?.turn === 7)
-
-  // This process ran an older sweep before it ever read the file: a git subprocess
-  // that reported late, for a turn the file already has a newer word on.
-  const revived = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 7, previous: null }), restore: () => {}, delayMs: 100000 })
-  revived.rememberSweep('newer', 5, 'complete')
-  await revived.load('newer')
-  check('the file newer caveat beats this process older claim', revived.sweepSeen('newer')?.turn === 7, JSON.stringify(revived.sweepSeen('newer')))
-  check('and the coverage it admits to survives', revived.sweepSeen('newer')?.coverage === 'partial', JSON.stringify(revived.sweepSeen('newer')))
-  await revived.flush('newer')
-  check('the next write keeps it', (await store.read('newer'))?.sweep?.turn === 7, JSON.stringify((await store.read('newer'))?.sweep))
-  await done(root)
-}
-
-{
-  // An unnumbered claim is not evidence of when it was measured, so it yields to
-  // any numbered one -- the same rule `rememberSweep` applies to itself.
-  const root = join(tmpdir(), `dsse-session-state-sweep-bare-${randomUUID()}`)
-  await mkdirp(root)
-  const store = new SessionStore({ root })
-  await store.write('bare', { state: 2, turns: 3, previous: null, skills: {}, tools: [], servers: {}, paths: {}, sequence: 0, sweep: { coverage: 'complete' } })
-  const state = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 4, previous: null }), restore: () => {}, delayMs: 100000 })
-  state.rememberSweep('bare', 4, 'partial')
-  await state.load('bare')
-  check('a numbered claim beats an unnumbered file claim', state.sweepSeen('bare')?.coverage === 'partial', JSON.stringify(state.sweepSeen('bare')))
-  check('and it names its turn', state.sweepSeen('bare')?.turn === 4, JSON.stringify(state.sweepSeen('bare')))
-  await done(root)
-}
 
 {
   // The summary's optional strings are normalised on the way in and on the way

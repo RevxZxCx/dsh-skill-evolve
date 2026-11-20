@@ -22,7 +22,7 @@
  * turn ends.
  */
 
-import { canonicalPath, writtenPaths } from '@revxz/dsh-evolve-core'
+import { canonicalPath } from '@revxz/dsh-evolve-core'
 
 /** How many tool calls one turn keeps before it stops recording detail. */
 const MAX_CALLS_PER_TURN = 200
@@ -50,25 +50,43 @@ const MAX_SAID_CHARS = 2000
  */
 const MAX_ASKED_CHARS = 600
 
-/** Tool names whose arguments describe a file the session touched. */
-const EDIT_TOOLS = new Set(['edit', 'write', 'ops_write_file', 'ops_edit_file', 'ops_replace', 'ops_move', 'ops_copy', 'ops_remove'])
-
-/** Shell tools: a command may create or modify files, but nobody knows which. */
+/**
+ * Shell tools, kept only so the summary can quote what a turn ran.
+ *
+ * This used to be a file source as well: `writtenPaths` parsed the command for
+ * redirects and `tee` targets. That is gone with the rest of the inference, but
+ * the command text still belongs in the turn summary, which describes what
+ * happened rather than what was handed over.
+ */
 const SHELL_TOOLS = new Set(['bash', 'ops_bash', 'shell', 'terminal', 'exec', 'run', 'pwsh', 'powershell'])
 
 /**
- * The tool that lets the model *declare* what a turn produced.
+ * The tools through which a turn says what it delivered.
  *
- * The other two sets are guesses about what a call implies: `edit` names a
- * path, a shell command may mention one in a redirect. Both miss everything
- * written by a program the turn ran — a script that calls `PIL` or `python-docx`
- * and saves four files names them nowhere a transcript can see. Measured on one
- * session: eight files on disk, four in the card, and no amount of reading the
- * command line would have found the other four.
+ * Two, because a turn can say it in two ways and the host gives each one a
+ * different amount of structure.
  *
- * So one tool asks instead of guessing. Nothing about it is special to the
- * panel: the model calls it, the call arrives on `tool/call` like every other,
- * and the paths are read here. Its `execute` only validates and answers.
+ * `present` is the host's own delivery call: it emits a `deliverables/presented`
+ * event carrying `{ path, description }` for each file, and the host's own
+ * `ui-deliverables` plugin renders those same events in the conversation. Its
+ * arguments are read here as a fallback for a host build that does not emit the
+ * event, and the event is preferred when both exist because the event carries
+ * the description the model wrote and cannot be truncated by argument limits.
+ *
+ * `report_output_files` is this plugin's own tool, for the case the host's does
+ * not cover: more than four files.
+ *
+ * ## What is deliberately gone
+ *
+ * An earlier version also read `edit` arguments and parsed shell commands for
+ * redirects, so a turn that never declared anything still produced rows. Both
+ * were removed when the card was narrowed to delivered documents, and the
+ * measurement that justified removing them is worth keeping: on one session
+ * the three collectors produced thirty-nine rows, of which three were documents
+ * a person would open, twenty-four no longer existed, and eleven belonged to a
+ * different conversation. Reading a path out of an `edit` answers "what did this
+ * turn touch", which is a different question from "what did this turn hand me",
+ * and the card only ever meant to answer the second.
  */
 const REPORT_TOOLS = new Set(['report_output_files'])
 
@@ -139,8 +157,7 @@ function readPathListArgument(raw) {
 }
 
 /**
- * The one tool a model reaches for on its own when it thinks "these are my
- * deliverables".
+ * The host's delivery call, read from the call as well as from its event.
  *
  * Added after a real run rather than in theory. A turn that wrote eight files
  * through a script was given `report_output_files` and did not call it once; it
@@ -149,31 +166,34 @@ function readPathListArgument(raw) {
  * which is exactly what the model was trying to say. Two tools with overlapping
  * meaning is a design mistake, and the fix is not to argue with the model: it is
  * to read the call it already makes.
- *
- * The two differ in what they can carry. `present` is capped by the host at four
- * files, so it only ever covers the few the model judged worth delivering;
- * `report_output_files` has no such cap and exists for the full list. Reading
- * both is the point — one is certain to be called and narrow, the other is
- * complete and optional.
  */
 const PRESENT_TOOLS = new Set(['present'])
 
 /**
- * Pull filesystem paths out of a `present`-shaped argument bag.
+ * The event the host emits when a turn presents files.
  *
- * The shape is `{ files: [{ path, description }] }` — objects, not bare
- * strings, which is why {@link readPathListArgument} cannot read it: that one
- * looks for `paths: string[]` and would return nothing here. `description` is
- * ignored; the card already has its own idea of what a row says.
+ * Preferred over the call's arguments whenever it arrives, for three reasons:
+ * it is already parsed, so a call whose arguments were truncated by a log cap
+ * still reports every file; it carries `description`, which the model wrote and
+ * nothing else in the transcript knows; and it is the same event the host's own
+ * deliverables plugin reads, so the sidebar and the conversation tail cannot
+ * disagree about what was delivered.
+ */
+const PRESENTED_EVENT = 'deliverables/presented'
+
+
+/**
+ * Pull delivered files out of a `present`-shaped argument bag, with what was
+ * said about each one.
  *
- * Anything that is not an object with a non-empty string `path` is skipped
- * silently. A malformed entry is the model's problem to notice, not a reason to
- * refuse the paths that were readable.
+ * The shape is `{ files: [{ path, description }] }`. `description` is optional
+ * and becomes `''` when absent or wrong-typed: a row with no second line is
+ * correct, and one quoting `[object Object]` is not.
  *
  * @param {unknown} raw - the tool call arguments.
- * @returns {string[]} the paths found, possibly empty.
+ * @returns {Array<{ path: string, description: string }>} the entries, possibly empty.
  */
-function readPresentedPaths(raw) {
+function readPresentedEntries(raw) {
   let value = raw
   if (typeof raw === 'string') {
     try {
@@ -190,12 +210,29 @@ function readPresentedPaths(raw) {
   for (const entry of list) {
     if (found.length >= MAX_REPORTED_PATHS) break
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue
-    const candidate = /** @type {Record<string, unknown>} */ (entry).path
-    if (typeof candidate !== 'string') continue
-    const trimmed = candidate.trim()
-    if (trimmed.length > 0) found.push(trimmed)
+    const row = /** @type {Record<string, unknown>} */ (entry)
+    if (typeof row.path !== 'string') continue
+    const path = row.path.trim()
+    if (path.length === 0) continue
+    const description = typeof row.description === 'string' ? row.description.trim() : ''
+    found.push({ path, description })
   }
   return found
+}
+
+/**
+ * Read the files out of a `deliverables/presented` event.
+ *
+ * The same shape as the call's arguments, and read by the same function, so the
+ * two cannot drift: the event is the host's copy of what the model said, and a
+ * host build that validates one but not the other would otherwise produce a row
+ * from the event that the call would have refused.
+ *
+ * @param {any} data - the event payload.
+ * @returns {Array<{ path: string, description: string }>} the entries, possibly empty.
+ */
+function readPresentedEvent(data) {
+  return readPresentedEntries(data?.files === undefined ? undefined : { files: data.files })
 }
 
 /**
@@ -333,36 +370,18 @@ class Transcript {
   constructor() {
     /** @type {Map<string, { id: string, name: string, path?: string, ok?: boolean, error?: string }>} */
     this.calls = new Map()
-    /** @type {string[]} paths this turn wrote, in first-touch order. */
-    this.paths = []
     /**
-     * Paths the turn *declared*, newest last.
+     * What the turn delivered, in first-mention order.
      *
-     * Kept apart from {@link paths} because the two lose a tie in opposite
-     * directions. `snapshot` keeps the first forty of `paths`, and a shell
-     * redirect is seen early while a declaration is the last call of the turn —
-     * so a busy turn would drop exactly the files the model went out of its way
-     * to name. Declarations therefore go in front of the merged list.
+     * The only file source the card has. Each entry is `{ path, description }`,
+     * where `description` is what the model wrote next to the file and may be
+     * `''` — `present` carries one, `report_output_files` does not.
      *
-     * @type {string[]}
+     * @type {Array<{ path: string, description: string }>}
      */
-    this.declared = []
+    this.delivered = []
     /** @type {string[]} shell commands the turn ran, newest last. */
     this.commands = []
-    /**
-     * The directory this turn runs in, or `''` when nobody said.
-     *
-     * A shell command can name a file with a relative path (`cat > notes.txt`),
-     * and the only place that knows what it is relative *to* is the session
-     * header. Left unresolved, that path is later joined to the session root on
-     * the way out, which is right only when the command did not `cd` first —
-     * and `cd sub && cat > notes.txt` did. The result was two rows for one
-     * file: the absolute one from an `edit` call and a second, non-existent one
-     * drawn struck through as though the turn had deleted it.
-     *
-     * @type {string}
-     */
-    this.cwd = ''
     /** @type {string[]} assistant text blocks from this turn, in order. */
     this.said = []
     /** The turn that is currently open, or undefined between turns. */
@@ -410,8 +429,7 @@ class Transcript {
   beginTurn(index, asked) {
     this.turns = Number.isFinite(index) ? index : this.turns + 1
     this.calls.clear()
-    this.paths = []
-    this.declared = []
+    this.delivered = []
     this.commands = []
     this.said = []
     this.asked = typeof asked === 'string' ? clipCodePoints(asked, MAX_ASKED_CHARS) : ''
@@ -435,8 +453,7 @@ class Transcript {
     // would describe a plan that was never carried out.
     if (data?.reason?.kind !== undefined && data.reason.kind !== 'completed') {
       this.calls.clear()
-      this.paths = []
-      this.declared = []
+      this.delivered = []
       this.commands = []
       this.said = []
       // Cleared with the rest: this turn produces no `previous`, so a question
@@ -466,14 +483,12 @@ class Transcript {
       turn: this.turn,
       calls: calls.length,
       failed: failed.length,
-      // Deduplicated: a turn that edits one file eight times should list it once.
-      //
-      // Declarations come first and the cap is applied after the merge, not
-      // before it. A turn sees a shell redirect early and a declaration last,
-      // so keeping the first forty of a single list would drop exactly the
-      // files the model named out loud — the ones this whole module exists to
-      // stop losing. Order inside each half is still first-touch.
-      paths: [...new Set([...this.declared, ...this.paths])].slice(0, MAX_CARD_PATHS),
+      // Deduplicated by path, first mention wins: a turn that presents the same
+      // file twice should list it once, and the description that survives is the
+      // one written the first time — a later mention with no description must
+      // not erase it.
+      paths: this.delivered.slice(0, MAX_CARD_PATHS).map((entry) => entry.path),
+      delivered: this.delivered.slice(0, MAX_CARD_PATHS),
       commands: this.commands.slice(-8),
       said: this.said.join('\n\n').slice(0, 1200),
       tools: tallyNames(calls),
@@ -485,63 +500,61 @@ class Transcript {
    * Record one tool call.
    *
    * @param {{ id?: string, name: string, arguments: unknown }} call - the call.
-   * @param {string} [cwd] - the directory this turn runs in, when known.
    */
-  noteCall(call, cwd) {
-    // Sticky on purpose: an empty or missing answer means the caller did not
-    // say, not that the directory changed. A session's header cwd is fixed, so
-    // the value is either the same each turn or absent every turn.
-    if (typeof cwd === 'string' && cwd.length > 0) this.cwd = cwd
+  noteCall(call) {
     if (this.calls.size >= MAX_CALLS_PER_TURN) return
     const key = call.id ?? `${call.name}#${this.calls.size}`
     const path = readPathArgument(call.arguments)
     this.calls.set(key, { id: key, name: call.name, path })
-    if (path !== undefined && EDIT_TOOLS.has(call.name)) this.paths.push(canonicalPath(path))
     if (REPORT_TOOLS.has(call.name)) {
-      // The one path where a turn says what it made instead of the transcript
-      // inferring it. Goes to `declared`, not `paths`: a declaration is the
-      // last call of a turn, and `snapshot` keeps the first forty, so pushing
-      // it in call order would drop it exactly when the turn was busy enough
-      // to need it.
-      for (const declared of readPathListArgument(call.arguments)) this.declared.push(canonicalPath(declared))
+      // No description: the tool's schema has none, and inventing one here would
+      // put words in the model's mouth.
+      for (const declared of readPathListArgument(call.arguments)) this.deliver(declared, '')
     }
     if (PRESENT_TOOLS.has(call.name)) {
-      // Read for the same reason as the branch above, with the opposite
-      // trade-off: this is the call a model makes without being told to, so it
-      // is the one that actually arrives. It carries at most four files, so it
-      // covers the few deliverables and misses the rest — which is exactly why
-      // both branches exist rather than one replacing the other.
-      for (const delivered of readPresentedPaths(call.arguments)) this.declared.push(canonicalPath(delivered))
+      // Read from the call as well as from the event, and see
+      // {@link PRESENTED_EVENT}: a host build that emits the event makes this a
+      // duplicate that `deliver` ignores, and one that does not still works.
+      for (const entry of readPresentedEntries(call.arguments)) this.deliver(entry.path, entry.description)
     }
     if (SHELL_TOOLS.has(call.name)) {
       const command = readCommandArgument(call.arguments)
-      if (command !== undefined) {
-        this.commands.push(command.slice(0, 200))
-        // A shell call names a command, not a path — but the command usually
-        // says which file it writes, and without this the card was blind to
-        // everything the session produced with a redirect. Measured on one
-        // 175-file session: 130 of the rows were temporary scripts written by
-        // `cat > x <<'EOF'`, and the file list held exactly none of them
-        // because no `edit`-family call ever named them.
-        //
-        // Read before the slice: the paths come out of the whole command, while
-        // `commands` keeps a short preview for the card's text.
-        //
-        // The base directory goes in so the paths come out resolved. Without it
-        // a `cd sub && cat > x` target stays relative until the card joins it to
-        // the session root, which names a file that does not exist — and the
-        // card then reports it as deleted.
-        //
-        // `this.cwd` is the last directory the host named, not this turn's
-        // answer: a call that arrives without one keeps the previous value,
-        // because a session's header cwd does not change between turns and
-        // "not told this time" is not "the directory is now unknown". Clearing
-        // it instead would turn placeable rows into unplaceable ones. A store
-        // never told anything still has `''`, and `writtenPaths` treats that as
-        // "no base" and hands the paths back as written.
-        for (const target of writtenPaths(command, this.cwd)) this.paths.push(target)
-      }
+      // Kept for the summary's "what this turn ran". No paths are read out of
+      // it: a redirect names a file the turn wrote, not one it handed over.
+      if (command !== undefined) this.commands.push(command.slice(0, 200))
     }
+  }
+
+  /**
+   * Record one delivered file, keeping the first mention.
+   *
+   * A file can arrive twice in one turn — the `present` call and the host's own
+   * event, or the same file presented in two batches — and the two mentions
+   * disagree in exactly one field. The first one wins, because the second is
+   * usually the same information again; a later mention that *has* a description
+   * where the first had none fills it in rather than being dropped, since that
+   * is strictly more than what was known before.
+   *
+   * @param {string} path - the path as the model wrote it.
+   * @param {string} description - what the model said about it, or ''.
+   * @returns {void}
+   */
+  deliver(path, description) {
+    if (typeof path !== 'string' || path.length === 0) return
+    const absolute = canonicalPath(path)
+    if (absolute.length === 0) return
+    const said = typeof description === 'string' ? description.trim() : ''
+    const existing = this.delivered.find((entry) => entry.path === absolute)
+    if (existing === undefined) {
+      this.delivered.push({ path: absolute, description: said })
+      return
+    }
+    // A later announcement carrying a sentence replaces the older one: the
+    // newest thing the model said about the file is the true one. A later
+    // announcement carrying nothing does not erase it -- the host emits one
+    // event per call and only the first tends to have a description, so the
+    // blank one is usually the same delivery arriving again.
+    if (said.length > 0) existing.description = said
   }
 
   /**
@@ -729,10 +742,9 @@ class TranscriptStore {
    *
    * @param {string} agentId - the agent id.
    * @param {any} event - the `session/event` payload.
-   * @param {string} [cwd] - the session's working directory, when known.
    * @returns {void}
    */
-  record(agentId, event, cwd) {
+  record(agentId, event) {
     const type = event?.type
     const data = event?.data
     if (type === 'user/message') {
@@ -747,11 +759,19 @@ class TranscriptStore {
     if (type === 'tool/call') {
       const call = typeof data?.name === 'string' ? { id: typeof data.callId === 'string' ? data.callId : undefined, name: data.name, arguments: data.arguments } : undefined
       if (call === undefined) return
-      this.for(agentId).noteCall(call, cwd)
+      this.for(agentId).noteCall(call)
       return
     }
     if (type === 'tool/result') {
       this.for(agentId).noteResult(data)
+      return
+    }
+    if (type === PRESENTED_EVENT) {
+      // The host's own record of what the turn handed over. Read as well as the
+      // call rather than instead of it — see {@link PRESENTED_EVENT} — and
+      // `deliver` drops the duplicate.
+      const transcript = this.for(agentId)
+      for (const entry of readPresentedEvent(data)) transcript.deliver(entry.path, entry.description)
       return
     }
     if (type === 'turn/end') {
@@ -760,4 +780,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, EDIT_TOOLS, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedPaths, readCommandArgument, readToolCallBlock, readUserText, tallyNames }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }

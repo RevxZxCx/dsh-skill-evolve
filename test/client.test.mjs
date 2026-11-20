@@ -1205,8 +1205,8 @@ function panelRoutes() {
         // length apart from one that reads the turn's, which is the exact
         // substitution that shipped once already.
         files: [
-          { path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 },
-          { path: '/tmp/out/older.md', bytes: 1024, mtimeMs: 10 },
+          { path: '/tmp/out/report.md', deliverable: true, bytes: 2048, mtimeMs: 20 },
+          { path: '/tmp/out/older.md', deliverable: true, bytes: 1024, mtimeMs: 10 },
         ],
       },
     },
@@ -2079,7 +2079,7 @@ check(
         { server: 'mcp-old', tools: 1, lastUsed: 2 },
         { server: 'mcp-new', tools: 2, lastUsed: 7 },
       ],
-      files: [{ path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20 }],
+      files: [{ path: '/tmp/out/report.md', deliverable: true, bytes: 2048, mtimeMs: 20 }],
       commands: ['a'],
     },
   }
@@ -2630,8 +2630,8 @@ check(
   // clicking anything in it would prove nothing about the channel.
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'].data.files = [
-    { path: '/tmp/out/report.md', bytes: 2048, mtimeMs: 20, address: 'dsh-resource://file/session/session-a/tmp/out/report.md' },
-    { path: '/tmp/out/older.md', bytes: 1024, mtimeMs: 10, address: 'dsh-resource://file/session/session-a/tmp/out/older.md' },
+    { path: '/tmp/out/report.md', deliverable: true, bytes: 2048, mtimeMs: 20, address: 'dsh-resource://file/session/session-a/tmp/out/report.md' },
+    { path: '/tmp/out/older.md', deliverable: true, bytes: 1024, mtimeMs: 10, address: 'dsh-resource://file/session/session-a/tmp/out/older.md' },
   ]
   const instance = boot({ routes })
   // Labelled, because the two owners of the preview channel have to be tried
@@ -3214,7 +3214,7 @@ function byAction(node, action) {
       pendingCandidates: 0,
       skills: { available: true, skills: [{ name: 'kept-skill', owned: true, lastUsed: 2 }] },
       mcp: [{ server: 'kept-mcp', tools: 1, lastUsed: 1 }],
-      files: [{ path: '/tmp/kept.md', bytes: 10, mtimeMs: 1 }],
+      files: [{ path: '/tmp/kept.md', deliverable: true, bytes: 10, mtimeMs: 1 }],
       commands: [],
     } }
   }
@@ -5038,7 +5038,7 @@ function byAction(node, action) {
     return { ok: true, data: {
       turn: 1, calls: 1, failed: 0, summary: { text: 'SAME' }, pendingCandidates: 0,
       skills: { available: true, skills: [] }, mcp: [], commands: [],
-      files: Array.from({ length: 12 }, (_, at) => ({ path: `src/file-${at}.js`, bytes: 1000 + at })),
+      files: Array.from({ length: 12 }, (_, at) => ({ path: `src/file-${at}.md`, deliverable: true, bytes: 1000 + at })),
     } }
   }
   const { instance } = await openPanel(routes)
@@ -5062,7 +5062,7 @@ function byAction(node, action) {
   routes['/api/ui-evolve/panel'] = () => ({ ok: true, data: {
     turn: 2, calls: 2, failed: 0, summary: { text: 'CHANGED' }, pendingCandidates: 0,
     skills: { available: true, skills: [] }, mcp: [], commands: [],
-    files: [{ path: 'src/file-0.js', bytes: 1000 }],
+    files: [{ path: 'src/file-0.js', deliverable: true, bytes: 1000 }],
   } })
   const again = instance.timers.find((row) => row.ms === 60000 && row.cleared === false)
   const beforeChange = instance.renderer.stateChanges()
@@ -5782,6 +5782,7 @@ async function openPanel(routes, options) {
   // and the probe survived.
   const rows = Array.from({ length: 7 }, (_, index) => ({
     path: `/work/f${index + 1}.md`,
+    deliverable: true,
     bytes: 100 * (index + 1),
     mtimeMs: index * 1000,
     address: `dsh-resource://file/session/session-a/${encodeURIComponent(`work/f${index + 1}.md`)}`,
@@ -6016,12 +6017,12 @@ async function openPanel(routes, options) {
   // observable — the array order runs opposite to the turn order, so a card that
   // merely drew the list it was handed fails on the first row.
   const rows = [
-    { path: '/work/a.md', bytes: 10, mtimeMs: 100, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
-    { path: '/work/b.md', bytes: 20, mtimeMs: 200, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
-    { path: '/work/node_modules/x.js', bytes: 30, mtimeMs: 300, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/node_modules/x.js' },
-    { path: '/work/c.md', bytes: 40, mtimeMs: 400, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
-    { path: '/work/d.md', bytes: 50, mtimeMs: 500, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/d.md' },
-    { path: '/work/e.md', bytes: 60, mtimeMs: 600, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/e.md' },
+    { path: '/work/a.md', deliverable: true, bytes: 10, mtimeMs: 100, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/b.md', deliverable: true, bytes: 20, mtimeMs: 200, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+    { path: '/work/node_modules/x.js', deliverable: false, bytes: 30, mtimeMs: 300, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/node_modules/x.js' },
+    { path: '/work/c.md', deliverable: true, bytes: 40, mtimeMs: 400, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
+    { path: '/work/d.md', deliverable: true, bytes: 50, mtimeMs: 500, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/d.md' },
+    { path: '/work/e.md', deliverable: true, bytes: 60, mtimeMs: 600, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/e.md' },
   ]
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
@@ -6046,11 +6047,12 @@ async function openPanel(routes, options) {
   // The two halves of the header, read separately: the bold count and the quiet
   // remainder. Adding them back together is the arithmetic the header promises.
   const countHead = (text) => Number((String(text).match(/(\d+) 个文件/u) ?? [])[1])
+  // One remainder now, not two: a row the card declines to draw is a row whose
+  // extension is not a delivery format, and there is no second reason to hide one.
   const countNote = (node) => {
     const text = textOf(firstByClass(node, 'dsse-head-note'))
-    const generated = Number((text.match(/另有 (\d+) 个生成文件/u) ?? [])[1])
-    const older = Number((text.match(/(\d+) 个较早/u) ?? [])[1])
-    return (Number.isFinite(generated) ? generated : 0) + (Number.isFinite(older) ? older : 0)
+    const skipped = Number((text.match(/另有 (\d+) 个文件不是交付文档/u) ?? [])[1])
+    return Number.isFinite(skipped) ? skipped : 0
   }
 
   // Folded, the four rows are this turn's files first, then the session's older
@@ -6065,14 +6067,14 @@ async function openPanel(routes, options) {
   // copy of the repository. Both numbers are still said, because a reader who adds
   // the header up must land on the total the badge counts down from.
   check('the header counts the files a person wrote', meta().includes('5 个文件'), meta())
-  check('and names the generated remainder quietly', textOf(firstByClass(card, 'dsse-head-note')) === '另有 1 个生成文件', textOf(firstByClass(card, 'dsse-head-note')))
+  check('and names the rows it did not draw', textOf(firstByClass(card, 'dsse-head-note')) === '另有 1 个文件不是交付文档', textOf(firstByClass(card, 'dsse-head-note')))
   check('and the two halves are the whole list', countHead(meta()) + countNote(card) === 6, `${meta()} / ${textOf(firstByClass(card, 'dsse-head-note'))}`)
   // A card whose only hidden rows are generated files still needs a way to see
   // them: filtering without an exit is deletion with extra steps. Four of the six
   // rows are drawn (three this turn, then a.md), so two are missing — one written
   // file and one generated one.
   const badge = firstByClass(card, 'dsse-expand-action')
-  check('the badge names the rows that are not on screen', String(badge?.props?.['aria-label'] ?? '') === '显示其余 2 个', String(badge?.props?.['aria-label']))
+  check('the badge names the rows that are not on screen', String(badge?.props?.['aria-label'] ?? '') === '显示其余 1 个', String(badge?.props?.['aria-label']))
 
   const press = (tree) => {
     const control = byClass(tree, 'dsse-expand-action')[0]
@@ -6089,34 +6091,37 @@ async function openPanel(routes, options) {
     return byClass(group, 'dsse-name').map((node) => textOf(node))
   }
 
-  check('opening the card shows every file, generated ones included', openNames.length === 6, JSON.stringify(openNames))
+  check('opening the card shows every delivered file', openNames.length === 5, JSON.stringify(openNames))
+  // The filtered row does not come back when the card opens. Opening is the exit
+  // from the fold, not from the filter: a source file is not a delivered document
+  // whether the reader is looking at four rows or at all of them.
+  check('and not the one it declined to draw', openNames.includes('x.js') === false, JSON.stringify(openNames))
   check('this turn comes first', JSON.stringify(groupNames('fresh')) === JSON.stringify(['b.md', 'c.md', 'e.md']), JSON.stringify(groupNames('fresh')))
   check('then the rest of the session', JSON.stringify(groupNames('earlier')) === JSON.stringify(['a.md', 'd.md']), JSON.stringify(groupNames('earlier')))
-  check('and the generated files last', JSON.stringify(groupNames('noise')) === JSON.stringify(['x.js']), JSON.stringify(groupNames('noise')))
-  check('the groups are drawn in that order', JSON.stringify(groups.map((node) => node.props?.['data-group'])) === JSON.stringify(['fresh', 'earlier', 'noise']), JSON.stringify(groups.map((node) => node.props?.['data-group'])))
+  // No third group: the files that are gone get one, and this fixture has none.
+  check('the groups are drawn in that order', JSON.stringify(groups.map((node) => node.props?.['data-group'])) === JSON.stringify(['fresh', 'earlier']), JSON.stringify(groups.map((node) => node.props?.['data-group'])))
   // Only a group that sits beside another one needs a name: a heading over the
   // only list on the card says nothing the card head has not already said.
   check('the older group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'earlier')).includes('更早'), textOf(groups.find((node) => node.props?.['data-group'] === 'earlier')).slice(0, 60))
-  check('the generated group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'noise')).includes('生成文件'), textOf(groups.find((node) => node.props?.['data-group'] === 'noise')).slice(0, 60))
   check('the rows this turn wrote carry no heading', firstByClass(groups.find((node) => node.props?.['data-group'] === 'fresh'), 'dsse-group-label') === undefined, textOf(groups[0]).slice(0, 60))
-  // The row says which kind of file it is, so the dimming rule has something to
-  // match even when the reader has scrolled past the group heading.
-  const noiseRow = byClass(openCard, 'dsse-row').find((node) => textOf(node).includes('x.js'))
-  check('a generated row says so on itself', noiseRow?.props?.['data-noise'] === 'true', String(noiseRow?.props?.['data-noise']))
-  check('and a written row does not', byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-noise'] === 'true').length === 1, String(byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-noise'] === 'true').length))
+  // A row used to carry `data-noise` so a dimming rule could match it after the
+  // reader scrolled past the group heading. There is no such row to dim now, and
+  // the attribute went with the rule.
+  check('no row carries a collector word', byClass(openCard, 'dsse-row').every((node) => node.props?.['data-noise'] === undefined && node.props?.['data-stale'] === undefined && node.props?.['data-source'] === undefined), String(byClass(openCard, 'dsse-row').length))
 
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
   check('the groups are spaced as separate blocks', /\.dsse-group\{[^}]*display:grid/.test(sheet), '')
   check('and the gap between them is drawn once', /\.dsse-group \+ \.dsse-group\{[^}]*margin-top/.test(sheet), '')
   check('a group heading is quieter than a row', /\.dsse-group-label\{[^}]*label-tertiary/.test(sheet), '')
-  check('a generated row is dimmed', /\.dsse-row\[data-noise="true"\] \.dsse-name\{[^}]*label-tertiary/.test(sheet), '')
+  check('and the dimming rules went with them', sheet.includes('data-noise') === false && sheet.includes('data-stale') === false, '')
 }
 
 {
-  // The generated files can be the whole list — a build that touched nothing but
-  // its own output. The card still has to offer the way in, because the four
-  // written rows it can show number zero and the reader would otherwise be told
-  // "0 个文件" with no hint that six exist.
+  // A session that delivered nothing but source files gets no card at all. This
+  // block used to assert the opposite: the card folded to zero rows and then had
+  // to open itself so the reader could see the generated files. With the card
+  // scoped to delivered documents there is nothing to show, and a card saying
+  // `0 个文件 另有 2 个文件不是交付文档` would be a card about its own filter.
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
     ok: true,
@@ -6127,8 +6132,8 @@ async function openPanel(routes, options) {
       skills: { available: true, skills: [] },
       mcp: [],
       files: [
-        { path: '/work/dist/out.js', bytes: 1, mtimeMs: 1, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/dist/out.js' },
-        { path: '/work/package-lock.json', bytes: 2, mtimeMs: 2, turn: false, noise: true, address: 'dsh-resource://file/session/session-a/work/package-lock.json' },
+        { path: '/work/dist/out.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: false, address: 'dsh-resource://file/session/session-a/work/dist/out.js' },
+        { path: '/work/package-lock.json', deliverable: false, bytes: 2, mtimeMs: 2, turn: false, address: 'dsh-resource://file/session/session-a/work/package-lock.json' },
       ],
       commands: [],
     },
@@ -6138,38 +6143,51 @@ async function openPanel(routes, options) {
   pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  // The card used to fold here and draw nothing: the folded list is the first
-  // four of `fresh.concat(earlier)`, and with every row generated that list is
-  // empty. The header then named a number with nothing under it, which reads as
-  // "this turn produced nothing" — one real turn was summarised exactly that way
-  // by the person who ran it. A filter the reader cannot reach is
-  // indistinguishable from deletion; rows the card declines to draw are the same
-  // thing with the data still on hand.
-  check('a card with nothing but generated files still shows them', byClass(card, 'dsse-name').length === 2, JSON.stringify(byClass(card, 'dsse-name').map((node) => textOf(node))))
-  check('and it opens itself rather than hiding them behind a badge', firstByClass(card, 'dsse-files')?.props?.['data-open'] === 'true', String(firstByClass(card, 'dsse-files')?.props?.['data-open']))
-  check('and still offers the way back to four rows', byClass(card, 'dsse-expand-action').length === 1, String(byClass(card, 'dsse-expand-action').length))
-  // `另有` is a word about a number that came before it. With every row generated
-  // there is no such number, and the grey line has to read as the whole story: a
-  // real session reached this state and the header said `另有 200 个生成文件`
-  // above nothing at all. Asserted as the whole sentence rather than as a
-  // substring, because the point is the wording that replaces `另有` -- a contains
-  // check would pass on a line that still began with it.
-  check('and it does not say "besides" to a number that is not there', textOf(firstByClass(card, 'dsse-head-note')) === '全部 2 个文件都是生成文件', textOf(firstByClass(card, 'dsse-head-note')))
-  check('and no main number is drawn when every row was generated', firstByClass(card, 'dsse-head-stat') === undefined, String(firstByClass(card, 'dsse-head-stat') === undefined))
-  // Opening itself is a default, not a rule. `null` is the third state — the
-  // reader has not touched the badge — and it is what lets the card make this
-  // decision for them without taking it back the moment they disagree. With a
-  // plain `false` the card would re-open on every render and the badge could
-  // never be closed on a turn where nothing a person wrote is listed.
-  const openedBadge = byClass(card, 'dsse-expand-action')[0]
-  check('the badge of an open card offers to close it', (openedBadge?.props?.['aria-label'] ?? '').includes('收起'), String(openedBadge?.props?.['aria-label']))
-  openedBadge?.props?.onClick()
-  const closedTree = await instance.renderer.deepRender(instance.seat('cards'))
-  const closedCard = byClass(closedTree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  check('a reader who closes it gets a closed card', firstByClass(closedCard, 'dsse-files')?.props?.['data-open'] === 'false', String(firstByClass(closedCard, 'dsse-files')?.props?.['data-open']))
-  check('and it stays closed rather than re-opening itself', byClass(closedCard, 'dsse-name').length === 0, JSON.stringify(byClass(closedCard, 'dsse-name').map((node) => textOf(node))))
-  check('and the badge goes back to counting', (byClass(closedCard, 'dsse-expand-action')[0]?.props?.['aria-label'] ?? '').includes('显示其余'), String(byClass(closedCard, 'dsse-expand-action')[0]?.props?.['aria-label']))
-  check('and the grey line still states the whole list', textOf(firstByClass(closedCard, 'dsse-head-note')) === '全部 2 个文件都是生成文件', textOf(firstByClass(closedCard, 'dsse-head-note')))
+  check('a session that delivered no document gets no card', card === undefined, textOf(tree).slice(0, 120))
+  // The rest of the panel still works: this is a card that is absent, not a panel
+  // that failed to render.
+  // The panel itself is still there: a card that is absent is not a panel that
+  // failed to render, so the assertion reads the row that is always drawn.
+  check('and the rest of the panel is still drawn', firstByClass(tree, 'dsse-top-row') !== undefined, textOf(tree).slice(0, 120))
+}
+
+{
+  // One delivered document beside five refused ones. The card draws one row, so
+  // nothing is hidden and there is nothing to expand. Counting the whole record
+  // instead of the delivered rows would see six and offer a badge that reveals
+  // nothing -- the same defect the all-refused block cannot see, because a card
+  // that is not drawn has no badge in either world.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 1,
+      summary: { text: 'wrote one note' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [
+        { path: '/work/note.md', deliverable: true, bytes: 9, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/note.md' },
+        { path: '/work/a.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/a.js' },
+        { path: '/work/b.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/b.js' },
+        { path: '/work/c.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/c.js' },
+        { path: '/work/d.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/d.js' },
+        { path: '/work/e.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/e.js' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  check('one delivered document still draws the card', card !== undefined, textOf(tree).slice(0, 120))
+  check('and it draws exactly that one row', byClass(card, 'dsse-row').length === 1, String(byClass(card, 'dsse-row').length))
+  // The refused five are named in the head, not counted towards the fold: the
+  // badge is about rows behind the fold, and none of these are rows.
+  check('the five it refused are named rather than counted', textOf(firstByClass(card, 'dsse-head-note')) === '另有 5 个文件不是交付文档', textOf(firstByClass(card, 'dsse-head-note')))
+  check('and a card whose one row fits offers no badge', firstByClass(card, 'dsse-expand') === undefined && firstByClass(card, 'dsse-expand-action') === undefined, textOf(card).slice(0, 160))
 }
 
 {
@@ -6185,7 +6203,7 @@ async function openPanel(routes, options) {
       pendingCandidates: 0,
       skills: { available: true, skills: [] },
       mcp: [],
-      files: [{ path: '/work/only.md', bytes: 12, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/only.md' }],
+      files: [{ path: '/work/only.md', deliverable: true, bytes: 12, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/only.md' }],
       commands: [],
     },
   }
@@ -6219,7 +6237,7 @@ async function openPanel(routes, options) {
       pendingCandidates: 0,
       skills: { available: true, skills: [] },
       mcp: [],
-      files: [{ path: '/work/x.md', bytes: 5, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/x.md' }],
+      files: [{ path: '/work/x.md', deliverable: true, bytes: 5, mtimeMs: 1, address: 'dsh-resource://file/session/session-a/work/x.md' }],
       commands: [],
     },
   }
@@ -6246,11 +6264,11 @@ async function openPanel(routes, options) {
   // sentence. Three states are the whole point of the change; the row survives,
   // and it says which of the three it is.
   const rows = [
-    { path: '/work/there.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/there.md' },
-    { path: '/work/gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.md' },
-    { path: '/work/locked.md', bytes: null, mtimeMs: null, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/locked.md' },
-    { path: '/work/unsure.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'unresolved', address: 'dsh-resource://file/session/session-a/work/unsure.md' },
-    { path: '/work/folder', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'folder', address: 'dsh-resource://file/session/session-a/work/folder' },
+    { path: '/work/there.md', deliverable: true, bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/there.md' },
+    { path: '/work/gone.md', deliverable: true, bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.md' },
+    { path: '/work/locked.md', deliverable: true, bytes: null, mtimeMs: null, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/locked.md' },
+    { path: '/work/unsure.md', deliverable: true, bytes: null, mtimeMs: null, turn: true, noise: false, status: 'unresolved', address: 'dsh-resource://file/session/session-a/work/unsure.md' },
+    { path: '/work/folder', deliverable: true, bytes: null, mtimeMs: null, turn: true, noise: false, status: 'folder', address: 'dsh-resource://file/session/session-a/work/folder' },
   ]
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
@@ -6346,6 +6364,15 @@ async function openPanel(routes, options) {
     String(rowOf('folder')?.props?.title),
   )
   check('a present row still invites the click', String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title ?? '').includes('点击在侧栏预览'), String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title))
+  // The invitation belongs last. The path is what a reader hunts for, and a
+  // tooltip that opens with a verb buries it under the one line nobody needs to
+  // read twice. A membership check cannot see the order, so this asks where the
+  // sentence ends.
+  {
+    const title = String(firstByClass(rowOf('there.md'), 'dsse-row-open')?.props?.title ?? '')
+    check('the invitation is the last line of the tooltip', title.endsWith('点击在侧栏预览'), JSON.stringify(title))
+    check('and the path comes before it', title.startsWith('/work/there.md'), JSON.stringify(title))
+  }
 
   const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
   check('a row that is gone is struck through', /\.dsse-row\[data-status="missing"\][^{]*\.dsse-name\{[^}]*line-through/.test(sheet), '')
@@ -6363,6 +6390,44 @@ async function openPanel(routes, options) {
 }
 
 {
+  // The sentence the file was handed over with. It is the one field the host
+  // supplies that Qoder's rows do not have, and it is the only thing on the card
+  // that answers "why is this file here". It goes in the tooltip rather than a
+  // second line: rows are 28px and the card can be 168px wide.
+  const routes = panelRoutes()
+  routes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 2,
+      summary: { text: 'handed over two documents' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: [
+        { path: '/work/plan.md', deliverable: true, bytes: 40, mtimeMs: 2, turn: true, status: 'available', description: '定稿方案：对照四份实现后的施工版', address: 'dsh-resource://file/session/session-a/work/plan.md' },
+        { path: '/work/shot.png', deliverable: true, bytes: 90, mtimeMs: 1, turn: true, status: 'available', description: '', address: 'dsh-resource://file/session/session-a/work/shot.png' },
+      ],
+      commands: [],
+    },
+  }
+  const instance = boot({ routes })
+  instance.module.apply(instance.ctx)
+  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  const tree = await instance.renderer.deepRender(instance.seat('cards'))
+  const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
+  const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
+  const titleOf = (name) => String(rowOf(name)?.props?.title ?? '')
+
+  check('the sentence the file was handed over with is on the row', titleOf('plan.md').includes('定稿方案：对照四份实现后的施工版'), JSON.stringify(titleOf('plan.md')))
+  // The invitation lives on the opener, not on the row: the row is the whole
+  // line and the opener is the part that promises the click.
+  const openerOf = (name) => String(firstByClass(rowOf(name), 'dsse-row-open')?.props?.title ?? '')
+  check('and the sentence sits between the path and the invitation', openerOf('plan.md') === '/work/plan.md\n定稿方案：对照四份实现后的施工版\n点击在侧栏预览', JSON.stringify(openerOf('plan.md')))
+  check('a file handed over without a sentence says nothing extra', titleOf('shot.png').includes('定稿方案') === false, JSON.stringify(titleOf('shot.png')))
+  check('and its tooltip is still the path and the invitation', openerOf('shot.png') === '/work/shot.png\n点击在侧栏预览', JSON.stringify(openerOf('shot.png')))
+}
+
+{
   // A row from an older Host has no status field at all. Reading it as "gone"
   // would strike through every file on the card the first time the panel is
   // opened against a build that predates the three states.
@@ -6375,7 +6440,7 @@ async function openPanel(routes, options) {
       pendingCandidates: 0,
       skills: { available: true, skills: [] },
       mcp: [],
-      files: [{ path: '/work/old.md', bytes: 9, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/old.md' }],
+      files: [{ path: '/work/old.md', deliverable: true, bytes: 9, mtimeMs: 1, turn: true, address: 'dsh-resource://file/session/session-a/work/old.md' }],
       commands: [],
     },
   }
@@ -6396,13 +6461,13 @@ async function openPanel(routes, options) {
   // and a file that is only missing would vanish from the header but stay in the
   // list, which is exactly how the counts drifted before.
   const rows = [
-    { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/a.md' },
-    { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/b.md' },
-    { path: '/work/c.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/c.md' },
-    { path: '/work/d.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/d.md' },
-    { path: '/work/e.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/e.md' },
-    { path: '/work/f.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/f.md' },
-    { path: '/work/node_modules/g.js', bytes: 1, mtimeMs: 1, turn: false, noise: true, status: 'available', address: 'dsh-resource://file/session/session-a/work/node_modules/g.js' },
+    { path: '/work/a.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/a.md' },
+    { path: '/work/b.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/b.md' },
+    { path: '/work/c.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'invalid', address: 'dsh-resource://file/session/session-a/work/c.md' },
+    { path: '/work/d.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/d.md' },
+    { path: '/work/e.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/e.md' },
+    { path: '/work/f.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/f.md' },
+    { path: '/work/node_modules/g.js', deliverable: false, bytes: 1, mtimeMs: 1, turn: false, noise: true, status: 'available', address: 'dsh-resource://file/session/session-a/work/node_modules/g.js' },
   ]
   const routes = panelRoutes()
   routes['/api/ui-evolve/panel'] = {
@@ -6437,12 +6502,17 @@ async function openPanel(routes, options) {
   const shown = byClass(card, 'dsse-name').length
   const missing = Number((String(badge?.props?.['aria-label'] ?? '').match(/(\d+) 个/u) ?? [])[1])
   check('the header, the rows and the badge add up', written === shown + missing, `${meta} ${note} / shown ${String(shown)} / badge ${String(badge?.props?.['aria-label'])}`)
-  check('and the missing and unreadable files are still counted in it', written === 7, `${meta} ${note} / ${String(badge?.props?.['aria-label'])}`)
+  // Six documents were delivered and one row is a source file: the header names
+  // six, and the note names the one it did not draw. Seven was the old total,
+  // back when the card counted every file the session touched.
+  check('and the filtered row is named but not counted', written === 6, `${meta} ${note} / ${String(badge?.props?.['aria-label'])}`)
   // The fold shows four rows; the badge names the remainder, not the whole list,
   // because the header already names the whole list. Two numbers that each name
   // the total leave the reader to subtract.
   check('the folded card draws four rows', shown === 4, String(shown))
-  check('and the badge names only what is left over', missing === 3, String(missing))
+  // Four of the six are on screen and the fifth row (c.md) is not: the badge
+  // counts rows the reader cannot see, and the filtered one was never a row.
+  check('and the badge names only what is left over', missing === 2, String(missing))
 }
 
 // ---------------------------------------------------------------------------
@@ -6479,10 +6549,10 @@ async function openPanel(routes, options) {
       mcp: [],
       cwd: '/work',
       files: [
-        { path: '/work/run.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
-        { path: '/work/page.html', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
-        { path: '/work/theme.css', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
-        { path: '/work/data.json', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+        { path: '/work/notes.md', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/page.html', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/costs.xlsx', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/work/deck.pptx', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
       ],
       commands: [],
     },
@@ -6492,20 +6562,20 @@ async function openPanel(routes, options) {
   pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
   const tree = await instance.renderer.deepRender(instance.seat('cards'))
 
-  const codeRow = rowNamed(tree, 'run.ts')
+  const docRow = rowNamed(tree, 'notes.md')
   const markupRow = rowNamed(tree, 'page.html')
-  const styleRow = rowNamed(tree, 'theme.css')
-  const dataRow = rowNamed(tree, 'data.json')
+  const sheetRow = rowNamed(tree, 'costs.xlsx')
+  const slideRow = rowNamed(tree, 'deck.pptx')
 
-  check('a file row carries a glyph', codeRow !== undefined && iconOf(codeRow) !== undefined, String(iconOf(codeRow)))
-  // Each bucket is a different outline now, not a different mark on one page. The
+  check('a file row carries a glyph', docRow !== undefined && iconOf(docRow) !== undefined, String(iconOf(docRow)))
+  // Each bucket is a different outline, not a different mark on one page. The
   // assertions name the stroke that only that bucket draws — a single shared
-  // silhouette would produce eight identical arrays and fail all four.
-  check('a source file is marked as code', bucketOf(codeRow) === 'code' && markOf(codeRow).includes('M10 4.5c-2.6 0-2.6 7.5-5.4 7.5'), markOf(codeRow))
+  // silhouette would produce identical arrays and fail all four.
+  check('prose is marked with ruled lines', bucketOf(docRow) === 'doc' && markOf(docRow).includes('M5 3.5h14v17H5zM8.5 8h7'), markOf(docRow))
   check('a page is marked as markup', bucketOf(markupRow) === 'markup' && markOf(markupRow).includes('M9.5 4.5L3.5 12l6 7.5'), markOf(markupRow))
-  check('a stylesheet is marked as style', bucketOf(styleRow) === 'style' && markOf(styleRow).includes('M10.4 3.5L7.6 20.5'), markOf(styleRow))
-  check('structured data is marked as data', bucketOf(dataRow) === 'data' && markOf(dataRow).includes('M3.5 5h17v14h-17z'), markOf(dataRow))
-  check('the four marks are not all the same', new Set([markOf(codeRow), markOf(markupRow), markOf(styleRow), markOf(dataRow)]).size === 4, 'marks collapsed together')
+  check('a spreadsheet is marked as a grid', bucketOf(sheetRow) === 'sheet' && markOf(sheetRow).includes('M3.5 5h17v14h-17zM3.5 10h17'), markOf(sheetRow))
+  check('a deck is marked as a screen', bucketOf(slideRow) === 'slide' && markOf(slideRow).includes('M12 16.5v3'), markOf(slideRow))
+  check('the four marks are not all the same', new Set([markOf(docRow), markOf(markupRow), markOf(sheetRow), markOf(slideRow)]).size === 4, 'marks collapsed together')
 
   // The stroke colour is inherited rather than set on the svg, so that a row can
   // recolour its glyph in CSS when the file is gone.
@@ -6531,14 +6601,14 @@ async function openPanel(routes, options) {
     const close = sheet.indexOf('}', at)
     return close < 0 ? '' : sheet.slice(at, close + 1)
   }
-  check('a source file is tinted', ruleFor('code').includes('#4c7fb8'), ruleFor('code'))
-  check('the six tints are six different colours', (() => {
-    const values = ['code', 'markup', 'style', 'data', 'image', 'archive']
+  check('a spreadsheet is tinted', ruleFor('sheet').includes('#2f8a72'), ruleFor('sheet'))
+  check('the five tints are five different colours', (() => {
+    const values = ['markup', 'sheet', 'image', 'slide', 'video']
       .map((bucket) => (/color:(#[0-9a-f]{6})/u.exec(ruleFor(bucket)) ?? [])[1])
-    return values.every((value) => typeof value === 'string') && new Set(values).size === 6
-  })(), ['code', 'markup', 'style', 'data', 'image', 'archive'].map(ruleFor).join(' | '))
-  // The two buckets that make no claim about the file keep the neutral grey: a card
-  // of eight rows should not be eight colours deep.
+    return values.every((value) => typeof value === 'string') && new Set(values).size === 5
+  })(), ['markup', 'sheet', 'image', 'slide', 'video'].map(ruleFor).join(' | '))
+  // The two buckets that make no claim about the document keep the neutral grey: a
+  // card of six rows should not be six colours deep.
   check('the buckets that claim nothing stay grey', ruleFor('doc') === '' && ruleFor('file') === '', ruleFor('doc') + ruleFor('file'))
   // A missing file must lose its tint. Colour is a claim about what the file is
   // worth reading as, and a struck-through grey name beside a bright blue glyph
@@ -6562,14 +6632,14 @@ async function openPanel(routes, options) {
       mcp: [],
       cwd: '/work',
       files: [
-        { path: '/work/notes.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
-        { path: '/work/shot.png', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
-        { path: '/work/dist.zip', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
-        { path: '/work/Makefile.qqq', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
-        { path: '/work/run.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://e' },
-        { path: '/work/page.html', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://f' },
-        { path: '/work/theme.css', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://g' },
-        { path: '/work/data.json', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://h' },
+        { path: '/work/notes.md', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/shot.png', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/demo.mp4', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/work/Makefile.qqq', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+        { path: '/work/report.pdf', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://e' },
+        { path: '/work/page.html', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://f' },
+        { path: '/work/costs.xlsx', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://g' },
+        { path: '/work/deck.pptx', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://h' },
       ],
       commands: [],
     },
@@ -6581,7 +6651,7 @@ async function openPanel(routes, options) {
 
   const docRow = rowNamed(tree, 'notes.md')
   const imageRow = rowNamed(tree, 'shot.png')
-  const archiveRow = rowNamed(tree, 'dist.zip')
+  const videoRow = rowNamed(tree, 'demo.mp4')
   const unknownRow = rowNamed(tree, 'Makefile.qqq')
 
   const marksOf = (row) => JSON.stringify(iconOf(row)?.props?.children ?? [])
@@ -6589,17 +6659,68 @@ async function openPanel(routes, options) {
 
   check('prose is marked as a document', bucketOf(docRow) === 'doc' && marksOf(docRow).includes('M5 3.5h14v17H5z'), marksOf(docRow))
   check('a picture is marked with a picture', bucketOf(imageRow) === 'image' && marksOf(imageRow).includes('"circle"'), marksOf(imageRow))
-  check('a bundle is marked as an archive', bucketOf(archiveRow) === 'archive' && marksOf(archiveRow).includes('M4 8.5h16'), marksOf(archiveRow))
+  check('a recording is marked with a play mark', bucketOf(videoRow) === 'video' && marksOf(videoRow).includes('M10.2 9.4l4.6 2.6'), marksOf(videoRow))
   // The blank page is the point: an unknown extension must produce the page outline
   // and nothing else, because a wrong mark tells the reader something false about a
   // file they wrote. The page and its fold are one path here, not two.
   const unknownMarks = iconOf(unknownRow)?.props?.children
   check('an extension nobody knows gets the blank page', Array.isArray(unknownMarks) && unknownMarks.length === 1, JSON.stringify(unknownMarks))
   check('and that page is the one outline that claims nothing', bucketOf(unknownRow) === 'file' && marksOf(unknownRow).includes('M5 3.5h10l4 4v13H5zM15 3.5v4h4'), marksOf(unknownRow))
-  // Eight buckets, eight outlines, and no bucket borrowing another's shape. Four are
-  // read from this block's rows and four from the block above; every one of the eight
-  // is named here so a fallback to the generic page cannot pass unnoticed.
-  check('the four buckets here are four different shapes', new Set([marksOf(docRow), marksOf(imageRow), marksOf(archiveRow), marksOf(unknownRow)]).size === 4, [marksOf(docRow), marksOf(imageRow), marksOf(archiveRow), marksOf(unknownRow)].join(' | '))
+  // Seven buckets, seven outlines, and no bucket borrowing another's shape. Three
+  // are read from this block's rows and four from the block above; every one is
+  // named across the two blocks so a fallback to the generic page cannot pass
+  // unnoticed.
+  check('the four buckets here are four different shapes', new Set([marksOf(docRow), marksOf(imageRow), marksOf(videoRow), marksOf(unknownRow)]).size === 4, [marksOf(docRow), marksOf(imageRow), marksOf(videoRow), marksOf(unknownRow)].join(' | '))
+  // The coverage assertion. Every suffix the delivery whitelist accepts has to land
+  // on a bucket that is not the blank page — the bug this block was written for was
+  // exactly six whitelisted suffixes falling through to it (xlsx, xlsm, ppt, pptx,
+  // mp4, webm). Reading the whitelist from `api.js` and the buckets from the
+  // rendered rows would need the whole pipeline; naming the list here is enough,
+  // because a suffix added to one table and not the other now fails this line.
+  const WHITELIST = ['pdf', 'doc', 'docx', 'md', 'markdown', 'txt', 'xls', 'xlsx', 'xlsm', 'csv', 'tsv', 'ppt', 'pptx', 'html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'mp4', 'webm']
+  const bucketForSuffix = {
+    pdf: 'doc', doc: 'doc', docx: 'doc', md: 'doc', markdown: 'doc', txt: 'doc',
+    xls: 'sheet', xlsx: 'sheet', xlsm: 'sheet', csv: 'sheet', tsv: 'sheet',
+    ppt: 'slide', pptx: 'slide',
+    html: 'markup', htm: 'markup',
+    png: 'image', jpg: 'image', jpeg: 'image', gif: 'image', webp: 'image', svg: 'image',
+    mp4: 'video', webm: 'video',
+  }
+  check('every delivered suffix has a bucket', WHITELIST.every((suffix) => typeof bucketForSuffix[suffix] === 'string' && bucketForSuffix[suffix] !== 'file'), WHITELIST.filter((suffix) => bucketForSuffix[suffix] === undefined).join(','))
+  check('and no bucket is claimed by a suffix the card would refuse', Object.keys(bucketForSuffix).every((suffix) => WHITELIST.includes(suffix)), Object.keys(bucketForSuffix).filter((suffix) => WHITELIST.includes(suffix) === false).join(','))
+  // The card has to draw each of those buckets with a different outline, or the
+  // mapping above is a table with no effect. Rendered one row per bucket.
+  const bucketRows = [
+    { path: '/work/x.pdf', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://p' },
+    { path: '/work/x.csv', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://q' },
+    { path: '/work/x.ppt', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://r' },
+    { path: '/work/x.htm', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://s' },
+    { path: '/work/x.svg', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://t' },
+    { path: '/work/x.webm', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://u' },
+  ]
+  const coverageRoutes = panelRoutes()
+  coverageRoutes['/api/ui-evolve/panel'] = {
+    ok: true,
+    data: {
+      turn: 1, calls: 1, failed: 0, turnFiles: 6,
+      summary: { text: 'delivered six documents' },
+      pendingCandidates: 0,
+      skills: { available: true, skills: [] },
+      mcp: [],
+      files: bucketRows,
+      commands: [],
+    },
+  }
+  const coverageInstance = boot({ routes: coverageRoutes })
+  coverageInstance.module.apply(coverageInstance.ctx)
+  pressToggle(firstByClass(await coverageInstance.renderer.render(coverageInstance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
+  // Six rows over a fold of four, so the card has to be opened before every bucket
+  // is on screen. Reading it folded would assert the first four and call it coverage.
+  const coverageBadge = firstByClass(await coverageInstance.renderer.deepRender(coverageInstance.seat('cards')), 'dsse-expand-action')
+  if (typeof coverageBadge?.props?.onClick === 'function') coverageBadge.props.onClick()
+  const coverageTree = await coverageInstance.renderer.deepRender(coverageInstance.seat('cards'))
+  const drawn = byClass(coverageTree, 'dsse-row').map((row) => iconOf(row)?.props?.['data-bucket'])
+  check('and each of them is drawn with its own outline', JSON.stringify(drawn) === JSON.stringify(['doc', 'sheet', 'slide', 'markup', 'image', 'video']), JSON.stringify(drawn))
 }
 
 {
@@ -6617,10 +6738,10 @@ async function openPanel(routes, options) {
       mcp: [],
       cwd: '/work',
       files: [
-        { path: '/work/src/lib/inner.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
-        { path: '/work/top.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
-        { path: '/work/deep/a/b/c/d.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
-        { path: '/elsewhere/x/y/z/e.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
+        { path: '/work/src/lib/inner.ts', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: '/work/top.md', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: '/work/deep/a/b/c/d.ts', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://c' },
+        { path: '/elsewhere/x/y/z/e.ts', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://d' },
       ],
       commands: [],
     },
@@ -6667,7 +6788,7 @@ async function openPanel(routes, options) {
       pendingCandidates: 0,
       skills: { available: true, skills: [] },
       mcp: [],
-      files: [{ path: '/work/src/lib/inner.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' }],
+      files: [{ path: '/work/src/lib/inner.ts', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' }],
       commands: [],
     },
   }
@@ -6695,8 +6816,8 @@ async function openPanel(routes, options) {
       mcp: [],
       cwd: 'C:\\work',
       files: [
-        { path: 'c:\\Work\\src\\a.ts', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
-        { path: 'C:\\WORK\\b.md', bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
+        { path: 'c:\\Work\\src\\a.ts', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: 'C:\\WORK\\b.md', deliverable: true, bytes: 10, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://b' },
       ],
       commands: [],
     },
@@ -6730,7 +6851,7 @@ async function openPanel(routes, options) {
       mcp: [],
       cwd: 'C:\\work',
       files: [
-        { path: 'C:\\work\\test8\\code.py', bytes: 1314, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
+        { path: 'C:\\work\\test8\\code.py', deliverable: true, bytes: 1314, mtimeMs: 1, turn: true, status: 'available', address: 'dsh-resource://a' },
       ],
       commands: [],
     },
@@ -6767,75 +6888,6 @@ async function openPanel(routes, options) {
 // assertion that reads all three at once can catch a card that names two totals.
 // ---------------------------------------------------------------------------
 {
-  const rows = [
-    { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
-    { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
-  ]
-  const withSweep = (sweep) => {
-    const routes = panelRoutes()
-    routes['/api/ui-evolve/panel'] = {
-      ok: true,
-      data: {
-        turn: 1, calls: 2, failed: 0, turnFiles: 2,
-        summary: { text: 'wrote two files' },
-        pendingCandidates: 0,
-        skills: { available: true, skills: [] },
-        mcp: [],
-        files: rows,
-        sweep,
-        commands: [],
-      },
-    }
-    return routes
-  }
-  const cardFor = async (sweep) => {
-    const routes = withSweep(sweep)
-    const instance = boot({ routes })
-    instance.module.apply(instance.ctx)
-    pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
-    const tree = await instance.renderer.deepRender(instance.seat('cards'))
-    const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-    // The caveat is only drawn on an open list. A collapsed card that said
-    // "the directory was not read to the end" would be a line of small print about
-    // files the reader cannot see yet, so the note is behind the same disclosure
-    // as the remainder it warns about.
-    const badge = firstByClass(card, 'dsse-expand-action')
-    if (typeof badge?.props?.onClick === 'function') badge.props.onClick()
-    await instance.renderer.deepRender(instance.seat('cards'))
-    const opened = await instance.renderer.deepRender(instance.seat('cards'))
-    return byClass(opened, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  }
-  const noteOf = (card) => {
-    const note = firstByClass(card, 'dsse-note')
-    return note === undefined ? undefined : textOf(note)
-  }
-
-  const partial = await cardFor({ turn: 1, coverage: 'partial' })
-  check('a sweep that did not finish says so on the card', noteOf(partial)?.includes('没读完') === true, String(noteOf(partial)))
-
-  const unnamed = await cardFor({ turn: 1, coverage: 'none' })
-  check('a sweep that never looked says that instead', noteOf(unnamed)?.includes('没有检查') === true, String(noteOf(unnamed)))
-  // The two caveats have to be different sentences. They are different claims:
-  // one says there may be more, the other says nobody knows.
-  check('and the two caveats are not the same sentence', noteOf(unnamed) !== noteOf(partial), `${String(noteOf(unnamed))} / ${String(noteOf(partial))}`)
-
-  const complete = await cardFor({ turn: 1, coverage: 'complete' })
-  // A caveat on every card is a caveat nobody reads. A complete sweep says
-  // nothing at all — not "checked", not "complete", nothing.
-  check('a sweep that finished says nothing at all', noteOf(complete) === undefined, String(noteOf(complete)))
-  check('and the rows are still drawn', byClass(complete, 'dsse-name').length === 2, String(byClass(complete, 'dsse-name').length))
-
-  // A host that never sent `sweep` (an older build) must not have its card
-  // decorated with a caveat about a sweep that was never described.
-  const noField = await cardFor(undefined)
-  check('a payload with no sweep field says nothing either', noteOf(noField) === undefined, String(noteOf(noField)))
-  // A `sweep` whose word this build does not know is not read as `partial`: the
-  // card can repeat a doubt it was told about, not invent one.
-  const unknown = await cardFor({ turn: 1, coverage: 'mostly' })
-  check('a coverage word this build does not know draws no caveat', noteOf(unknown) === undefined, String(noteOf(unknown)))
-}
-
-{
   // Three rows, so nothing is hidden and the card fits: no badge, and the header
   // still names the total. The badge is a control for a remainder, and there is
   // no remainder — one labelled "显示其余 0 个" would be a control that reveals
@@ -6850,9 +6902,9 @@ async function openPanel(routes, options) {
       skills: { available: true, skills: [] },
       mcp: [],
       files: [
-        { path: '/work/a.md', bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
-        { path: '/work/b.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
-        { path: '/work/c.md', bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
+        { path: '/work/a.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: true, noise: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
+        { path: '/work/b.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
+        { path: '/work/c.md', deliverable: true, bytes: 1, mtimeMs: 1, turn: false, noise: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
       ],
       commands: [],
     },
@@ -6877,12 +6929,12 @@ async function openPanel(routes, options) {
   // file outside it so the second button has to disappear rather than invent a
   // relative path with `..` in it.
   const rows = [
-    { path: 'F:\\work\\src\\inside.ts', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/src/inside.ts' },
-    { path: 'F:\\elsewhere\\outside.ts', bytes: 20, mtimeMs: 200, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/elsewhere/outside.ts' },
+    { path: 'F:\\work\\src\\inside.ts', deliverable: true, bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/src/inside.ts' },
+    { path: 'F:\\elsewhere\\outside.ts', deliverable: true, bytes: 20, mtimeMs: 200, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/elsewhere/outside.ts' },
     // Spelled by a different part of the Host than the workspace was, in the
     // other case. On Windows this is the same directory, so the row is inside
     // and both buttons must exist.
-    { path: 'f:\\WORK\\Src\\Cased.ts', bytes: 30, mtimeMs: 300, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/Src/Cased.ts' },
+    { path: 'f:\\WORK\\Src\\Cased.ts', deliverable: true, bytes: 30, mtimeMs: 300, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/Src/Cased.ts' },
   ]
   const routesFor = () => {
     const routes = panelRoutes()
@@ -7208,7 +7260,7 @@ async function openPanel(routes, options) {
   // would copy is still the path it used to have, so the control stays. What must
   // not happen is an opener appearing beside it.
   {
-    const goneRows = [{ path: 'F:\\work\\gone.ts', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.ts' }]
+    const goneRows = [{ path: 'F:\\work\\gone.ts', deliverable: true, bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', address: 'dsh-resource://file/session/session-a/work/gone.ts' }]
     const routes = panelRoutes()
     routes['/api/ui-evolve/panel'] = {
       ok: true,
@@ -7461,221 +7513,6 @@ async function openPanel(routes, options) {
     check('and closing it asks for nothing', scrolled.length === openCount, `${scrolled.length - openCount} calls on close`)
   }
 
-}
-
-{
-  // A session open for weeks accumulates paths nobody touched since. They are
-  // listed — production is a record, not a cache, and a row that vanished could
-  // not be clicked or discarded — but they are demoted: their own group, a
-  // quieter colour, and no say in the header's main number.
-  //
-  // The fixture runs the four kinds through one card: two of this turn, one more
-  // from today, one old, one generated. Every number has to agree at once.
-  const rows = [
-    { path: '/work/a.md', bytes: 10, mtimeMs: 100, turn: false, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/a.md' },
-    { path: '/work/old.md', bytes: 20, mtimeMs: 200, turn: false, noise: false, stale: true, address: 'dsh-resource://file/session/session-a/work/old.md' },
-    { path: '/work/b.md', bytes: 30, mtimeMs: 300, turn: true, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/b.md' },
-    { path: '/work/node_modules/x.js', bytes: 40, mtimeMs: 400, turn: false, noise: true, stale: false, address: 'dsh-resource://file/session/session-a/work/node_modules/x.js' },
-    { path: '/work/c.md', bytes: 50, mtimeMs: 500, turn: true, noise: false, stale: false, address: 'dsh-resource://file/session/session-a/work/c.md' },
-  ]
-  const routes = panelRoutes()
-  routes['/api/ui-evolve/panel'] = {
-    ok: true,
-    data: {
-      turn: 3, calls: 2, failed: 0, turnFiles: 2,
-      summary: { text: 'edited two files' },
-      pendingCandidates: 0,
-      skills: { available: false, skills: [] },
-      mcp: [],
-      files: rows,
-      commands: [],
-    },
-  }
-  const instance = boot({ routes })
-  instance.module.apply(instance.ctx)
-  pressToggle(firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle'))
-  const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  // The main number leaves the old row out on purpose: the point of demoting it
-  // is that it stops describing the session as it stands now. It is not lost —
-  // the quiet note counts it, and the two together still name the whole list.
-  check('the main number leaves the old row out', textOf(firstByClass(folded, 'dsse-head-stats')).includes('3 个文件'), textOf(firstByClass(folded, 'dsse-head-stats')))
-  check('and the note names it separately from generated files', textOf(firstByClass(folded, 'dsse-head-note')) === '另有 1 个生成文件 · 1 个较早', textOf(firstByClass(folded, 'dsse-head-note')))
-  // The arithmetic closes with three kinds in play: 3 recent + 1 generated + 1
-  // old is the whole list of five, and the badge counts down from that same five.
-  check('and the three numbers still name the whole list', Number(textOf(firstByClass(folded, 'dsse-head-stats')).match(/(\d+) 个文件/u)[1]) + 2 === 5, `${textOf(firstByClass(folded, 'dsse-head-stats'))} ${textOf(firstByClass(folded, 'dsse-head-note'))}`)
-  check('the badge counts down from the same total', String(firstByClass(folded, 'dsse-expand-action')?.props?.['aria-label'] ?? '') === '显示其余 2 个', String(firstByClass(folded, 'dsse-expand-action')?.props?.['aria-label']))
-
-  // Read the badge before pressing it. Three mutations remove this control on
-  // purpose; an unguarded read turns each of them into a crash before the tally
-  // prints, and a crash looks to the runner like a mutation nothing caught.
-  const badge = firstByClass(folded, 'dsse-expand-action')
-  check('the folded card offers a way to see the rest', badge !== undefined, String(badge === undefined))
-  check('and that way is clickable', typeof badge?.props?.onClick === 'function', typeof badge?.props?.onClick)
-  if (badge !== undefined && typeof badge.props?.onClick === 'function') badge.props.onClick()
-  const openCard = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  const groups = byClass(openCard, 'dsse-group')
-  const groupNames = (key) => byClass(groups.find((node) => node.props?.['data-group'] === key), 'dsse-name').map((node) => textOf(node))
-  check('the old row gets its own group', JSON.stringify(groupNames('stale')) === JSON.stringify(['old.md']), JSON.stringify(groupNames('stale')))
-  check('and it sits after today and before the generated files', JSON.stringify(groups.map((node) => node.props?.['data-group'])) === JSON.stringify(['fresh', 'earlier', 'stale', 'noise']), JSON.stringify(groups.map((node) => node.props?.['data-group'])))
-  check('the old group is labelled', textOf(groups.find((node) => node.props?.['data-group'] === 'stale')).includes('较早'), textOf(groups.find((node) => node.props?.['data-group'] === 'stale')).slice(0, 60))
-  // Every row appears exactly once. A demotion that drew the row twice would look
-  // like a card that found more than the session ever recorded.
-  const all = byClass(openCard, 'dsse-name').map((node) => textOf(node))
-  check('every row is drawn once', JSON.stringify(all) === JSON.stringify(['b.md', 'c.md', 'a.md', 'old.md', 'x.js']), JSON.stringify(all))
-  // Five rows over four groups, and the arithmetic in the header still lands on
-  // five: a row drawn twice would look like a session that recorded more than
-  // it did, which is the failure mode a demotion invites.
-  check('and the rows outnumber no group total', byClass(openCard, 'dsse-row').length === 5, String(byClass(openCard, 'dsse-row').length))
-
-  // The row carries the fact itself, not just its position under a heading: the
-  // heading scrolls away and the dimming has to survive that.
-  const staleRow = byClass(openCard, 'dsse-row').find((node) => textOf(node).includes('old.md'))
-  check('an old row says so on itself', staleRow?.props?.['data-stale'] === 'true', String(staleRow?.props?.['data-stale']))
-  check('and a current row does not', byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-stale'] === 'true').length === 1, String(byClass(openCard, 'dsse-row').filter((node) => node.props?.['data-stale'] === 'true').length))
-  // It is demoted, not deleted: the row must still open, because a person whose
-  // work is buried under an old entry still needs to click it.
-  check('an old row is still openable', firstByClass(staleRow, 'dsse-row-open') !== undefined, String(firstByClass(staleRow, 'dsse-row-open') === undefined))
-
-  const sheet = instance.styles.map((node) => String(node.textContent)).join('\n')
-  // Quieter, but not struck through: a strikethrough is the missing file's word,
-  // and these rows still point at files that are there.
-  check('an old row is dimmed', /\.dsse-row\[data-stale="true"\] \.dsse-name\{[^}]*label-secondary/.test(sheet), '')
-  check('and it is not struck through like a deleted one', /\.dsse-row\[data-stale="true"\] \.dsse-name\{[^}]*line-through/.test(sheet) === false, '')
-}
-
-{
-  // Provenance: which bracket found the row, said in the tooltip it already has.
-  //
-  // The field has been written since S8 (`api.js` narrows it to 'git' | 'scan' |
-  // null) and was never read by the panel. The half worth saying out loud is
-  // 'scan': the diff ran and did not list the file, so a walk of the directory
-  // found it. That is the one thing a reader cannot infer from the path, and it
-  // is the difference between a change and a thing that moved.
-  //
-  // The other half is silence. `null` is the ordinary case -- a file tool named
-  // the path, so the row is here because something said it wrote it -- and a
-  // word this build does not know must also stay silent rather than guess. Both
-  // are asserted, because inventing a sentence for them would be a claim about a
-  // record that never carried the field.
-  const lines = [
-    { path: 'F:\\work\\src\\diff.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'git', address: 'dsh-resource://file/session/session-a/work/src/diff.md' },
-    { path: 'F:\\work\\src\\walked.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'scan', address: 'dsh-resource://file/session/session-a/work/src/walked.md' },
-    { path: 'F:\\work\\src\\edited.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', address: 'dsh-resource://file/session/session-a/work/src/edited.md' },
-    { path: 'F:\\work\\src\\foreign.md', bytes: 10, mtimeMs: 100, turn: true, noise: false, status: 'available', source: 'siege', address: 'dsh-resource://file/session/session-a/work/src/foreign.md' },
-    // A row that is both gone and was found by the walk: the two sentences have to
-    // coexist, because the reason a row cannot be opened is the more urgent fact
-    // and provenance must not push it off the tooltip.
-    { path: 'F:\\work\\src\\gone.md', bytes: null, mtimeMs: null, turn: true, noise: false, status: 'missing', source: 'scan' },
-  ]
-  const routes = panelRoutes()
-  routes['/api/ui-evolve/panel'] = {
-    ok: true,
-    data: {
-      turn: 3, calls: 4, failed: 0, turnFiles: 5,
-      summary: { text: 'wrote five files' },
-      pendingCandidates: 0,
-      skills: { available: true, skills: [] },
-      mcp: [],
-      cwd: 'F:\\work',
-      files: lines,
-      commands: [],
-    },
-  }
-  const instance = boot({ routes })
-  instance.module.apply(instance.ctx)
-  const toggle = firstByClass(await instance.renderer.render(instance.seat('toggle'), { sessionId: 'session-a' }), 'dsse-toggle')
-  check('the panel has a handle to open it with', toggle !== undefined, String(toggle === undefined))
-  pressToggle(toggle)
-  const folded = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  // Five rows over a four-row fold, so the last one is not drawn yet. Expanding is
-  // part of the fixture rather than an accident: reading a row that the card chose
-  // not to draw would pass or fail for the wrong reason.
-  const badge = firstByClass(folded, 'dsse-expand-action')
-  // The badge exists whether or not the card is folded, so its presence says
-  // nothing about the fold. What this line can honestly claim is that there is a
-  // control to press; the row count right after is what shows the fold was real.
-  check('the fixture offers a control to expand it with', badge !== undefined, String(badge === undefined))
-  if (badge !== undefined && typeof badge.props?.onClick === 'function') badge.props.onClick()
-  const card = byClass(await instance.renderer.deepRender(instance.seat('cards')), 'dsse-card').find((node) => textOf(node).includes('产出文件'))
-  const rowOf = (name) => byClass(card, 'dsse-row').find((node) => textOf(node).includes(name))
-  const titleOf = (name) => String(rowOf(name)?.props?.title ?? '')
-  check('and every row is on screen once it is open', byClass(card, 'dsse-row').length === 5, String(byClass(card, 'dsse-row').length))
-  // The count alone cannot tell a full list from a list that lost one row and
-  // drew another twice. The row this block reads last is the one that was folded
-  // away before the expansion, so its presence is the evidence that expanding
-  // worked rather than that the fixture happens to fit.
-  check('including the one that was folded away', rowOf('gone.md') !== undefined, String(rowOf('gone.md') === undefined))
-
-  // Nothing on any row claims where it came from. The bracket is a value on the
-  // node, not a sentence in the tooltip: someone reading this card is asking what
-  // changed, and a line about which collector noticed it invites a question the
-  // card cannot answer. `source` also outlives the turn that wrote it, so the same
-  // file could gain the sentence and lose it again between turns, which reads as a
-  // change in the file itself.
-  //
-  // Checked over every row rather than the two that carry a bracket. A row whose
-  // source is unset and a row whose source is a word this build cannot read are
-  // exactly the two where an accidental fallback sentence would hide, and they are
-  // the majority on a real card.
-  for (const name of ['diff.md', 'walked.md', 'edited.md', 'foreign.md', 'gone.md']) {
-    check(
-      `the row for ${name} says nothing about brackets`,
-      titleOf(name).includes('差分') === false && titleOf(name).includes('扫描') === false,
-      titleOf(name),
-    )
-  }
-  // And the silence is a whole tooltip, not a truncated one. `titleOf` answers ''
-  // for a row that was never drawn, and ''.includes('差分') is false, so the checks
-  // above pass whether the row said nothing or was not there at all. Presence is
-  // what turns that around: absence now fails.
-  check('the row a tool named is on screen at all', rowOf('edited.md') !== undefined, String(rowOf('edited.md') === undefined))
-  check('the row with a word this build cannot read is on screen', rowOf('foreign.md') !== undefined, String(rowOf('foreign.md') === undefined))
-  check('and the tool-named row has a tooltip to be silent in', titleOf('edited.md') !== '', titleOf('edited.md'))
-  check('and so does the one with the unreadable word', titleOf('foreign.md') !== '', titleOf('foreign.md'))
-  // Silence means no empty parts, not merely no words. Without the filter in the
-  // hint assembly a tooltip grows a trailing blank line and every check above
-  // still passes, because they all ask what a line says and never whether what
-  // they are looking at is a line at all.
-  check('and the silent tooltip has no blank lines', titleOf('edited.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('edited.md')))
-  check('the word this build cannot read adds no blank lines either', titleOf('foreign.md').split('\n').every((part) => part.length > 0), JSON.stringify(titleOf('foreign.md')))
-
-  // The opener covers most of the row's width. A tooltip changed only on the row
-  // would never be seen over the part people actually point at.
-  const openerOf = (name) => firstByClass(rowOf(name), 'dsse-row-open')
-  check('the opener carries the same tooltip', String(openerOf('walked.md')?.props?.title ?? '').startsWith('F:\\work\\src\\walked.md'), String(openerOf('walked.md')?.props?.title))
-  check('and does not add a bracket of its own', String(openerOf('walked.md')?.props?.title ?? '').includes('扫描') === false, String(openerOf('walked.md')?.props?.title))
-  check('and still offers the preview', String(openerOf('walked.md')?.props?.title ?? '').includes('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
-  // Membership cannot see order. The point of the opener's template is that the
-  // invitation comes last: the path is what the reader hunts for, and it has to
-  // lead the tooltip it leads inside the row.
-  check('and puts the invitation last', String(openerOf('walked.md')?.props?.title ?? '').endsWith('点击在侧栏预览'), String(openerOf('walked.md')?.props?.title))
-
-  // The bracket is still recorded, and the attribute is now the only place it
-  // lives. That is the whole point of keeping it: it has to survive the move off
-  // the tooltip, or the fact is lost rather than hidden.
-  check('the row states its bracket as an attribute', rowOf('walked.md')?.props?.['data-source'] === 'scan' && rowOf('diff.md')?.props?.['data-source'] === 'git', `${String(rowOf('diff.md')?.props?.['data-source'])}/${String(rowOf('walked.md')?.props?.['data-source'])}`)
-  check('and an unrecorded one is named as such', rowOf('edited.md')?.props?.['data-source'] === 'unknown', String(rowOf('edited.md')?.props?.['data-source']))
-  check('including a word this build does not know', rowOf('foreign.md')?.props?.['data-source'] === 'unknown', String(rowOf('foreign.md')?.props?.['data-source']))
-  // A row that cannot be opened still has a bracket. Losing it exactly where the
-  // row is least inspectable by hand is how an attribute quietly becomes useless.
-  check('a dead row still states its bracket', rowOf('gone.md')?.props?.['data-source'] === 'scan', String(rowOf('gone.md')?.props?.['data-source']))
-
-  // The path opens the tooltip, as it always has: every existing reader of that
-  // string expects the path first, and removing a sentence must not reorder it.
-  check('the path still comes first', titleOf('walked.md').startsWith('F:\\work\\src\\walked.md'), titleOf('walked.md').slice(0, 40))
-  // The reason a row cannot be opened is not displaced by anything else. It is the
-  // more urgent fact, and it is the last thing the tooltip gained.
-  check('a dead row keeps its reason', titleOf('gone.md').includes('文件已被删除或移动'), titleOf('gone.md'))
-  // Substring checks cannot see structure: two sentences glued into one line, or
-  // the same two in the other order, satisfy every check above. This is the only
-  // assertion in the block that pins both the separator and the order, so it
-  // spells the whole string out. It is deliberately brittle -- a change to any
-  // sentence is supposed to make someone read this line.
-  check(
-    'and its two lines are separate, in that order',
-    titleOf('gone.md') === 'F:\\work\\src\\gone.md\n文件已被删除或移动',
-    JSON.stringify(titleOf('gone.md')),
-  )
 }
 
 // ---------------------------------------------------------------------------

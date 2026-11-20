@@ -71,6 +71,7 @@
 | 2026-11-19 | 面板改成事件驱动：一条长连接说「变了」才取数 | 用户 m05226 说「我更希望是事件驱动的，只有事件驱动走不通时，才降级为轮询」。第一版我直接写了长轮询 /watch，被用户 m05581 拦下要求先查 qoder 逆向与成熟实现 —— 调研推翻了自己三个判断：qoder 用的是进程内 observable（跨 bundle 无等价物）、宿主转发事件白名单硬编码且被 api-remotes 独占注册（插件无法扩展）、官方 dsh-client-hmr 的 /plugins/events 才是可照抄的 SSE 参考。同时发现自己在复刻 D-70/D-73/D-74 那段被撤回的历史，用户 m07783 授权后继续，并核正了他推断里的时间顺序（计数移除 d5cc753 2026-11-17，晚于撤流 8457751 十天）。新增 revision.js + test/revision.test.mjs，/events 路由 + 8 处 bump，客户端 EventSource + 60 秒兜底。五轮审查：r1 失败无结论，r2 判词「实现的质量高于测试」，r3 NOT CONVERGED（onError 从没人赋值、致命 error 分支零测试可达），r4 抓出两处过期计数、一句假陈述、摘要落地无人宣告（唯一真缺口）、has() 缺失、onError 可能逃进宿主，r5 **判定收敛、无 must-fix** —— 它用真实 Node 探针证伪了「`req.once('close')` 会在开流时误触发」的担心，剩下的全是文案时效（README 那一节还写着「没有订阅，也没有服务端推送」，而这一节整段讲的就是取数机制）。全量 4198 断言全绿，变异 143 + 230 全杀。真机已验证 /events 返回 200 并在 214 秒后收到真帧；推流部分真机已验证，轮次结束即时更新待观察 |
 | 2026-11-19 | 切会话时监控列不跟随：三条救援路径，替身原来建模了一个不存在的宿主 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他猜「事件驱动未生效、等 60s 兜底」方向对但机制不同 —— 切换会话本身从来不是事件驱动的（靠 MutationObserver → syncSession → bridge.sessionId），R-103 没碰它。三处叠加：观察器挂在 `[data-slot]` 祖先上而 `childList` 不看子树（真机层级 `.an3WzG_root > .an3WzG_body > content`，宿主只替换 content 时 slot 上零记录），`bridge.sessionId` 因此不动，而 `load()` 每次重读 `liveSessionId()` 能自愈、`startStream()` 只绑一次且兜底写的是 `if (stream === null)`（旧流还开着，永不重绑）—— 数据自愈、流不自愈，正是「过一会儿列自己对了、但每轮又等一分钟」。改①②③：渲染时读宿主属性、观察器加挂 content 父节点、流记住绑定会话。**替身原来把 content 建在 slot 直接子节点下（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因**；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1/M3 互为兜底全部存活 —— 测试在触发慢钟后又顺手渲染一次，替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把换行转成 CRLF） | 4215 passed；变异 148 + 230 全杀 |
 | 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 退回上一轮：「实际不通过，你是否做了真机实测」。本轮全程在活宿主上取证：6 轮真实切换里 2 轮 `/panel` 零请求、列文字停在旧会话；埋点证明 `Toggle` 抢先写 `bridge` 并 notify，那次渲染读到的还是旧 attribute，等 attribute 追上时 `syncSession` 已不再通知。两处修复后真机 10/10 轮正确 | 4215 passed；变异 148 + 230 全杀；**两处无测试，只有真机证据** |
+| 2026-11-21 | 产出文件卡重定为交付文档：只认汇报，删掉四路采集 | 用户 m28433 把卡片场景定为「交付文档」（给人看的文档/图片/表格/演示），m28497 批准彻底删除。删掉 git 差分、mtime 扫描、工具路径、shell 路径解析四路采集（六个文件 1,636 行产品 + 1,772 行测试），数据来源只剩 `deliverables/presented` 事件与 `report_output_files`；九张噪声表换成 23 项交付白名单；`source`/`stale`/`noise` 三字段换成 `deliverable` + `description`；图标八桶重建为六桶。3853 断言全绿，四套突变 166 + 68 + 141 + 69 全杀、0 存活、0 CRASHED。新增 DEF-172~178、D-233~D-240、R-108 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5647,3 +5648,88 @@ transcript store。修法是在 `rememberSummary` 里查一次 `condemned`。其
 2. **审查者的一条结论是错的**：它报 `test/run.mjs` 有失败仍退出 0，实际是 `process.exit(failed === 0 ? 0 : 1)`。不独立复现就采纳，会把假缺陷写进文档。
 3. `keepsDocument` 忽略 `servers`、`dropIfOrphan` 读原始信封而 `hasFacts` 读 `entry.snapshot`——审查者列为小问题，今天都不可达，未改。
 
+---
+
+## 2026-11-21 · 一张卡回答一个问题，然后删掉回答别的问题的 7,500 行
+
+### 这一轮要解决什么
+
+用户 m27688 说「我认为我们需要重构当前的产出文件卡片了」，并给出场景：**交付文档**。
+他在 m28433 把这件事说得更清楚：
+
+> 显示代码的场景实际在卡片中是不需要的，不仅看不完改动的部分，也没有实际的价值，
+> 还增加了噪声干扰。我现在将这个卡片的场景就定为 qoder 的交付文档，主要是给人看的。
+
+这句话之前，这张卡回答的是「这一轮哪些文件变了」。那个问题的答案天然是几十到几百条，
+而且**正确答案在采集层就已经丢了**（docs/21 的账：165 条缺陷里 91 条谁也没点名，
+误判率 92%、命中率 8%）。用户 m28497 批准「可以彻底删除，防止影响后续开发」。
+
+### 三个问题的答案（Qoder 侧栏取证）
+
+1. **模型汇报后立刻进侧栏吗？** 不是「汇报」这个动作本身。Qoder 的 artifact 由 `q_0` 产生，
+   主通道是**本回合最后一条 completed assistant 消息里的 markdown 链接**，过 23 项扩展名白名单；
+   通道 2 只在通道 1 为空时启用（Write 新建、create 系、Bash 重定向、`fileChangeSet` 的 add）。
+   **`present_files` 全库零次调用** —— docs/22 与 docs/23 的核心假设被推翻。
+2. **下一轮结束后还在吗？** 在。`chat_session_highlights` 四处写入全是整份替换，
+   累积与否完全由投影函数 `projectHighlights(previous.session.title, messages, artifacts)` 决定；
+   真实数据 43 / 25 / 21 / 13 条，与用户观测一致。
+3. **删除后画删除线吗？** 画，但只对「产出」组的文件行（`kind === "artifact"` 且
+   `target.type === "file"` 且 `entryKind !== "directory"`），四态里只有 `missing` 画，
+   画了就不可点，拿不到服务时回退 `available`。
+
+按通道 1 原样复现 → TP=24 FP=0 FN=7（精确率 100%、召回 77.4%）；补上通道 2 →
+**31/31，精确率与召回都 100%**。
+
+### 为什么最终没有照抄 Qoder 的通道 1
+
+宿主自带 `@deepseek-ai/dsh-client-ui-deliverables` 插件，它的源码注释原文是：
+
+> produced paths come from successful first-party mutation calls and their recorded file targets,
+> changed files from the Host's recorded git summary, and deliveries from present;
+> **never from presentation data or the closing prose.**
+
+「收尾散文」正是 Qoder 通道 1。宿主明确拒绝它，而且我们自己实测：148 回合里模型只在
+14 处（7%）用 markdown 链接写路径，多数时候用反引号。**照抄会得到一个几乎永远为空的卡。**
+
+### 删掉了什么
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `packages/ui-evolve/lib/git-changes.js` | 627 | git 差分（多根、worktree、coverage） |
+| `packages/ui-evolve/lib/git-watch.js` | 200 | 回合首尾基线 |
+| `packages/ui-evolve/lib/scan-changes.js` | 188 | mtime 走查 |
+| `packages/ui-evolve/lib/scan-watch.js` | 159 | 走查基线 |
+| `packages/ui-evolve/lib/coverage.js` | 31 | 三态合并 |
+| `packages/core/lib/shellpaths.js` 的 `writtenPaths` + tokenizer | 361 | 从 shell 命令猜写了哪些文件 |
+
+产品合计 1,566 行，测试合计 1,477 行，另有 `Transcript.cwd`、`workspaceFor` 的 session 分支
+两处死代码。`git diff --stat`：**31 文件 / 1,868 insertions / 7,505 deletions**。
+
+### 留下了什么
+
+- **数据来源两条，都是模型主动做的动作**：`deliverables/presented` 事件（宿主给的结构化事件，
+  带 `description`）与 `report_output_files` 工具调用。
+- **交付白名单 23 项**（`DELIVERABLE_SUFFIXES`）：`pdf doc docx md markdown txt xls xlsx xlsm
+  csv tsv ppt pptx html htm png jpg jpeg gif webp svg mp4 webm`。零个源码后缀。
+- **`UNDELIVERABLE_DIRS` 12 项**：依赖/构建 scratch 与秘密/私有状态目录。
+  **故意不含本仓库自己的 `_tmp-test`/`_qoder_rev`/`.review`** —— 产品代码不该用作者的目录习惯
+  覆盖模型的明确动作。
+- **`description` 双向不对称**：后到的非空描述覆盖旧的；后到的空描述不抹掉旧的
+  （宿主每次调用发一个事件，通常只有第一个带描述，空的那次是同一份交付又来了一遍）。
+- **图标六桶**：`doc`/`sheet`/`slide`/`markup`/`image`/`video`，每个都是白名单的子集。
+
+### 验证
+
+`node test/run.mjs` → **3853 passed / 0 failed**（基线 4376，差的 523 条随采集器一起删掉）。
+四套突变**串行**跑：语言 166、持久化 68、面板 141、速度 69 —— **全部 killed，0 survived，
+0 not applied，0 CRASHED**。残留审计 `report_dead_anchors2.py` 报 `TOTAL DEAD: 0`，
+`find_mutation_residue.py` 报出的 4 行逐条核对全是误报（那些 `to:` 文本恰好与真代码相同）。
+
+### 这一轮没做到的
+
+1. **真机没截图。** 活宿主跑的还是旧 bundle，要看到新卡片必须重启宿主。
+2. **77% 的会话会是空卡。** 30 个会话里只有 7 个（23%）有过汇报。这是只认汇报的必然代价，
+   不是缺陷 —— 但也意味着这张卡在多数会话里根本不出现。
+3. **`docs/22` 与 `docs/23` 的「artifact 来自 `present_files`」结论已被推翻**，
+   两处正文未改写（`handover/` 只增不改的规矩），更正记在 `docs/24` §1.1 的对照表里。
+4. **`docs/21` §2 与 §3 的两个 P0 随代码一起消失**，不是修好了，是那两条路没了。

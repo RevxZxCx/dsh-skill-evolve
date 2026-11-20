@@ -52,12 +52,12 @@ export { appendLedger, procedureSignature, Store } from './store.js'
 // copies of the parse would eventually disagree about the same event.
 export { readSkillArgument, SKILL_GESTURE } from './skillcall.js'
 
-// Reads the files a shell command writes out of its redirections, and drops the
-// heredoc bodies that would otherwise look like commands. Shared rather than
-// copied for the same reason as the skill call parse: the workflow detector and
-// the file card both read commands, and two copies of the heredoc scan would
-// eventually disagree about the same command.
-export { canonicalPath, stripHeredocs, writtenPaths } from './shellpaths.js'
+// Path spelling and heredoc scanning. Shared rather than copied for the same
+// reason as the skill call parse: the workflow detector and the transcript both
+// read commands, and two copies of the heredoc scan would eventually disagree
+// about the same command. The shell write-target reader that used to live here is
+// gone with the card that needed it.
+export { canonicalPath, stripHeredocs } from './shellpaths.js'
 
 export {
   annotateQueue,

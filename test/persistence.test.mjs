@@ -216,17 +216,20 @@ function work(host, session, { skill, tool, said, edit, turn = 1 }) {
       data: { message: { role: 'assistant', content: [{ type: 'text', text: said }] } }
     })
   }
-  // A file edit. The panel's output card reads the session's list of written
-  // paths, and the only thing that feeds it is the transcript's snapshot of a
-  // turn that ended — so a turn that edits nothing is the case that shows
-  // whether the list survives, and a turn that edits something is the case
-  // that shows whether it is fed at all.
+  // A delivered file. The panel's output card reads the session's list of
+  // delivered paths, and the only thing that feeds it is the transcript's
+  // snapshot of a turn that ended — so a turn that delivers nothing is the case
+  // that shows whether the list survives, and a turn that delivers something is
+  // the case that shows whether it is fed at all.
+  //
+  // The host announces a declaration as `deliverables/presented`; the card does
+  // not read tool calls any more, so neither does this helper.
   if (edit !== undefined) {
     host.emit('session/event', session.session, {
-      type: 'tool/call',
+      type: 'deliverables/presented',
       seq: turn * 10 + 5,
       time: Date.now(),
-      data: { turn, step: 1, callId: `c-edit-${turn}`, name: 'edit', arguments: JSON.stringify({ path: edit }) }
+      data: { turn, callId: `c-present-${turn}`, files: [{ path: edit, description: '' }] }
     })
   }
   host.emit('session/event', session.session, {
@@ -342,8 +345,8 @@ console.log('persistence — the panel describes a conversation, not a process')
   // Two files written for real, because the route stats them: a path that does
   // not exist is dropped, and the assertions below would then be about the
   // stat call rather than about the list.
-  const first = join(home, 'first.js')
-  const second = join(home, 'second.js')
+  const first = join(home, 'first.md')
+  const second = join(home, 'second.md')
   await writeFile(first, 'one\n', 'utf8')
   await writeFile(second, 'two\n', 'utf8')
 
@@ -419,15 +422,16 @@ console.log('persistence — the panel describes a conversation, not a process')
   const session = fakeSession('session-interrupted', home)
   host.agents.set(session.id, session)
 
-  const old = join(home, 'old.js')
-  const interrupted = join(home, 'interrupted.js')
+  const old = join(home, 'old.md')
+  const interrupted = join(home, 'interrupted.md')
   await writeFile(old, 'one\n', 'utf8')
   await writeFile(interrupted, 'two\n', 'utf8')
 
   work(host, session, { said: 'wrote the old one', edit: old, turn: 1 })
 
-  // A second turn that edits a different file and is then abandoned. Written out
-  // by hand rather than through `work`, which always ends the turn as completed.
+  // A second turn that delivers a different file and is then abandoned. Written
+  // out by hand rather than through `work`, which always ends the turn as
+  // completed.
   host.emit('session/event', session.session, {
     type: 'user/message',
     seq: 20,
@@ -435,10 +439,10 @@ console.log('persistence — the panel describes a conversation, not a process')
     data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] }
   })
   host.emit('session/event', session.session, {
-    type: 'tool/call',
+    type: 'deliverables/presented',
     seq: 25,
     time: Date.now(),
-    data: { turn: 2, step: 1, callId: 'c-edit-2', name: 'edit', arguments: JSON.stringify({ path: interrupted }) }
+    data: { turn: 2, callId: 'c-present-2', files: [{ path: interrupted, description: '' }] }
   })
   host.emit('session/event', session.session, {
     type: 'turn/end',

@@ -306,13 +306,22 @@ function looksLikeShellLeftover(path) {
   const { payload } = await mount(document, { cwd: 'D:\\work\\project' })
   const rows = rowsOf(payload)
   check('the mixed-bracket fixture reaches the route', rows.length > 0, String(rows.length))
-  const sources = new Set(rows.map((row) => row.source))
-  check('a row found by the diff says so in its data', sources.has('git'), JSON.stringify([...sources]))
-  check('a row only the walk found says so in its data', sources.has('scan'), JSON.stringify([...sources]))
+  // The collector word is gone. A row now says one thing about itself: whether
+  // its suffix is on the delivery whitelist. The fixture mixes `.js` with `.md`,
+  // so both answers must appear -- a card that called everything deliverable, or
+  // nothing, would pass a test that only looked at one of them.
+  const verdicts = new Set(rows.map((row) => row.deliverable))
+  check('the fixture holds a file the card would show', verdicts.has(true), JSON.stringify([...verdicts]))
+  check('and a file it would not', verdicts.has(false), JSON.stringify([...verdicts]))
   check(
-    'no other word reaches the card as a source',
-    [...sources].every((source) => source === null || source === 'git' || source === 'scan'),
-    JSON.stringify([...sources]),
+    'every row answers the whitelist with a boolean',
+    rows.every((row) => typeof row.deliverable === 'boolean'),
+    JSON.stringify(rows.filter((row) => typeof row.deliverable !== 'boolean').slice(0, 3)),
+  )
+  check(
+    'no collector word survives on a row',
+    rows.every((row) => row.source === undefined),
+    JSON.stringify([...new Set(rows.map((row) => row.source))]),
   )
   // A relative record has no base in the document; `readPanel` resolves it against
   // the workspace, which is the only place that knows it. Whatever comes out must
@@ -334,10 +343,15 @@ function looksLikeShellLeftover(path) {
   check('the untimed fixture reaches the route', rows.length > 0, String(rows.length))
   const untimed = rows.filter((row) => row.at === null || row.at === undefined)
   check('the untimed rows survive the read', untimed.length > 0, String(untimed.length))
-  // Unknown is not old. A row with no timestamp must not be filed away: on the
-  // card `stale` moves a row under its own heading, and doing that to a row that
-  // merely predates the field would hide work that is still current.
-  check('a row with no recorded time is not called old', untimed.every((row) => row.stale === false), JSON.stringify(untimed.map((row) => [row.path, row.stale]).slice(0, 5)))
+  // Unknown stays unknown. There is no "old" bucket any more -- the card groups
+  // by turn, which every row has -- but a row written before the field existed
+  // must still come back with `at: null` rather than a time this build made up.
+  // The old card did invent one, and it moved live work under a "stale" heading.
+  check(
+    'a row with no recorded time reports no time',
+    untimed.every((row) => row.at === null || row.at === undefined),
+    JSON.stringify(untimed.map((row) => [row.path, row.at]).slice(0, 5)),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -353,11 +367,11 @@ function looksLikeShellLeftover(path) {
   const rows = rowsOf(payload)
   check('and its path reaches the card', rows.length === 1, String(rows.length))
   check(
-    'with no invented source and no invented time',
-    rows[0]?.source === null && (rows[0]?.at === null || rows[0]?.at === undefined),
-    JSON.stringify({ source: rows[0]?.source, at: rows[0]?.at }),
+    'with no invented description and no invented time',
+    rows[0]?.description === '' && (rows[0]?.at === null || rows[0]?.at === undefined),
+    JSON.stringify({ description: rows[0]?.description, at: rows[0]?.at }),
   )
-  check('and it is not filed as old', rows[0]?.stale === false, String(rows[0]?.stale))
+  check('and it is still judged by the whitelist', typeof rows[0]?.deliverable === 'boolean', String(rows[0]?.deliverable))
 }
 
 {

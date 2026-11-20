@@ -42,8 +42,8 @@ const mutations = [
   {
     label: 'the header stats fall back to the old title-only metadata',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "                head: jsxs('div', {\n                  className: 'dsse-head-stats',\n                  children: [\n                    current.length > 0",
-    to: "                head: jsxs('div', {\n                  className: 'dsse-head-stats-gone',\n                  children: [\n                    current.length > 0",
+    from: "                head: jsxs('div', {\n                  className: 'dsse-head-stats',\n                  children: [\n                    delivered.length > 0",
+    to: "                head: jsxs('div', {\n                  className: 'dsse-head-stats-gone',\n                  children: [\n                    delivered.length > 0",
     suites: ['test/client.test.mjs'],
   },
   {
@@ -333,7 +333,7 @@ const mutations = [
   {
     label: 'the file count is reported as the folded count',
     file: 'packages/ui-evolve/lib/client.js',
-    from: "jsx('b', { children: String(current.length) })",
+    from: "jsx('b', { children: String(delivered.length) })",
     to: "jsx('b', { children: String(ordered.length) })",
     suites: ['test/client.test.mjs'],
   },
@@ -486,60 +486,21 @@ const mutations = [
     // files are generated would show "0 个文件" with no way in.
     label: 'a dependency is listed as the reader\'s own work',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true`,
-    to: `  if (false) return true`,
+    from: `    if (UNDELIVERABLE_DIRS.has(folded) === true) return false`,
+    to: `    if (false) return false`,
     suites: ['test/api.test.mjs'],
   },
   {
     label: 'a lockfile is listed as the reader\'s own work',
     file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (GENERATED_FILES.has(lowerName)) return true`,
-    to: `  if (false) return true`,
+    from: `  return DELIVERABLE_SUFFIXES.has(name.slice(dot + 1).toLowerCase())`,
+    to: `  return true`,
     suites: ['test/api.test.mjs'],
   },
-  {
-    // Lowercasing is not length-preserving, so folding the prefix and then cutting
-    // the original by the folded length eats a character of the first segment:
-    // `node_modules/` reads as `ode_modules/`, matches nothing, and a dependency is
-    // listed as the reader's own work.
-    label: 'the folded prefix is measured against the original path',
-    file: 'packages/ui-evolve/lib/api.js',
-    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
-    to: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? normalized.slice(foldedRoot.length + 1) : folded',
-    suites: ['test/api.test.mjs'],
-  },
-  {
-    // The two halves come from different places and neither normalises: `cwd` is
-    // whatever the session header says, the path is whatever the tool argument
-    // said. Comparing them case-sensitively declines to strip, falls through to
-    // judging every ancestor, and hides the whole list.
-    label: 'the workspace prefix is compared case-sensitively',
-    file: 'packages/ui-evolve/lib/api.js',
-    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
-    to: '  const scoped = root.length > 0 && normalized.startsWith(`${root}/`) ? normalized.slice(root.length + 1) : normalized',
-    suites: ['test/api.test.mjs'],
-  },
-  {
-    // The workspace can sit anywhere. `D:/build/mine`, `/build/<repo>` in CI, or
-    // the output folder opened directly as a project are all ordinary, and
-    // judging the ancestors calls every file inside generated — the card then
-    // draws no rows and says "0 个文件" about a session that edited a dozen.
-    // The workspace can sit anywhere. `D:/build/mine`, `/build/<repo>` in CI, or
-    // the output folder opened directly as a project are all ordinary, and
-    // judging the ancestors calls every file inside generated.
-    label: 'the directories above the workspace decide too',
-    file: 'packages/ui-evolve/lib/api.js',
-    from: '  const scoped = foldedRoot.length > 0 && folded.startsWith(`${foldedRoot}/`) ? folded.slice(foldedRoot.length + 1) : folded',
-    to: '  const scoped = folded',
-    suites: ['test/api.test.mjs'],
-  },
-  {
-    label: 'a directory name only has to contain a generated one',
-    file: 'packages/ui-evolve/lib/api.js',
-    from: `  if (segments.slice(0, -1).some((segment) => GENERATED_DIRS.has(segment) || scratchDirectory(segment))) return true`,
-    to: `  if (normalized.split('/').some((segment) => segment.includes('build'))) return true`,
-    suites: ['test/api.test.mjs'],
-  },
+
+
+
+
   {
     label: 'every file counts as written this turn',
     file: 'packages/ui-evolve/lib/api.js',
@@ -563,14 +524,14 @@ const mutations = [
     label: 'the folded card keeps the list order instead of this turn first',
     file: 'packages/ui-evolve/lib/client.js',
     from: `        : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]`,
-    to: `        : [{ key: 'folded', label: '', files: people.slice(0, FOLDED_FILES) }]`,
+    to: `        : [{ key: 'folded', label: '', files: ordered.slice(0, FOLDED_FILES) }]`,
     suites: ['test/client.test.mjs'],
   },
   {
     label: 'the generated files are mixed in with the reader\'s work',
     file: 'packages/ui-evolve/lib/client.js',
-    from: `      const noisy = ordered.filter((file) => file.noise === true)`,
-    to: `      const noisy = []`,
+    from: `      const delivered = ordered.filter((file) => file.deliverable === true)`,
+    to: `      const delivered = ordered`,
     suites: ['test/client.test.mjs'],
   },
   {
@@ -601,20 +562,7 @@ const mutations = [
     to: `            { key: 'earlier', label: '', files: earlier },`,
     suites: ['test/client.test.mjs'],
   },
-  {
-    label: 'the generated group has no heading at all',
-    file: 'packages/ui-evolve/lib/client.js',
-    from: `            { key: 'noise', label: noisy.length > 0 ? '生成文件' : '', files: noisy },`,
-    to: `            { key: 'noise', label: '', files: noisy },`,
-    suites: ['test/client.test.mjs'],
-  },
-  {
-    label: 'every row claims to be generated',
-    file: 'packages/ui-evolve/lib/client.js',
-    from: `                            'data-noise': file.noise === true ? 'true' : 'false',`,
-    to: `                            'data-noise': 'true',`,
-    suites: ['test/client.test.mjs'],
-  },
+
   {
     label: 'the group heading is styled as loud as a row',
     file: 'packages/ui-evolve/lib/client.js',
@@ -622,13 +570,7 @@ const mutations = [
     to: `.dsse-group-label{margin:0;padding:2px 6px 0;color:red;`,
     suites: ['test/client.test.mjs'],
   },
-  {
-    label: 'a generated row looks like every other row',
-    file: 'packages/ui-evolve/lib/client.js',
-    from: `.dsse-row[data-noise="true"] .dsse-name{color:var(--dsw-alias-label-tertiary,#8b92a1)}`,
-    to: ``,
-    suites: ['test/client.test.mjs'],
-  },
+
   {
     label: 'the groups run together with no gap',
     file: 'packages/ui-evolve/lib/client.js',

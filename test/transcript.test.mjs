@@ -9,12 +9,12 @@
  */
 
 import {
-  EDIT_TOOLS,
   MAX_CALLS_PER_TURN,
   MAX_REPORTED_PATHS,
   MAX_SAID_BLOCKS,
   MAX_SAID_CHARS,
   PRESENT_TOOLS,
+  PRESENTED_EVENT,
   REPORT_TOOLS,
   SHELL_TOOLS,
   Transcript,
@@ -22,7 +22,8 @@ import {
   readCommandArgument,
   readPathArgument,
   readPathListArgument,
-  readPresentedPaths,
+  readPresentedEntries,
+  readPresentedEvent,
   readToolCallBlock,
   tallyNames
 } from '../packages/ui-evolve/lib/transcript.js'
@@ -98,7 +99,6 @@ check('a non-object argument is undefined', readPathArgument('not json') === und
 check('a command is read from a JSON string', readCommandArgument('{"command":"npm test"}') === 'npm test', String(readCommandArgument('{"command":"npm test"}')))
 check('a command is read from an object', readCommandArgument({ cmd: 'ls -la' }) === 'ls -la', String(readCommandArgument({ cmd: 'ls -la' })))
 check('a shell tool set includes bash', SHELL_TOOLS.has('bash'), [...SHELL_TOOLS].join(','))
-check('an edit tool set includes edit', EDIT_TOOLS.has('edit'), [...EDIT_TOOLS].join(','))
 
 check(
   'a tool-call block is recognised',
@@ -168,9 +168,12 @@ check(
   check('no turn is open between turns', view.current.turn === undefined)
   check('call count is recorded', view.previous.calls === 3, String(view.previous.calls))
   check('failure count is recorded', view.previous.failed === 1, String(view.previous.failed))
-  check('the edited path is recorded', view.previous.paths.includes('F:\\src\\a.js'), JSON.stringify(view.previous.paths))
-  check('a read-only path is not reported as touched', view.previous.paths.includes('F:\\src\\read-only.js') === false, JSON.stringify(view.previous.paths))
-  check('only the edit is a touched file', view.previous.paths.length === 1, JSON.stringify(view.previous.paths))
+  // Neither a read nor an edit is a delivered file any more. The card answers
+  // "what did this turn hand me", and a model editing `a.js` handed nobody
+  // anything -- it changed the repository, which is what git is for.
+  check('an edited path is not a delivered file', view.previous.paths.includes('F:\\src\\a.js') === false, JSON.stringify(view.previous.paths))
+  check('a read-only path is not reported either', view.previous.paths.includes('F:\\src\\read-only.js') === false, JSON.stringify(view.previous.paths))
+  check('and a turn that delivered nothing has an empty list', view.previous.paths.length === 0, JSON.stringify(view.previous.paths))
   check('the command is recorded', view.previous.commands.includes('npm test'), JSON.stringify(view.previous.commands))
   check('the assistant text is recorded', view.previous.said.includes('The test fails'), String(view.previous.said))
   check('the tool tally is recorded', view.previous.tools.some((row) => row.name === 'read'), JSON.stringify(view.previous.tools))
@@ -258,11 +261,11 @@ check(
 }
 
 {
-  // A shell call names a command, not a path — but the command usually says
-  // which file it writes. Without this the card was blind to everything the
-  // session produced with a redirect: on one real 175-file session, 130 of the
-  // rows were scripts created by `cat > x <<'EOF'`, and the file list held none
-  // of them because no `edit`-family call ever named them.
+  // A shell call names a command, not a path, and this build deliberately does
+  // not read paths out of one. The old rule did -- it parsed redirects, `tee`,
+  // `curl -o` -- and on one real 175-file session that produced 130 rows of
+  // scripts nobody would ever open. What replaced it is a declaration: the model
+  // says which files it is delivering, and the card believes it.
   const store = new TranscriptStore()
   store.record('a', human('write a probe'))
   store.record('a', call('bash', { command: "cat > scripts/probe.py <<'EOF'\nprint(1)\nEOF" }, 's1'))
@@ -271,8 +274,15 @@ check(
   store.record('a', endTurn())
 
   const view = store.view('a')
-  check('a file written by a redirect is reported', view.previous.paths.includes('scripts/probe.py'), JSON.stringify(view.previous.paths))
-  check('the heredoc body is not a file', view.previous.paths.some((path) => path.includes('print')) === false, JSON.stringify(view.previous.paths))
+  check('a redirect names no delivered file', view.previous.paths.length === 0, JSON.stringify(view.previous.paths))
+
+  // The same turn, but the model declared the file. Now it is on the card.
+  const declared = new TranscriptStore()
+  declared.record('b', human('write a probe'))
+  declared.record('b', call('report_output_files', { paths: ['scripts/probe.py'] }, 'r1'))
+  declared.record('b', result('r1', true))
+  declared.record('b', endTurn())
+  check('a declared file is', declared.view('b').previous.paths.includes('scripts/probe.py'), JSON.stringify(declared.view('b').previous.paths))
 }
 
 {
@@ -318,20 +328,195 @@ check(
 }
 
 // ---------------------------------------------------------------------------
+// Reading a delivery: the event, the call, and the entries neither may invent
+// ---------------------------------------------------------------------------
+//
+// Both the host's `deliverables/presented` event and a `present` call carry the
+// same `{ files: [{ path, description }] }` bag, and both are read by one
+// function so they cannot drift. The failure modes below are all about a bag
+// that is *nearly* right: the model wrote a path with a newline, the host sent a
+// string where an array belongs, an entry arrived without a description.
+
+{
+  const read = (raw) => readPresentedEntries(raw)
+  // A reader that throws on the shape it is supposed to reject is a bug, and
+  // the test has to say so. Calling it bare would let the throw escape and end
+  // the file before the tally prints -- the runner calls that CRASHED, and a
+  // crash looks like a broken fixture rather than a caught defect.
+  const survives = (raw) => {
+    try {
+      return read(raw)
+    } catch {
+      return 'threw'
+    }
+  }
+
+  // A well-formed bag is read whole, description and all.
+  const good = read(JSON.stringify({ files: [{ path: 'a.md', description: 'the plan' }] }))
+  check('a delivery is read from a JSON string', good.length === 1 && good[0].path === 'a.md', JSON.stringify(good))
+  check('and it keeps the sentence it carried', good[0]?.description === 'the plan', JSON.stringify(good))
+
+  const fromObject = read({ files: [{ path: 'b.md' }] })
+  check('a delivery is read from an object too', fromObject.length === 1, JSON.stringify(fromObject))
+  check('and a missing description becomes nothing, not the word undefined', fromObject[0]?.description === '', JSON.stringify(fromObject))
+
+  // A path with whitespace around it is the same file. Keeping the whitespace
+  // would make it a different key from the same path without it, and the card
+  // would list one file twice.
+  const padded = read({ files: [{ path: '  c.md\n', description: '  padded  ' }] })
+  check('a padded path is trimmed', padded[0]?.path === 'c.md', JSON.stringify(padded))
+  check('and so is the sentence beside it', padded[0]?.description === 'padded', JSON.stringify(padded))
+
+  // A blank path names no file, so it is not a row.
+  check('a blank path is not a row', read({ files: [{ path: '   ' }] }).length === 0)
+  check('a non-string path is not a row', read({ files: [{ path: 42 }] }).length === 0, JSON.stringify(read({ files: [{ path: 42 }] })))
+  check('a bare string entry is not a row', read({ files: ['a.md'] }).length === 0, JSON.stringify(read({ files: ['a.md'] })))
+  // A null entry is the shape that separates the object guard from a crash:
+  // `typeof null === 'object'`, so a guard that forgets the null check reaches
+  // `row.path` and throws inside the event handler.
+  const nullEntry = survives({ files: [null] })
+  check('a null entry is not a row', Array.isArray(nullEntry) && nullEntry.length === 0, JSON.stringify(nullEntry))
+
+  // The bag itself: `files` has to be an array, and the value has to be an
+  // object. A string where an array belongs is a shape no host sends, and
+  // reading it anyway would turn a malformed event into rows.
+  check('a missing files field yields nothing', read({ other: 1 }).length === 0)
+  check('a files field that is not an array yields nothing', read({ files: 'a.md' }).length === 0, JSON.stringify(read({ files: 'a.md' })))
+  // An object under `files` is not iterable, so `for..of` throws. The string
+  // above iterates into characters and answers [] with or without the array
+  // check, which makes it the weaker of the two inputs.
+  const objectBag = survives({ files: { a: 1 } })
+  check('and an object under files yields nothing rather than throwing', Array.isArray(objectBag) && objectBag.length === 0, JSON.stringify(objectBag))
+  const nulled = survives(null)
+  check('a null argument yields nothing', Array.isArray(nulled) && nulled.length === 0, JSON.stringify(nulled))
+  const arrayed = survives([{ path: 'a.md' }])
+  check('an array argument yields nothing', Array.isArray(arrayed) && arrayed.length === 0, JSON.stringify(arrayed))
+  check('unparseable text yields nothing', read('not json').length === 0)
+  check('the list is capped', read({ files: Array.from({ length: MAX_REPORTED_PATHS + 20 }, (_, at) => ({ path: `f${at}.md` })) }).length === MAX_REPORTED_PATHS, String(read({ files: Array.from({ length: MAX_REPORTED_PATHS + 20 }, (_, at) => ({ path: `f${at}.md` })) }).length))
+}
+
+{
+  // The event is the host's own announcement, and it is read through the same
+  // reader as the call. The event is the structured copy: the call's arguments
+  // are text the host may have truncated, the event is data.
+  const fromEvent = readPresentedEvent({ turn: 3, callId: 'c1', files: [{ path: 'from-event.md', description: 'the event' }] })
+  check('a delivery is read from the event', fromEvent.length === 1 && fromEvent[0].path === 'from-event.md', JSON.stringify(fromEvent))
+  check('and the event carries the sentence too', fromEvent[0]?.description === 'the event', JSON.stringify(fromEvent))
+  check('an event with no files yields nothing', readPresentedEvent({ turn: 3 }).length === 0)
+  check('an undefined event payload yields nothing', readPresentedEvent(undefined).length === 0)
+
+  // A turn that ends after the event has the file on the card. This is the
+  // whole path: the event arrives mid-turn, the turn ends, the snapshot is read.
+  const store = new TranscriptStore()
+  store.record('e', human('hand over the plan'))
+  store.record('e', { type: PRESENTED_EVENT, data: { turn: 1, callId: 'c1', files: [{ path: 'F:/work/plan.md', description: '定稿方案' }] } })
+  store.record('e', endTurn())
+  const view = store.view('e')
+  check('the event reaches the card', view.previous.paths.includes('F:\\work\\plan.md'), JSON.stringify(view.previous.paths))
+  check('and the sentence reaches it with the path', view.previous.delivered?.[0]?.description === '定稿方案', JSON.stringify(view.previous.delivered))
+}
+
+{
+  // A turn that announces the same file twice lists it once. The host emits one
+  // event per `present` call, and a model that hands over the same document in
+  // two steps should not produce two rows -- the second row would also carry an
+  // empty description, so the card would show the file twice, once described
+  // and once not.
+  const store = new TranscriptStore()
+  store.record('d', human('hand it over twice'))
+  store.record('d', { type: PRESENTED_EVENT, data: { files: [{ path: 'F:/work/plan.md', description: '第一次说' }] } })
+  store.record('d', { type: PRESENTED_EVENT, data: { files: [{ path: 'F:/work/plan.md' }] } })
+  store.record('d', endTurn())
+  const view = store.view('d')
+  check('the same file announced twice is one row', view.previous.paths.length === 1, JSON.stringify(view.previous.paths))
+
+  // The blank announcement must not erase what the first one said. The host
+  // announces per call and only the first carries the description; a later one
+  // with no description arriving second would wipe the sentence.
+  check('and the later blank announcement keeps the sentence', view.previous.delivered?.[0]?.description === '第一次说', JSON.stringify(view.previous.delivered))
+
+  // A later announcement that does carry a description replaces it: the newest
+  // thing the model said about the file is the true one.
+  const replaced = new TranscriptStore()
+  replaced.record('r', human('hand it over twice'))
+  replaced.record('r', { type: PRESENTED_EVENT, data: { files: [{ path: 'F:/work/plan.md', description: '旧' }] } })
+  replaced.record('r', { type: PRESENTED_EVENT, data: { files: [{ path: 'F:/work/plan.md', description: '新' }] } })
+  replaced.record('r', endTurn())
+  check('a newer sentence replaces the older one', replaced.view('r').previous.delivered?.[0]?.description === '新', JSON.stringify(replaced.view('r').previous.delivered))
+}
+
+{
+  // The call and the event are both read, and `deliver` drops the duplicate.
+  // Reading only one of them would mean a host build that emits the event and a
+  // build that does not each lose half the deliveries; the event is the
+  // structured copy and the call is the fallback, so both paths are live.
+  const store = new TranscriptStore()
+  store.record('b', human('declare then announce'))
+  // The host's event is its own copy of the same call, so the sentence is the
+  // same in both. A fixture that gave them different text would be testing
+  // which of two copies wins, and no host produces that.
+  store.record('b', call('present', { files: [{ path: 'F:/work/a.md', description: 'the plan' }] }, 'p1'))
+  store.record('b', { type: PRESENTED_EVENT, data: { files: [{ path: 'F:/work/a.md', description: 'the plan' }] } })
+  store.record('b', endTurn())
+  const view = store.view('b')
+  check('the call alone puts the file on the card', view.previous.paths.includes('F:\\work\\a.md'), JSON.stringify(view.previous.paths))
+  check('and the event does not add a second row', view.previous.paths.length === 1, JSON.stringify(view.previous.paths))
+  check('the sentence survives the duplicate', view.previous.delivered?.[0]?.description === 'the plan', JSON.stringify(view.previous.delivered))
+}
+
+// ---------------------------------------------------------------------------
 // Deduplication and caps
 // ---------------------------------------------------------------------------
 
 {
+  // Only the tools whose arguments *are* a delivery are read as one. Several
+  // tools take an array of files for their own reasons, and reading all of them
+  // would fill the card with files nothing handed over.
   const store = new TranscriptStore()
-  store.record('a', human('edit the same file'))
+  store.record('n', human('run something that happens to name files'))
+  store.record('n', call('bash', { command: 'ls', files: [{ path: 'F:/work/incidental.md' }] }, 'x1'))
+  store.record('n', call('todo_write', { files: [{ path: 'F:/work/also-not.md' }] }, 'x2'))
+  store.record('n', endTurn())
+  const view = store.view('n')
+  check('a tool that is not a delivery tool contributes no row', view.previous.paths.length === 0, JSON.stringify(view.previous.paths))
+
+  // The cap keeps the first forty in the order they were announced. A busy turn
+  // announces early and late, and the late ones are the model's own words.
+  const capped = new TranscriptStore()
+  capped.record('c', human('hand over more than the card can hold'))
+  for (let i = 0; i < MAX_REPORTED_PATHS + 5; i += 1) capped.record('c', call('report_output_files', { paths: [`F:/work/f${i}.md`] }, `p${i}`))
+  capped.record('c', endTurn())
+  const kept = capped.view('c').previous.paths
+  check('the cap keeps the first files announced, not the last', kept.length === MAX_REPORTED_PATHS && kept[0] === 'F:\\work\\f0.md' && kept.includes('F:\\work\\f44.md') === false, JSON.stringify([kept.length, kept[0], kept.includes('F:\\work\\f44.md')]))
+}
+
+{
+  // A turn that hands over one file, then another, has two rows. Assigning the
+  // second announcement over the first still leaves a card that looks right --
+  // it shows a file -- while the first one is gone.
+  const store = new TranscriptStore()
+  store.record('s', human('hand over two things'))
+  store.record('s', call('present', { files: [{ path: 'F:/work/first.md', description: '第一份' }] }, 'q1'))
+  store.record('s', call('present', { files: [{ path: 'F:/work/second.md', description: '第二份' }] }, 'q2'))
+  store.record('s', endTurn())
+  const view = store.view('s')
+  check('two announcements leave two rows', view.previous.paths.length === 2, JSON.stringify(view.previous.paths))
+  check('and the first one is still there', view.previous.paths.includes('F:\\work\\first.md'), JSON.stringify(view.previous.paths))
+  check('with the sentence it was handed over with', view.previous.delivered?.map((one) => one.description).join('|') === '第一份|第二份', JSON.stringify(view.previous.delivered))
+}
+
+
+{
+  const store = new TranscriptStore()
+  store.record('a', human('deliver the same file'))
   for (let i = 0; i < 5; i += 1) {
-    store.record('a', call('edit', { file_path: 'F:/same.js' }, `c${i}`))
+    store.record('a', call('report_output_files', { paths: ['F:/same.md'] }, `c${i}`))
     store.record('a', result(`c${i}`, true))
   }
   store.record('a', endTurn())
   const paths = store.view('a').previous.paths
-  check('a file edited five times is listed once', paths.length === 1, JSON.stringify(paths))
-  check('the five edits still count as five calls', store.view('a').previous.calls === 5, String(store.view('a').previous.calls))
+  check('a file delivered five times is listed once', paths.length === 1, JSON.stringify(paths))
+  check('the five declarations still count as five calls', store.view('a').previous.calls === 5, String(store.view('a').previous.calls))
 }
 
 {
@@ -630,11 +815,13 @@ check(
   check('a declared file is recorded', Array.isArray(reported?.paths) && reported.paths.length === 2, JSON.stringify(reported?.paths))
   check('and it keeps the whole list, not just the first', reported?.paths?.includes('F:\\test\\test8\\image.png') === true, 'dropped the second path')
 
-  // A shell call in the same turn stays a separate rule. The report does not
-  // replace the redirect parser; both feed the same list.
+  // A shell call in the same turn adds nothing. The redirect parser that used to
+  // read `echo hi > x.txt` is gone: a command says what it ran, not what it
+  // delivered, and the model is the only thing that knows the difference.
   store.record('a', { type: 'tool/call', data: { callId: 'call-2', name: 'bash', arguments: { command: 'echo hi > F:/test/redirected.txt' } } })
   const both = store.view('a')?.current
-  check('a redirect and a declaration both reach the card', both?.paths?.includes('F:\\test\\redirected.txt') === true && both?.paths?.includes('F:\\test\\test8\\doc.docx') === true, JSON.stringify(both?.paths))
+  check('a redirect adds no row of its own', both?.paths?.includes('F:\\test\\redirected.txt') === false, JSON.stringify(both?.paths))
+  check('and the declaration is still there', both?.paths?.includes('F:\\test\\test8\\doc.docx') === true, JSON.stringify(both?.paths))
 
   // The arguments arrive as raw model output, so the array shape has to be
   // read out of a JSON string too — this is the same trap `readPathArgument`
@@ -649,11 +836,15 @@ check(
   store.record('a', { type: 'tool/call', data: { callId: 'call-4', name: 'report_output_files', arguments: { paths: ['out/relative.pdf'] } } })
   check('a relative path is recorded as written', store.view('a')?.current?.paths?.includes('out/relative.pdf') === true, JSON.stringify(store.view('a')?.current?.paths))
 
-  // None of the existing rules had to change for the new one to work, and the
-  // reverse is also true: the new rule must not fire on an edit call.
+  // An edit call names nothing. This is the change that matters most: a model
+  // rewriting `client.js` twelve times used to put twelve rows on the card, and
+  // none of them was something a reader would open.
   const shaped = new TranscriptStore()
   shaped.record('b', { type: 'tool/call', data: { callId: 'x', name: 'write', arguments: { path: 'a.js', paths: ['ignored.js'] } } })
-  check('an edit call is not read as a declaration', shaped.view('b')?.current?.paths?.join(',') === 'a.js', JSON.stringify(shaped.view('b')?.current?.paths))
+  check('an edit call is not read as a declaration', (shaped.view('b')?.current?.paths?.length ?? 0) === 0, JSON.stringify(shaped.view('b')?.current?.paths))
+  const edited = new TranscriptStore()
+  edited.record('b', { type: 'tool/call', data: { callId: 'y', name: 'edit', arguments: { file_path: 'a.js' } } })
+  check('nor is an edit call', (edited.view('b')?.current?.paths?.length ?? 0) === 0, JSON.stringify(edited.view('b')?.current?.paths))
 
   // Declaring the same file twice is a model mistake, not a second file.
   const twice = new TranscriptStore()
@@ -687,282 +878,16 @@ check(
   check('the list reader rejects a non-array', readPathListArgument({ paths: 'nope' }).length === 0, 'read a string as a list')
   check('the list reader survives unparseable arguments', readPathListArgument('{not json').length === 0, 'threw on bad json')
   check('the list reader does not read a single path field', readPathListArgument({ path: 'a.js' }).length === 0, 'a single path is not a list')
+
+  // A blank entry is not a file, and the list reader needs its own assertion
+  // for that: the object reader's blank check is a different line in a
+  // different function, so proving one of them says nothing about the other.
+  const withBlanks = readPathListArgument({ paths: ['', '   ', 'F:/work/real.md'] })
+  check('the list reader drops a blank entry', withBlanks.length === 1, JSON.stringify(withBlanks))
+  check('and keeps the one that names a file', withBlanks[0] === 'F:/work/real.md', JSON.stringify(withBlanks))
+  check('a list of nothing but blanks is empty', readPathListArgument({ paths: ['', '  '] }).length === 0, JSON.stringify(readPathListArgument({ paths: ['', '  '] })))
 }
 
-// Presented outputs.
-//
-// The block above assumes the model calls the tool we gave it. A real run
-// showed it does not: asked to produce eight files, it called the host's own
-// `present` with three of them and never touched `report_output_files`. That is
-// a design mistake on our side, not disobedience — `present` already means
-// "these are my deliverables" — so the fix is to read the call that arrives.
-//
-// The shape differs and that is the whole point of a second reader: `present`
-// carries `files: [{ path, description }]`, not `paths: string[]`.
-{
-  check('the presentation tool is a name the transcript listens for', PRESENT_TOOLS.has('present') === true, [...PRESENT_TOOLS].join(','))
-
-  const store = new TranscriptStore()
-  store.record('f', {
-    type: 'tool/call',
-    data: {
-      callId: 'p1',
-      name: 'present',
-      arguments: {
-        files: [
-          { path: 'test8/doc.docx', description: 'generated by python-docx' },
-          { path: 'test8/archive.zip', description: 'six files' },
-        ],
-      },
-    },
-  })
-  const shown = store.view('f')?.current?.paths ?? []
-  check('a presented file is recorded like a declared one', shown.includes('test8/doc.docx'), JSON.stringify(shown))
-  check('every presented file is recorded, not just the first', shown.includes('test8/archive.zip'), JSON.stringify(shown))
-  check('the description is not mistaken for a path', shown.every((entry) => entry !== 'generated by python-docx'), JSON.stringify(shown))
-
-  // Both in one turn. They must merge rather than replace: `present` covers the
-  // deliverables, `report_output_files` covers everything the turn made, and a
-  // turn can legitimately do both.
-  const both = new TranscriptStore()
-  both.record('f', { type: 'tool/call', data: { callId: 'b1', name: 'present', arguments: { files: [{ path: 'F:/test/one.docx' }] } } })
-  both.record('f', { type: 'tool/call', data: { callId: 'b2', name: 'report_output_files', arguments: { paths: ['F:/test/two.png', 'F:/test/three.zip'] } } })
-  const merged = both.view('f')?.current?.paths ?? []
-  check('a presentation and a declaration both land', merged.includes('F:\\test\\one.docx') && merged.includes('F:\\test\\two.png'), JSON.stringify(merged))
-  check('and neither is dropped for the other', merged.length === 3, JSON.stringify(merged))
-
-  // A path presented twice is still one row: the snapshot de-duplicates, as it
-  // does for every other source.
-  const twice = new TranscriptStore()
-  twice.record('f', { type: 'tool/call', data: { callId: 't1', name: 'present', arguments: { files: [{ path: 'F:/test/same.txt' }] } } })
-  twice.record('f', { type: 'tool/call', data: { callId: 't2', name: 'present', arguments: { files: [{ path: 'F:/test/same.txt' }] } } })
-  check('a file presented twice is one row', (twice.view('f')?.current?.paths ?? []).length === 1, JSON.stringify(twice.view('f')?.current?.paths))
-
-  // A path the turn had already collected must survive the presentation. This
-  // is the failure that looks fine: replacing the list instead of adding to it
-  // still shows the presented files, and quietly forgets every file the turn
-  // edited before the model said anything.
-  const keeps = new TranscriptStore()
-  keeps.record('f', { type: 'tool/call', data: { callId: 'k1', name: 'write', arguments: { path: 'F:/src/keep.js' } } })
-  keeps.record('f', { type: 'tool/call', data: { callId: 'k2', name: 'present', arguments: { files: [{ path: 'F:/out/card.docx' }] } } })
-  const kept = keeps.view('f')?.current?.paths ?? []
-  check('a presentation adds to the turn, it does not replace it', kept.includes('F:\\src\\keep.js') && kept.includes('F:\\out\\card.docx'), JSON.stringify(kept))
-
-  // Order matters at the cap, and it matters against the obvious reading.
-  // `snapshot` keeps the first forty; a shell redirect is seen early, a
-  // declaration is the last call of the turn. Keeping call order would drop the
-  // declared files of exactly the busiest turns.
-  const busy = new TranscriptStore()
-  for (let index = 0; index < 45; index += 1) {
-    busy.record('f', { type: 'tool/call', data: { callId: `s${index}`, name: 'write', arguments: { path: `F:/filled/${index}.txt` } } })
-  }
-  busy.record('f', { type: 'tool/call', data: { callId: 'last', name: 'present', arguments: { files: [{ path: 'F:/out/named.docx' }] } } })
-  const crowded = busy.view('f')?.current?.paths ?? []
-  check('a busy turn still shows what the model named', crowded.includes('F:\\out\\named.docx'), JSON.stringify(crowded.slice(-3)))
-  check('and the cap is still forty rows', crowded.length === 40, String(crowded.length))
-
-  // The reader itself. JSON-in-a-string is the shape `tool/call` actually
-  // carries, so it is the shape that has to work.
-  check('the presentation reader accepts JSON in a string', readPresentedPaths(JSON.stringify({ files: [{ path: 'a/b.png' }] })).length === 1, 'did not parse the string form')
-  check('and a call carrying a JSON string is read end to end', (() => {
-    const wire = new TranscriptStore()
-    wire.record('f', { type: 'tool/call', data: { callId: 'w1', name: 'present', arguments: JSON.stringify({ files: [{ path: 'F:/out/wired.pdf' }] }) } })
-    return (wire.view('f')?.current?.paths ?? []).includes('F:\\out\\wired.pdf')
-  })(), 'the string form works in isolation but not through a call')
-  check('the presentation reader skips entries without a path', readPresentedPaths({ files: [{ description: 'no path here' }, { path: 'ok.txt' }] }).length === 1, 'kept a pathless entry')
-
-  // A files array is not a signature. `write` and friends are documented with
-  // one per call; only the tool that means "this is the deliverable" may be
-  // read that way. Without the name check, a turn that merely wrote a document
-  // would have it announced as something the model chose to hand over.
-  const shaped = new TranscriptStore()
-  shaped.record('f', { type: 'tool/call', data: { callId: 'x1', name: 'some_other_tool', arguments: { files: [{ path: 'F:/out/not-a-deliverable.docx' }] } } })
-  shaped.record('f', { type: 'tool/call', data: { callId: 'x2', name: 'present', arguments: { files: [{ path: 'F:/out/really.docx' }] } } })
-  const shapedPaths = shaped.view('f')?.current?.paths ?? []
-  check('a files array is not a signature', shapedPaths.includes('F:\\out\\not-a-deliverable.docx') === false, JSON.stringify(shapedPaths))
-  check('and the tool that does present is still read', shapedPaths.includes('F:\\out\\really.docx'), JSON.stringify(shapedPaths))
-  check('the presentation reader skips a bare string entry', readPresentedPaths({ files: ['nope.txt'] }).length === 0, 'read a string as a file object')
-  check('the presentation reader rejects a missing files array', readPresentedPaths({ paths: ['a.txt'] }).length === 0, 'read the wrong field name')
-  // Not just absent: present with the wrong *type* under the right key. The
-  // guard has to be `Array.isArray`, not `=== undefined`, or this throws inside
-  // transcript recording and takes the whole panel down with it.
-  //
-  // These three call the reader through `survives` rather than directly. A
-  // guard that is too weak throws, and a direct call would take the whole test
-  // file down with it — the suite would report CRASHED, which a mutation runner
-  // counts as neither killed nor clean. Catching here turns the same regression
-  // into an ordinary failed assertion, which is what it is.
-  const survives = (fn) => {
-    try {
-      return { threw: false, value: fn() }
-    } catch (error) {
-      return { threw: true, error: error instanceof Error ? error.message : String(error) }
-    }
-  }
-  const wrongType = survives(() => readPresentedPaths({ files: {} }))
-  check('the presentation reader rejects a files field that is not an array', wrongType.threw === false && wrongType.value.length === 0, wrongType.threw === true ? `threw: ${wrongType.error}` : 'iterated a non-array')
-  const arrayish = survives(() => readPresentedPaths({ files: 'nope' }))
-  check('and one that is an array-shaped string', arrayish.threw === false && arrayish.value.length === 0, arrayish.threw === true ? `threw: ${arrayish.error}` : 'iterated a string')
-  check('the presentation reader survives unparseable arguments', readPresentedPaths('{not json').length === 0, 'threw on bad json')
-  check('the presentation reader survives a non-object', readPresentedPaths('5').length === 0, 'threw on a number')
-  const nulled = survives(() => readPresentedPaths(null))
-  check('the presentation reader survives null', nulled.threw === false && nulled.value.length === 0, nulled.threw === true ? `threw: ${nulled.error}` : 'threw on null')
-  check('a whitespace path is not a file', readPresentedPaths({ files: [{ path: '   ' }] }).length === 0, 'kept a blank path')
-  check('a presented path is trimmed before it is recorded', readPresentedPaths({ files: [{ path: '  F:/out/report.docx  ' }] })[0] === 'F:/out/report.docx', 'kept the padding, which no longer opens')
-  // Only `present` is a presentation. A tool that happens to carry a `files`
-  // array is not, and a branch that skips the name check records it anyway.
-  check('a tool that is not present is not read as one', (() => {
-    const other = new TranscriptStore()
-    other.record('f', { type: 'tool/call', data: { callId: 'o1', name: 'report_output_files', arguments: { files: [{ path: 'F:/out/other.txt' }] } } })
-    return (other.view('f')?.current?.paths ?? []).includes('F:/out/other.txt') === false
-  })(), 'read files from a tool that is not the presentation tool')
-  check('a present call with no arguments does not throw', (() => {
-    const empty = new TranscriptStore()
-    empty.record('f', { type: 'tool/call', data: { callId: 'e1', name: 'present' } })
-    return (empty.view('f')?.current?.paths ?? []).length === 0
-  })(), 'threw or invented a path')
-  check('a present call with more entries than the cap keeps the cap', readPresentedPaths({ files: Array.from({ length: 60 }, (unused, index) => ({ path: `p/${index}.txt` })) }).length === MAX_REPORTED_PATHS, 'did not stop at the cap')
-}
-
-
-// ------------------------------------------------- where a command ran --
-//
-// A shell command is the one caller that knows where its relative paths point:
-// it can `cd` first. Recording `packages/lib/a.js` without that base made the
-// card join it to the session root, find nothing, and draw a line through a file
-// the turn had just written.
-{
-  const store = new TranscriptStore()
-  store.record('a', human('write the fixture'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > notes.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a shell target is resolved against the workspace', paths.includes('F:\\repo\\app\\notes.txt') === true, JSON.stringify(paths))
-  check('and no relative copy is kept beside it', paths.includes('notes.txt') === false, JSON.stringify(paths))
-}
-
-{
-  // The `cd` in the command wins over the base, because it is the last thing
-  // that happened before the write.
-  const store = new TranscriptStore()
-  store.record('a', human('write it under the sub-project'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd sub && cat > notes.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a cd inside the command moves the base', paths.includes('F:\\repo\\app\\sub\\notes.txt') === true, JSON.stringify(paths))
-}
-
-{
-  // The whole point of the exercise: the same file named two ways is one row.
-  // Before this, an `edit` call (forward slashes) and a redirect (whatever the
-  // base joined to) were two keys, and the second was stat-ed as missing.
-  const store = new TranscriptStore()
-  store.record('a', human('write client.js'))
-  store.record('a', { type: 'tool/call', data: { callId: 'e1', name: 'edit', arguments: { file_path: 'F:/repo/app/lib/client.js' } } }, 'F:/repo/app')
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: "cat > lib/client.js <<'EOF'\nx\nEOF" } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('one file named two ways is one row', paths.length === 1, JSON.stringify(paths))
-  check('and the row is the file that exists', paths[0] === 'F:\\repo\\app\\lib\\client.js', JSON.stringify(paths))
-}
-
-{
-  // Without a workspace the old behaviour is the only honest one: keep the
-  // path, and let the reader decide it cannot be placed.
-  const store = new TranscriptStore()
-  store.record('a', human('write notes'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > notes.txt' } } })
-  const paths = store.view('a')?.current?.paths ?? []
-  check('with no workspace the path is kept as written', paths.includes('notes.txt') === true, JSON.stringify(paths))
-}
-
-{
-  // A store that was told its directory keeps it when a later call does not
-  // repeat it. That is the documented behaviour, not an accident -- a session's
-  // header cwd does not change, so "not told this time" and "no longer known"
-  // are different things, and only the second should reach `writtenPaths`.
-  const store = new TranscriptStore()
-  const call = { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cat > g.txt' } } }
-  store.record('a', call, 'F:/repo/app')
-  store.record('a', call)
-  const kept = store.view('a')?.current?.paths ?? []
-  check('a store keeps the directory it was told', kept.includes('F:\\repo\\app\\g.txt') === true, JSON.stringify(kept))
-
-  // And an empty answer is "not told", not "unknown": the same value stays.
-  store.record('a', call, '')
-  const afterEmpty = store.view('a')?.current?.paths ?? []
-  check('and an empty answer does not move it', afterEmpty.includes('F:\\repo\\app\\g.txt') === true, JSON.stringify(afterEmpty))
-
-  // A fresh store told nothing at all must not inherit anything.
-  const cold = new TranscriptStore()
-  cold.record('a', human('write notes'))
-  cold.record('a', call)
-  const written = cold.view('a')?.current?.paths ?? []
-  check('a store never told anything keeps the path as written', written.includes('g.txt') === true, JSON.stringify(written))
-}
-
-// ------------------------------------- a directory the command lost --
-//
-// The transcript now passes its base into `writtenPaths`, which means the base
-// is also something a command can invalidate: `cd $DIR`, `cd -`, a `popd`, or a
-// subshell all move the shell somewhere the command does not name. Handing the
-// card an absolute path in that case is the same mistake as before -- a
-// confident claim about a file -- so these stay relative and `api.js` calls them
-// unplaceable.
-{
-  const store = new TranscriptStore()
-  store.record('a', human('write into a directory from a variable'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > notes.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a variable cd leaves the target unplaced', paths.includes('notes.txt') === true, JSON.stringify(paths))
-  // The property is "no absolute path was invented", not "the string repo does
-  // not appear": a guess against any other root would pass a substring test.
-  check('and no resolved guess is recorded beside it', paths.every((path) => /^[A-Za-z]:[\\/]/.test(path) === false), JSON.stringify(paths))
-}
-
-{
-  const store = new TranscriptStore()
-  store.record('a', human('go back a directory'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd - && cat > notes.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a cd - leaves the target unplaced', paths.includes('notes.txt') === true, JSON.stringify(paths))
-}
-
-{
-  const store = new TranscriptStore()
-  store.record('a', human('work inside a subshell'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: '(cd sub && cat > inner.txt)' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a subshell target keeps no paren', paths.some((path) => path.endsWith(')')) === false, JSON.stringify(paths))
-  // The cd inside the parens applies to that subshell alone, so the target is
-  // placed there. The earlier expectation -- that any subshell leaves the
-  // directory unknown -- described the command-wide flag this rewrite removed,
-  // and would have kept the card from naming a file written at a known place.
-  check('and it is placed inside the subshell', paths.includes('F:\\repo\\app\\sub\\inner.txt') === true, JSON.stringify(paths))
-  // One row, not two: the failure mode this guards is the relative spelling and a
-  // fabricated absolute one for the same file both landing in the list.
-  check('and nothing absolute is recorded beside it', paths.length === 1, JSON.stringify(paths))
-}
-
-{
-  // One unknown directory poisons what follows it. `cd $DIR` then `cd sub` is
-  // still unknown: `sub` is relative to a directory nobody named, so the second
-  // cd has nothing to resolve against. Only an absolute cd can come back.
-  const store = new TranscriptStore()
-  store.record('a', human('write into two directories, the first from a variable'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > a.txt; cd sub && cat > b.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('a relative cd after an unknown one stays unknown', paths.includes('b.txt') === true, JSON.stringify(paths))
-  check('and the earlier one is unplaced too', paths.includes('a.txt') === true, JSON.stringify(paths))
-}
-
-{
-  // Recovery has to exist, or a single `cd $VAR` early in a session would make
-  // every later row unplaceable. An absolute cd says exactly where the shell is.
-  const store = new TranscriptStore()
-  store.record('a', human('go somewhere absolute after a variable'))
-  store.record('a', { type: 'tool/call', data: { callId: 's1', name: 'bash', arguments: { command: 'cd $DIR && cat > a.txt; cd F:/repo/other && cat > b.txt' } } }, 'F:/repo/app')
-  const paths = store.view('a')?.current?.paths ?? []
-  check('an absolute cd restores a known directory', paths.includes('F:\\repo\\other\\b.txt') === true, JSON.stringify(paths))
-  check('and the unplaced one stays unplaced', paths.includes('a.txt') === true, JSON.stringify(paths))
-}
 
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {

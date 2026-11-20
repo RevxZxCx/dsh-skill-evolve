@@ -237,18 +237,18 @@ check(
   JSON.stringify(statuses.slice(0, 5)),
 )
 check(
-  'every noise flag is a boolean',
-  files.every((row) => typeof row.noise === 'boolean'),
-  JSON.stringify(files.filter((row) => typeof row.noise !== 'boolean').slice(0, 3)),
+  'every deliverable flag is a boolean',
+  files.every((row) => typeof row.deliverable === 'boolean'),
+  JSON.stringify(files.filter((row) => typeof row.deliverable !== 'boolean').slice(0, 3)),
 )
 check(
-  'every stale flag is a boolean',
-  files.every((row) => typeof row.stale === 'boolean'),
-  JSON.stringify(files.filter((row) => typeof row.stale !== 'boolean').slice(0, 3)),
+  'every row carries the description it was delivered with',
+  files.every((row) => typeof row.description === 'string'),
+  JSON.stringify(files.filter((row) => typeof row.description !== 'string').slice(0, 3)),
 )
 check(
-  'no row claims a source this build does not know',
-  files.every((row) => row.source === undefined || row.source === null || row.source === 'git' || row.source === 'scan'),
+  'no source word survives from the collector era',
+  files.every((row) => row.source === undefined),
   JSON.stringify([...new Set(files.map((row) => row.source))]),
 )
 // A directory is not a deletion. Before the fifth state existed, a successful `stat`
@@ -578,6 +578,13 @@ check('the output card draws from a real stored session', card !== undefined, te
 const rows = byClass(card, 'dsse-row')
 const badge = firstByClass(card, 'dsse-expand-action')
 
+// The list the card owes the reader is the delivered subset of what was
+// recorded -- on this session two of two hundred. Everything below compares
+// against that number, because comparing against `files.length` would be asking
+// the card to draw the source files it was narrowed away from.
+const delivered = files.filter((file) => file.deliverable === true)
+const refused = files.length - delivered.length
+
 // A collapsed card draws only the rows a person wrote. A stored session whose
 // every row is a generated file therefore draws nothing while still saying how
 // many there are — and the card is only honest if the badge offers them. Both
@@ -591,20 +598,25 @@ check(
 )
 check(
   'and what it offers plus what it draws is the list',
-  rows.length + offered >= files.length,
-  JSON.stringify({ drawn: rows.length, offered, stored: files.length }),
+  rows.length + offered >= delivered.length,
+  JSON.stringify({ drawn: rows.length, offered, delivered: delivered.length }),
+)
+check(
+  'and the files it declined are named rather than drawn',
+  refused === 0 || textOf(firstByClass(card, 'dsse-head-note')).includes(`${refused} 个文件不是交付文档`),
+  JSON.stringify({ refused, note: textOf(firstByClass(card, 'dsse-head-note')) }),
 )
 
 // Press it, so the rows are on screen for every assertion below. Reading a
 // collapsed card and concluding anything about its rows is how a test ends up
 // describing the fold instead of the list.
-if (rows.length < files.length && badge !== undefined && typeof badge.props?.onClick === 'function') {
+if (rows.length < delivered.length && badge !== undefined && typeof badge.props?.onClick === 'function') {
   badge.props.onClick()
 }
 const reopened = await react.__render(cardsSeat.Component, {})
 const openCard = byClass(reopened, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
 const openRows = byClass(openCard, 'dsse-row')
-check('opening the card draws every row it holds', openRows.length === files.length, `${openRows.length} of ${files.length}`)
+check('opening the card draws every row it holds', openRows.length === delivered.length, `${openRows.length} of ${delivered.length}`)
 const full = openRows.length >= rows.length ? openRows : rows
 
 // The arithmetic the card promises: the header number plus the quiet remainder
@@ -613,7 +625,7 @@ const full = openRows.length >= rows.length ? openRows : rows
 const headText = textOf(firstByClass(card, 'dsse-head-stats'))
 const shown = Number((headText.match(/(\d+) 个文件/u) ?? [])[1] ?? 0)
 const noteNode = firstByClass(card, 'dsse-head-note')
-const noiseInNote = Number((textOf(noteNode).match(/(\d+) 个生成文件/u) ?? [])[1] ?? 0)
+const noiseInNote = Number((textOf(noteNode).match(/(\d+) 个文件不是交付文档/u) ?? [])[1] ?? 0)
 const emptyCard = headText.trim() === '' && noteNode === undefined
 check(
   'the header adds up to the list it is describing',
@@ -622,8 +634,13 @@ check(
 )
 check(
   'a number is never negative or absurd',
-  shown >= 0 && shown <= files.length && noiseInNote >= 0 && noiseInNote <= files.length,
-  JSON.stringify({ shown, noiseInNote, rows: files.length }),
+  shown >= 0 && shown <= delivered.length && noiseInNote >= 0 && noiseInNote <= refused,
+  JSON.stringify({ shown, noiseInNote, delivered: delivered.length, refused }),
+)
+check(
+  'and the two numbers are the two halves of the record',
+  shown + noiseInNote === delivered.length + refused,
+  JSON.stringify({ shown, noiseInNote, recorded: delivered.length + refused }),
 )
 
 const titles = full.map((row) => String(row.props?.title ?? ''))
@@ -633,9 +650,9 @@ check(
   JSON.stringify(titles.filter((title) => title.includes('差分') || title.includes('扫描')).slice(0, 3)),
 )
 check(
-  'every row states a bracket attribute',
-  full.every((row) => ['git', 'scan', 'unknown'].includes(row.props?.['data-source'])),
-  JSON.stringify(full.filter((row) => ['git', 'scan', 'unknown'].includes(row.props?.['data-source']) === false).map((row) => row.props?.['data-source']).slice(0, 5)),
+  'no row carries a bracket attribute any more',
+  full.every((row) => row.props?.['data-source'] === undefined),
+  JSON.stringify(full.map((row) => row.props?.['data-source']).slice(0, 5)),
 )
 check(
   'every row states a status attribute',

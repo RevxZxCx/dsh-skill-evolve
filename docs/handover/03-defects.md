@@ -174,6 +174,13 @@
 | DEF-169 | 2026-11-20 | 抬裁决只挂在 `turn/start` 上，而宿主可以在回合已经跑起来之后才交接会话，那一轮没有 `turn/start`，整轮的技能与 MCP 全被门口拒光 | 所有测试都从 `turn/start` 起步——fixture 里「先建会话再跑回合」是固定的，从来没有一个会话是在回合中途出现的 |
 | DEF-170 | 2026-11-20 | 恢复会话的第一轮丢掉回合中段的技能与 MCP：抬裁决挂在 `turn/end`，而那些事实写在回合进行中，等它抬起来时事实已经没了 | 「恢复会话仍能写摘要」那条断言的事实是在回合**结束之后**才写的，正好落在抬裁决之后，所以它绿着 |
 | DEF-171 | 2026-11-20 | 一条用例同时经过两条救援通道：回合里先加载技能再调 MCP，删掉 MCP 那处的抬裁决测试仍然是绿的 | 断言只问「文件里有没有」，不问「是走哪条路写进去的」；两条路径互为兜底时，删掉任一条都看不出来 |
+| DEF-172 | 2026-11-21 | 图标分类器与交付白名单脱节：office 三件套全落空白页 | 断言只覆盖了当时的八桶，没有一条问「白名单里每个后缀都有桶吗」 |
+| DEF-173 | 2026-11-21 | 两套突变并行跑，一套把另一套的变异体当原文备份、事后写了回去 | 两个脚本各跑各的都绿；没有任何断言看「工作区里有没有变异体」 |
+| DEF-174 | 2026-11-21 | `Transcript.cwd` 只写不读，删掉采集器后成了死字段 | 两条突变存活，而存活的原因是「没有断言」，不是「断言写错」 |
+| DEF-175 | 2026-11-21 | 后到的非空描述无法覆盖旧描述：卡片永远显示模型第一次说的那句话 | 第一次写断言时 fixture 给 call 与 event 编了不同的描述，测的是「哪份赢」 |
+| DEF-176 | 2026-11-21 | 测试里裸 `await` 一个可能永不 resolve 的函数，把「代码挂住」报成「套件崩了」 | 突变 runner 把「没有 tally 行」判成 CRASHED，看起来像坏 fixture 而不像抓到缺陷 |
+| DEF-177 | 2026-11-21 | 摘要落地整条路径零测试覆盖；补的第一版断言看的是回合不是落地 | 基线取在 `runTurn(2)` 之前，而那一轮自己就推 4 帧，条件在模型调用前就成立 |
+| DEF-178 | 2026-11-21 | `readPathListArgument` 与 `readPresentedEntries` 形状相同，但只有对象读取器有空白检查 | 两条代码路径长得一样，删掉列表那条没有任何断言能看见 |
 
 ---
 
@@ -3055,3 +3062,151 @@ sweep 数 turn，同 turn 时方向没有依据。
 **通用判据**：**一个用例只允许一条救援通道。** 写「A 也能做到」的测试时，先把 B 从场景里拿掉，
 否则你测的是「A 或 B」。
 
+---
+
+## DEF-172 · 图标分类器与交付白名单脱节
+
+收窄到「交付文档」之后，`fileBucket` 还是那八桶：`code`/`markup`/`style`/`data`/
+`doc`/`image`/`archive`/`file`。
+
+- `xlsx`/`xlsm`/`ppt`/`pptx`/`mp4`/`webm` **六种白名单后缀没有桶**，全落空白页 ——
+  而 office 三件套正是这个场景的主角。
+- `code`/`style`/`archive` 三类**永远不可达**，因为白名单里没有任何源码、样式、压缩包后缀。
+
+**为什么测试没抓到**：图标断言覆盖的是「当时那八桶各画什么形状」，没有一条问
+「白名单里的每个后缀都有桶吗」。两张表各测各的，中间那条「必须同构」的契约没人测。
+
+**修法**：重建为六桶（每个都是白名单的子集），并加三条断言 ——
+`every delivered suffix has a bucket`、`and no bucket is claimed by a suffix the card would refuse`、
+以及六行 fixture 实测 `and each of them is drawn with its own outline`。
+
+**通用判据**：两个集合之间存在「覆盖」关系时，要测的是**覆盖关系**，不是各自的内容。
+各测各的永远是绿的，直到有人加了一个元素。
+
+---
+
+## DEF-173 · 并行突变把变异体写回了工作区
+
+`test/client.test.mjs` 有 3 条红：`clicking pins turn seven open` 等。查 `git diff -U10` 发现：
+
+```js
+onClick: () => setHoverTurn(turnPinned === false ? "" : turnId),
+```
+
+这正是 `scripts/mutate-checklist-panel.mjs:857` 的 `to:` 文本。**面板突变与速度突变并行跑，
+两者都写 `client.js`；速度脚本把面板脚本的变异体当成「原文」备份，事后写了回去。**
+
+**为什么测试没抓到**：这是 DEF-103 的第二次实证。那一条记的机制是「三套突变并行会互相污染」，
+但它当时表现为「结果不可信」（SURVIVED / 假 KILLED），这次表现为**工作区代码被改坏**。
+没有断言看「工作区里有没有变异体」—— 这不是测试能测的，只能靠流程。
+
+**修法**：改回原文；四套突变**串行**跑（一条 `for` 循环）；写 `find_mutation_residue.py`
+扫九个 `scripts/mutate-*.mjs` 的每条 `to:` 与 `git diff -U0 -- packages` 的每个新增行比对
+（**只有精确相等才算残留**，子串会误报 5 条）。
+
+**通用判据**：突变脚本之间绝不可并行。不只是「结果不可信」，而是「变异体会变成工作区代码」。
+
+---
+
+## DEF-174 · `Transcript.cwd` 只写不读
+
+两条突变 `the transcript forgets where the command ran` / `the workspace is only read from
+an agent, never from a session` 存活。查 `grep -n cwd packages/ui-evolve/lib/transcript.js`：
+初始化一处、赋值一处、两处 JSDoc，**零读取**。
+
+四路采集（shell 解析器）在时，这个字段是 `writtenPaths(command, this.cwd)` 的输入。
+解析器删掉后它就没有消费者了 —— `snapshot()` 不带它，`api.js` 用自己的 `deps.cwdFor(id)`。
+
+**为什么测试没抓到**：不是断言写错，是**没有断言**。而为它补断言是错的：
+那会钉住一个没人消费的值，让下一个读代码的人以为流水线依赖它。
+
+**修法**：删掉 `this.cwd` 与它的 14 行 JSDoc、`noteCall(call, cwd)` → `noteCall(call)`、
+`record(agentId, event, cwd)` → `record(agentId, event)`，两个调用点同步。
+连带 `workspaceFor(subject)` 的 session 分支变成零调用方，收窄为 `workspaceFor(agent)`。
+
+**通用判据**：一条突变存活有两种原因 —— 断言缺失，或者**这个值本来就不该存在**。
+先分辨是哪一种，再决定写断言还是删代码。
+
+---
+
+## DEF-175 · 后到的非空描述无法覆盖旧描述
+
+新加的断言 `a newer sentence replaces the older one` 首次运行即红：
+`[{"path":"F:\work\plan.md","description":"旧"}]`。
+
+`deliver(path, description)` 写的是：
+
+```js
+if (existing.description.length === 0 && said.length > 0) existing.description = said
+```
+
+**只在旧描述为空时补写** —— 模型第二次对同一文件说出新描述时，卡片仍显示旧描述。
+
+**为什么测试没抓到（而且是两次）**：
+1. 第一版没有「同一文件两次不同描述」的 fixture，只有「一次有描述、一次没有」。
+2. 补断言时我给的 fixture 让 `present` 调用与 `deliverables/presented` 事件带**不同的**描述，
+   于是断言测的是「哪份赢」—— 而宿主两者是同一份副本，**没有任何宿主会产生这种输入**。
+
+**修法**：改成 `if (said.length > 0) existing.description = said`；fixture 两处都写同一个值，
+断言改名 `the sentence survives the duplicate`。
+
+**通用判据**：给同一个动作的两个副本编不同的值，测的是你自己编的差异，不是产品行为。
+
+---
+
+## DEF-176 · 裸 `await` 把「代码挂住」报成「套件崩了」
+
+突变 `a host with no revision holds every request`（`return Promise.resolve()` →
+`return new Promise(() => {})`）让 `route()` 永不 resolve。测试里写的是裸
+`const res = await route(...)` → 顶层 await 悬空 → Node 打印
+`Warning: Detected unsettled top-level await` → **套件不打印 tally 行** →
+突变 runner 取不到 `(\d+) passed, (\d+) failed` → 判 **CRASHED**。
+
+CRASHED 与 KILLED 在输出里都像「没过」，但含义完全相反：前者是测试坏了，后者是抓到了缺陷。
+
+**为什么测试没抓到**：测试里没有任何「这个等待不该挂」的断言 —— 因为断言本身挂在同一个
+永不 resolve 的 promise 上，它根本没机会执行。
+
+**修法**：两处 `route()` → `routeHeld()`（`Promise.race` 带 5000ms 上限，
+超时返回 `{ statusCode: 0, body: '', timedOut: true }`），`bodyOf()` → `heldBodyOf()`
+（空 body 返回 `{}` 而不是 `JSON.parse('')` 抛错）。修后同一变异体产生 **6 条红断言**，
+其中一条就是 `a host with no revision answers the wait at once — 5010`。
+
+**通用判据**：凡是被断言「不该挂」的等待，都要走带超时的包装。
+否则「代码挂住」会伪装成「测试环境坏了」。
+
+---
+
+## DEF-177 · 摘要落地整条路径零覆盖，且第一版断言看错了对象
+
+三条突变存活（`the summary landing announces nothing` 等）。查 `test/index.test.mjs`：
+八处 `applyPanel` 全用 `panelSummary: false`，**没有一条走
+`turn/end` → `summariser.warm()` → `.then(answer => revisions.bump)`**。
+`:3117` 还留着「The summary landing, announced by the stream」的注释，但下面的测试块已被删空。
+
+补测试时第一版又错了：基线取在 `runTurn(2)` **之前**，等 `count > baseline + 1`。
+但 `runTurn(2)` 自己就推 4 帧（user / turn-start / assistant / turn-end），
+**条件在模型调用发生之前就成立了** —— 断言看的是回合，不是落地。
+
+**修法**：基线移到 `runTurn(2)` **之后**取（`turn/end` 的 bump 全是同步的），
+等 `count > beforeLanding`。注入验证：删掉 `revisions.bump(agentId)` →
+`FAIL a summary that lands wakes the reader 5 -> 5`。
+
+**通用判据**：一条断言变绿有两种原因 —— 被测代码正确，或者那条路根本没被走到。
+基线取早一步，两种原因在输出里长得一模一样。
+
+---
+
+## DEF-178 · 两条形状相同的读取器，只有一条有空白检查
+
+突变 `an unusable entry is kept as a path` 存活。`readPathListArgument`（读 `{paths: [...]}`）
+与 `readPresentedEntries`（读 `{files: [{path, description}]}`）结构几乎一样，但只有后者有
+`if (path.length === 0) continue`；前者的 `trimmed` 没有空白检查。
+
+**为什么测试没抓到**：两条代码路径长得一样，测试覆盖了对象读取器的空白用例，
+却没人问「列表读取器有没有同样的守卫」—— 因为看起来「它们做的是同一件事」。
+
+**修法**：补三条断言（混入 `''` 与 `'   '` 时只留真实路径、全空白时为空）。
+注入验证：删掉 `if (trimmed.length > 0)` → 147 passed / 3 failed，三条全红。
+
+**通用判据**：两份「做同一件事」的代码是两处，不是一处。守卫要各测一遍。

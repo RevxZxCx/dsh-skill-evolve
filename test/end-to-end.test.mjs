@@ -220,21 +220,20 @@ function fakeHost() {
 }
 
 /**
- * Wait until the turn's collectors have written their answer down.
- *
- * The sweep is deliberately not awaited by the plugin (a `git status` must not
- * hold up the turn that just ended), so it lands after `turn/end` returns. The
- * file appears first and the sweep is filled in second, so both have to be seen.
+ * The state file is written on a short delay after `turn/end`, so the payload
+ * cannot be asked for immediately. It used to wait for a `sweep.coverage` word,
+ * which no longer exists; the recorded rows are the thing the card is built from,
+ * so those are what this waits for.
  *
  * @param {string} path - the session state file.
- * @returns {Promise<void>} resolves once a sweep with a coverage is recorded.
+ * @returns {Promise<void>} resolves once the delivered rows are on disk.
  */
-async function waitForSweep(path) {
+async function waitForPaths(path) {
   for (let attempt = 0; attempt < 200; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 25))
     if (existsSync(path) === false) continue
     const stored = JSON.parse(readFileSync(path, 'utf8'))
-    if (typeof stored?.sweep?.coverage === 'string' && stored.sweep.coverage !== '') return
+    if (stored?.paths !== undefined && Object.keys(stored.paths).length > 0) return
   }
 }
 
@@ -243,17 +242,18 @@ function fakeSession(id, cwd) {
 }
 
 /**
- * One finished turn that wrote files, through the real event stream.
+ * One finished turn that delivered files, through the real event stream.
  *
- * The paths are absolute and inside `cwd`, because that is what the host's tools
- * record once `writtenPaths` is given a base — and a relative path here would
- * exercise the `unresolved` branch instead of the main one.
+ * The delivery is emitted the way the Host emits it: a `deliverables/presented`
+ * event carrying `{ path, description }` per file. That event is now the only
+ * source the card reads — an `edit` call used to be one too, and is not, because
+ * a card scoped to delivered documents cannot count a source edit as a delivery.
  *
  * @param {object} host - the mounted host.
  * @param {object} session - the session record.
  * @param {object} options - what the turn did.
  */
-function turn(host, session, { edits = [], turnNumber = 1, said = 'did the work' } = {}) {
+function turn(host, session, { delivered = [], turnNumber = 1, said = 'did the work' } = {}) {
   const base = turnNumber * 100
   host.emit('session/event', session.session, {
     type: 'turn/start',
@@ -268,12 +268,16 @@ function turn(host, session, { edits = [], turnNumber = 1, said = 'did the work'
     data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'go' }] },
   })
   let step = 1
-  for (const path of edits) {
+  if (delivered.length > 0) {
     host.emit('session/event', session.session, {
-      type: 'tool/call',
+      type: 'deliverables/presented',
       seq: base + step,
       time: Date.now(),
-      data: { turn: turnNumber, step, callId: `c-edit-${turnNumber}-${step}`, name: 'edit', arguments: JSON.stringify({ path }) },
+      data: {
+        turn: turnNumber,
+        callId: `c-present-${turnNumber}`,
+        files: delivered.map((one) => ({ path: one.path, description: one.description ?? '' })),
+      },
     })
     step += 1
   }
@@ -691,19 +695,27 @@ async function openPanel(routes, sessionId) {
   const workspace = join(root, 'workspace')
   await mkdir(join(workspace, 'src'), { recursive: true })
   await mkdir(join(workspace, 'test'), { recursive: true })
+  // Delivered documents, not source files: a `.js` file is a legal thing for a
+  // turn to write and an illegal thing for this card to list.
   const written = [
-    join(workspace, 'src', 'alpha.js'),
-    join(workspace, 'src', 'beta.js'),
-    join(workspace, 'test', 'alpha.test.js'),
+    join(workspace, 'src', 'alpha.md'),
+    join(workspace, 'src', 'beta.md'),
+    join(workspace, 'test', 'shot.png'),
   ]
-  for (const path of written) await writeFile(path, 'export const x = 1\n', 'utf8')
+  for (const path of written) await writeFile(path, 'content\n', 'utf8')
 
   const session = fakeSession('session-e2e', workspace)
   host.agents.set(session.id, session)
-  turn(host, session, { edits: written })
+  turn(host, session, {
+    delivered: [
+      { path: written[0], description: '第一版方案' },
+      { path: written[1], description: '' },
+      { path: written[2], description: '界面截图' },
+    ],
+  })
 
   const statePath = join(root, 'plugin-data', 'skill-evolve', 'sessions', `${session.id}.json`)
-  await waitForSweep(statePath)
+  await waitForPaths(statePath)
   const payload = await host.panel(session.id)
   check('the real route answers in the envelope the client parses', payload.ok === true, JSON.stringify(payload).slice(0, 200))
   check('and names the session', payload.data?.agent === session.id, String(payload.data?.agent))
@@ -746,19 +758,14 @@ async function openPanel(routes, sessionId) {
   check('with one row per file the host reported', rows.length === 3, String(rows.length))
 
   const names = byClass(card, 'dsse-name').map(textOf)
-  check('named as the files are named', names.includes('alpha.js') && names.includes('beta.js') && names.includes('alpha.test.js'), JSON.stringify(names))
+  check('named as the files are named', names.includes('alpha.md') && names.includes('beta.md') && names.includes('shot.png'), JSON.stringify(names))
 
-  // The header arithmetic is the one place a real payload can disagree with a
-  // fixture: the counts come from three different filters over the same list.
-  // Both collectors ran, so the card owes the reader no caveat. A `none` or
-  // `partial` here means the chain lost the turn's start or its sweep, which is
-  // exactly what a hand-written fixture could never show.
-  const sweepNote = firstByClass(card, 'dsse-note')
-  check(
-    'the card does not apologise for a sweep that ran',
-    sweepNote === undefined || textOf(sweepNote).includes('没有检查') === false,
-    textOf(sweepNote),
-  )
+  // The description travels the whole chain — event, state file, payload, card —
+  // and this is the only test that proves it does. It is the one field the card
+  // has that a collector could never supply.
+  const titles = byClass(card, 'dsse-row').map((row) => String(row.props?.title ?? ''))
+  check('the sentence a file was delivered with reaches the tooltip', titles.some((title) => title.includes('第一版方案')), JSON.stringify(titles))
+  check('and a file delivered without one says nothing extra', titles.some((title) => title.split('\n').length === 1), JSON.stringify(titles))
 
   const head = textOf(firstByClass(card, 'dsse-head-stats'))
   check('the header counts the files a person wrote', head.includes('3 个文件'), head)
@@ -774,13 +781,12 @@ async function openPanel(routes, sessionId) {
   )
   check('and none of them claims to be deleted', rows.every((row) => row.props?.['data-status'] === 'available'), JSON.stringify(rows.map((row) => row.props?.['data-status'])))
 
-  // No provenance sentence, which is the change this whole round was about: the
-  // attribute stays, the sentence does not. A real payload is where a leaked
-  // sentence would show, because `source` is populated by the collectors and a
-  // fixture often is not.
-  const titles = rows.map((row) => String(row.props?.title ?? ''))
-  check('no row says where it came from', titles.every((title) => title.includes('差分') === false && title.includes('扫描') === false), JSON.stringify(titles))
-  check('and the bracket is still an attribute', rows.every((row) => ['git', 'scan', 'unknown'].includes(row.props?.['data-source'])), JSON.stringify(rows.map((row) => row.props?.['data-source'])))
+  // No collector words anywhere on the card, which is the change this whole round
+  // was about. A real payload is where a leaked word would show, because those
+  // fields were populated by the collectors and a fixture often is not.
+  const sentences = rows.map((row) => String(row.props?.title ?? ''))
+  check('no row says which collector found it', sentences.every((title) => title.includes('差分') === false && title.includes('扫描') === false), JSON.stringify(sentences))
+  check('and no row carries a bracket attribute', rows.every((row) => row.props?.['data-source'] === undefined), JSON.stringify(rows.map((row) => row.props?.['data-source'])))
 }
 
 report()
