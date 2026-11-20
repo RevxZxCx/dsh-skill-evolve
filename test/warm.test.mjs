@@ -343,6 +343,79 @@ console.log('warm.js — the summary is written when the turn ends, not when the
 }
 
 // ---------------------------------------------------------------------------
+// The summary survives the process that paid for it
+// ---------------------------------------------------------------------------
+//
+// The whole point of storing the text is that a restart must not buy it again.
+// Every other test in this repo runs inside one process, so every one of them
+// passes with the dependency wired to nothing: `stored` defaults to "never
+// anything there" and `persist` defaults to "throw it away". Only a second
+// `apply` over the same home directory can tell the difference.
+
+{
+  const root = await makeRoot('skill-evolve-warm-restart-')
+  const first = countingLlm()
+  const before = fakeHost({ llm: first })
+  applyPanel(before.ctx, PanelConfig({ panelSummary: true }))
+  const agent = fakeAgent('session-restart', 'F:/proj')
+  before.agents.set(agent.id, agent)
+  await openPanel(before, agent.id)
+
+  playTurn(before, agent, 1)
+  await settle()
+  check('the first process paid for the turn', first.log.prepared >= 1, `${first.log.prepared} call(s)`)
+
+  // `rememberSummary` goes through the store's one-second coalescing timer, so
+  // the file does not exist the moment the model answers. Waiting is the honest
+  // version of this test; reaching into the store to flush it would assert on a
+  // private path the production code never takes.
+  await new Promise((resolve) => setTimeout(resolve, 1400))
+
+  // A second process: new host, new summariser, new in-memory cache, same disk.
+  const second = countingLlm()
+  const after = fakeHost({ llm: second })
+  applyPanel(after.ctx, PanelConfig({ panelSummary: true }))
+  const again = fakeAgent('session-restart', 'F:/proj')
+  again.push({ type: 'turn/start', seq: 10, data: { turn: 1 } })
+  again.push({ type: 'user/message', seq: 11, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'run the tests' }] } })
+  again.push({ type: 'assistant/message', seq: 12, data: { message: { content: [{ type: 'text', text: 'I ran the tests.' }] } } })
+  again.push({ type: 'turn/end', seq: 13, data: { reason: { kind: 'completed' } } })
+  after.agents.set(again.id, again)
+
+  await openPanel(after, again.id)
+  await settle()
+  check(
+    'a restarted process answers the same turn without paying again',
+    second.log.prepared === 0,
+    `${second.log.prepared} call(s) after the restart`
+  )
+
+  // And the text is the one that was stored, not an empty convenience answer.
+  const route = after.routes.find((candidate) => candidate.handler !== undefined)
+  let body = ''
+  const res = {
+    statusCode: undefined,
+    writableEnded: false,
+    destroyed: false,
+    once() { return res },
+    writeHead(code) { res.statusCode = code; return res },
+    end(chunk) { body = String(chunk ?? ''); res.writableEnded = true; return res }
+  }
+  await route.handler(
+    { url: `/api/ui-evolve/panel?agent=${encodeURIComponent(again.id)}`, method: 'GET', headers: { host: '127.0.0.1:19387' } },
+    res
+  )
+  const payload = JSON.parse(body)
+  check(
+    'the text that survived is the text the old process bought',
+    payload?.data?.summary?.text === 'It ran the tests.',
+    JSON.stringify(payload?.data?.summary)
+  )
+
+  void root
+}
+
+// ---------------------------------------------------------------------------
 // The admission gate, through the production wiring rather than a stub
 // ---------------------------------------------------------------------------
 //

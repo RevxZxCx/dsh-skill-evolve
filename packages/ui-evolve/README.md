@@ -375,6 +375,53 @@ Three modules, top to bottom:
    matter. Keeping the language out of the prompt also means the language never
    enters the cache key, so a warm-up started at turn end and a later panel
    request compute the same key without needing to agree on anything.
+
+   **The result is written down.** A summary is the one thing here that costs
+   money, and it used to live only in the summariser's memory: every host
+   restart bought the same turn again, 2.8 seconds a time. It is now stored in
+   the session's own document beside the skills and the file list
+   (`summary: { key, text, at, model, routeKey }`), read back on the next
+   process, and reused when the key matches. The key carries the turn number and
+   a hash of the prompt body, so "the same key" means "the same question" — a new
+   turn, or the same turn with a different transcript, is a miss. `routeKey` is
+   what makes a model switch invalidate it, and **two absent route keys count as
+   a match**: a plugin that never pinned `summaryProvider`/`summaryModel` resolves
+   its route per session and may honestly have nothing to compare, and refusing
+   those would take the stored text away from exactly the people who paid for it.
+
+   Only the most recent summary is kept, because only the most recent turn is
+   ever asked about — `readPanel` renders `previous`. Going back to an older turn
+   of a session still costs a model call; what this fixes is one specific bill,
+   the same turn being bought again after a restart. A failure to write is logged
+   and nothing else: the text is already in memory and already paid for, so an
+   unwritable disk must not turn a served answer into a failed one.
+
+   Facts can arrive **after** the conversation they describe has been deleted.
+   The summary is the clearest case — the pre-warm is not awaited and the model
+   call may take twenty seconds, long enough for the host to archive the session
+   and for a sweep to remove its file — but it is not the only one: a git reading
+   and a directory scan are not awaited either. So the refusal lives in `entry()`,
+   the one funnel every writer goes through, rather than in the one writer that
+   was noticed first. A sweep that removes a file records the verdict, and any
+   later write for that id is dropped until the host says the conversation is
+   running again.
+
+   That last clause is the whole difficulty, and getting it wrong was a bug. The
+   verdict has to be lifted at `turn/start`, not only at `turn/end`: skills and
+   MCP calls are written *during* a turn, so a resumed conversation used to lose
+   every one of them to a verdict that would not be lifted until the turn was
+   already over. And "lifted" cannot mean "any write from a live session" — the
+   late git and scan callbacks are live too, they just belong to a turn that has
+   ended. The turn boundary is the only thing that distinguishes a conversation
+   the host reopened from an echo of one it closed.
+
+   The merge that runs when an event arrives before the first read used to carry
+   the file's skills, files and snapshot into memory but not its `summary` or its
+   `sweep` — so the *first write after a restart* erased what the previous
+   process had paid for and what it had been able to see. Both are carried now,
+   but they do not share a rule: a summary is replaced whole and has no ordering,
+   so memory wins when it has one; a sweep counts turns, so the newer claim wins
+   whichever side it came from.
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question

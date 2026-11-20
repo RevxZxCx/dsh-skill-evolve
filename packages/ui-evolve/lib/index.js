@@ -478,6 +478,12 @@ export function apply(ctx, config, options) {
       // relative until the card joins it to the session root, and a command that
       // did `cd` first then names a file that never existed.
       transcripts.record(agentId, event, workspaceFor(session))
+      // A new turn is the host saying this conversation is running, which is
+      // newer testimony than a sweep that judged it gone. It has to be said here
+      // and not at `turn/end`: the skills and MCP servers this turn records are
+      // written while it runs, and a resumed session would lose all of them to
+      // the gate before the turn was over.
+      sessionState.noteLive(agentId)
       // The panel's `turn` field is read from the transcript that just moved, so
       // a fresh turn is a visible change even before anything happens inside it.
       revisions.bump(agentId)
@@ -803,7 +809,17 @@ export function apply(ctx, config, options) {
   const summariser = new Summariser({
     config: () => liveConfig(),
     llm: () => service('llm'),
-    log
+    log,
+    // The stored half of a summary. Both are looked up at call time rather than
+    // captured: `sessionState` is built above this line, but the session's
+    // record may not exist yet — `summarySeen` answers `undefined` for a session
+    // nothing has loaded, and `rememberSummary` creates the record itself.
+    //
+    // `rememberSummary` writes asynchronously through the store's one-second
+    // coalescing timer, so the panel never waits for a disk write to draw, and a
+    // process that dies within a second of a summary loses only that one.
+    stored: (agentId) => sessionState.summarySeen(agentId),
+    persist: (agentId, summary) => sessionState.rememberSummary(agentId, summary)
   })
 
   // ------------------------------------------------------------- the pruner --

@@ -985,6 +985,123 @@ console.log('persistence — the panel describes a conversation, not a process')
 }
 
 // ---------------------------------------------------------------------------
+// A conversation the host brings back keeps what its first turn does
+// ---------------------------------------------------------------------------
+//
+// The sweep marks a session it removed, and that mark lasts for the life of the
+// process. The host may still open the conversation again, and when it does,
+// `turn/start` is the only signal that says so: skills and MCP calls arrive in
+// the middle of the turn, long before `turn/end`, and they look exactly like the
+// late callbacks the mark exists to refuse.
+//
+// Two things about the shape of this test are load-bearing.
+//
+// It drives the plugin's *own* sweep, by firing the captured minute timer. A
+// second `SessionStore` pruned out of band would delete the same file and leave
+// the plugin's memory untouched — the mark would never be set, the gate would
+// never engage, and the test would pass no matter what the plugin did.
+//
+// And the timer is captured before `apply`, on the same host that later receives
+// the events. A second host would mean a second `SessionState`, with the mark in
+// one instance and the resumed writes in another.
+{
+  const root = await makeTempRoot('dsse-persist-resume-')
+  process.env.DSH_HOME = root
+
+  const archived = []
+  const services = new Map()
+  services.set('workspaceRegistry', {
+    archivedSessionIds: archived,
+    async sessionKnown() {
+      return true
+    }
+  })
+
+  // The sweep is a one-minute timer, so it is captured rather than waited for.
+  // This has to happen before `apply`, because that is where it is registered.
+  const realSetInterval = globalThis.setInterval
+  const ticks = []
+  globalThis.setInterval = (callback, ms) => {
+    ticks.push({ callback, ms })
+    return { id: undefined }
+  }
+  let host
+  try {
+    host = fakeHost(services)
+    applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  } finally {
+    globalThis.setInterval = realSetInterval
+  }
+
+  const session = fakeSession('session-resumed')
+  host.agents.set(session.id, session)
+
+  // A first, ordinary life, so there is a file to take away.
+  work(host, session, { skill: 'before-archive', said: 'first turn.', turn: 1 })
+  const path = join(stateDir(root), `${session.id}.json`)
+  check('the first turn wrote a file', await waitForFile(path), 'missing')
+
+  // Archive it and fire the sweep the plugin registered.
+  archived.push(session.id)
+  const sweep = ticks.find((tick) => tick.ms === 60 * 1000)
+  check('the plugin registered a one-minute sweep', sweep !== undefined, String(ticks.length))
+  sweep.callback()
+  // The tick starts its prune without awaiting it, so the unlink is waited for
+  // rather than assumed. Polling the file is more honest than picking a delay.
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline && existsSync(path)) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  check('and the sweep removed the archived conversation', existsSync(path) === false, `the file at ${path} survived`)
+
+  // The host brings it back. Nothing in this turn is unusual: it starts, loads a
+  // skill, calls an MCP server, speaks, and ends.
+  host.emit('session/event', session.session, {
+    type: 'turn/start',
+    seq: 100,
+    time: Date.now(),
+    data: { turn: 2 }
+  })
+  host.emit('session/event', session.session, {
+    type: 'tool/call',
+    seq: 101,
+    time: Date.now(),
+    data: { turn: 2, step: 1, callId: 'c-resume-skill', name: 'skill', arguments: JSON.stringify({ name: 'after-resume' }) }
+  })
+  host.emit('session/event', session.session, {
+    type: 'tool/call',
+    seq: 102,
+    time: Date.now(),
+    data: { turn: 2, step: 1, callId: 'c-resume-mcp', name: 'mcp__fs__read', arguments: '{}' }
+  })
+  host.emit('session/event', session.session, {
+    type: 'assistant/message',
+    seq: 103,
+    time: Date.now(),
+    data: { message: { role: 'assistant', content: [{ type: 'text', text: 'second life.' }] } }
+  })
+  host.emit('session/event', session.session, {
+    type: 'turn/end',
+    seq: 104,
+    time: Date.now(),
+    data: { turn: 2, reason: { kind: 'completed' } }
+  })
+  check('the resumed turn wrote a file again', await waitForFile(path), 'missing')
+
+  const written = await new SessionStore({ root: stateDir(root) }).read(session.id)
+  check(
+    'the skill the resumed turn loaded is in the file',
+    written?.skills?.['after-resume'] !== undefined,
+    JSON.stringify(written?.skills)
+  )
+  check(
+    'the MCP server the resumed turn called is in the file',
+    Array.isArray(written?.tools) && written.tools.includes('mcp__fs__read'),
+    JSON.stringify(written?.tools)
+  )
+}
+
+// ---------------------------------------------------------------------------
 // A sweep that never answers must not be able to stop the turn being written
 // ---------------------------------------------------------------------------
 //

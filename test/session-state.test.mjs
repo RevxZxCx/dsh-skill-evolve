@@ -688,6 +688,14 @@ async function filesIn(root) {
   await state.prune({ known: async () => false })
   check('the sweep took the record away while its write was in flight', state.bySession.has('arms') === false, String(state.bySession.size))
 
+  // Reopening is a turn starting, and that is the event that outranks the
+  // sweep's judgement: `condemned` is permanent for the process, so without a
+  // signal that the host is talking about this session again nothing could ever
+  // be written for it. A tool call alone is not that signal — it is
+  // indistinguishable from a late callback belonging to the turn the sweep
+  // already decided about (the git and scan watchers report from a promise that
+  // nobody awaits).
+  state.rememberTurn('arms')
   state.rememberSkill('arms', 'beta', 'tool')
   await state.flush('arms')
   check('the earlier write parked at the gate', parked === true, String(parked))
@@ -2170,6 +2178,498 @@ for (const reason of ['gone', 'archived']) {
   } finally {
     await done(root)
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// A summary is a fact about the session, so it goes in the session's own file
+// ---------------------------------------------------------------------------
+
+{
+  // The panel's summary is the only thing in this plugin that spends money per
+  // turn. It used to live in a Map inside the Summariser and die with the
+  // process, so every restart bought every visible turn again — measured at
+  // 2.8-4.0 seconds per session on the host. This is the round trip it now takes.
+  const { state, store, root } = await fixture()
+  check('a session nothing has summarised claims nothing', state.summarySeen('summarised') === undefined, JSON.stringify(state.summarySeen('summarised')))
+  state.rememberSummary('summarised', { key: 'a:3:abc', text: 'It built the panel.', at: 5000, model: 'prov-a/model-a', routeKey: 'prov-a/model-a' })
+  check('the summary is remembered', state.summarySeen('summarised')?.text === 'It built the panel.', JSON.stringify(state.summarySeen('summarised')))
+  await state.flush('summarised')
+  const stored = await store.read('summarised')
+  check('the text is written down, not just held in memory', stored?.summary?.text === 'It built the panel.', JSON.stringify(stored?.summary))
+  check('and the key goes with it, because the key is what decides reuse', stored?.summary?.key === 'a:3:abc', JSON.stringify(stored?.summary))
+  const reloaded = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
+  await reloaded.load('summarised')
+  check('a new process reads it back', reloaded.summarySeen('summarised')?.text === 'It built the panel.', JSON.stringify(reloaded.summarySeen('summarised')))
+  check('and the route goes with it', reloaded.summarySeen('summarised')?.routeKey === 'prov-a/model-a', JSON.stringify(reloaded.summarySeen('summarised')))
+  await done(root)
+}
+
+{
+  // Replacement, not accumulation: the panel describes the newest turn, so a
+  // growing list would answer a question about one entry by keeping all of them.
+  const { state, store, root } = await fixture()
+  state.rememberSummary('twice', { key: 'k1', text: 'first', at: 1000 })
+  state.rememberSummary('twice', { key: 'k2', text: 'second', at: 2000 })
+  check('a second summary replaces the first', state.summarySeen('twice')?.text === 'second', JSON.stringify(state.summarySeen('twice')))
+  await state.flush('twice')
+  const stored = await store.read('twice')
+  check('and the file holds exactly one', stored?.summary?.key === 'k2', JSON.stringify(stored?.summary))
+  await done(root)
+}
+
+{
+  // A missing model is a missing claim, not a wrong one. An older build wrote no
+  // model at all; reading that as "the model is undefined, which is not prov-a"
+  // would throw away a perfectly good summary on every upgrade.
+  const { state, store, root } = await fixture()
+  await store.write('modelless', {
+    state: 2,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 1,
+    paths: {},
+    summary: { key: 'k', text: 'A summary.', at: 4000 },
+  })
+  await state.load('modelless')
+  check('a summary with no model is still a summary', state.summarySeen('modelless')?.text === 'A summary.', JSON.stringify(state.summarySeen('modelless')))
+  check('and the absent model is absent, not empty', state.summarySeen('modelless')?.model === undefined, JSON.stringify(state.summarySeen('modelless')?.model))
+  await done(root)
+}
+
+{
+  // Every field the reader depends on is checked on the way in. A stored text
+  // that is not a string would reach the renderer; a stored at that is not a
+  // number would make "3 minutes ago" read NaN.
+  const { state, store, root } = await fixture()
+  const cases = [
+    ['no-key', { text: 'x', at: 1 }],
+    ['empty-key', { key: '', text: 'x', at: 1 }],
+    ['no-text', { key: 'k', at: 1 }],
+    ['empty-text', { key: 'k', text: '', at: 1 }],
+    ['no-at', { key: 'k', text: 'x' }],
+    ['bad-at', { key: 'k', text: 'x', at: 'yesterday' }],
+    ['not-an-object', 'a summary'],
+  ]
+  for (const [id, summary] of cases) {
+    await store.write(id, { state: 2, turns: 1, previous: null, skills: {}, tools: [], servers: {}, sequence: 1, paths: {}, summary })
+    const reading = new SessionState({ store, delayMs: 0, now: () => 1000, snapshotOf: async () => ({ turns: 0, previous: null }) })
+    await reading.load(id)
+    check(`a summary that is ${id} is refused`, reading.summarySeen(id) === undefined, JSON.stringify(reading.summarySeen(id)))
+  }
+  await done(root)
+}
+
+{
+  // Writing is checked too, because the writer is the thing that would otherwise
+  // put a shape the reader refuses into a file the reader then has to refuse.
+  const { state, store, root } = await fixture()
+  for (const bad of [undefined, null, 'text', {}, { key: 'k' }, { key: 'k', text: '' }, { key: 'k', text: 'x', at: Number.NaN }]) {
+    state.rememberSummary('never', bad)
+  }
+  check('nothing resembling a summary was recorded', state.summarySeen('never') === undefined, JSON.stringify(state.summarySeen('never')))
+  // A session with only a summary must be a session worth a file: it is the one
+  // fact a turn that edited nothing and loaded nothing still produces.
+  state.rememberSummary('only-summary', { key: 'k', text: 'A summary.', at: 1 })
+  check('a summary alone is a reason to write a file', state.document('only-summary') !== undefined, JSON.stringify(state.document('only-summary')))
+  await state.flush('only-summary')
+  check('and the file is there', (await store.read('only-summary'))?.summary?.text === 'A summary.', JSON.stringify((await store.read('only-summary'))?.summary))
+  await done(root)
+}
+
+{
+  // The orphan check has to know about the new field for the same reason it had
+  // to know about paths: a file whose only fact is the summary is deletable by
+  // another process releasing a session it never wrote, unless dropIfOrphan is
+  // handed that field too.
+  const root = join(tmpdir(), `dsse-session-state-only-summary-${randomUUID()}`)
+  await mkdirp(root)
+  const storeA = new SessionStore({ root })
+  const storeB = new SessionStore({ root })
+  const stateA = new SessionState({ store: storeA, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  const stateB = new SessionState({ store: storeB, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  await stateA.load('summarised')
+  stateB.rememberSummary('summarised', { key: 'k', text: 'A summary.', at: 1 })
+  await stateB.flush('summarised')
+  await stateA.release('summarised')
+  const after = await filesIn(root)
+  check('a summary is not an orphan', after.includes('summarised.json') === true, JSON.stringify(after))
+  check('and it survived the other process leaving', (await storeB.read('summarised'))?.summary?.text === 'A summary.', JSON.stringify((await storeB.read('summarised'))?.summary))
+  await done(root)
+}
+
+{
+  // The order that erases a paid-for summary: a restart happens, an event lands
+  // before anyone opens the panel, and only then does the first write pull the
+  // file in. \`entry()\` has already built a record with no summary, so the merge
+  // in \`readInto\` is the only thing standing between the file's summary and the
+  // rewrite that follows. It did not carry the field, so the first write after a
+  // restart deleted a summary the previous process had paid a model call for.
+  //
+  // Every other summary test opens the panel first, which takes the
+  // \`current === undefined\` branch where \`...state\` copies the field for free.
+  // That branch is why this went unnoticed: the ordinary path through a restart
+  // is the other one.
+  const root = join(tmpdir(), `dsse-session-state-summary-merge-${randomUUID()}`)
+  await mkdirp(root)
+  const store = new SessionStore({ root })
+  const first = new SessionState({ store, snapshotOf: () => ({ turns: 1, previous: null }), restore: () => {}, delayMs: 0 })
+  first.rememberSummary('merges', { key: 'a:1:abc', text: 'Written before the restart.', at: 4000, model: 'prov/model', routeKey: 'prov/model' })
+  await first.flush('merges')
+  check('the summary is on disk before the restart', (await store.read('merges'))?.summary?.text === 'Written before the restart.', JSON.stringify((await store.read('merges'))?.summary))
+
+  // delayMs is long so the event does not write: the point of the test is the
+  // merge, and a write here would just be the second process's own summary.
+  const second = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 2, previous: null }), restore: () => {}, delayMs: 100000 })
+  second.rememberTurn('merges')
+  check('the event built a record with no summary of its own', second.summarySeen('merges') === undefined, JSON.stringify(second.summarySeen('merges')))
+  await second.load('merges')
+  check('the file\'s summary is merged into the record the event created', second.summarySeen('merges')?.text === 'Written before the restart.', JSON.stringify(second.summarySeen('merges')))
+  check('and it keeps the key that decides reuse', second.summarySeen('merges')?.key === 'a:1:abc', JSON.stringify(second.summarySeen('merges')))
+  await second.flush('merges')
+  check('so the next write does not delete it', (await store.read('merges'))?.summary?.text === 'Written before the restart.', JSON.stringify((await store.read('merges'))?.summary))
+
+  // The other half of the rule, in the order that actually exercises it: this
+  // process produces a summary before it ever reads the file, and then the read
+  // arrives. Memory is what happened since the file was written, so it wins.
+  //
+  // The first draft of this case produced the summary after the load, which made
+  // the two orders indistinguishable: by then the merge had already run and
+  // nothing was left to overwrite. It proved only that a later write beats an
+  // earlier one, which no direction of this line could change.
+  const third = new SessionState({ store, now: () => 9900, snapshotOf: () => ({ turns: 3, previous: null }), restore: () => {}, delayMs: 100000 })
+  third.rememberSummary('merges', { key: 'a:3:def', text: 'Produced before the read.', at: 9500 })
+  check('memory holds the newer summary before the read', third.summarySeen('merges')?.text === 'Produced before the read.', JSON.stringify(third.summarySeen('merges')))
+  await third.load('merges')
+  check('the read does not put the file\'s older text back', third.summarySeen('merges')?.text === 'Produced before the read.', JSON.stringify(third.summarySeen('merges')))
+  check('and it keeps the key of the summary that won', third.summarySeen('merges')?.key === 'a:3:def', JSON.stringify(third.summarySeen('merges')))
+  await third.flush('merges')
+  check('a newer summary wins over the one on disk', (await store.read('merges'))?.summary?.text === 'Produced before the read.', JSON.stringify((await store.read('merges'))?.summary))
+  await done(root)
+}
+
+{
+  // A summary is the only fact in this module that can arrive after the host has
+  // already ended the conversation. \`warm\` is deliberately not awaited and the
+  // model call is allowed twenty seconds, so "turn ends, session is archived,
+  // summary comes back" is a real order rather than a contrived one.
+  //
+  // Without the guard, \`rememberSummary\` reaches \`entry()\`, which happily builds
+  // a new record for the id, and the write that follows recreates a file the
+  // sweep deleted — a document whose only content is a summary of a conversation
+  // nobody can open. It is the same failure \`condemned\` already exists to stop,
+  // reached through a path written later than the guard.
+  const { state, store, root } = await fixture()
+  state.rememberSkill('late', 'probe-skill', 'tool')
+  await state.flush('late')
+  check('the session has a file worth sweeping', (await store.read('late')) !== undefined)
+  await state.prune({ known: async () => false })
+  check('the sweep deleted it', (await store.read('late')) === undefined)
+
+  state.rememberSummary('late', { key: 'late:1:abc', text: 'A summary that arrived too late.', at: 5000 })
+  await state.flush('late')
+  check('a summary that arrives after the sweep does not recreate the file', (await store.read('late')) === undefined, JSON.stringify(await store.read('late')))
+  check('and it is not held in memory either', state.summarySeen('late') === undefined, JSON.stringify(state.summarySeen('late')))
+
+  // The guard must be about the sweep's decision, not about summaries: an
+  // ordinary session that was never condemned still stores one.
+  state.rememberSummary('alive', { key: 'alive:1:abc', text: 'Stored while alive.', at: 6000 })
+  await state.flush('alive')
+  check('a session no sweep has judged still stores its summary', (await store.read('alive'))?.summary?.text === 'Stored while alive.', JSON.stringify((await store.read('alive'))?.summary))
+  await done(root)
+}
+
+{
+  // The same order that erased the summary erases the sweep's caveat, and it was
+  // already doing so before this change touched the file. \`readInto\` merges the
+  // file into a record that an event created, and the field was not on the list,
+  // so a restart reached through an event forgot that the last git scan could
+  // only see part of the turn. The next write then stated a clean coverage the
+  // sweep never claimed — which is the one direction this field exists to
+  // prevent, because a short file list that reads as complete is worse than one
+  // that admits its reach.
+  const root = join(tmpdir(), `dsse-session-state-sweep-merge-${randomUUID()}`)
+  await mkdirp(root)
+  const store = new SessionStore({ root })
+  const first = new SessionState({ store, snapshotOf: () => ({ turns: 3, previous: null }), restore: () => {}, delayMs: 0 })
+  first.rememberPaths('merges', ['a.js'])
+  first.rememberSweep('merges', 3, 'partial')
+  await first.flush('merges')
+  check('the caveat is on disk before the restart', (await store.read('merges'))?.sweep?.coverage === 'partial', JSON.stringify((await store.read('merges'))?.sweep))
+
+  const second = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 4, previous: null }), restore: () => {}, delayMs: 100000 })
+  second.rememberPaths('merges', ['b.js'])
+  await second.load('merges')
+  check('the caveat survives the event then read order', second.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(second.sweepSeen('merges')))
+  check('and so does the turn it names', second.sweepSeen('merges')?.turn === 3, JSON.stringify(second.sweepSeen('merges')))
+  await second.flush('merges')
+  check('so the next write still admits a partial scan', (await store.read('merges'))?.sweep?.coverage === 'partial', JSON.stringify((await store.read('merges'))?.sweep))
+
+  // A sweep this process ran is newer than the file's, so it must win. Without
+  // the direction the merge would resurrect the file's older claim on every
+  // read.
+  const third = new SessionState({ store, now: () => 9900, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
+  third.rememberSweep('merges', 5, 'complete')
+  await third.load('merges')
+  check('this process sweep beats the file older caveat', third.sweepSeen('merges')?.coverage === 'complete', JSON.stringify(third.sweepSeen('merges')))
+  await done(root)
+}
+
+{
+  // The guard refuses a late summary only while nothing owns the id. Once a live
+  // event has rebuilt the record, the session is back and the summary is a
+  // perfectly ordinary fact about it — the very next thing anyone opening the
+  // panel would ask for. Refusing on \`condemned\` alone would leave this one
+  // writer silent while every other writer in the class wrote normally, so the
+  // file would carry the skills of a resumed session and none of its text.
+  const { state, store, root } = await fixture()
+  state.rememberSkill('resumed', 'probe-skill', 'tool')
+  await state.flush('resumed')
+  await state.prune({ known: async () => false })
+  check('the sweep took the file', (await store.read('resumed')) === undefined)
+
+  // The host starts talking about it again — any live event rebuilds the record.
+  state.rememberTurn('resumed')
+  state.rememberSummary('resumed', { key: 'resumed:2:abc', text: 'Text from after the session came back.', at: 7000 })
+  await state.flush('resumed')
+  const written = await store.read('resumed')
+  check('a resumed session keeps its summary', written?.summary?.text === 'Text from after the session came back.', JSON.stringify(written?.summary))
+  check('and the store agrees in memory', state.summarySeen('resumed')?.key === 'resumed:2:abc', JSON.stringify(state.summarySeen('resumed')))
+  await done(root)
+}
+
+
+{
+  // The order the two review rounds asked for and no test had: the sweep deletes
+  // the file, then the panel polls. A poll for an id with nothing on disk installs
+  // an `empty` record -- `readInto`'s absent branch, and `test/.../the poll
+  // installs an empty record` says it must -- so by the time a late fact arrives
+  // memory is no longer empty. A guard asking "is there a record" is therefore
+  // always answered "yes", a second after the sweep, for every session a panel is
+  // watching. That is why the question moved into `entry()` and why it asks about
+  // `empty` rather than absence.
+  //
+  // Each writer gets its own store: `pruneIfDue` refuses to sweep twice inside its
+  // interval, and a second sweep that never ran would make the rest of the matrix
+  // pass for the wrong reason.
+  const writers = [
+    ['skill', (state, id) => state.rememberSkill(id, 'late-skill', 'tool')],
+    ['tool', (state, id) => state.rememberTool(id, 'mcp__srv__tool', 'mcp')],
+    ['paths', (state, id) => state.rememberPaths(id, ['src/late.js'], 4, 'edit')],
+    ['summary', (state, id) => state.rememberSummary(id, { key: `${id}:1:abc`, text: 'Late.', at: 9000 })],
+  ]
+  for (const [name, late] of writers) {
+    const { state, store, root } = await fixture()
+    const id = `after-poll-${name}`
+    state.rememberSkill(id, 'seed-skill', 'tool')
+    await state.flush(id)
+    check(`${name}: the session has a file worth sweeping`, (await store.read(id)) !== undefined)
+    await state.prune({ known: async () => false })
+    check(`${name}: the sweep took it`, (await store.read(id)) === undefined)
+
+    // The panel polls between the sweep and the fact arriving.
+    await state.load(id)
+    check(`${name}: the poll installed an empty record`, state.bySession.get(id)?.empty === true)
+    check(`${name}: and the sweep still owns the id`, state.condemned.has(id) === true)
+
+    late(state, id)
+    await state.flush(id)
+    check(`${name}: a write after the poll does not recreate the file`, (await store.read(id)) === undefined, JSON.stringify(await store.read(id)))
+    await done(root)
+  }
+}
+
+{
+  // The other half, and the one that keeps the guard from being "refuse forever":
+  // a host's `turn/start` is evidence the conversation is running again, and it is
+  // the only writer that says so. Everything else that could arrive in that window
+  // -- a tool call, a path, a snapshot -- looks exactly like a late callback from
+  // the turn the sweep already decided about.
+  const { state, store, root } = await fixture()
+  const id = 'resumed-everything'
+  state.rememberSkill(id, 'seed-skill', 'tool')
+  await state.flush(id)
+  await state.prune({ known: async () => false })
+  await state.load(id)
+
+  state.rememberTurn(id)
+  state.rememberSkill(id, 'after-shape', 'gesture')
+  state.rememberPaths(id, ['src/back.js'], 5, 'edit')
+  state.rememberSummary(id, { key: `${id}:5:abc`, text: 'Text written after the resume.', at: 7000 })
+  await state.flush(id)
+  const back = await store.read(id)
+  check('a resumed session writes its skills again', back?.skills?.['after-shape'] !== undefined, JSON.stringify(back?.skills))
+  check('a resumed session writes its paths again', back?.paths?.['src/back.js'] !== undefined, JSON.stringify(back?.paths))
+  check('and its summary lands too', back?.summary?.text === 'Text written after the resume.', JSON.stringify(back?.summary))
+  await done(root)
+}
+
+{
+  // The lift has to happen when the turn starts, not when it ends.
+  //
+  // A resumed session's first turn records its skills and MCP servers while the
+  // turn is still running -- that is what a turn is made of. If the verdict is
+  // only lifted at `turn/end`, every one of those writes meets a gate that still
+  // says the session is gone, and by the time the lift arrives the facts are
+  // already dropped: the turn ends by writing an empty document over a session
+  // that has just done real work.
+  //
+  // This is the shape a host actually produces (`turn/start` -> tool calls ->
+  // `turn/end`), so the calls here are in that order on purpose.
+  const { state, store, root } = await fixture()
+  const id = 'resumed-mid-turn'
+  state.rememberSkill(id, 'seed-skill', 'tool')
+  await state.flush(id)
+  await state.prune({ known: async () => false })
+  check('the sweep took the file before the resume', (await store.read(id)) === undefined)
+  await state.load(id)
+
+  // `turn/start`: the host says this conversation is running again.
+  state.noteLive(id)
+  // The middle of the turn: a skill the model loaded and an MCP tool it called.
+  state.rememberSkill(id, 'skill-from-first-turn-after-resume', 'tool')
+  state.rememberTool(id, 'mcp__fs__read')
+  // `turn/end`.
+  state.rememberTurn(id)
+  await state.flush(id)
+
+  const back = await store.read(id)
+  check(
+    'a resumed turn keeps the skill it loaded mid-turn',
+    back?.skills?.['skill-from-first-turn-after-resume'] !== undefined,
+    JSON.stringify(back?.skills),
+  )
+  check(
+    'a resumed turn keeps the MCP tool it called mid-turn',
+    Array.isArray(back?.tools) && back.tools.includes('mcp__fs__read'),
+    JSON.stringify(back?.tools),
+  )
+  await done(root)
+}
+
+{
+  // The negative half: without the lift, the same sequence loses both facts.
+  // Written as its own block so that removing the lift from `turn/start` fails
+  // here rather than passing because `rememberTurn` happened to rescue it.
+  const { state, store, root } = await fixture()
+  const id = 'resumed-no-lift'
+  state.rememberSkill(id, 'seed-skill', 'tool')
+  await state.flush(id)
+  await state.prune({ known: async () => false })
+  await state.load(id)
+
+  // No `noteLive`: this is the shape the code had before the fix, where the only
+  // lift was inside `rememberTurn`.
+  state.rememberSkill(id, 'skill-that-should-not-land', 'tool')
+  state.rememberTool(id, 'mcp__fs__read')
+  const beforeTurnEnd = await store.read(id)
+  check('a write before the resume is lifted lands nowhere', beforeTurnEnd === undefined, JSON.stringify(beforeTurnEnd))
+  await done(root)
+}
+
+{
+  // `sweep` is ordered, so "the file wins" and "memory wins" are both wrong as
+  // rules. A caveat about a newer turn that the previous process wrote before it
+  // exited outranks this process's older one; this process's numbered claim
+  // outranks an unnumbered file.
+  const root = join(tmpdir(), `dsse-session-state-sweep-newer-${randomUUID()}`)
+  await mkdirp(root)
+  const store = new SessionStore({ root })
+  const older = new SessionState({ store, snapshotOf: () => ({ turns: 7, previous: null }), restore: () => {}, delayMs: 0 })
+  older.rememberPaths('newer', ['a.js'])
+  older.rememberSweep('newer', 7, 'partial')
+  await older.flush('newer')
+  check('the newer caveat is on disk', (await store.read('newer'))?.sweep?.turn === 7)
+
+  // This process ran an older sweep before it ever read the file: a git subprocess
+  // that reported late, for a turn the file already has a newer word on.
+  const revived = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 7, previous: null }), restore: () => {}, delayMs: 100000 })
+  revived.rememberSweep('newer', 5, 'complete')
+  await revived.load('newer')
+  check('the file newer caveat beats this process older claim', revived.sweepSeen('newer')?.turn === 7, JSON.stringify(revived.sweepSeen('newer')))
+  check('and the coverage it admits to survives', revived.sweepSeen('newer')?.coverage === 'partial', JSON.stringify(revived.sweepSeen('newer')))
+  await revived.flush('newer')
+  check('the next write keeps it', (await store.read('newer'))?.sweep?.turn === 7, JSON.stringify((await store.read('newer'))?.sweep))
+  await done(root)
+}
+
+{
+  // An unnumbered claim is not evidence of when it was measured, so it yields to
+  // any numbered one -- the same rule `rememberSweep` applies to itself.
+  const root = join(tmpdir(), `dsse-session-state-sweep-bare-${randomUUID()}`)
+  await mkdirp(root)
+  const store = new SessionStore({ root })
+  await store.write('bare', { state: 2, turns: 3, previous: null, skills: {}, tools: [], servers: {}, paths: {}, sequence: 0, sweep: { coverage: 'complete' } })
+  const state = new SessionState({ store, now: () => 9000, snapshotOf: () => ({ turns: 4, previous: null }), restore: () => {}, delayMs: 100000 })
+  state.rememberSweep('bare', 4, 'partial')
+  await state.load('bare')
+  check('a numbered claim beats an unnumbered file claim', state.sweepSeen('bare')?.coverage === 'partial', JSON.stringify(state.sweepSeen('bare')))
+  check('and it names its turn', state.sweepSeen('bare')?.turn === 4, JSON.stringify(state.sweepSeen('bare')))
+  await done(root)
+}
+
+{
+  // The summary's optional strings are normalised on the way in and on the way
+  // out, so a whitespace-only model cannot mean "a model called ''" to one reader
+  // and "no claim" to another.
+  const { state, store, root } = await fixture()
+  state.rememberSummary('normal', { key: 'normal:1:abc', text: 'Normalised.', at: 1000, model: '', routeKey: '' })
+  check('an empty model is stored as no claim', state.summarySeen('normal')?.model === undefined, JSON.stringify(state.summarySeen('normal')))
+  check('and so is an empty route', state.summarySeen('normal')?.routeKey === undefined, JSON.stringify(state.summarySeen('normal')))
+  // Whitespace is a string, not an absence, and is kept verbatim. Trimming would
+  // be this module deciding what a route identity means, which it does not know:
+  // it compares two strings and reports whether they are the same one.
+  state.rememberSummary('spaced', { key: 'spaced:1:abc', text: 'Spaced.', at: 1000, model: '   ' })
+  check('a whitespace model is kept rather than guessed at', state.summarySeen('spaced')?.model === '   ', JSON.stringify(state.summarySeen('spaced')))
+  await state.flush('normal')
+  const written = await store.read('normal')
+  check('the file carries no empty string either', written?.summary?.model === undefined && written?.summary?.routeKey === undefined, JSON.stringify(written?.summary))
+  check('a real model is kept', (() => {
+    state.rememberSummary('normal', { key: 'normal:1:abc', text: 'Normalised.', at: 1000, model: 'p/m' })
+    return state.summarySeen('normal')?.model === 'p/m'
+  })(), JSON.stringify(state.summarySeen('normal')))
+  await done(root)
+}
+
+
+{
+  // The other half of the gate, and the reason it is a predicate rather than a
+  // bare `condemned` check. A swept id can come back with facts: another process
+  // that had not heard about the archive writes the file, the panel's next poll
+  // reads it, and `readInto` merges it into a record. Those facts are somebody's
+  // work and they are what the panel is drawing, so a writer must not be refused
+  // on the strength of the sweep alone -- refusing would leave the record showing
+  // one thing and every later fact silently discarded, with the file never
+  // updated to say so.
+  //
+  // What must not happen is the *empty* record doing the same: that one holds
+  // nothing, so letting a write through creates a file the sweep deleted. The two
+  // cases differ by `empty`, which is why the gate asks about it.
+  const { state, store, root } = await fixture()
+  const id = 'came-back-with-facts'
+  state.rememberSkill(id, 'seed-skill', 'tool')
+  await state.flush(id)
+  await state.prune({ known: async () => false })
+  check('the sweep took the file', (await store.read(id)) === undefined)
+
+  // A different process, still unaware the session was archived.
+  await store.write(id, {
+    state: 2, turns: 4, previous: null, skills: { elsewhere: { via: 'tool', at: 3 } },
+    tools: [], servers: {}, paths: {}, sequence: 3,
+  })
+  await state.load(id)
+  check('the poll found facts another process wrote', state.skillsUsed(id)?.has('elsewhere') === true, JSON.stringify([...(state.skillsUsed(id)?.keys() ?? [])]))
+  check('and the record is not an empty one', state.bySession.get(id)?.empty !== true)
+
+  state.rememberSkill(id, 'recorded-here', 'tool')
+  await state.flush(id)
+  const written = await store.read(id)
+  check('a writer is not refused facts the record already holds', written?.skills?.['recorded-here'] !== undefined, JSON.stringify(written?.skills))
+  check('and the other process work is still there', written?.skills?.elsewhere !== undefined, JSON.stringify(written?.skills))
+  await done(root)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

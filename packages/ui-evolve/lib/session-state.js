@@ -109,7 +109,7 @@ function isRecord(value) {
  * front of the person reading the panel.
  *
  * @param {any} stored - what `SessionStore.read` returned.
- * @returns {{ skills: Map<string, { via: string, at: number }>, tools: Set<string>, servers: Map<string, number>, sequence: number } | undefined}
+ * @returns {{ skills: Map<string, { via: string, at: number }>, tools: Set<string>, servers: Map<string, number>, paths: Map<string, object>, sweep: object | undefined, summary: object | undefined, sequence: number } | undefined}
  */
 function readState(stored) {
   if (!isRecord(stored)) return undefined
@@ -166,7 +166,7 @@ function readState(stored) {
     paths.clear()
     for (const [file, entry] of newest) paths.set(file, entry)
   }
-  return { skills, tools, servers, paths, sweep: readSweep(stored.sweep), sequence }
+  return { skills, tools, servers, paths, sweep: readSweep(stored.sweep), summary: readSummary(stored.summary), sequence }
 }
 
 /**
@@ -222,6 +222,65 @@ function readSweep(raw) {
 }
 
 /**
+ * The last summary this session was given, in whichever shape the file used.
+ *
+ * Stored so that a restart does not pay for it again. A summary key is
+ * `${agentId}:${turn}:${bodyHash}`, so the key alone says which turn it
+ * describes and whether the prompt text is the same one: a stored key that is
+ * not the key being asked for is a summary of something else, and returning it
+ * would put the previous turn's words under this turn's heading. That is why
+ * this is a single record rather than a list — only the newest turn is ever
+ * asked about, and a list would persist an unbounded history to answer a
+ * question that has one answer.
+ *
+ * Everything is validated rather than trusted, like every other field here. A
+ * summary is one of the few things in this file that cost money to produce, but
+ * a torn copy is worth discarding rather than salvaging: half a sentence shown
+ * as the turn's summary is worse than a missing one, and a missing one only
+ * costs the next call.
+ *
+ * @param {any} raw - the stored value.
+ * @returns {{ key: string, text: string, at: number, model: string | undefined, routeKey: string | undefined } | undefined} the entry, or undefined when unusable.
+ */
+function readSummary(raw) {
+  if (isRecord(raw) === false) return undefined
+  if (typeof raw.key !== 'string' || raw.key.length === 0) return undefined
+  if (typeof raw.text !== 'string' || raw.text.length === 0) return undefined
+  if (typeof raw.at !== 'number' || Number.isFinite(raw.at) === false) return undefined
+  return normaliseSummary(raw)
+}
+
+/**
+ * The five facts a summary carries, built in exactly one place.
+ *
+ * Three callers need this shape: the reader that validates a file, the writer
+ * that records what a model just said, and `document`, which puts it back on
+ * disk. Written as three field lists they drift — one gains a field the others
+ * drop, and the field survives a restart only if all three agree. The `sweep`
+ * field upstream was written the other way and the merge in `readInto` forgot
+ * it completely, which is the same failure in a different field.
+ *
+ * Both identities are allowed to be absent, and absent means "no claim" rather
+ * than "mismatch". `model` is the resolved route the text came from, and
+ * `routeKey` is the identity of the route that would be used now; when the
+ * plugin is unconfigured they are resolved per session and can genuinely be
+ * unknown. A reader that treated two absences as a miss would throw away a
+ * usable summary every time it could not name the model.
+ *
+ * @param {object} raw - any object claiming to be a summary.
+ * @returns {{ key: string, text: string, at: number, model: string | undefined, routeKey: string | undefined }} the five fields.
+ */
+function normaliseSummary(raw) {
+  return {
+    key: raw.key,
+    text: raw.text,
+    at: raw.at,
+    model: typeof raw.model === 'string' && raw.model.length > 0 ? raw.model : undefined,
+    routeKey: typeof raw.routeKey === 'string' && raw.routeKey.length > 0 ? raw.routeKey : undefined,
+  }
+}
+
+/**
  * A record for a session, holding nothing yet.
  *
  * Every field a record needs is here and in one place. There are four callers —
@@ -264,6 +323,16 @@ function blankRecord() {
      * `undefined` until a sweep reports, and that means "no claim", not "clean".
      */
     sweep: undefined,
+    /**
+     * The last summary this session was given.
+     *
+     * `undefined` until one is produced, and for a session whose summary is
+     * turned off, which is "no claim" rather than "an empty summary". The panel
+     * asks for the newest turn only, so one record is the whole of what it needs;
+     * see `readSummary` for why the key rather than the text decides whether a
+     * stored answer still applies.
+     */
+    summary: undefined,
     sequence: 0,
     snapshot: undefined,
     timer: undefined,
@@ -310,6 +379,12 @@ function keepsDocument(facts) {
   // off in settings. Leaving paths out of this answer would make `document()`
   // refuse the file that holds the one card the person is reading.
   if (facts.paths instanceof Map && facts.paths.size > 0) return true
+  // A summary on its own is a file worth keeping. In practice a summary always
+  // arrives with the finished turn it describes, so this changes no ordinary
+  // case — which is exactly why it belongs here rather than being left implicit:
+  // the three readers of this test must agree even in the case that never
+  // happens, or the one time it does the file is judged an orphan and deleted.
+  if (facts.summary !== undefined && facts.summary !== null) return true
   if (facts.previous !== undefined && facts.previous !== null) return true
   // A count on its own is still something the panel prints, and the one field
   // that cannot be rebuilt from live events after a restart. Leaving it out of
@@ -337,6 +412,7 @@ function hasFacts(entry) {
     skills: entry.skills,
     tools: entry.tools,
     paths: entry.paths,
+    summary: entry.summary,
     previous: entry.snapshot?.previous,
     turns: entry.snapshot?.turns,
   })
@@ -394,8 +470,36 @@ class SessionState {
    */
   entry(sessionId) {
     if (typeof sessionId !== 'string' || sessionId.length === 0) return undefined
-    let entry = this.bySession.get(sessionId)
-    if (entry !== undefined) return entry
+    const known = this.bySession.get(sessionId)
+    // The sweep decided this session is over and deleted its file. Nothing that
+    // merely *arrives late* may put that file back. Every writer funnels through
+    // here — skills, tools, paths, turns, sweeps and summaries — so this is the
+    // one place that has to know, and the reason it cannot be a check inside
+    // `rememberSummary`: the other five were resurrecting the file too, with
+    // content, on exactly the same late callbacks.
+    //
+    // "Late" is not the same question as "is there a record". `readInto`
+    // installs an `empty: true` record for a session with nothing on disk so
+    // that the next tick does not go back to the file, and the panel polls
+    // through `load` on every refresh. So a second after any sweep there is
+    // always a record, and testing for its absence would let every writer
+    // through on the ordinary order "prune, the panel refreshes, the answer
+    // lands". `empty` is cleared by `schedule` the moment a real fact arrives,
+    // which makes it the same question `document` and `dropIfOrphan` ask: has
+    // anything claimed this id since the sweep.
+    //
+    // The exception is a session the host resumes: `rememberTurn` clears the
+    // mark, because a turn ending is the host saying this conversation just did
+    // work, which is newer testimony than the sweep's.
+    //
+    // The `empty` test and the record test are one question asked once. Written
+    // as two branches — "return a record that has facts", then "return any
+    // record" — the first is unreachable with a different answer, because a
+    // record that has facts is also a record. A branch no input can take is a
+    // branch no test can hold, so it is not written here.
+    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined
+    if (known !== undefined) return known
+    let entry
     // An id the store will not turn into a path is an id whose state could never
     // be read back. Keeping it in memory would make the panel show, for this
     // process only, work that vanishes on restart — the exact asymmetry this
@@ -624,6 +728,36 @@ class SessionState {
       // read of one file wrote twice the turns it held. The snapshot is taken
       // again from the transcript below, after `restore` has had its say.
       if (current.snapshot === undefined) current.snapshot = snapshot
+      // The summary merges the way `snapshot` does, and for the same reason: the
+      // file's copy is the only thing that survives a restart, so dropping it
+      // here would have the first write after a restart erase a summary that was
+      // already paid for. Memory wins when it has one — it was produced by this
+      // process and is therefore newer — and the file's is taken only when
+      // memory has nothing, which is the ordinary "events arrived before the
+      // panel's first read" order that `flush` exists to handle.
+      if (current.summary === undefined) current.summary = state.summary
+      // `sweep` merges the same way and was missing from this branch entirely.
+      // It is the sweep's own caveat about how much of the last turn it could
+      // see, so losing it does not lose files — it loses the warning that the
+      // file list may be short, which is the one thing that keeps a partial scan
+      // from reading as a clean one. The same "event arrives before the first
+      // read" order reaches it, and the next write then states a complete
+      // coverage the sweep never claimed.
+      // `sweep` is ordered, so unlike the other fields the file may legitimately
+      // be the newer of the two: a sweep whose git subprocess reported after the
+      // following turn had already done so is exactly what `rememberSweep`'s own
+      // stale rule is about. Copying the file's value unconditionally would
+      // reinstate a caveat this process already superseded; keeping memory
+      // unconditionally would throw away a caveat about a *newer* turn that was
+      // written by the last process before it exited. So the same rule as the
+      // writer: an unnumbered claim yields to a numbered one, and a numbered one
+      // yields to a newer turn.
+      if (state.sweep !== undefined) {
+        const mine = current.sweep
+        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {
+          current.sweep = state.sweep
+        }
+      }
       current.empty = false
       current.loaded = true
     }
@@ -799,6 +933,35 @@ class SessionState {
   }
 
   /**
+   * The host says this conversation is alive.
+   *
+   * The only thing this does is lift a sweep's verdict, and it exists as its own
+   * method because that lift belongs to a moment, not to a writer. `condemned`
+   * is permanent for the life of the process, and the host genuinely changes its
+   * mind: an archived conversation can be opened again and run a new turn. That
+   * turn is newer testimony than the sweep, so the verdict has to go — otherwise
+   * the session writes nothing for as long as this process lives, and the panel
+   * shows an empty turn for every one of them.
+   *
+   * It has to happen at `turn/start` rather than at `turn/end`. Skills and MCP
+   * servers are recorded in the middle of a turn, and a resumed session's first
+   * turn would have had every one of those writes refused by the gate before the
+   * end of the turn ever arrived — the facts would be gone by the time the
+   * verdict lifted, and only an empty document would be left to write.
+   *
+   * Lifting on a turn boundary does not reopen the hole the gate closes: a late
+   * callback — a summary that took twenty seconds, a git sweep that reported
+   * after the session was archived — has no turn of its own, and a turn that
+   * starts after the sweep is the host saying the conversation is running again.
+   *
+   * @param {string} sessionId - the session.
+   * @returns {void}
+   */
+  noteLive(sessionId) {
+    this.condemned.delete(sessionId)
+  }
+
+  /**
    * A turn finished, so the snapshot is worth writing down.
    *
    * The other accumulators record a fact when it arrives. This one records
@@ -816,6 +979,7 @@ class SessionState {
    * @returns {void}
    */
   rememberTurn(sessionId) {
+    this.noteLive(sessionId)
     const entry = this.entry(sessionId)
     if (entry === undefined) return
     this.schedule(sessionId)
@@ -878,6 +1042,76 @@ class SessionState {
   sweepSeen(sessionId) {
     const entry = this.bySession.get(sessionId)
     return entry === undefined ? undefined : entry.sweep
+  }
+
+  /**
+   * The last summary this session was given, for the panel to skip a paid call.
+   *
+   * Returned whole rather than filtered to the caller's key: the caller is the
+   * only thing that knows what it is about to ask for, and a filter here would
+   * put the matching rule in two places. `matchesStored` in `summarise.js` does
+   * the comparing, so there is one answer to "does this stored text describe the
+   * turn I am drawing".
+   *
+   * @param {string} sessionId - the session.
+   * @returns {{ key: string, text: string, at: number, model: string | undefined, routeKey: string | undefined } | undefined} the summary, or undefined when none was stored.
+   */
+  summarySeen(sessionId) {
+    const entry = this.bySession.get(sessionId)
+    return entry === undefined ? undefined : entry.summary
+  }
+
+  /**
+   * Record the summary a turn was given.
+   *
+   * Replaces rather than accumulates: the panel describes the newest turn and a
+   * stored list would grow with the conversation to answer a question about one
+   * entry.
+   *
+   * Deliberately *not* gated on the key changing. The same turn can be
+   * summarised twice with the same key — a cache eviction, a route switch back to
+   * the model that produced it — and the second answer is the one the user is
+   * looking at. Keeping the first would mean a repaint showed text that no longer
+   * exists in memory.
+   *
+   * @param {string} sessionId - the session.
+   * @param {{ key: string, text: string, at: number, model?: string, routeKey?: string }} summary - what to store.
+   * @returns {void}
+   */
+  rememberSummary(sessionId, summary) {
+    if (isRecord(summary) === false) return
+    if (typeof summary.key !== 'string' || summary.key.length === 0) return
+    if (typeof summary.text !== 'string' || summary.text.length === 0) return
+    if (typeof summary.at !== 'number' || Number.isFinite(summary.at) === false) return
+    // A summary is the slowest fact this module ever receives: `warm` is not
+    // awaited and the model call may take twenty seconds, so it can arrive after
+    // the host has already said the session is over and a sweep has deleted the
+    // file. Reaching `entry()` in that state would build a fresh record, the
+    // write would land, and the file would come back as a document whose only
+    // content is a summary of a conversation nobody can open.
+    //
+    // Both halves are needed, and neither alone is the question. `condemned` is
+    // permanent for the process, so refusing on it alone would also refuse a
+    // session the host later resumed — the next event would rebuild that record
+    // and write its facts while this one path stayed silent, which is an
+    // inconsistency nobody watching the panel could explain. "No record in
+    // memory" alone is too wide the other way: `release` drops the record for
+    // every agent the host disposes, and a summary that arrives afterwards is
+    // writing about a session whose file is still there and still wanted.
+    //
+    // Together they name exactly the state after a sweep: the decision was made
+    // *and* nothing has claimed the id since. `flush`'s own comment treats a
+    // record appearing after a sweep as "the session came back", and it is
+    // right to — a live event is evidence. A summary is not evidence of
+    // anything, so it may not be the thing that brings the file back.
+    //
+    // `entry` refuses a condemned id, which is where the question belongs: every
+    // writer asks it, not just this one. Keeping a second copy of the rule here
+    // would be a branch whose only job is to agree with the other one.
+    const entry = this.entry(sessionId)
+    if (entry === undefined) return
+    entry.summary = normaliseSummary(summary)
+    this.schedule(sessionId)
   }
 
   /**
@@ -962,6 +1196,9 @@ class SessionState {
       servers,
       paths,
       sweep: entry.sweep === undefined ? undefined : { turn: entry.sweep.turn, coverage: entry.sweep.coverage },
+      // Rebuilt through the same shape the reader validates, so a field added
+      // to one side cannot silently stop being written by the other.
+      summary: entry.summary === undefined ? undefined : normaliseSummary(entry.summary),
       sequence: entry.sequence,
     }
   }
@@ -1150,6 +1387,7 @@ class SessionState {
       skills: stored.skills,
       tools: stored.tools,
       paths: stored.paths,
+      summary: stored.summary,
       previous: found.value.previous,
       turns: found.value.turns,
     })

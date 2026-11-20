@@ -282,6 +282,33 @@ function routeIdentity(config, sessionRoute) {
 }
 
 /**
+ * Whether a stored summary is the answer to the question being asked now.
+ *
+ * The key carries the turn number and a hash of the prompt body, so comparing
+ * keys is the whole test for "is this the same turn, rendered the same way" —
+ * a conversation that moved on, or a transcript that changed under a stale
+ * entry, both produce a different key and neither may reuse the old text.
+ *
+ * The route is compared separately, and only when both sides name one. A
+ * summary produced by one model and served under another is not wrong, exactly,
+ * but `reset()` treats a model switch as "the old answers are not mine", and a
+ * disk record that outlived that call would quietly undo it. Two absences,
+ * though, are not a mismatch: an unconfigured plugin resolves its route per
+ * session and can honestly have no identity to compare.
+ *
+ * @param {{ key: string, routeKey?: string } | undefined} stored - what was on disk.
+ * @param {string} key - the key being asked for.
+ * @param {string | undefined} routeKey - the route that would be used now.
+ * @returns {boolean} true when the stored text may be served as this turn's summary.
+ */
+function matchesStored(stored, key, routeKey) {
+  if (stored === undefined || stored === null) return false
+  if (stored.key !== key) return false
+  if (routeKey === undefined || stored.routeKey === undefined) return true
+  return stored.routeKey === routeKey
+}
+
+/**
  * Accumulate the text of one streamed response.
  *
  * The host's `BlockAssembler` would do this, but it lives in
@@ -405,11 +432,26 @@ class Summariser {
    * @param {() => any} deps.llm - returns the host's `llm` service, or undefined.
    * @param {() => object} deps.config - returns the live plugin config.
    * @param {(message: string) => void} [deps.log] - diagnostic sink.
+   * @param {(agentId: string) => object | undefined} [deps.stored] - the summary on disk for a session, if any.
+   * @param {(agentId: string, summary: object) => void} [deps.persist] - store a summary for a session.
    */
-  constructor({ llm, config, log }) {
+  constructor({ llm, config, log, stored, persist }) {
     this.llm = llm
     this.config = config
     this.log = log ?? (() => {})
+    /**
+     * Where a summary outlives this process.
+     *
+     * Both halves are optional and independent so that a caller without a store
+     * — every test that only cares about one call — behaves exactly as before:
+     * `stored` returns nothing and `persist` is never called.
+     *
+     * Kept as functions rather than a `SessionState` instance so that this
+     * module keeps asking two questions and knows nothing about the document
+     * they are stored in — the store owns the file format, this owns the text.
+     */
+    this.stored = typeof stored === 'function' ? stored : () => undefined
+    this.persist = typeof persist === 'function' ? persist : () => {}
     /** @type {Map<string, { text: string, at: number }>} */
     this.cache = new Map()
     /** @type {Map<string, Promise<object>>} in-flight calls, so one turn costs one call. */
@@ -547,6 +589,23 @@ class Summariser {
     // on every refresh would make the timestamp say nothing at all.
     if (hit !== undefined) return { enabled: true, text: hit.text, at: hit.at, cached: true }
 
+    // Then the copy that outlived the last process. Checked after memory rather
+    // than instead of it because memory is the same answer without a lookup, and
+    // before the failure memory because a stored success beats a remembered
+    // failure: the failure is a guess about the route, the text is evidence.
+    //
+    // A match is put into `cache` on the way out. Without that, every panel
+    // repaint after a restart would re-read the file and re-run the same two
+    // comparisons to reach the same answer.
+    const stored = this.stored(agentId)
+    if (matchesStored(stored, key, routeKey) === true) {
+      this.cache.set(key, { text: stored.text, at: stored.at })
+      // `cached` is the honest word for it — the reader is seeing text this
+      // process did not produce — and it is what keeps the panel from claiming
+      // the summary was written just now.
+      return { enabled: true, text: stored.text, at: stored.at, model: stored.model, cached: true }
+    }
+
     // Only a failure recorded on the route we would use now. A remembered
     // failure from a model the reader has just switched away from would keep
     // reporting that model's error, and the error text itself says to switch.
@@ -558,7 +617,7 @@ class Summariser {
     const running = this.inflight.get(key)
     if (running !== undefined) return running
 
-    const task = this.run({ key, body, signal, sessionRoute, routeKey }).finally(() => this.inflight.delete(key))
+    const task = this.run({ key, body, signal, sessionRoute, routeKey, agentId }).finally(() => this.inflight.delete(key))
     this.inflight.set(key, task)
     return task
   }
@@ -591,6 +650,8 @@ class Summariser {
    *
    * @param {object} input - the request.
    * @param {string} input.key - cache key.
+   * @param {string} input.agentId - the session the summary belongs to; where a
+   *   stored summary is filed.
    * @param {string} input.body - prompt body.
    * @param {AbortSignal} [input.signal] - cancellation.
    * @param {{ provider: string, model: string } | undefined} [input.sessionRoute] -
@@ -599,7 +660,7 @@ class Summariser {
    *   would use, recorded with any failure so a later route switch ignores it.
    * @returns {Promise<object>} the summary record.
    */
-  async run({ key, body, signal, sessionRoute, routeKey }) {
+  async run({ key, body, signal, sessionRoute, routeKey, agentId }) {
     // A caller who cancelled before the call started should not be charged for
     // it. `addEventListener` never fires for an abort that already happened, so
     // without this the request would run to completion for nobody.
@@ -646,6 +707,23 @@ ${TRANSCRIPT_CLOSE}` }],
       // One key, one answer: a remembered failure must not outlive the success
       // that replaced it, or evicting this cache entry would resurrect it.
       this.failed.delete(key)
+      // The whole point of the change this line belongs to: the text was paid
+      // for, and until it reached the disk a restart threw it away and bought it
+      // again. Written on success only — a failure is already remembered in
+      // memory for a minute and is not worth a disk write, and a cancellation is
+      // not an answer at all.
+      //
+      // After the in-memory bookkeeping, not before: if `persist` throws, the
+      // caller still gets its text, because the cache is already correct. The
+      // store's own write is fire-and-forget for the same reason.
+      try {
+        this.persist(agentId, { key, text: trimmed, at, model: `${route.provider}/${route.model}`, routeKey })
+      } catch (error) {
+        // A store that cannot write is a lost optimisation, not a failed
+        // summary. Logged once per failure so the next restart's mystery cost
+        // has an explanation in the log.
+        this.log(`the summary could not be stored: ${error?.message ?? error}`)
+      }
       if (this.cache.size > 64) {
         // Oldest-first eviction: the panel only ever asks about the last turn,
         // so anything beyond the newest few dozen entries is unreachable.
@@ -768,6 +846,7 @@ ${TRANSCRIPT_CLOSE}` }],
 
 export {
   Summariser,
+  matchesStored,
   MAX_SUMMARY_CHARS,
   MAX_INPUT_CHARS,
   SUMMARY_TIMEOUT_MS,

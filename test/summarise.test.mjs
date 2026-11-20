@@ -17,6 +17,7 @@ import {
   Summariser,
   collectText,
   finishFailure,
+  matchesStored,
   renderPromptBody,
   summaryKey,
   tidy
@@ -1063,6 +1064,220 @@ check('a reply under the cap is untouched', tidy('x'.repeat(MAX_SUMMARY_CHARS - 
     await summariser.summarise({ agentId: 'a', snapshot: { ...snapshot, turn: i, said: `turn ${i}` } })
   }
   check('the cache is bounded', summariser.cache.size <= 64, String(summariser.cache.size))
+}
+
+
+// ---------------------------------------------------------------------------
+// A summary that survived the process
+//
+// The cache in this module used to be the whole story, so every restart bought
+// every visible turn again: 2.8-4.0 seconds per session measured on the host.
+// The text is now written into the session document. These cases pin the three
+// questions that decide whether a stored text may be served: is it this turn,
+// is it this route, and what happens when neither side can name a route.
+// ---------------------------------------------------------------------------
+
+{
+  // The plain case, and the one the whole change exists for: a fresh process
+  // with an empty cache asks for a turn the disk already describes.
+  const llm = fakeLlm()
+  let stored = undefined
+  const summariser = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true }),
+    stored: () => stored,
+  })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  check('the first answer is fresh, not stored', first.cached === undefined, JSON.stringify(first))
+  check('and it took a model call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  // What a later process would find: the text the first one produced, filed
+  // under the key it was produced for.
+  stored = { key: `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`, text: 'From last week.', at: 1234, model: 'prov-a/model-a', routeKey: undefined }
+  const fresh = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), stored: () => stored })
+  const second = await fresh.summarise({ agentId: 'a', snapshot })
+  check('a stored answer is served without a call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  check('and the text is the stored one', second.text === 'From last week.', JSON.stringify(second))
+  check('and it says it was remembered', second.cached === true, JSON.stringify(second))
+  check('and the time is the time it was written', second.at === 1234, JSON.stringify(second))
+  // The second read must come from memory: otherwise every repaint after a
+  // restart re-reads the file and re-runs the comparisons to reach the answer
+  // it already had.
+  const third = await fresh.summarise({ agentId: 'a', snapshot })
+  check('a stored answer is cached in memory once found', fresh.cache.size === 1, String(fresh.cache.size))
+  check('and a third ask still costs nothing', second.cached === true && third.cached === true, JSON.stringify(third))
+}
+
+{
+  // A conversation that moved on is a different question. The key carries the
+  // turn number and a hash of the prompt, so a stored text for turn 3 must not
+  // answer turn 4 — the panel would describe the wrong turn in the right voice.
+  const llm = fakeLlm()
+  const stored = { key: 'a:2:deadbeef', text: 'An old turn.', at: 1234 }
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), stored: () => stored })
+  const answer = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a stored summary of another turn is not served', answer.text !== 'An old turn.', JSON.stringify(answer))
+  check('and the model is asked', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  // Same turn number, different transcript: the hash half of the key is what
+  // catches this, and it is the only half a turn counter cannot see.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), stored: () => undefined })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  const widened = { ...snapshot, paths: ['F:/a.js', 'F:/b.js'] }
+  const other = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true }),
+    stored: () => ({ key: `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`, text: first.text, at: 1 }),
+  })
+  const answer = await other.summarise({ agentId: 'a', snapshot: widened })
+  check('a rewritten turn is a different question', answer.cached === undefined, JSON.stringify(answer))
+  check('and it is asked again', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+}
+
+{
+  // The route comparison exists because `reset()` says a model switch means the
+  // old answers are not mine. A disk record that outlived that call would undo
+  // it silently — the panel would keep showing text the new model never wrote.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const key = `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`
+
+  const same = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true, summaryProvider: 'prov-a', summaryModel: 'model-a' }),
+    stored: () => ({ key, text: 'From model-a.', at: 5, routeKey: 'prov-a/model-a' }),
+  })
+  const served = await same.summarise({ agentId: 'a', snapshot })
+  check('a summary from the route in use is served', served.text === 'From model-a.', JSON.stringify(served))
+
+  const switched = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true, summaryProvider: 'prov-b', summaryModel: 'model-b' }),
+    stored: () => ({ key, text: 'From model-a.', at: 5, routeKey: 'prov-a/model-a' }),
+  })
+  const rejected = await switched.summarise({ agentId: 'a', snapshot })
+  check('a summary from a model no longer in use is not served', rejected.text !== 'From model-a.', JSON.stringify(rejected))
+  check('and the new route is asked', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  // Two absences are not a mismatch. A plugin with no summary model configured
+  // resolves its route per session and can honestly have no identity to compare;
+  // reading that as "not the same route" would make the stored text unusable for
+  // exactly the people who never pinned a model.
+  const llm = fakeLlm()
+  const key = `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`
+  const stored = { key, text: 'Filed without a route.', at: 9 }
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), stored: () => stored })
+  const answer = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a summary stored without a route is served when nobody names one', answer.text === 'Filed without a route.', JSON.stringify(answer))
+  check('and no call was made', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+{
+  // A remembered failure must not outlive the stored success that replaced it.
+  // The failure memory exists to stop paying for a route that is gone; text on
+  // disk is evidence that a call did succeed, so it wins. The order of these two
+  // checks is the decision, and reversing it would keep a session silent for a
+  // minute after every restart.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  let stored = undefined
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), stored: () => stored })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('the failure is remembered', summariser.failed.size === 1, String(summariser.failed.size))
+
+  // The same process, the same remembered failure, and now text on disk for the
+  // same turn — which is what a second host window writing the file looks like
+  // from here. The two checks are in this order deliberately: memory, then disk,
+  // then failure memory.
+  const key = `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`
+  stored = { key, text: 'A real summary.', at: 77 }
+  const answer = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a stored success beats a remembered failure for the same turn', answer.text === 'A real summary.', JSON.stringify(answer))
+  check('and it did not need a call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  // The write half. What gets persisted is what a later process needs to decide
+  // reuse: the key (which is turn + prompt hash), the text, when it was written,
+  // and the route that produced it.
+  const llm = fakeLlm()
+  const writes = []
+  const summariser = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true, summaryProvider: 'prov-a', summaryModel: 'model-a' }),
+    persist: (agentId, summary) => writes.push({ agentId, summary }),
+  })
+  const answer = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a produced summary is persisted', writes.length === 1, String(writes.length))
+  check('filed under the session that asked', writes[0]?.agentId === 'a', JSON.stringify(writes[0]?.agentId))
+  check('with the text the caller was given', writes[0]?.summary.text === answer.text, `${writes[0]?.summary.text} vs ${answer.text}`)
+  check('and the key that produced it', writes[0]?.summary.key === `a:${summaryKey(snapshot.turn, renderPromptBody(snapshot))}`, JSON.stringify(writes[0]?.summary.key))
+  check('and when it was written', writes[0]?.summary.at === answer.at, JSON.stringify(writes[0]?.summary.at))
+  // Without the route a model switch could not invalidate anything, because the
+  // reader would have nothing to compare.
+  check('and the route that produced it', writes[0]?.summary.routeKey === 'prov-a/model-a', JSON.stringify(writes[0]?.summary.routeKey))
+
+  // A cached answer must not be written again: the point of storing it is to
+  // stop the call, not to rewrite the same file on every repaint.
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('serving a cached answer writes nothing', writes.length === 1, String(writes.length))
+}
+
+{
+  // A failure is not a value and must not be written: the next turn has to be
+  // able to try again, and a remembered failure already covers the minute after.
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'quota exceeded' } } })
+  const writes = []
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }), persist: (agentId, summary) => writes.push(summary) })
+  await summariser.summarise({ agentId: 'a', snapshot })
+  check('a failed call persists nothing', writes.length === 0, String(writes.length))
+}
+
+{
+  // A store that cannot write is a lost optimisation, not a failed summary. The
+  // text was paid for; throwing it away because the disk was busy would charge
+  // the user twice for the same answer.
+  const llm = fakeLlm()
+  const logged = []
+  const summariser = new Summariser({
+    llm: () => llm,
+    config: () => ({ panelSummary: true }),
+    persist: () => { throw new Error('disk full') },
+    log: (message) => logged.push(message),
+  })
+  const answer = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a store that throws still returns the summary', answer.text === 'A summary.', JSON.stringify(answer))
+  check('and the failure to store is logged', logged.some((line) => String(line).includes('disk full')), JSON.stringify(logged))
+  check('and the answer is still cached in memory', summariser.cache.size === 1, String(summariser.cache.size))
+}
+
+{
+  // The two dependencies are optional and independent. Every existing caller
+  // constructs this object without them, and their behaviour has to be exactly
+  // what it was — a missing store is "nothing stored", not a crash.
+  const llm = fakeLlm()
+  const summariser = new Summariser({ llm: () => llm, config: () => ({ panelSummary: true }) })
+  const first = await summariser.summarise({ agentId: 'a', snapshot })
+  check('a summariser with no store still answers', first.text === 'A summary.', JSON.stringify(first))
+  check('and still caches in memory', summariser.cache.size === 1, String(summariser.cache.size))
+  const again = await summariser.summarise({ agentId: 'a', snapshot })
+  check('and serves the second ask from memory', again.cached === true, JSON.stringify(again))
+  check('without a second call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  // `matchesStored` is the single place that decides reuse, and the panel wiring
+  // is not the only reader of it. Each refusal has to hold on its own.
+  check('nothing stored is not a match', matchesStored(undefined, 'k', undefined) === false)
+  check('a summary of another turn is not a match', matchesStored({ key: 'other' }, 'k', undefined) === false)
+  check('the same key is a match', matchesStored({ key: 'k' }, 'k', undefined) === true)
+  check('a different route is not a match', matchesStored({ key: 'k', routeKey: 'x/y' }, 'k', 'a/b') === false)
+  check('the same route is a match', matchesStored({ key: 'k', routeKey: 'a/b' }, 'k', 'a/b') === true)
+  check('a stored summary with no route matches any route', matchesStored({ key: 'k' }, 'k', 'a/b') === true)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
