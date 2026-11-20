@@ -562,7 +562,7 @@ const mutations = [
     file: state,
     label: 'the first write after a restart forgets how much the sweep could see',
     suites: ['test/session-state.test.mjs'],
-    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {\n          current.sweep = state.sweep\n        }\n      }\n',
+    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        const theirs = state.sweep\n        if (mine === undefined || mine.turn === undefined) {\n          current.sweep = theirs\n        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n          current.sweep = theirs\n        } else if (theirs.turn === mine.turn) {\n          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n        }\n      }\n',
     to: '',
     why: 'A partial git scan is the one claim that keeps a short file list from reading as a clean one. Dropped on the way in, the next write states a complete coverage the sweep never claimed, and the panel stops caveating its own list exactly when it should.',
   },
@@ -570,7 +570,7 @@ const mutations = [
     file: state,
     label: 'a sweep this process ran loses to the one in the file',
     suites: ['test/session-state.test.mjs'],
-    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {\n          current.sweep = state.sweep\n        }\n      }\n',
+    from: '      if (state.sweep !== undefined) {\n        const mine = current.sweep\n        const theirs = state.sweep\n        if (mine === undefined || mine.turn === undefined) {\n          current.sweep = theirs\n        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n          current.sweep = theirs\n        } else if (theirs.turn === mine.turn) {\n          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n        }\n      }\n',
     to: '      if (state.sweep !== undefined) current.sweep = state.sweep\n',
     why: 'The merge has to have a direction, and it is by turn: the file is older than this process, so an unnumbered claim in memory is a scan this process ran after reading it. Unconditional assignment hands every read to a scan that has already been superseded, and a clean sweep can never be recorded.',
   },
@@ -578,17 +578,17 @@ const mutations = [
     file: state,
     label: 'a merge that lets the older claim win',
     suites: ['test/session-state.test.mjs'],
-    from: '        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {\n',
-    to: '        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn < mine.turn)) {\n',
-    why: 'Turn numbers are the only ordering these two claims have. Reversed, a caveat from turn seven replaces a complete scan from turn nine, and the panel keeps telling the user its file list may be partial after it stopped being partial.',
+    from: '        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n',
+    to: '        } else if (theirs.turn !== undefined && theirs.turn < mine.turn) {\n',
+    why: 'Turn numbers are the only ordering these two claims have. Reversed, a caveat from turn seven replaces a complete scan from turn nine, and the panel keeps telling the user its file list may be partial after it stopped being partial. The tie arm below it does not rescue this: a reversed comparison sends every strictly-newer file claim into the merge branch instead of replacing, so a stale partial turn keeps its number and only its coverage is weakened.',
   },
   {
     file: state,
     label: 'a merge that never lets the file speak',
     suites: ['test/session-state.test.mjs'],
-    from: '        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {\n',
-    to: '        if (mine === undefined) {\n',
-    why: 'A sweep in memory is not automatically newer: a restart reads the file, and the events that rebuild the record can carry a scan from before the one the file kept. Judging by ``is there one at all`` throws that away.',
+    from: '        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {\n',
+    to: '        } else if (false) {\n',
+    why: 'A sweep in memory is not automatically newer: a restart reads the file, and the events that rebuild the record can carry a scan from before the one the file kept. With this arm gone the file can only speak on an exact tie, so a caveat about a newer turn that the last process recorded is silently replaced by whatever this process measured earlier.',
   },
   {
     file: state,
@@ -634,7 +634,7 @@ const mutations = [
     file: state,
     label: 'a write revives a file the sweep deleted',
     suites: ['test/session-state.test.mjs'],
-    from: '    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined\n',
+    from: '    if (this.condemned.has(sessionId) && (known === undefined || hasFacts(known) === false)) return undefined\n',
     to: '',
     why: 'Every writer funnels through here, and several of them produce their fact long after the event that started them: a summary is a model call that can run for twenty seconds, and the git and scan callbacks are not awaited at all. Without the gate the first one to land after a prune writes the file back, and the sweep it was deleted by never runs again.',
   },
@@ -642,7 +642,7 @@ const mutations = [
     file: state,
     label: 'the gate only notices an id that has no record yet',
     suites: ['test/session-state.test.mjs'],
-    from: '    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined\n',
+    from: '    if (this.condemned.has(sessionId) && (known === undefined || hasFacts(known) === false)) return undefined\n',
     to: '    if (this.condemned.has(sessionId) && known === undefined) return undefined\n',
     why: 'This is the shape the review found: the panel polls the session it is showing, and reading a deleted session installs an empty record. A gate that asks ``is there a record`` is therefore already open by the time the twenty-second summary arrives, and the file comes back with nothing in it but the summary.',
   },
@@ -650,7 +650,7 @@ const mutations = [
     file: state,
     label: 'the gate refuses a session that came back with facts',
     suites: ['test/session-state.test.mjs'],
-    from: '    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined\n',
+    from: '    if (this.condemned.has(sessionId) && (known === undefined || hasFacts(known) === false)) return undefined\n',
     to: '    if (this.condemned.has(sessionId)) return undefined\n',
     why: 'A condemned id is not necessarily an empty one: another process that had not heard about the archive can write the file, and the panel poll reads it back. Refusing on the verdict alone discards the work already in the record and leaves the file frozen at whatever that other process wrote.',
   },
@@ -658,23 +658,49 @@ const mutations = [
     file: state,
     label: 'the gate trusts any record at all',
     suites: ['test/session-state.test.mjs'],
-    from: '    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined\n',
+    from: '    if (this.condemned.has(sessionId) && (known === undefined || hasFacts(known) === false)) return undefined\n',
     to: '    if (this.condemned.has(sessionId) && known === undefined) return undefined\n    if (known !== undefined) return known\n',
     why: 'The empty record is the thing that must stay reclaimable. Handing it back as if it were claimed makes the gate depend on whether the panel happened to poll, which is the ordering the whole fix exists to survive.',
   },
   {
+    file: state,
+    label: 'a write recreates a file somebody else has since removed',
+    suites: ['test/session-state.test.mjs'],
+    from: '    if (this.condemned.has(sessionId)) {\n      const still = await this.store.inspect(sessionId)\n',
+    to: '    if (false) {\n      const still = await this.store.inspect(sessionId)\n',
+    why: 'The gate asks whether the record holds facts, and a record that merged another process\'s facts does. That other process can then remove its own file — its sweep, its cleanup, a person with `rm` — and the facts in memory become facts about a file nobody wants. Only the disk can say it is gone, which is why the answer is not in the gate. Measured: without this, the file comes back holding a summary of a conversation both sweeps had agreed to delete.',
+  },
+  {
+    file: state,
+    label: 'an equal turn lets memory decide on its own',
+    suites: ['test/session-state.test.mjs'],
+    from: '          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }\n',
+    to: '          current.sweep = mine\n',
+    why: 'Two claims about the same turn cannot be ordered: one was measured before the process restarted, one after. Picking memory throws away the caveat the earlier process recorded, at exactly the restart boundary where that caveat is most likely to be the only evidence a sweep stopped early. The tie has to go through the coverage lattice, which keeps the weaker of the two.',
+  },
+  {
     file: index,
-    label: 'the resumed turn is never announced to the session state',
-    // Measured: without this line the plugin-level suite loses exactly the two
-    // assertions about the resumed turn's skill and MCP call, and the unit
-    // suites stay green. That asymmetry is the reason this mutation exists: the
-    // gate and its `noteLive` are both correct in the class, and the only thing
-    // that can be wrong is whether anything ever calls the lift at the one
-    // moment it is true.
+    label: 'a skill loaded mid-turn never lifts a sweep verdict',
+    // Measured: without this line the plugin-level suite loses exactly the
+    // assertion about the skill an attached turn loaded, and nothing else moves.
+    // Both lines carry the same call, so the anchor includes the line below it:
+    // `noteLive(agentId)` on its own appears twice in this file.
     suites: ['test/persistence.test.mjs'],
-    from: '      sessionState.noteLive(agentId)\n',
-    to: '',
-    why: 'A sweep can take a file away from a conversation the host then opens again. Skills and MCP calls are written *during* the turn, so a lift at `turn/end` arrives after the facts are already refused; the announcement has to be at `turn/start`, which is the host saying the conversation is running.',
+    from: '    sessionState.noteLive(agentId)\n    sessionState.rememberSkill(agentId, name, via)\n',
+    to: '    sessionState.rememberSkill(agentId, name, via)\n',
+    why: 'A host can attach to a conversation while its turn is already running, so the first thing this process hears is a tool call and no `turn/start` will ever arrive for that turn. A lift only at `turn/start` therefore drops every skill loaded in a turn this process joined late.',
+  },
+  {
+    file: index,
+    label: 'an MCP call mid-turn never lifts a sweep verdict',
+    // A separate case, and separate on purpose: in one turn that loads a skill
+    // and then calls a server, the skill's lift is still standing when the server
+    // call arrives, so deleting this line changes nothing observable. The
+    // mutation survived when the test was written as a single turn.
+    suites: ['test/persistence.test.mjs'],
+    from: '    sessionState.noteLive(agentId)\n    sessionState.rememberTool(agentId, toolName)\n',
+    to: '    sessionState.rememberTool(agentId, toolName)\n',
+    why: 'Same shape as the skill path and the same reason: an MCP call is the host dispatching something now, not a continuation this process scheduled. Without the lift, a conversation attached mid-turn records the server it reached only if something else happened to lift the verdict first.',
   },
   {
     file: state,

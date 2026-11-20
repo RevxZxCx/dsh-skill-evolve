@@ -1102,6 +1102,129 @@ console.log('persistence — the panel describes a conversation, not a process')
 }
 
 // ---------------------------------------------------------------------------
+// A conversation attached mid-turn keeps what that turn does
+// ---------------------------------------------------------------------------
+//
+// The previous test resumes a session the ordinary way: `turn/start` arrives,
+// and that is what lifts the sweep's verdict. This one covers the shape that is
+// left over, and it is not hypothetical — a host can attach to a session while a
+// turn is already running, and then the first thing this process ever hears
+// about the conversation is a tool call. No `turn/start` will ever arrive for
+// that turn, so a lift that lived only there would leave every skill and every
+// MCP call in it dropped at the gate, and `turn/end` would write a file that
+// describes none of them.
+//
+// What separates these facts from the late callbacks the verdict exists to
+// refuse is where they came from, not when they arrived. A tool call is the host
+// dispatching something now. The git callback, the directory scan and the
+// summary call are continuations this process scheduled earlier, and they are
+// the reason a verdict is permanent in the first place.
+//
+// There are two cases rather than one, and that is the whole point. A single
+// turn that loads a skill and then calls an MCP server tests only the first
+// path: the skill's lift is still standing when the MCP call arrives, so the
+// MCP call rides on it, and deleting the MCP path's own lift changes nothing
+// observable. The mutation survived when this was written as one case. Each path
+// therefore gets a turn in which it is the *only* live event.
+async function attachMidTurn(tag) {
+  const root = await makeTempRoot(`dsse-persist-${tag}-`)
+  process.env.DSH_HOME = root
+  const archived = []
+  const services = new Map()
+  services.set('workspaceRegistry', {
+    archivedSessionIds: archived,
+    async sessionKnown() {
+      return true
+    }
+  })
+  const realSetInterval = globalThis.setInterval
+  const ticks = []
+  globalThis.setInterval = (callback, ms) => {
+    ticks.push({ callback, ms })
+    return { id: undefined }
+  }
+  let host
+  try {
+    host = fakeHost(services)
+    applyPanel(host.ctx, PanelConfig({ panelSummary: false }))
+  } finally {
+    globalThis.setInterval = realSetInterval
+  }
+
+  const session = fakeSession(`session-${tag}`)
+  host.agents.set(session.id, session)
+  work(host, session, { skill: 'before-archive', said: 'first turn.', turn: 1 })
+  const path = join(stateDir(root), `${session.id}.json`)
+  const seeded = await waitForFile(path)
+
+  archived.push(session.id)
+  const sweep = ticks.find((tick) => tick.ms === 60 * 1000)
+  if (sweep !== undefined) sweep.callback()
+  const deadline = Date.now() + 4000
+  while (Date.now() < deadline && existsSync(path)) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  return { host, session, path, root, seeded, removed: existsSync(path) === false, swept: sweep !== undefined }
+}
+
+{
+  const run = await attachMidTurn('skill-first')
+  check('a file existed before the sweep', run.seeded === true, 'missing')
+  check('the plugin registered a one-minute sweep', run.swept === true, 'none')
+  check('and the sweep removed the archived conversation', run.removed === true, `the file at ${run.path} survived`)
+
+  // No `turn/start`. The turn this process is attached to was already running,
+  // and the first thing it hears is a skill load.
+  run.host.emit('session/event', run.session.session, {
+    type: 'tool/call',
+    seq: 200,
+    time: Date.now(),
+    data: { turn: 2, step: 1, callId: 'c-mid-skill', name: 'skill', arguments: JSON.stringify({ name: 'attached-mid-turn' }) }
+  })
+  run.host.emit('session/event', run.session.session, {
+    type: 'turn/end',
+    seq: 201,
+    time: Date.now(),
+    data: { turn: 2, reason: { kind: 'completed' } }
+  })
+  check('the mid-turn attachment wrote a file', await waitForFile(run.path), 'missing')
+  const written = await new SessionStore({ root: stateDir(run.root) }).read(run.session.id)
+  check(
+    'the skill the attached turn loaded is in the file',
+    written?.skills?.['attached-mid-turn'] !== undefined,
+    JSON.stringify(written?.skills)
+  )
+}
+
+{
+  const run = await attachMidTurn('mcp-first')
+  check('a file existed before the sweep', run.seeded === true, 'missing')
+  check('the plugin registered a one-minute sweep', run.swept === true, 'none')
+  check('and the sweep removed the archived conversation', run.removed === true, `the file at ${run.path} survived`)
+
+  // The same attachment, with an MCP call as the only live event.
+  run.host.emit('session/event', run.session.session, {
+    type: 'tool/call',
+    seq: 300,
+    time: Date.now(),
+    data: { turn: 2, step: 1, callId: 'c-mid-mcp', name: 'mcp__fs__read', arguments: '{}' }
+  })
+  run.host.emit('session/event', run.session.session, {
+    type: 'turn/end',
+    seq: 301,
+    time: Date.now(),
+    data: { turn: 2, reason: { kind: 'completed' } }
+  })
+  check('the mid-turn attachment wrote a file', await waitForFile(run.path), 'missing')
+  const written = await new SessionStore({ root: stateDir(run.root) }).read(run.session.id)
+  check(
+    'the MCP server the attached turn called is in the file',
+    Array.isArray(written?.tools) && written.tools.includes('mcp__fs__read'),
+    JSON.stringify(written?.tools)
+  )
+}
+
+// ---------------------------------------------------------------------------
 // A sweep that never answers must not be able to stop the turn being written
 // ---------------------------------------------------------------------------
 //

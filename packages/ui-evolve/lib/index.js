@@ -361,6 +361,13 @@ export function apply(ctx, config, options) {
     // `SessionState` now, because the same rules have to hold for a state read
     // back off disk — a rule enforced only on the way in would be a rule that
     // changes depending on whether the process had restarted.
+    //
+    // A load is a live event from the host, not a continuation this process
+    // scheduled, so it is its own evidence that the conversation is running.
+    // That matters when this process attached mid-turn: it never saw the
+    // `turn/start` that would otherwise lift a sweep's verdict, and without
+    // this line every load in that turn would be dropped at the gate.
+    sessionState.noteLive(agentId)
     sessionState.rememberSkill(agentId, name, via)
     // Both the tool path and the `/name` gesture path end here, which is why the
     // bump is here and not in either caller: a second copy would be a second
@@ -479,10 +486,19 @@ export function apply(ctx, config, options) {
       // did `cd` first then names a file that never existed.
       transcripts.record(agentId, event, workspaceFor(session))
       // A new turn is the host saying this conversation is running, which is
-      // newer testimony than a sweep that judged it gone. It has to be said here
-      // and not at `turn/end`: the skills and MCP servers this turn records are
-      // written while it runs, and a resumed session would lose all of them to
-      // the gate before the turn was over.
+      // newer testimony than a sweep that judged it gone.
+      //
+      // This line is now a backstop rather than the mechanism, and it is worth
+      // saying so instead of letting the comment claim more than the tests can
+      // show. The two writers that actually land mid-turn -- the skill load and
+      // the MCP call -- lift the verdict themselves, because a host can attach
+      // to a conversation while a turn is already running, and then no
+      // `turn/start` ever arrives for that turn. Removing this line therefore
+      // changes nothing observable today: the mutation was measured to survive
+      // and was removed from the script rather than left there as a claim of
+      // coverage. It stays because a future event that writes mid-turn would
+      // otherwise be dropped silently at the gate, and silent data loss is a
+      // worse price than one unexercised line.
       sessionState.noteLive(agentId)
       // The panel's `turn` field is read from the transcript that just moved, so
       // a fresh turn is a visible change even before anything happens inside it.
@@ -687,6 +703,13 @@ export function apply(ctx, config, options) {
     // The whole tool name, not just the server. The reader splits it, so this
     // side never has to decide what a bare string means — and it can count how
     // many tools each server actually contributed.
+    //
+    // The lift comes first and for the same reason as the skill path: a call
+    // being dispatched right now is the host saying the conversation is
+    // running. The facts that must *not* lift a verdict are the ones this
+    // process scheduled for later — the git and scan callbacks, the summary
+    // call — and none of them arrive through here.
+    sessionState.noteLive(agentId)
     sessionState.rememberTool(agentId, toolName)
     // `rememberTool` is the only writer of the panel's MCP module, and this is
     // its only call site, so the bump belongs here rather than in a second

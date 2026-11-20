@@ -5609,3 +5609,41 @@ transcript store。修法是在 `rememberSummary` 里查一次 `condemned`。其
 2. 摘要归一化的三处等价（`document()` / `normaliseSummary` 空串 `model` / `rememberSummary` 存原始值）
    没有断言守着，审查的变异实测三条 0 红。补它需要先定「空白 model 算不算已归一化」，属产品判断
 3. 「切会话监控列不跟随」仍记**有待观察**（用户 m12367），SSE 轮次结束即时更新那半从未单独验证过
+
+## 2026-11-20 · 第三轮审查之后：门问什么、文件还在不在、这件事是谁在派发
+
+第三轮审查（R-107）交回两条 must-fix、四条 should-fix。两条 must-fix 我都独立复现过再修（`F:/dsh-plugin/.tmp-test/probe_mf2.mjs`），没有直接采信。
+
+### 改了什么
+
+| 问题 | 改法 | 证据 |
+| --- | --- | --- |
+| 门信任读取器填不满的记录：foreign 与「读不懂」两条分支装空记录却不设 `empty`，迟到写入放行并整体覆盖别人的文件 | 判据 `known.empty === true` → `hasFacts(known) === false` | 修前 `RESURRECTED by us? true`、别人的 `fromOtherBuild` 技能被抹掉；修后 `other build intact? true` / `RESURRECTED by us? false` |
+| 记录有事实、文件后来被别人删掉，仍会凭记忆重建 | `flush()` 写盘前对**已裁决** id 查 `inspect`，`absent` 停手 | 修前 `RESURRECTED by us? true`；修后 `false` |
+| 同 turn 的 sweep 合并由内存单方面说了算，与 `rememberSweep` 的「同 turn 可纠正」矛盾 | 走 `mergeCoverage`，取更弱者 | `{"turn":7,"coverage":"complete"}` → `{"turn":7,"coverage":"partial"}` |
+| 中途挂接（宿主在回合已跑起来后才交接）：没有 `turn/start`，整轮的技能与 MCP 被门口拒光 | `noteLive` 接到技能与 MCP 两条宿主实时事件入口 | 删任一处 → persistence 各红 1 条；两处都删 → 红 2 条 |
+| `document()` 里第三次 `normaliseSummary` 是不可达防御层 | 删掉，`summary: entry.summary` | 审查者变异实测：删掉 0 条断言变色 |
+
+### 一条被删掉的变异，和它说的实话
+
+新加两处抬裁决之后，「删掉 `turn/start` 的 `noteLive`」这条变异**存活**——今天所有会在回合中段落盘的写者都要先经过那两条入口，它们自己已经抬过裁决。我没有留着它假装有覆盖：删掉条目、计数 74 → 73，并在源码那行上方写明它现在是 backstop 而不是机制，代码留着给将来可能新增的回合中段写者兜底。
+
+### 一条测试的分辨率问题（第二次踩）
+
+给「中途挂接」写的第一版是一个回合里先加载技能再调 MCP，绿了，但删掉 MCP 那处抬裁决**还是绿的**——技能先到已经把裁决抬起来了。拆成两个回合、各自只有一条路径作为唯一实时事件之后，两条变异各自被单独杀死。**一个用例只允许一条救援通道。**
+
+### 数字
+
+- 全量 `node test/run.mjs` → **4376 passed / 0 failed**
+- `scripts/mutate-persistence.mjs` → **73 killed / 0 survived / 0 not applied / 0 crashed**
+- `scripts/mutate-checklist-panel.mjs` → **148 killed / 0 survived / 0 not applied**
+- `scripts/mutate-language-and-files.mjs` → **230 killed / 0 survived / 0 not applied**
+- `test/mutations.test.mjs` → **48 passed**
+- `test/session-state.test.mjs` **391**；`test/persistence.test.mjs` **93**；六个改动文件，CR 全为 0
+
+### 尚未做
+
+1. **真机没验。** 活宿主仍在跑旧代码：`/panel` 首次 3017ms、后续 5ms，但磁盘 `hasSummary: false`。要看到效果必须重启宿主。
+2. **审查者的一条结论是错的**：它报 `test/run.mjs` 有失败仍退出 0，实际是 `process.exit(failed === 0 ? 0 : 1)`。不独立复现就采纳，会把假缺陷写进文档。
+3. `keepsDocument` 忽略 `servers`、`dropIfOrphan` 读原始信封而 `hasFacts` 读 `entry.snapshot`——审查者列为小问题，今天都不可达，未改。
+

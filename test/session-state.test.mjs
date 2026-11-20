@@ -992,6 +992,120 @@ for (const reason of ['gone', 'archived']) {
 }
 
 // ---------------------------------------------------------------------------
+// A verdict is not the same question as "is there a record"
+// ---------------------------------------------------------------------------
+//
+// The gate used to ask whether the record carried `empty`. Only one of the three
+// readers sets that flag: the one that found nothing on disk. The other two — a
+// file belonging to another build, and a file whose envelope is ours but whose
+// body is not — install a record with no flag at all, holding nothing. Asking
+// for `empty` therefore said "this record is claimed" about two records that
+// hold nothing, and a late write replaced a file another build owns.
+//
+// The file stays on disk in this test on purpose. That is what makes it the
+// gate's own case: `flush` also refuses to recreate a file a sweep removed, so a
+// test whose file is gone can pass with the gate broken. Here the sweep deleted
+// our file and somebody else wrote a new one under the same name, so the only
+// thing standing between the late write and their bytes is the gate.
+
+{
+  const { state, store, root } = await fixture()
+  try {
+    state.rememberSkill('theirs', 'victim', 'tool')
+    await state.flush('theirs')
+    await state.prune({ known: async () => false })
+    check('unreadable: the sweep removed our file', (await store.read('theirs')) === undefined, JSON.stringify(await store.read('theirs')))
+
+    // Another build owns the name now. Its `state` is a version this build
+    // cannot read, which is the `foreign`... no — it parses and the envelope is
+    // ours, so it is the *unreadable body* branch. Both branches behave the same
+    // at the gate, and this one is reachable without a second version constant.
+    const path = store.pathFor('theirs')
+    const theirs = {
+      version: 1,
+      session: 'theirs',
+      updated: '2026-01-01T00:00:00.000Z',
+      state: 99,
+      skills: { fromThem: { via: 'tool', at: 5 } },
+    }
+    await writeFile(path, JSON.stringify(theirs), 'utf8')
+
+    // The poll installs a record for it: `loaded`, and holding nothing.
+    await state.load('theirs')
+    const record = state.bySession.get('theirs')
+    check('unreadable: the poll installs a record', record !== undefined, String(record))
+    check('unreadable: the record holds nothing', record !== undefined && record.skills.size === 0 && record.tools.size === 0 && record.summary === undefined, JSON.stringify({ skills: record?.skills.size, tools: record?.tools.size }))
+    check('unreadable: and the flag the old gate asked for is not set', record?.empty !== true, String(record?.empty))
+
+    // The late write. It must be refused, and the refusal has to leave their
+    // file exactly as it was.
+    state.rememberSummary('theirs', { key: 'theirs:1:abc', text: 'Late text.', at: 11 })
+    await state.flush('theirs')
+
+    const after = JSON.parse(await readFile(path, 'utf8'))
+    check('unreadable: their skills are still there', after.skills?.fromThem !== undefined, JSON.stringify(after.skills))
+    check('unreadable: our summary was not written into their file', after.summary === undefined, JSON.stringify(after.summary))
+    check('unreadable: and the late fact did not join the record either', state.bySession.get('theirs')?.summary === undefined, JSON.stringify(state.bySession.get('theirs')?.summary))
+  } finally {
+    await done(root)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// A record with facts does not recreate a file that has since gone
+// ---------------------------------------------------------------------------
+//
+// The gate lets a record with facts through on purpose: another process that had
+// not heard about the archive can write real facts, and the poll reads them back.
+// But that other process can then remove its own file — its own sweep, its own
+// cleanup, a user with `rm`. The facts in memory are then facts about a file
+// nobody wants, and writing them back creates it again. `hasFacts` cannot see
+// this, because the record genuinely does hold facts; only the disk can say the
+// file is gone, so `flush` asks it.
+
+{
+  const { state, store, root } = await fixture()
+  try {
+    state.rememberSkill('merged', 'victim', 'tool')
+    await state.flush('merged')
+    await state.prune({ known: async () => false })
+
+    const path = store.pathFor('merged')
+    await writeFile(
+      path,
+      JSON.stringify({
+        version: 1,
+        session: 'merged',
+        updated: '2026-01-01T00:00:00.000Z',
+        state: 2,
+        turns: 4,
+        skills: { elsewhere: { via: 'tool', at: 3 } },
+        tools: [],
+        servers: {},
+        paths: {},
+        sequence: 3,
+      }),
+      'utf8'
+    )
+
+    await state.load('merged')
+    check('facts-then-gone: the other process\'s facts are in memory', state.skillsUsed('merged')?.has('elsewhere') === true, JSON.stringify([...(state.skillsUsed('merged') ?? [])]))
+    check('facts-then-gone: so the record is not empty', state.bySession.get('merged')?.empty !== true, String(state.bySession.get('merged')?.empty))
+
+    // Their cleanup removes it.
+    await rm(path, { force: true })
+
+    state.rememberSummary('merged', { key: 'merged:1:def', text: 'Late text.', at: 12 })
+    await state.flush('merged')
+
+    check('facts-then-gone: the file does not come back', (await store.read('merged')) === undefined, JSON.stringify(await store.read('merged')))
+    check('facts-then-gone: and nothing is left in the directory', (await store.list()).length === 0, JSON.stringify(await store.list()))
+  } finally {
+    await done(root)
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A write that lands after the session was pruned does not put the file back
 // ---------------------------------------------------------------------------
 
@@ -2415,6 +2529,31 @@ for (const reason of ['gone', 'archived']) {
   third.rememberSweep('merges', 5, 'complete')
   await third.load('merges')
   check('this process sweep beats the file older caveat', third.sweepSeen('merges')?.coverage === 'complete', JSON.stringify(third.sweepSeen('merges')))
+  await third.flush('merges')
+
+  // The two claims can name the same turn. Neither can then prove it is newer:
+  // both measured turn 3, one before the process restarted and one after, and
+  // the turn number is the only ordering either of them has. Whichever side is
+  // picked by habit, the other one's caveat disappears — and the file's caveat
+  // is the one that only exists because a walk really did stop early. So the tie
+  // goes through the coverage lattice and keeps the weaker claim, which is the
+  // same answer `rememberSweep` gives two claims about one turn.
+  const fourth = new SessionState({ store, now: () => 11000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
+  fourth.rememberSweep('merges', 5, 'complete')
+  await fourth.flush('merges')
+  const tied = new SessionState({ store, now: () => 12000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
+  tied.rememberSweep('merges', 5, 'partial')
+  await tied.load('merges')
+  check('an equal turn keeps the weaker claim', tied.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(tied.sweepSeen('merges')))
+  check('and still names that turn', tied.sweepSeen('merges')?.turn === 5, JSON.stringify(tied.sweepSeen('merges')))
+
+  // Written down first, or the next state reads the pair the tie test started
+  // from rather than the merged one, and the other direction is never exercised.
+  await tied.flush('merges')
+  const other = new SessionState({ store, now: () => 13000, snapshotOf: () => ({ turns: 5, previous: null }), restore: () => {}, delayMs: 100000 })
+  other.rememberSweep('merges', 5, 'complete')
+  await other.load('merges')
+  check('the same tie in the other direction keeps it too', other.sweepSeen('merges')?.coverage === 'partial', JSON.stringify(other.sweepSeen('merges')))
   await done(root)
 }
 

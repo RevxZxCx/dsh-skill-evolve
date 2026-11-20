@@ -402,26 +402,54 @@ Three modules, top to bottom:
    and for a sweep to remove its file — but it is not the only one: a git reading
    and a directory scan are not awaited either. So the refusal lives in `entry()`,
    the one funnel every writer goes through, rather than in the one writer that
-   was noticed first. A sweep that removes a file records the verdict, and any
-   later write for that id is dropped until the host says the conversation is
-   running again.
+   was noticed first.
 
-   That last clause is the whole difficulty, and getting it wrong was a bug. The
-   verdict has to be lifted at `turn/start`, not only at `turn/end`: skills and
-   MCP calls are written *during* a turn, so a resumed conversation used to lose
-   every one of them to a verdict that would not be lifted until the turn was
-   already over. And "lifted" cannot mean "any write from a live session" — the
-   late git and scan callbacks are live too, they just belong to a turn that has
-   ended. The turn boundary is the only thing that distinguishes a conversation
-   the host reopened from an echo of one it closed.
+   The question that funnel asks is not "is this id still valid" but "does the
+   record I am about to overwrite hold anything worth keeping". That is the same
+   question `document()`, `flush()` and `dropIfOrphan()` already ask, and it is
+   the one that survives the awkward case: a file written by a different build,
+   or one whose body we cannot parse, still produces a record — an empty one —
+   and an empty record must not be read as permission to replace somebody else's
+   file. The mirror image is also true: a record that *does* hold facts proves
+   the conversation was alive recently, so a write carrying new facts is allowed
+   even while the verdict stands.
+
+   Facts in memory, though, cannot tell you what is on the disk now. A file the
+   other process wrote can be swept away again after we read it, and then our
+   late write would rebuild it out of our half of the story alone. So before a
+   dropped-id write is flushed, the file itself is inspected one more time, and
+   an absent file ends the write. Only that verdict stops it: a file that is
+   still there, or one we cannot read, is not ours to decide about.
+
+   That last clause is the whole difficulty, and getting it wrong was a bug in
+   two directions. The verdict has to be lifted *while a turn is running*, not
+   when it ends: skills and MCP calls are written during the turn, so a resumed
+   conversation used to lose every one of them to a verdict that would not be
+   lifted until the turn was already over. And "lifted" cannot mean "any write
+   from a live session" — the late git and scan callbacks are live too, they
+   just belong to a turn that has ended.
+
+   What separates the two is not a moment but a source. A skill load and an MCP
+   call are the host saying "this conversation is running right now"; a late
+   summary, a late git reading and a late scan are continuations this process
+   scheduled itself, and a continuation has no claim to being current. So the
+   lift is attached to those two host-dispatched events, which also covers the
+   case that first broke it: a host may hand the plugin a conversation whose
+   turn is *already* running, and then there is no `turn/start` to lift
+   anything. `turn/start` is still there as a backstop for a future writer that
+   arrives mid-turn by some other route — it is not what makes the current ones
+   work, and a mutation that deletes it survives, which is why it is described
+   here as a backstop rather than counted as covered.
 
    The merge that runs when an event arrives before the first read used to carry
    the file's skills, files and snapshot into memory but not its `summary` or its
    `sweep` — so the *first write after a restart* erased what the previous
    process had paid for and what it had been able to see. Both are carried now,
-   but they do not share a rule: a summary is replaced whole and has no ordering,
-   so memory wins when it has one; a sweep counts turns, so the newer claim wins
-   whichever side it came from.
+   but they do not share a rule. A summary is replaced whole and has no ordering,
+   so memory wins when it has one. A sweep counts turns, so the newer claim wins
+   whichever side it came from — and when both sides claim the same turn, neither
+   gets to decide: the merge keeps whichever coverage saw less, because a turn
+   corrected in two places is a turn we are less sure about, not more.
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question

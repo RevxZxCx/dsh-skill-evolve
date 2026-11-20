@@ -39,6 +39,7 @@
  */
 
 import { SessionStore } from './session-store.js'
+import { mergeCoverage } from './coverage.js'
 
 /**
  * How long an event may sit in memory before it is written.
@@ -492,12 +493,22 @@ class SessionState {
     // mark, because a turn ending is the host saying this conversation just did
     // work, which is newer testimony than the sweep's.
     //
-    // The `empty` test and the record test are one question asked once. Written
-    // as two branches — "return a record that has facts", then "return any
-    // record" — the first is unreachable with a different answer, because a
-    // record that has facts is also a record. A branch no input can take is a
-    // branch no test can hold, so it is not written here.
-    if (this.condemned.has(sessionId) && (known === undefined || known.empty === true)) return undefined
+    // The test is `hasFacts`, not `empty`. `empty` is written by exactly one
+    // reader — `readInto`'s "nothing on disk" branch — and left undefined by the
+    // other two, which install a record for a file this build cannot read at all
+    // (`foreign`) or can read the envelope of but not the body. Both of those
+    // records hold nothing, and both used to slip past a test for `empty ===
+    // true`, so a late write replaced a file another build owns with a document
+    // holding only what arrived after the sweep. Asking "does this record hold
+    // anything" is the question the gate actually means, and it is the same
+    // question `document`, `flush` and `dropIfOrphan` ask.
+    //
+    // The record test and the fact test are one question asked once. Written as
+    // two branches — "return a record that has facts", then "return any record"
+    // — the first is unreachable with a different answer, because a record that
+    // has facts is also a record. A branch no input can take is a branch no test
+    // can hold, so it is not written here.
+    if (this.condemned.has(sessionId) && (known === undefined || hasFacts(known) === false)) return undefined
     if (known !== undefined) return known
     let entry
     // An id the store will not turn into a path is an id whose state could never
@@ -752,10 +763,23 @@ class SessionState {
       // written by the last process before it exited. So the same rule as the
       // writer: an unnumbered claim yields to a numbered one, and a numbered one
       // yields to a newer turn.
+      // Equal turns do not pick a winner, because neither side can prove it is
+      // newer: both measured the same turn, one before the process restarted and
+      // one after. `mergeCoverage` is the answer the rest of the codebase uses
+      // for two claims about the same interval — it keeps the weaker one, since
+      // what the reader needs is what *both* measurements could see. Falling
+      // back to "memory wins ties" would make the file's caveat disappear at
+      // exactly the restart boundary where it is most likely to be the only
+      // record of a partial sweep.
       if (state.sweep !== undefined) {
         const mine = current.sweep
-        if (mine === undefined || mine.turn === undefined || (state.sweep.turn !== undefined && state.sweep.turn > mine.turn)) {
-          current.sweep = state.sweep
+        const theirs = state.sweep
+        if (mine === undefined || mine.turn === undefined) {
+          current.sweep = theirs
+        } else if (theirs.turn !== undefined && theirs.turn > mine.turn) {
+          current.sweep = theirs
+        } else if (theirs.turn === mine.turn) {
+          current.sweep = { turn: mine.turn, coverage: mergeCoverage(mine.coverage, theirs.coverage) }
         }
       }
       current.empty = false
@@ -1196,9 +1220,15 @@ class SessionState {
       servers,
       paths,
       sweep: entry.sweep === undefined ? undefined : { turn: entry.sweep.turn, coverage: entry.sweep.coverage },
-      // Rebuilt through the same shape the reader validates, so a field added
-      // to one side cannot silently stop being written by the other.
-      summary: entry.summary === undefined ? undefined : normaliseSummary(entry.summary),
+      // Handed over as it stands, because `entry.summary` cannot be anything but
+      // normalised: it is written in exactly two places and both of them are the
+      // reader — `rememberSummary` and the `readInto` merge, which takes the
+      // value `readSummary` already rebuilt. Running the same five-field
+      // projection again here was defensive code with no input that could reach
+      // it, and a second copy of a shape is how the two copies drift. The
+      // invariant is worth stating instead of re-checking: nothing else assigns
+      // this field.
+      summary: entry.summary,
       sequence: entry.sequence,
     }
   }
@@ -1286,6 +1316,27 @@ class SessionState {
       // the file instead of the flag.
       if (entry.empty === true) await this.dropIfOrphan(sessionId)
       return
+    }
+    // A record that holds facts can still be a record about a file that is gone.
+    // The order is ordinary, not exotic: a sweep condemns the id, another
+    // process writes facts under the same name, this process's poll merges them
+    // in — which is required, they are real facts — and then that process's own
+    // cleanup removes the file. The gate above lets this write through, because
+    // the record does hold facts. Without the check below, the write recreates a
+    // file both sweeps had agreed to remove.
+    //
+    // Asked only for a condemned id: for any other, the write is the point and
+    // an extra `stat` on every flush would be a per-write cost for no answer.
+    // `condemned` is the only thing that can say "somebody decided against this
+    // file" after the fact, and it is exactly what the sweep left behind.
+    if (this.condemned.has(sessionId)) {
+      const still = await this.store.inspect(sessionId)
+      // Only `absent` stops the write. A file that is still there, or one this
+      // build cannot read, is not ours to decide about: the first means the
+      // sweep's unlink has not landed yet and the write is about to be the
+      // survivor, the second belongs to another build and the last-write-wins
+      // rule still applies to it.
+      if (still.kind === 'absent') return
     }
     entry.writing = this.store
       // One `updated` format across both writers. `SessionStore.write` stamps an

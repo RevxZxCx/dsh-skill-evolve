@@ -4390,3 +4390,55 @@ lift at turn/end only: skills=[]                                      tools=[]
 - `test/session-state.test.mjs`：新增 `resumed-mid-turn` / `resumed-no-lift` 两块
 - `test/persistence.test.mjs`：新增插件级「恢复会话第一轮」块，驱动真清扫
 - `scripts/mutate-persistence.mjs` + `test/mutations.test.mjs`：新增接线变异，计数 70
+
+## R-107 · 第三轮审查：两条 must-fix 都不是「摘要的那条路径」，而是门本身（并自查出一条前两轮都没提的缺陷）
+
+第一轮审查（R-106）修了 `rememberSummary` 的局部守卫；第二轮把它下沉进 `entry()`。第三轮派出去的审查者（`ee7413d7`）第四次才把结论交回来，交回来时指出我的材料已经落后一版——它改按实时树审。它报 2 个 must-fix、4 个 should-fix，其中两条 must-fix 我都独立复现了，确认成立。
+
+### MUST-FIX 1 · 门信任了读取器填不满的记录
+
+`empty` 是「我看过，磁盘上没有东西」的观察，只在 `readInto` 的 absent 分支被设成 `true`。另外两个分支——文件是别的构建写的（foreign）、信封是我们的但正文读不懂——都会装一条 `loaded: true` 的记录而**不设 `empty`**。于是门判 `known.empty === true` 时两半都为假，迟到写入被放行，`store.write` 把别人的文件整体替换掉。
+
+判据改成 `hasFacts(known) === false`。这不是换个写法：`hasFacts` 正是 `document()`、`flush()`、`dropIfOrphan()` 已经在问的同一个问题——「这条记录里有没有值得写下去的东西」。用它，门和下游三处问的是同一件事；用 `empty`，门问的是第四件事。
+
+修法会动到 `scripts/mutate-persistence.mjs` 里四处字面锚点，不改 `test/mutations.test.mjs` 会直接失败——**改实现之后必须重核变异锚点，这一步不能省。**
+
+### MUST-FIX 2 · 记录带事实，文件后来消失，仍然复活
+
+上一轮的守护逻辑是「记录有事实就放行」，理由是「别的进程写了文件、我们读回来了」。这条理由本身没错，但它只覆盖到读回那一刻。真实顺序可以再往后走一步：prune 裁决 → 别的进程写文件 → 我们 `load()` 合并它的事实 → **那个文件被对方删掉** → 我们迟到的写入凭「记录有事实」过门，重建一个只有我们的摘要、没有别人事实的文件。
+
+`hasFacts` 关不掉这一条，因为它描述的是记忆而不是磁盘。修法是在 `flush()` 写盘之前、`this.store.write(...)` 之前，对**已裁决的 id** 查一次 `inspect`：`absent` 就停写。只对 condemned id 查，是因为对别人查等于用一次 IO 换一个我们已经知道的答案；只停 `absent`，是因为文件还在或读不懂都不是这个进程能决定的事。
+
+### SHOULD-FIX 3 · 中途挂接：抬裁决只有 `turn/start` 一处，而宿主可以在回合中途挂上
+
+这是我自己没想到的一条，也是本轮最后做的一件事。`noteLive` 原来只由 `turn/start`（以及 `rememberTurn`）调用。如果宿主在一个回合**已经跑起来之后**才把这个会话交给插件，那么这一轮不会有 `turn/start`，裁决永远不会被抬起，这一轮里加载的技能和调用的 MCP 服务器全部在门口被拒，`turn/end` 写出一份什么都没记下的文件。
+
+修法是认清楚「哪些事实算活着的证据」。技能加载与 MCP 调用是**宿主此刻正在派发**的事件；迟到摘要、迟到的 git 回调、迟到的目录扫描是**本进程自己排的续体**。前者可以抬裁决，后者不行——它们正是裁决存在的理由。所以 `noteLive` 接到这两条宿主实时事件入口上（`packages/ui-evolve/lib/index.js` 的技能路径与 MCP 路径），而不是接到任何一个写者上。
+
+### 一条存活的变异，以及它说的实话
+
+新加两处抬裁决之后，原来那条「删掉 `turn/start` 的 `noteLive`」变异**存活**了。原因是真实的：今天所有会在回合中段落盘的写者，都要先经过技能或 MCP 这两条入口，它们自己已经抬过裁决，`turn/start` 那一行不可能再成为唯一的救星。
+
+我没有留着这条变异假装有覆盖，而是删掉它、把计数改回 73，并在 `packages/ui-evolve/lib/index.js` 那一行上方写清它现在是**backstop 而不是机制**。代码留着，是因为将来若出现一个新的、回合中段就会写盘的入口，没有这一行它会静默丢数据——「多一行没被走到」比「静默丢数据」便宜。
+
+### 测试怎么才抓得住（本轮最贵的一课，第二次）
+
+给「中途挂接」写的第一版测试是一个回合里先加载技能、再调 MCP。它绿了，但把 MCP 那处 `noteLive` 删掉它**还是绿的**：技能先到，已经把裁决抬起来了，MCP 调用搭了便车。一条测试同时经过两条路径，就分不清是哪条在起作用。
+
+拆成两个回合——一个只加载技能，一个只调 MCP，各自作为该回合**唯一**的实时事件——之后，两条变异各自被单独杀死。**一个用例只允许一条救援通道**，这条判据上一轮在「切会话不跟随」上用过一次，这次又用了一次。
+
+### 同批处理的另外两条
+
+- should-fix 4：等 turn 的 sweep 合并改成走 `mergeCoverage`。同 turn 时不能由内存单方面说了算——`rememberSweep` 自己的规则明确允许「同一个 turn 可以纠正自己」，两处规则不一致就是两个答案。
+- should-fix 5：删掉 `document()` 里那次 `normaliseSummary`。`entry.summary` 只有两处写入口，两处都已归一化，第三处投影是不可达的防御层——审查者用变异证明它不可达：删掉它，0 条断言变色。
+
+### 验收
+
+全量 **4376 passed / 0 failed**；`mutate-persistence` **73 killed / 0 survived / 0 not applied / 0 crashed**；`mutate-checklist-panel` **148 / 0**；`mutate-language-and-files` **230 / 0**；`test/mutations.test.mjs` **48 / 0**；`test/session-state.test.mjs` **391**；`test/persistence.test.mjs` **93**。
+
+### 如实记录：这一轮仍然没有的东西
+
+- **真机没验。** 活宿主跑的还是旧代码（`/panel` 首次 3017ms、后续 5ms，但磁盘 `hasSummary: false`）。要看到效果必须重启宿主，而重启不在我这一侧。
+- **审查者报的 `run.mjs` 有失败仍退出 0，我核实是错的**（`test/run.mjs:91` 是 `process.exit(failed === 0 ? 0 : 1)`）。它那条结论大概是自己的环境有问题，但「审查者也会错」这件事本身值得记下来：不独立复现就采纳，会把一条假缺陷写进文档。
+- `keepsDocument` 忽略 `servers`、`dropIfOrphan` 读原始信封而 `hasFacts` 读 `entry.snapshot`——审查者列为小问题，我判断今天都不可达，没改。
+
