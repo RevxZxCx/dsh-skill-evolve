@@ -5429,3 +5429,183 @@ diff：**1 个文件，24 insertions / 6 deletions**。
    `/panel` 请求，两次都因观测点不干净或需要渲染而自相矛盾，已删）；替身也没有 `key` 重挂语义
 2. **独立审查未派**。上一轮派了、也收敛了，但结论仍被真机推翻 —— 这一段的瓶颈不在阅读。审查放在用户复测之后
 3. 推送仍未成功：代理 `127.0.0.1:7890` 连不上（`581ee24` 也还在本地）
+
+## 2026-11-19 · 摘要落盘：一个已经付过钱的事实没有被记下来
+
+### 起因
+
+用户问「监控栏为什么摘要这么慢、有没有缓存」，量化之后得到两个数字：
+
+- 一次冷面板请求 **2841ms**，其中 **2836ms（99.8%）** 是摘要的模型调用，`stat` 与解析加起来不到 5ms
+- 同一会话第二次请求 4.5ms —— 内存 `cache` 命中了
+
+然后用户问了一句这场改造的起点：**「摘要为什么不落盘？」**
+
+### 查证
+
+不是「缓存策略保守」，是**没有记录**：
+
+- `packages/ui-evolve/lib/summarise.js:414` 的 `this.cache = new Map()` 是唯一存放处
+- 构造函数只有 `{ llm, config, log }`，`grep -n store summarise.js` 零命中 —— 它结构上没有存储能力
+- `docs/handover/` 全仓 grep「不持久 / 不落盘 / 重启后」+ 摘要 → **零命中**，没有任何决策讨论过这件事
+- 唯一相关的一句是 `viewed` 的 JSDoc「Deliberately not persisted」，但那解释的是**预热闸门**
+  （重启后不要为没人看的会话花钱），读起来却像在解释整个对象。**「预热不持久」被写成了「摘要不持久」**，
+  于是后来读代码的人以为这是决定过的
+
+### 改动
+
+三个文件，均 `node --check` 通过：
+
+1. `packages/ui-evolve/lib/session-state.js`
+   - `readSummary(raw)` 校验（`key`/`text` 非空、`at` 有限；`model`/`routeKey` 可缺省且缺省不算不匹配）
+   - `blankRecord()` / `readState()` / `keepsDocument()` / `hasFacts()` / `dropIfOrphan()` / `toDocument()`
+     六处接上 `summary`
+   - 新增 `summarySeen(sessionId)` 与 `rememberSummary(sessionId, summary)`
+2. `packages/ui-evolve/lib/summarise.js`
+   - 新增 `matchesStored(stored, key, routeKey)`，比对规则只此一处
+   - 构造函数加两个**可选**依赖 `stored` / `persist`，缺省是「什么都没存」与「丢掉」，所以所有既有构造点行为不变
+   - 查磁盘排在内存之后、`failed` 之前（磁盘文本是证据，失败是对路由的猜测），命中后回填 `cache`
+   - `run()` 成功分支 `try { this.persist(...) } catch` 只记日志
+3. `packages/ui-evolve/lib/index.js` —— 把两个依赖接到 `sessionState`
+
+### 关键判断
+
+- **不升 `STATE_VERSION`**：`READABLE_VERSIONS` 判的是 `state` 字段，新增可选字段读出来就是 `undefined`，
+  本来就是合法可读状态。升版会把所有旧文档变成 `foreign`，用户技能与文件历史一次性清零 ——
+  我最初判断要升版，读 `readState()` 的校验之后才纠正
+- **不新建 `sessions/<id>.summary.json`**：`session-store.js` 的 `list()` 把所有 `.json` 当会话 id，
+  `index.js` 的 `prune(sources)` 只凭宿主两份名单判删 → 一个不在名单里的文件是垃圾
+- **必须由 `SessionState` 写**：`toDocument()` 整篇重写 + temp/rename，两个写者各自写同一路径会互相覆盖
+
+### 测试
+
+- `test/session-state.test.mjs` **312 passed / 0 failed**（原 293）
+- `test/summarise.test.mjs` **232 passed / 0 failed**
+- `test/warm.test.mjs` **14 passed / 0 failed**，其中新增一条**跨进程**用例：第一个 `apply` 付一次钱 →
+  等 1.4 秒让 1 秒合并定时器落盘 → 第二个 `apply`（新 host、新 summariser、同一 DSH_HOME）打开同一会话，
+  断言**模型调用 0 次**且返回的文本正是老进程买到的那句
+
+**为什么跨进程用例是必须的**：`stored` 与 `persist` 都是可选依赖，缺省值恰好就是「旧行为」。所以
+`summarise.test.mjs` 里的每一条断言在「接线被删掉」时**依然全绿** —— 变异第一轮就是这么存活的
+（`SURVIVED the summariser is wired to nothing`）。只有真的起两个进程才能让接线缺失变得可见。
+
+### 变异
+
+`scripts/mutate-persistence.mjs` 从 **45 条加到 58 条**（`test/mutations.test.mjs:205` 的锚点计数同步），
+新增 13 条：
+
+| 打哪里 | 变异 | 结果 |
+|---|---|---|
+| 查磁盘 | `const stored = this.stored(agentId)` → `undefined` | KILLED (10 failed) |
+| 键比对 | 删 `if (stored.key !== key) return false` | KILLED (5) |
+| 路由缺省 | 删「两个 undefined 算匹配」那条 | KILLED (1) |
+| 路由比对 | `return stored.routeKey === routeKey` → `true` | KILLED (3) |
+| 回填缓存 | 删 `this.cache.set(key, {...})`（磁盘命中那行） | KILLED (1) |
+| 写盘 | 删 `this.persist(agentId, {...})` | KILLED (8) |
+| 写盘失败日志 | 删 `this.log('the summary could not be stored: ...')` | KILLED (1) |
+| `cached` 标记 | 磁盘命中返回 `cached: false` | KILLED (2) |
+| 读回 | `summary: readSummary(stored.summary)` → `undefined` | KILLED (5) |
+| `keepsDocument` | 删「只有摘要也算有事实」 | KILLED (9) |
+| `dropIfOrphan` | 删 `summary: stored.summary` | KILLED (2) |
+| 损坏字段 | 删 `at` 的有限数校验 | KILLED (2) |
+| **接线** | 删 `index.js` 里的 `stored`/`persist` 两行 | KILLED (1) |
+
+**58 killed / 0 survived / 0 not applied / 0 crashed**
+
+### 三条变异的设计教训
+
+1. **锚点必须照抄字面**。`summary: readSummary(stored.summary),` 在 `session-state.js:169` 是**行内**字段
+   （`return { skills, ..., sweep: readSweep(stored.sweep), summary: readSummary(stored.summary), sequence }`），
+   我第一次按「独占一行」写锚点 → `ANCHOR MISSING`
+2. **让套件崩掉的变异不算杀死**。两条变异把守卫换成 `throw` 或把可选依赖改必填，结果是整个套件抛出、
+   0 条断言执行。这证明不了任何事（`0 crashed` 与 `0 survived` 是同一件事的两面），所以改成断言能看见的
+   那一半：日志行缺失、`cached` 标记说谎
+3. **生成 JS 字面量时 `quote()` 必须先转义反斜杠**。手写的 `split("'").join("\'")` 没处理 `\`，
+   于是载荷里的 `\n` 变成真换行，生成的文件直接 `SyntaxError: Invalid or unexpected token`；
+   还把切片边界算错一位，产出 `},,`。正确做法是 `split('\\').join('\\\\')` 打头，再做引号与换行
+
+### 回归
+
+- 全量 `node test/run.mjs` → **4281 passed / 0 failed**
+- `node test/mutations.test.mjs` → **48 passed**（含 58 条计数锚点）
+- `mutate-persistence.mjs` → **58 killed / 0 survived**；`mutate-checklist-panel.mjs` → **148 killed / 0 survived**；
+  `mutate-language-and-files.mjs` → **230 killed / 0 survived**
+
+### 审查之后：两个真实缺陷
+
+一审（独立 subagent）的核心问题是「会不会把摘要供给错误的问题」，答**不会** —— `matchesStored` 的四条
+规则经受住了逐条推演，key 里带 `turn` 且带正文 sha256，turn 复用但内容变了就不命中；跨会话由存储层的
+`value.session !== sessionId → foreign` 挡住。版本判断（不升 `STATE_VERSION`）也被确认正确。
+
+但它翻出两个我在写代码时没想到的缺陷，两个都已修：
+
+**M1 · 迟到的摘要能复活一个已被删除的会话文件**（must-fix）。`rememberSummary()` 无条件调 `entry()`，
+而 `entry()` 只要 id 合法就建新记录放回 `bySession`。`condemned` 集合唯一的生效点是 `dropIfOrphan`，而它
+只在 `document() === undefined` 时才被调用 —— 摘要让 `keepsDocument()` 为真，于是没人来纠正。这条路径
+的时序是**唯一可能倒过来**的：`warm()` 不 await，模型调用最长 20 秒，这 20 秒里宿主完全可能把会话归档、
+`prune()` 删掉文件；20 秒后摘要回来，文件被重新写成只剩 summary 的空壳，还连带把已 dispose 的会话塞回
+transcript store。修法是在 `rememberSummary` 里查一次 `condemned`。其余 6 个写盘方法都不需要 —— 它们全部
+由活着的会话事件驱动，而摘要是一条「事实产生时刻远晚于事件时刻」的路径。
+
+**S1 · 合并分支丢掉 `sweep`**（should-fix，**本次改动之前就存在的 bug**）。`readState` 认识 `sweep`，
+`readInto` 的合并分支却从未搬过它。于是「宿主重启后先到事件、后读盘」这个顺序下，下一轮写盘把 `sweep`
+写成 `undefined`，抹掉「上一轮 git 扫描只看到一半」这条 caveat，面板从此不再对自己的文件列表加限定。
+它和我自查发现的 `summary` 合流遗漏是**同一个形状**的错误：同一个字段三处各写一遍，其中一处漏了。
+
+另抽了 `normaliseSummary(raw)` 消掉 summary 五个字段的三处重复（S2）。
+
+### 修复后重新验证
+
+- `test/session-state.test.mjs` → **331 passed / 0 failed**（新增 3 块：迟到摘要不复活文件、`sweep` 合流、
+  内存 `sweep` 胜过文件 `sweep`）。每一块都实测过「删掉对应的修复就变红」：M1 那块 2 条红、`sweep` 合流
+  3 条红
+- 全量 `node test/run.mjs` → **4300 passed / 0 failed**
+- `mutate-persistence.mjs` → 60 → **63 killed / 0 survived / 0 not applied / 0 crashed**
+- `mutate-checklist-panel.mjs` → **148 killed / 0 survived**；`mutate-language-and-files.mjs` → **230 killed /
+  0 survived / 0 crashed**
+- 残留扫描：三套脚本 0 suspect，5 条关键源码行各命中 1 次
+
+### 尚未做
+
+1. **真机未验证**。需要重启宿主后实测「切回看过的会话应毫秒级」，本轮结论全部来自进程内测试与变异
+2. 二轮审查已派（针对 M1/S1/S2 的修复），结论未回
+
+## 2026-11-20 · 摘要落盘收尾：裁决下沉、抬裁决挂到 turn/start、以及一条绿得发亮的假测试
+
+### 这一节补的是什么
+
+前一节记的「尚未做」有两项，这一节把它们做完，并补上期间查出的一个**新真实缺陷**。
+
+### 缺陷：恢复会话的第一轮丢掉全部中段写入
+
+| 项 | 内容 |
+|---|---|
+| 现象 | 会话被清扫删档后又被宿主打开，第一轮里加载的技能与调用的 MCP 服务器，一份都没写进文件 |
+| 根因 | 抬裁决（`condemned.delete`）只接了 `turn/end`；技能与 MCP 是回合**进行中**写的事实，全被门拒掉 |
+| 修法 | 抽 `SessionState.noteLive(sessionId)`，`rememberTurn` 与 `index.js` 的 `turn/start` 都调它（D-231） |
+| 证据 | `probe_resume_turn2.mjs` 两臂对照：`turn/start` 抬 → 两者都在；只在 `turn/end` 抬 → 两者皆空 |
+| 变异 | 删 `index.js` 的调用 → 2 条红；`noteLive` 改空函数 → 9 条红；改 `this.noteLive(null)` → 7 条红 |
+
+### 教训：一条绿得发亮的假测试
+
+第一版插件级用例用**另一个** `SessionStore` 去 `prune()`，文件删了，但插件自己的 `condemned` 从没设过，
+门从来没关上 —— **删掉被测的接线，83 条断言全绿**。正确写法必须：捕获插件自己的定时器并手动 fire、
+全程同一个 host、之后才发恢复回合的事件。改对后删接线立刻红 2 条。
+
+推广：测「某个状态标记导致了拒绝」时，测试必须摸到那个标记本身。绕过标记去删文件/删记录/改内存，测到的
+是文件系统或别的实例，被测那段代码一次都没运行。
+
+### 数字
+
+- 全量 `node test/run.mjs` → **4352 passed / 0 failed**
+- `test/persistence.test.mjs` **83**（新增插件级恢复用例）；`test/session-state.test.mjs` **377**
+- `scripts/mutate-persistence.mjs` **70 条全杀**（69 → 70，新增接线变异）
+- `scripts/mutate-checklist-panel.mjs` **148 全杀**；`scripts/mutate-language-and-files.mjs` **230 全杀**
+- `test/mutations.test.mjs` **48 passed**
+
+### 尚未做
+
+1. **真机仍未验证**。需要重启宿主后实测「切回看过的会话应毫秒级」，本轮全部证据来自进程内测试与变异
+2. 摘要归一化的三处等价（`document()` / `normaliseSummary` 空串 `model` / `rememberSummary` 存原始值）
+   没有断言守着，审查的变异实测三条 0 红。补它需要先定「空白 model 算不算已归一化」，属产品判断
+3. 「切会话监控列不跟随」仍记**有待观察**（用户 m12367），SSE 轮次结束即时更新那半从未单独验证过

@@ -192,6 +192,9 @@
 | D-224 | 2026-11-19 | 会话切换的三处修复：渲染时读宿主属性、观察器加挂 content 的父节点、流记住自己绑的会话 | 生效；真机复测「明显好转」，待观察（见 D-228） |
 | D-227 | 2026-11-19 | 流的 `error` 处理器只关它自己那条流 | 生效 |
 | D-228 | 2026-11-19 | 会话切换的通知不能因为 `bridge` 已经是新值就吞掉；列的会话身份用 `key` 表达而不是依赖 effect 依赖 | 生效，真机 10/10；用户复测「明显好转」，待观察 |
+| D-229 | 2026-11-19 | 摘要落盘：把最近一次的 `{ key, text, at, model, routeKey }` 存进会话文档，重启后同一轮不再买第二次 | 生效，全量 4300/0，变异 63/63 + 148 + 230；二轮审查修掉两个真实缺陷（见 D-230） |
+| D-230 | 2026-11-19 | 「迟到写入复活已删文件」不是摘要独有的路径：把裁决下沉进 `entry()` 这个唯一漏斗，并给 `sweep` 的跨进程合并定一个方向 | 生效，全量 4342/0，变异 69/70 + 148 + 230 |
+| D-231 | 2026-11-20 | 抬裁决要挂在 `turn/start`，因为技能与 MCP 的事实产生在回合进行中，等 `turn/end` 已经来不及 | 生效，全量 4352/0，变异 70/70 + 148 + 230 |
 
 ---
 
@@ -4346,3 +4349,177 @@ effect 不重跑。等 attribute 追上，`syncSession` 一看 `bridge` 已经�
 另一个代价是覆盖：这两处都没有测试（见 R-105 的两处覆盖缺口 —— `MutationObserverStub.trigger()`
 不带事件参数，`bridge` 已新值时 attribute 才追上的时序构造不出来；替身也没有 `key` 重挂语义），
 验收只能靠真机 10/10 轮。
+
+### D-229 · 摘要写进会话文档，因为它是一个已经付过钱的事实
+
+**选择**：`Summariser` 成功产出摘要后，把 `{ key, text, at, model, routeKey }` 交给
+`SessionState.rememberSummary()`，随已有的会话文档一起落盘（`~/.dsh/plugin-data/skill-evolve/sessions/<id>.json`
+的 `summary` 字段）；下次 `summarise()` 在内存未命中时向 `stored(agentId)` 要一次，`matchesStored()` 通过就
+当作命中返回，并回填内存 `cache`。
+
+**为什么**：摘要是一次模型调用，实测 **2836ms**（占一次冷面板请求的 99.8%），此前只活在
+`this.cache = new Map()` 里。宿主重启、插件重载、换 `summaryProvider/summaryModel` 之外的任何一次进程
+结束，这笔钱都要再付一次，而没有任何文档说过这是有意的。这不是「缓存策略」，是**一个已经付过钱的事实
+没有被记下来**。
+
+**为什么之前没落盘 —— 三个真实原因，不是疏忽**：
+
+1. **`Summariser` 结构上没有存储能力**。它的构造函数只有 `{ llm, config, log }`，全程不 import 任何
+   store（`grep -n store packages/ui-evolve/lib/summarise.js` 零命中）。它是纯计算对象，加一个写盘依赖
+   是结构性改动，不是补一个 `await`。当初把它写成纯对象是为了能脱离宿主单测（`test/summarise.test.mjs`
+   的全部 232 条都靠这一点）。
+2. **落盘的时机与摘要的时机是错开的**。摘要在 `turn/end` 之后异步产出（`warm()` 不 await），而会话文档
+   由 `SessionState` 的 1 秒合并定时器整篇重写（`toDocument()` + temp/rename）。两者若各自写同一路径会
+   互相覆盖 —— 所以落盘**必须经由 `SessionState`**，不能由 `Summariser` 直接写。这个约束在写之前不
+   明显，动手时才发现。
+3. **`viewed` 那句注释把问题盖住了**。`summarise.js` 里 `viewed` 的 JSDoc 写着「Deliberately not
+   persisted: a restarted host forgets」，那句话解释的是**预热闸门**（重启后不要为没人看的会话花钱），
+   读起来却像在解释整个对象都不落盘。它把「预热不持久」说成了「摘要不持久」，于是后来读代码的人（包括
+   我）以为这是决定过的。
+
+**代价**：
+
+- 会话文档变大：一个摘要文本上限 `MAX_SUMMARY_CHARS = 300`，加上 key 与一个路由串，量级几百字节，相对
+  已有的 `paths`/`skills`/`tools` 可以忽略。
+- 同一个文档的写者从「一个」变成「一个模块的两个入口」，但两者都走 `SessionState.schedule()`，合并定时器
+  仍是唯一出口 —— 代价是多两个公开方法（`summarySeen` / `rememberSummary`）而不是两处直接 `writeJson`。
+- **只存最近一次**。键含 turn 与 prompt 的 sha256，所以换一轮就是新键，磁盘上只留最新那条；读者问的
+  永远只有最后一轮（`readPanel` 只取 `previous`），历史摘要是不可达的，存了也没有读者。这一条也意味着
+  换回旧会话的**旧轮次**仍然要重算 —— 落盘解决的是「同一个进程重启后同一轮重付」，不是「任意历史免费」。
+- `routeKey` 存的是生成它的路由。两个缺省都不算不匹配（`matchesStored` 里
+  `routeKey === undefined || stored.routeKey === undefined → true`）：没配 `summaryProvider/Model` 的
+  用户，路由来自会话本身，可能诚实地没有可比身份。把两个「不知道」判成不一致，会让**从没固定过模型的人
+  —— 也就是最常为摘要付钱的人 —— 永远拿不到自己付过的文本**。
+
+**与 `reset()` 的关系**：`api.js` 在配置里的 `summaryProvider/summaryModel` 变化时调 `reset()`，清内存
+`cache` 与 `failed`。磁盘记录要跟着失效，靠的就是 `routeKey` 比对 —— 换模型后旧记录的 `routeKey` 与当前
+不一致，`matchesStored` 返回假。**这一条如果只靠 `reset()` 就错了**：`reset()` 是进程内的，而磁盘记录
+跨进程，第二次启动时 `reset()` 根本没被调用过。变异「换模型后仍供旧文本」正是打这一点。
+
+**读与写的顺序**：`summarise()` 先查内存、再查磁盘、再查 `failed`。磁盘命中排在 `failed` **之前**是故意的
+—— 失败是对一条路由的猜测（可能已经过期、可能是别的进程记的），磁盘文本是证据。这条也有变异守着。
+
+**写失败不是摘要失败**：`persist` 包在 try/catch 里，只记一行日志。写不进只是丢一个优化；而把已经付过
+钱的文本因为磁盘忙就扔掉，等于让用户为同一个答案付两次。同样，`persist` 在内存记账**之后**调用，所以
+`persist` 抛错时调用者仍然拿到文本。
+
+**不升 `STATE_VERSION`**：`session-state.js` 的 `READABLE_VERSIONS` 判的是 `state` 字段，新增一个可选字段
+读出来就是 `undefined`，本来就是合法可读状态。升版会把所有旧文档变成 `foreign`，用户的技能与文件历史
+一次性清零 —— 那是为了一个可选字段付出全部历史的代价。这里我一开始判断错了（以为要升版），是在读
+`readState()` 的校验之后纠正的。
+
+**不新建 `sessions/<id>.summary.json`**：`session-store.js` 的 `list()` 把目录下**所有** `.json` 当会话 id，
+而 `index.js` 的 `prune(sources)` 只凭宿主给的 `known`/`archived` 两份名单判删 —— 一个永远不在名单里的
+文件是垃圾，会在某次清理里被删掉，而且在此之前还会被当成一个「未知会话」参与统计。
+
+### D-230 · 一个能复活已删文件的写者，和一个只合并了一半的读者
+
+**选择**：两处一起修。
+
+1. `SessionState.rememberSummary()` 在校验之后、`entry()` 之前加 `if (this.condemned.has(sessionId)) return`。
+2. `readInto()` 的合并分支补上 `sweep`，与刚补的 `summary` 同一个形状：
+   `if (current.sweep === undefined) current.sweep = state.sweep`。
+3. `summary` 的五个字段从「三处各写一遍」抽成 `normaliseSummary(raw)`，`readSummary`、`rememberSummary`、
+   `document()` 共用。
+
+**为什么第 1 条是真实缺陷，而不是理论问题**：摘要这条路径的时序是**唯一可能倒过来**的一条。
+
+- `warm()` 在 `turn/end` 之后调用且**不 await**（`index.js:557`），模型调用最长 20 秒
+  （`SUMMARY_TIMEOUT_MS`）。
+- 这 20 秒里宿主完全可能把会话归档或删掉，于是 `prune()` 跑起来、`onRemoved` 把 `bySession` 删掉并把
+  会话 id 记进 `condemned`、文件从磁盘消失。
+- 20 秒后摘要回来，调 `rememberSummary()`。`entry()` 只检查「id 是不是合法字符串」和「store 能不能把它
+  变成路径」，两样都通过，于是**建一条新记录放回 `bySession`**，`schedule()` 触发写盘。
+- 结果：一个只剩 `summary` 的空壳文档被重新写在磁盘上。`condemned` 的唯一生效点是 `dropIfOrphan`，而
+  它只在 `document() === undefined` 时被调用 —— 摘要让 `keepsDocument()` 为真（这一条本身是对的，见
+  D-229），于是 `document()` 有值，`dropIfOrphan` 根本不会被调用，没人来纠正它。
+- 连带后果：同一个迟到的写会让 `flush()` 走到 `restore()`，把已经 `disposed` 的会话重新塞回 transcript
+  store。
+
+实测（`F:/dsh-plugin/.tmp-test/probe-m1.mjs`，只用公开 API）：修前
+`file resurrected by a late summary: true`，修后 `false`。
+
+**为什么其它写者不需要这个检查**：`SessionState` 里能触发写盘的方法有 7 个。`rememberSkill`、
+`rememberTool`、`rememberPaths`、`rememberTurn`、`rememberSweep` 全部由**活着的会话事件**驱动 —— 宿主
+不会给一个已归档的会话发 `turn/end`。`load()` 自己已经查 `condemned`（`readInto` 里那条注释写明了
+「sweep 已经判过，文件不能推翻它」）。于是 `rememberSummary` 是唯一一条「事实的产生时刻远晚于事件的时刻」
+的路径，也自然是唯一需要在这里再查一次的地方。这不是「加个保险」，是这条路径与其余六条的本质差别。
+
+**为什么第 2 条是同一个 bug 的另一个字段**：`readInto` 的合并分支逐字段搬了
+skills / tools / servers / paths / snapshot，而 `readState` 读出来的 `sweep` 从未被搬过。于是「宿主重启
+后先到事件、后读盘」这个顺序下，下一轮写盘会把 `sweep` 写成 `undefined`，也就是**把「上一轮 git 扫描只
+看到一半」这条 caveat 抹掉**，面板从此不再对自己的文件列表加限定。这条缺陷**在本次改动之前就存在**，
+是查 `summary` 合流时顺着同一段代码看到的 —— 记在这里是因为它和 `summary` 是同一个形状的错误：
+`readState` 认识一个字段，合并分支不认识它，`document()` 于是把它写丢。
+
+这条也解释了为什么第 3 条值得做：`sweep` 出问题的方式和 `summary` 一模一样，都源于「同一个形状在三处
+各写一遍」。`normaliseSummary` 只解决 `summary` 那三处，`sweep` 仍然有两处（`readSweep` 与
+`document()`），但至少现在是同一个问题的两半被看见并写下来了，而不是等第三次踩到才想起来。
+
+**方向**：两个合并都用「内存有值就保留，没有才取文件的」。对 `summary` 和 `sweep` 都成立，理由相同：
+文件是上一个进程知道的事，内存是此后发生的事。`rememberSweep` 自己另有一层 stale 判断
+（`previous.turn > stamp` 时丢弃新值），那管的是**同一进程内两次扫描的先后**，与这个「跨进程新旧」不是
+同一个问题，两层不冲突。
+
+**代价**：`rememberSummary` 多一次 `Set.has`；`readInto` 多两次属性比较。都在微秒级，且只在写盘路径上，
+不在 `/panel` 的热路径上。
+
+**测试与变异**：新增 3 个测试块（迟到 summary 不复活文件、`sweep` 合流、内存 sweep 胜过文件 sweep），
+`test/session-state.test.mjs` 从 321 条到 331 条。对应变异 3 条全部被杀死：
+`a summary that arrives after the sweep brings the file back`（2 条红）、
+`a summary produced by this process loses to the one on disk` / `a sweep this process ran loses to the one in
+the file`（各 1-3 条红）。`scripts/mutate-persistence.mjs` 从 60 条到 63 条。
+
+### D-231 · 抬裁决属于一个时刻，不属于一个写者
+
+**选择**：`SessionState` 新增 `noteLive(sessionId)`，内容只有一行 `this.condemned.delete(sessionId)`。
+`rememberTurn()` 首行改为调它，**并且** `packages/ui-evolve/lib/index.js` 的 `turn/start` 分支也调一次。
+
+**为什么必须两处都调**：`condemned` 是「这个会话被清扫判死过」的记忆，`entry()` 的门据此拒绝迟到写入
+（D-230）。但裁决本身可以被更晚的证词推翻，而「更晚的证词」有两种到达方式：
+
+- `turn/end` —— 一个回合结束了，宿主说这个会话刚才在跑。
+- `turn/start` —— 一个回合开始了，宿主说这个会话现在就在跑。
+
+D-230 只接了前一种，于是恢复会话的第一轮里，**从 `turn/start` 到 `turn/end` 之间写的所有事实都被拒**：
+`rememberSkill`、`rememberTool` 都走 `entry()`，两条都被门挡住。等到 `turn/end` 把裁决抬起来时，那一轮
+的技能与 MCP 调用已经拒绝完了，写出去的是一份只有 snapshot 的空文档。
+
+实测（`F:/dsh-plugin/.tmp-test/probe_resume_turn2.mjs`，两臂同一序列，只差抬裁决的时机）：
+
+```
+lift at turn/start:    skills=["skill-from-first-turn-after-resume"] tools=["mcp__fs__read"]
+lift at turn/end only: skills=[]                                      tools=[]
+```
+
+**为什么这不重新打开 D-230 修的那个洞**：洞的形状是「迟到的回调把已删文件写回来」。迟到摘要、迟到的
+git 扫描、迟到的目录扫描，三者共同点是没有自己的回合 —— 它们是**上一个**回合的产物，在清扫之后落地。
+`turn/start` 是宿主明确说「这个会话又在跑了」，它不是任何上一个回合的回声。所以按回合边界抬裁决，只救
+真正被恢复的会话，不救回声。
+
+**为什么抬裁决不能挂在写者上**：第一版把它写成 `rememberSummary` 里的局部守卫（D-230 的做法），第二轮
+审查指出这是「一个只负责同意另一份拷贝的分支」。这一轮把它抽成 `noteLive` 之后，语义变成「谁在正确的
+时刻知道这个事实，谁就调它」，而不是「每个写者自己判断一次」。`rememberTurn` 仍然调它，正是因为
+`turn/end` 也是一个正确时刻。
+
+**代价**：多一个公开方法。它很窄 —— 一行 `Set.delete`，唯一的语义是「撤销一个进程内裁决」—— 而调用点
+只有两个，都在宿主明确宣告回合边界的地方。变异验证：把 `index.js` 的调用删掉，插件级用例 2 条红；把
+`noteLive` 改成空函数，9 条红；把 `noteLive` 的调用改成 `null`，7 条红。
+
+**测试怎么才抓得住它（这一轮最贵的教训）**：第一版插件级用例是绿的假阳性。它用**另一个** `SessionStore`
+实例调 `prune()` 删掉同一个文件 —— 文件确实没了，但插件自己 `SessionState` 里的 `condemned` 从没被设过，
+门从来没关上，删掉接线照样全绿（83/0，与修好时一模一样）。正确写法必须三段同时成立：
+
+1. 捕获插件**自己**注册的那分钟定时器（在 `apply` 之前替换 `globalThis.setInterval`），然后手动 fire 它，
+   让 `sessionState.prune()` 真的跑一遍并记下裁决；
+2. 全程用**同一个** host / 同一个 `SessionState` —— 换 host 就是换实例，裁决在一个实例里、恢复写入在另
+   一个实例里，等于什么都没测；
+3. 之后才发 `turn/start` → 中段 `skill` + `mcp` → `turn/end`，断言文件里两者都在。
+
+改对之后，删掉 `index.js` 那一行立刻 2 条红（`the skill the resumed turn loaded is in the file — {}`、
+`the MCP server the resumed turn called is in the file — []`），恢复后回到 83/0。这条变异已并入
+`scripts/mutate-persistence.mjs`（69 → 70 条），名字是
+`the resumed turn is never announced to the session state`。
+
+**更一般的判据**：一个状态标记由谁设置、由谁撤销，要看**谁能最早知道它该撤销**，而不是看谁最常碰它。
+在这里「最早知道」就是 `turn/start`，而它离事实产生还有整整一个回合的余量。

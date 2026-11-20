@@ -4206,3 +4206,187 @@ attribute 变化本身是事件，「`bridge` 已经这么说」不是吞掉它�
 - 真机 **10 轮切换 10/10 正确**（修前同脚本 6 轮 2 轮失败）
 - 独立审查：**无**。这一轮没有派审查者 —— 上一轮派了、也收敛了，但结论仍然被真机推翻，
   说明这一段的瓶颈不在阅读而是在实测。审查放在用户复测之后
+
+
+## R-106 · 摘要落盘：给一个已经付过钱的事实找个住处（两轮独立审查，一个 must-fix）
+
+### 这一轮要解决什么
+
+用户 m12651 问：「我想问的是为什么摘要不落盘存储」。查证的结果是**没有理由** —— 不是权衡过后的选择，
+而是一段谁都没写下来的空白：
+
+- `summary` 只住在 `Summariser` 的内存 `Map` 里（`packages/ui-evolve/lib/summarise.js` 的
+  `this.cache = new Map()`），构造函数只有 `{ llm, config, log }` 三个参数，`grep store` 零命中 ——
+  结构上它**没有存储能力**，不是「有存储但没用」
+- `docs/handover/` 全仓 grep「不持久 / 不落盘 / 重启后」+ 摘要 → **零命中**，没有任何决策记录
+- 唯一沾边的一句话是 `viewed` Set 的 JSDoc「Deliberately not persisted」，而它解释的是**预热闸门不持久**，
+  不是摘要不持久。这两件事被一句话说在了一起，读起来像「摘要也是故意不落盘的」
+
+代价是可量的：宿主重启后切回一个看过的会话，第一次 `/panel` 会重买一次模型调用。真机实测
+`session-dcf55d54` **2841ms**，其中摘要模型调用占 **2836ms（99.8%）**。
+
+### 形态（详见 D-229）
+
+摘要存进**已有的会话文档**，不新建文件、不升 `STATE_VERSION`：
+
+- 不能新建 `sessions/<id>.summary.json`：`session-store.js` 的 `list()` 把目录下所有 `.json` 当会话 id，
+  而 `prune(sources)` 只凭宿主给的两份名单判删 —— 一个永远不在名单里的文件是垃圾
+- 不必升版：`READABLE_VERSIONS` 判的是 `state` 字段，新增可选字段读出来就是 `undefined`，本来就是可读状态。
+  **这里我一开始判断错了**，对用户说过要升版，读 `readState()` 的校验之后才纠正 —— 升版会把所有旧文档变成
+  `foreign`，等于为了一个可选字段清空用户的技能与文件历史
+- 必须经 `SessionState` 写：`toDocument()` 是整篇重写（temp + rename），两个写者会互相覆盖
+
+### 两轮审查
+
+**第一轮**（独立 subagent）问的核心是「会不会把摘要供给错误的问题」，答**不会**。`matchesStored` 的四条
+规则经受住了逐条推演：key 里带 `turn` 和正文 sha256，turn 复用但内容变了就不命中；跨会话由存储层的
+`value.session !== sessionId → foreign` 挡住；`routeKey` 单边 `undefined` 放行是刻意的权衡（一个从未
+pin 过 `summaryProvider` 的插件按会话解析路由，可能诚实地无从比较）。
+
+但它翻出**两个我写代码时没想到的缺陷**：
+
+**M1（must-fix）· 迟到的摘要能复活一个已被删除的会话文件。** `rememberSummary()` 无条件调 `entry()`，
+而 `entry()` 只要 id 合法就建新记录放回 `bySession`。`condemned` 唯一的生效点是 `dropIfOrphan`，它只在
+`document() === undefined` 时被调用 —— 摘要让 `keepsDocument()` 为真（这一条本身是对的），于是
+`dropIfOrphan` 根本不会跑。这条路径的时序是**唯一可能倒过来**的：`warm()` 不 await，模型调用最长 20 秒，
+这 20 秒里宿主完全可能把会话归档、`prune()` 删掉文件。修法：`rememberSummary` 里查一次 `condemned`。
+其余 6 个写盘方法都不需要 —— 它们全部由活着的会话事件驱动。
+
+**S1（should-fix，本次改动之前就存在）· 合并分支丢掉 `sweep`。** `readState` 认识 `sweep`，`readInto`
+的合并分支从未搬过它。重启后「先到事件、后读盘」的顺序下，下一轮写盘把 `sweep` 写成 `undefined`，抹掉
+「上一轮 git 扫描只看到一半」这条 caveat。**它和我自查发现的 `summary` 合流遗漏是同一个形状的错误**：
+同一个字段三处各写一遍，其中一处漏了。
+
+S2：`normaliseSummary(raw)` 消掉 summary 五个字段的三处重复。
+
+### 我自己查到的那一处（在一轮审查之前）
+
+`readInto()` 的合并分支只搬 skills / tools / servers / paths / snapshot，**不搬 `summary`**。于是宿主重启后
+若先到事件后开面板：`entry()` 建空白记录 → `flush()` 发现 `loaded !== true` 先 `load()` 合流 → 合流不搬
+summary → `toDocument()` 整篇重写 → **上一个进程付过钱的摘要被抹掉**。修法是同形状的一行合并。
+
+原来的跨进程测试没抓到它，因为它只**打开面板**（走 `current === undefined` 那条分支），没有「先事件后
+load」这个顺序。这条是我自己顺着读 `readInto()` 全文看到的，不是审查给的 —— 记下来是因为它说明
+「跨进程测试通过」不等于「重启路径都被覆盖」。
+
+### 测试诚实度
+
+**能抓住缺陷的**：`test/warm.test.mjs:379-397` 的重启用例（两个 `applyPanel`、同一 `DSH_HOME`，第二个
+`prepared === 0`）—— 删掉接线会红，这是整条链唯一的端到端守卫。
+
+**装饰性的**：`test/summarise.test.mjs:1259-1271` 那几条不带 `stored`/`persist` 的用例 —— 它们在改动之前
+就全绿，证明的是**向后兼容**而不是**持久化**。`matchesStored` 六条单测里有两条在实现退化成 `return true`
+时也会过。
+
+**本轮新增的 3 块**（`test/session-state.test.mjs` 从 312 到 331）都实测过「删掉对应修复就变红」：
+迟到摘要不复活文件（2 条红）、`sweep` 合流（3 条红）、内存 `sweep` 胜过文件 `sweep`（1 条红）。
+
+有两处我自己先写错再改对，值得记：
+
+1. summary 合流的**反向**用例第一版写成「`load` 之后再 `rememberSummary`」，被变异证明是假通过 ——
+   「`load` 后」这两个顺序已经无法区分。改成「`load` 之前就 `rememberSummary`」才真红
+2. 变异脚本里的 `quote()` 手写版没先转义反斜杠，载荷里的 `\n` 变成真换行，生成的文件直接
+   `SyntaxError`；还把切片边界算错一位产出 `},,`。正确顺序是 `split('\\').join('\\\\')` 打头
+
+### 变异
+
+- `scripts/mutate-persistence.mjs` **45 → 63 条**：**63 killed / 0 survived / 0 not applied / 0 crashed**
+- `mutate-checklist-panel.mjs` **148 killed / 0 survived**
+- `mutate-language-and-files.mjs` **230 killed / 0 survived / 0 crashed**
+
+**两条 CRASHED 的教训**：把守卫换成 `throw`、把可选依赖改必填，结果是整个套件抛出、0 条断言执行。
+这证明不了任何事 —— `0 crashed` 与 `0 survived` 是同一件事的两面。改成断言能看见的那一半（日志行、
+`cached` 标记）才算杀死。
+
+**一次我自己造成的残留事故**：我在后台跑变异脚本的同时并发跑了另外两个测试套件，两进程在同一批文件上
+互撞，`readSummary` 的 `at` 校验被删掉且没还原。此后一律串行，并用
+`F:/dsh-plugin/.tmp-test/scan_residue.mjs` 按「`to` 出现且 `from` 不出现」扫描残留 —— 只信 `git status`
+不足以发现「改动还在但已被变异过」的状态。
+
+### 向后兼容的真数据验证
+
+拿用户的 **232 个真实会话文档**（`C:/Users/26903/.dsh/plugin-data/skill-evolve/sessions/`）过新代码：
+**232 个全部可读，0 个变成 `foreign`**，全部 `summary=absent`。新增的可选字段没有破坏任何一个已有文件。
+
+### 收尾数据
+
+- 全量 **4300 passed / 0 failed**
+- `test/session-state.test.mjs` **331**；`test/summarise.test.mjs` **232**；`test/warm.test.mjs` **14**
+- 改动 **11 个文件，1216 insertions / 7 deletions**
+- 独立审查 **两轮**：第一轮 1 must-fix + 2 should-fix（全部折入）；第二轮针对修复本身，结论见下
+
+### 第三轮审查（自己担任；派出的审查者第三次丢结论）
+
+第三轮派了 subagent 并把「结论写进 `F:/dsh-plugin/.tmp-test/r3-verdict.md`」写进任务书首条，结果与前两次
+一样：`wait_agent` 返回 `no-active-peer`，`list_agents` 只剩 lead，落盘文件不存在。**这是第三次，结论是
+不要再指望它** —— 关键审查必须假定自己做。于是按清单逐条核对：`entry()` 的调用点、`bySession.set` /
+`delete` 的全部位置、`condemned` 的所有触点、`readInto` 的合流字段、`rememberSweep` 的 stale 规则、
+`normaliseSummary` 的三个调用点、`index.js` 里所有 `sessionState.*` 调用。
+
+### 自查查出的新缺陷（前两轮都没提到）
+
+**恢复会话的第一轮丢掉全部中段写入。** 序列是：`rememberSkill` → `flush` → `prune`（文件删、id 记进
+`condemned`）→ 面板 `load()`（装一条空记录）→ 同一轮里 `rememberSkill` + `rememberTool` → `rememberTurn`
+→ `flush`，结果是磁盘上 `skills` 与 `tools` **双双为空**。
+
+根因不在门本身，而在**抬裁决的时机**：D-230 只把撤销写在 `rememberTurn`，而它由 `turn/end` 驱动。技能与
+MCP 服务器是回合**进行中**写的事实，落在这个区间里，全被门拒掉；等 `turn/end` 解除时已经晚了。`index.js`
+的 `turn/start` 分支当时完全不碰 `sessionState`。
+
+修法见 D-231：抬裁决抽成 `noteLive(sessionId)`，两处都调 —— `rememberTurn` 保留（那是 `turn/end`），
+`turn/start` 新增。
+
+两臂对照实测（`F:/dsh-plugin/.tmp-test/probe_resume_turn2.mjs`）：
+
+```
+lift at turn/start:    skills=["skill-from-first-turn-after-resume"] tools=["mcp__fs__read"]
+lift at turn/end only: skills=[]                                      tools=[]
+```
+
+### 一条绿得发亮的假测试（本轮最贵的教训）
+
+给这个修复补插件级用例时，第一版写成了**真真切切测不到东西的假阳性**：它用另一个 `SessionStore` 实例调
+`prune()` 把文件删掉。文件确实没了，但插件自己 `SessionState` 里的 `condemned` 从没被设过 —— 门从来没
+关上，所以**删掉 `index.js` 那行接线，83 条断言依然全绿**。
+
+要抓住它，三件事必须同时成立：
+
+1. 捕获插件**自己**注册的分钟定时器（在 `apply` **之前**替换 `globalThis.setInterval`），手动 fire，让
+   `sessionState.prune()` 真跑一遍并记下裁决；
+2. 全程**同一个** host / 同一个 `SessionState`（换 host 就是换实例，裁决落在一个实例、恢复写入落在另一个，
+   等于没测）；
+3. 之后才发 `turn/start` → 中段 `skill` + `mcp` → `turn/end`，断言文件里两者都在。
+
+改对后，删掉 `index.js` 那一行立刻红 2 条
+（`the skill the resumed turn loaded is in the file — {}`、
+`the MCP server the resumed turn called is in the file — []`），恢复后回到 83/0。
+
+**这条教训可以推广**：测试一个「状态标记导致了拒绝」的修复时，**必须让测试摸到那个标记本身**。绕过标记
+去删文件、删记录、改内存，测到的是文件系统或别的实例，而被测的那段代码一次都没被调用过。
+
+### 这一轮的验收
+
+- 全量 `node test/run.mjs` → **4352 passed / 0 failed**
+- `scripts/mutate-persistence.mjs` **69 → 70 条**：**70 killed / 0 survived / 0 not applied / 0 crashed**
+  （新增那条 `the resumed turn is never announced to the session state` 报 2 failed）
+- `scripts/mutate-checklist-panel.mjs` → **148 killed / 0 survived**
+- `scripts/mutate-language-and-files.mjs` → **230 killed / 0 survived / 0 crashed**
+- `test/mutations.test.mjs` → **48 passed**（计数断言 69 → 70 已同步）
+- `test/session-state.test.mjs` **377**；`test/persistence.test.mjs` **83**
+
+### 仍然没有的东西（如实记录）
+
+1. **真机未验证**。需要重启宿主，「切回看过的会话应毫秒级」这一条仍然只有进程内证据。
+2. **`normaliseSummary` 与 `document()` 的三处等价靠读代码**，没有断言守着 —— 审查的变异实测里
+   `document()` 不做归一化、`normaliseSummary` 保留空串 `model`、`rememberSummary` 存原始 `summary`
+   三条都是 0 红。这轮没补，因为补它需要先决定「空白 model 算不算已归一化」，而那是产品判断不是缺陷。
+3. **`gate ignores condemned altogether` 会让套件 CRASH 而不是失败**（`test/session-state.test.mjs:101`
+   `TypeError`），所以它没有进正式脚本；崩溃证明不了覆盖。
+
+### 代码
+
+- `packages/ui-evolve/lib/session-state.js`：新增 `noteLive(sessionId)`；`rememberTurn` 首行改为调它
+- `packages/ui-evolve/lib/index.js`：`turn/start` 分支调用 `sessionState.noteLive(agentId)`
+- `test/session-state.test.mjs`：新增 `resumed-mid-turn` / `resumed-no-lift` 两块
+- `test/persistence.test.mjs`：新增插件级「恢复会话第一轮」块，驱动真清扫
+- `scripts/mutate-persistence.mjs` + `test/mutations.test.mjs`：新增接线变异，计数 70
