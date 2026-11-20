@@ -1932,40 +1932,55 @@ for (const reason of ['gone', 'archived']) {
 }
 
 // ---------------------------------------------------------------------------
-// The file list gained two facts: which turn wrote a file, and when
+// The file list changed what it means, and that is why old rows are not read
 // ---------------------------------------------------------------------------
 
-// A bare position cannot say either of them, so the stored shape changed. What
-// must not change is the readability of files written before it: a session from
-// an older build still has its order, and the two facts it never recorded come
-// back as "unknown" rather than as an invented zero.
+// v1 and v2 recorded "this session touched this file", inferred by four
+// collectors that no longer exist: edit calls, shell redirections, a diff of the
+// worktree and a directory walk. v3 records "this session delivered this
+// document", which is a different claim about the same field. A file cannot be
+// upgraded into a claim it never made, so its paths are dropped -- while every
+// other field, whose meaning did not change, is still read.
 {
   const { state, store, root } = await fixture()
   await store.write('v1', {
     state: 1,
     turns: 1,
     previous: null,
-    skills: {},
-    tools: [],
-    servers: {},
+    skills: { 'kept-skill': { via: 'tool', at: 5 } },
+    tools: ['mcp__kept__x'],
+    servers: { kept: 1 },
     sequence: 9,
     paths: { 'one.js': 9, 'two.js': 2, 'three.js': 5 },
   })
   await state.load('v1')
   const seen = state.pathsSeen('v1')
-  const names = seen.map((file) => file.path)
-  check('a version 1 file still loads', seen.length === 3, JSON.stringify(seen))
-  check('and it keeps the order it was written with', names[0] === 'one.js' && names[1] === 'three.js' && names[2] === 'two.js', JSON.stringify(names))
-  check(
-    'and the turn it cannot know is unknown rather than zero',
-    seen.every((file) => file.turn === undefined),
-    JSON.stringify(seen)
-  )
-  check(
-    'and the time it cannot know is unknown too',
-    seen.every((file) => file.at === undefined),
-    JSON.stringify(seen)
-  )
+  check('a version 1 file contributes no rows', seen.length === 0, JSON.stringify(seen))
+  check('and its skills are still read', state.skillsUsed('v1')?.has('kept-skill') === true, JSON.stringify([...(state.skillsUsed('v1') ?? [])]))
+  check('and so are its tools', state.toolsSeen('v1')?.has('mcp__kept__x') === true, JSON.stringify([...(state.toolsSeen('v1') ?? [])]))
+  // The counter is read as before. Dropping it would renumber every surviving
+  // field's position, which is a different bug than the one being fixed.
+  check('and its sequence survives', state.bySession.get('v1')?.sequence === 9, String(state.bySession.get('v1')?.sequence))
+  await done(root)
+}
+
+{
+  // The same rule for v2, which is the shape most files on disk have. Asserted
+  // separately because v2 is the version a hand-rolled `state: 2` fixture would
+  // reach for, and a rule that only holds for v1 is not the rule.
+  const { state, store, root } = await fixture()
+  await store.write('v2', {
+    state: 2,
+    turns: 1,
+    previous: null,
+    skills: {},
+    tools: [],
+    servers: {},
+    sequence: 3,
+    paths: { '/work/a.ts': { seq: 3, turn: 1, at: 111, description: '旧记录' } },
+  })
+  await state.load('v2')
+  check('a version 2 file contributes no rows either', state.pathsSeen('v2').length === 0, JSON.stringify(state.pathsSeen('v2')))
   await done(root)
 }
 
@@ -2005,7 +2020,7 @@ for (const reason of ['gone', 'archived']) {
   // meant as a number, which is worse than admitting the file has no opinion.
   const { state, store, root } = await fixture()
   await store.write('bad-turn', {
-    state: 2,
+    state: STATE_VERSION,
     turns: 1,
     previous: null,
     skills: {},
@@ -2058,11 +2073,11 @@ for (const reason of ['gone', 'archived']) {
   state.rememberPaths('upgrade', ['added.js'], 2)
   await state.flush('upgrade')
   const stored = await store.read('upgrade')
-  check('an old file is upgraded by being written once', stored?.state === 2, String(stored?.state))
-  check('and the file it knew is still there', stored?.paths?.['kept.js'] !== undefined, JSON.stringify(stored?.paths))
+  check('an old file is upgraded by being written once', stored?.state === STATE_VERSION, String(stored?.state))
+  check('and the row it knew is not carried over', stored?.paths?.['kept.js'] === undefined, JSON.stringify(stored?.paths))
   check(
-    'and the upgraded entry is the new shape',
-    typeof stored?.paths?.['kept.js'] === 'object' && stored?.paths?.['kept.js']?.seq === 7,
+    'and the row this build delivered is the new shape',
+    typeof stored?.paths?.['added.js'] === 'object' && stored?.paths?.['added.js']?.turn === 2,
     JSON.stringify(stored?.paths)
   )
   await done(root)
@@ -2154,7 +2169,7 @@ for (const reason of ['gone', 'archived']) {
       JSON.stringify({
         version: 1,
         session: 'foreign',
-        state: 2,
+        state: STATE_VERSION,
         turns: 1,
         paths: {
           '/work/a.ts': { seq: 3, turn: 1, at: 111, source: 'git', description: '旧记录' },

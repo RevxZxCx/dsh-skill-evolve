@@ -57,29 +57,33 @@ const WRITE_DELAY_MS = 1000
  * changing what an existing field means does, because an old file would then be
  * read as if its values meant what they say now.
  */
-const STATE_VERSION = 2
+const STATE_VERSION = 3
 
 /**
  * The versions this build can read.
  *
  * v1 stored `paths` as `{ [file]: position }`. v2 stores
  * `{ [file]: { seq, turn, at } }`, because a number cannot say which turn edited
- * the file or when — and the card needs both: `turn` decides whether a file
- * belongs under "this turn" or "earlier" after a restart, and `at` is when the
- * file was produced rather than when it was last written to disk.
+ * the file or when. v3 adds `description` and, more importantly, changes what a
+ * `paths` entry *means*: v1 and v2 were written by four collectors that inferred
+ * files from edit calls, shell redirections and a diff of the worktree, so a row
+ * meant "this session touched this file". v3 records only what the model handed
+ * over, so a row means "this session delivered this document".
  *
- * The bump is a *reader* change, not a migration: `readState` normalises either
- * shape into the v2 one, and every write emits v2. So an old file is upgraded by
- * being read once and written once, with no migration step and no backup — the
- * data it held is exactly the data the v2 record holds, minus the two facts v1
- * never had.
+ * Those are different claims, and that is why this bump drops the paths instead
+ * of normalising them. A v2 file cannot tell a delivered document from a file a
+ * build script rewrote in the same turn — every entry it holds has an empty
+ * `description`, which is exactly what a `report_output_files` call also
+ * produces. Carrying them forward would put files the model never offered in
+ * front of a reader under a heading that promises it did. Skills, tools and the
+ * summary are read as before: those fields did not change meaning.
  *
- * Going backwards is deliberately unsupported: a build that only knows v1 reads
- * a v2 file as "not mine" and starts from empty, which looks the same as a
- * session that has not edited anything yet. Losing history to a downgrade is
+ * Going backwards is deliberately unsupported: a build that only knows v2 reads
+ * a v3 file as "not mine" and starts from empty, which looks the same as a
+ * session that has not delivered anything yet. Losing history to a downgrade is
  * cheaper than holding the format back for it.
  */
-const READABLE_VERSIONS = new Set([1, STATE_VERSION])
+const READABLE_VERSIONS = new Set([1, 2, STATE_VERSION])
 
 /**
  * How many edited files a session remembers.
@@ -148,8 +152,12 @@ function readState(stored) {
   // value for two facts a v1 file never recorded. The card treats an unknown
   // turn as "earlier" and an unknown time as "no timestamp to show", which is
   // what a session from before this change should look like.
+  // Read only from a file this build wrote. A v1 or v2 file's paths were inferred
+  // by the collectors that used to exist, and the claim they carry — "this
+  // session touched this file" — is not the claim the card makes now. See the
+  // note on `READABLE_VERSIONS`.
   const paths = new Map()
-  if (isRecord(stored.paths)) {
+  if (stored.state === STATE_VERSION && isRecord(stored.paths)) {
     for (const [file, raw] of Object.entries(stored.paths)) {
       const entry = readPathEntry(raw)
       if (entry !== undefined) paths.set(file, entry)

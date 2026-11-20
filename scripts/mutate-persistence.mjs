@@ -675,6 +675,18 @@ const mutations = [
     to: '',
     why: 'The verdict is permanent for the process and the host can change its mind: an archived conversation that is opened again starts a turn. That turn is a newer testimony than the sweep, and without lifting the verdict the resumed session records skills and files while silently dropping every summary.',
   },
+  {
+    file: state,
+    label: 'a collector row is read as a delivery',
+    // Measured: all three fail, and they fail on different data -- a written
+    // file, a fixture, and a copy of this machine's real history. The last one
+    // matters most: the fixtures were built for the old rule and could be made
+    // to agree with a wrong one, while the real file cannot.
+    suites: ['test/session-state.test.mjs', 'test/fixture-data.test.mjs', 'test/real-data.test.mjs'],
+    from: '  if (stored.state === STATE_VERSION && isRecord(stored.paths)) {',
+    to: '  if (isRecord(stored.paths)) {',
+    why: 'v1 and v2 recorded "this session touched this file", inferred by four collectors that no longer exist; v3 records "this session delivered this document". Reading the old rows under the new heading puts files the model never offered in front of a reader who was promised it had, which is the whole reason the version was bumped rather than the rows normalised.',
+  },
 ]
 
 // The originals, read once per file, so the interrupt path can restore from

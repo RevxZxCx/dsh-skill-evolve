@@ -6047,13 +6047,10 @@ async function openPanel(routes, options) {
   // The two halves of the header, read separately: the bold count and the quiet
   // remainder. Adding them back together is the arithmetic the header promises.
   const countHead = (text) => Number((String(text).match(/(\d+) 个文件/u) ?? [])[1])
-  // One remainder now, not two: a row the card declines to draw is a row whose
-  // extension is not a delivery format, and there is no second reason to hide one.
-  const countNote = (node) => {
-    const text = textOf(firstByClass(node, 'dsse-head-note'))
-    const skipped = Number((text.match(/另有 (\d+) 个文件不是交付文档/u) ?? [])[1])
-    return Number.isFinite(skipped) ? skipped : 0
-  }
+  // No remainder at all now. The card answers one question, and a grey sentence
+  // counting the rows it declined is a sentence about the filter: the reader who
+  // wants to know what was handed over is not helped by learning what was not.
+  const hasNote = (node) => firstByClass(node, 'dsse-head-note') !== undefined
 
   // Folded, the four rows are this turn's files first, then the session's older
   // ones. Keeping the handed order would give a.md first, and that is precisely
@@ -6066,9 +6063,9 @@ async function openPanel(routes, options) {
   // `200 个文件` over four rows, and 197 of the rows behind it were a reviewer's
   // copy of the repository. Both numbers are still said, because a reader who adds
   // the header up must land on the total the badge counts down from.
-  check('the header counts the files a person wrote', meta().includes('5 个文件'), meta())
-  check('and names the rows it did not draw', textOf(firstByClass(card, 'dsse-head-note')) === '另有 1 个文件不是交付文档', textOf(firstByClass(card, 'dsse-head-note')))
-  check('and the two halves are the whole list', countHead(meta()) + countNote(card) === 6, `${meta()} / ${textOf(firstByClass(card, 'dsse-head-note'))}`)
+  check('the header counts the documents this session delivered', meta().includes('5 个文件'), meta())
+  check('and it says nothing about the rows it declined', hasNote(card) === false, textOf(firstByClass(card, 'dsse-head-stats')))
+  check('and the number is the whole of the header', countHead(meta()) === 5, meta())
   // A card whose only hidden rows are generated files still needs a way to see
   // them: filtering without an exit is deletion with extra steps. Four of the six
   // rows are drawn (three this turn, then a.md), so two are missing — one written
@@ -6184,9 +6181,12 @@ async function openPanel(routes, options) {
   const card = byClass(tree, 'dsse-card').find((node) => textOf(node).includes('产出文件'))
   check('one delivered document still draws the card', card !== undefined, textOf(tree).slice(0, 120))
   check('and it draws exactly that one row', byClass(card, 'dsse-row').length === 1, String(byClass(card, 'dsse-row').length))
-  // The refused five are named in the head, not counted towards the fold: the
-  // badge is about rows behind the fold, and none of these are rows.
-  check('the five it refused are named rather than counted', textOf(firstByClass(card, 'dsse-head-note')) === '另有 5 个文件不是交付文档', textOf(firstByClass(card, 'dsse-head-note')))
+  // The refused five are not mentioned at all, and they are not rows either: the
+  // badge is about rows behind the fold, and none of these are rows. The shape
+  // below is the one that tells the two counts apart -- one delivered document
+  // plus five refused source files is the only fixture where a badge counting the
+  // refused rows would appear and the real one would not.
+  check('the five it refused are not mentioned', firstByClass(card, 'dsse-head-note') === undefined, textOf(firstByClass(card, 'dsse-head-stats')))
   check('and a card whose one row fits offers no badge', firstByClass(card, 'dsse-expand') === undefined && firstByClass(card, 'dsse-expand-action') === undefined, textOf(card).slice(0, 160))
 }
 

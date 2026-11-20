@@ -764,8 +764,8 @@ const mutations = [
     file: client,
     label: 'the card refuses files without saying how many',
     suites: ['test/client.test.mjs'],
-    from: "      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个文件不是交付文档`)",
-    to: "      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个`)",
+    from: "                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(delivered.length) }), jsx('span', { children: '个文件' })] })",
+    to: "                      ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(ordered.length) }), jsx('span', { children: '个文件' })] })",
     why: 'A session with two written files draws two rows, not four. Assuming a full fold makes the badge claim four rows are hidden on a card that hides none, which is the "展开全部 1 个" bug wearing new words.',
   },
 

@@ -1,13 +1,13 @@
 {
   "fixture": {
-    "why": "Twenty-eight rows carry no recorded time at all, which is the \"unknown is not old\" branch: they must not be filed under the stale heading.",
+    "why": "Twenty-eight rows carry no recorded time at all, which is the \"unknown is not old\" branch: they must not be filed under the stale heading. Re-stamped `state: 3`: the rows below were written by the collectors, and this build reads rows only from a document it wrote. Without the stamp the pipeline under test would read an empty list and every assertion would pass for the wrong reason.",
     "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
     "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
     "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
     "regenerate": "node scripts/make-fixture.mjs"
   },
   "version": 1,
-  "state": 2,
+  "state": 3,
   "turns": 32,
   "paths": {
     "&1|head": {

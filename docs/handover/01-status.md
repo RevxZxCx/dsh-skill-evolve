@@ -72,6 +72,7 @@
 | 2026-11-19 | 切会话时监控列不跟随：三条救援路径，替身原来建模了一个不存在的宿主 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他猜「事件驱动未生效、等 60s 兜底」方向对但机制不同 —— 切换会话本身从来不是事件驱动的（靠 MutationObserver → syncSession → bridge.sessionId），R-103 没碰它。三处叠加：观察器挂在 `[data-slot]` 祖先上而 `childList` 不看子树（真机层级 `.an3WzG_root > .an3WzG_body > content`，宿主只替换 content 时 slot 上零记录），`bridge.sessionId` 因此不动，而 `load()` 每次重读 `liveSessionId()` 能自愈、`startStream()` 只绑一次且兜底写的是 `if (stream === null)`（旧流还开着，永不重绑）—— 数据自愈、流不自愈，正是「过一会儿列自己对了、但每轮又等一分钟」。改①②③：渲染时读宿主属性、观察器加挂 content 父节点、流记住绑定会话。**替身原来把 content 建在 slot 直接子节点下（一个不存在的宿主），这是 984 条断言全绿却漏掉本 bug 的根本原因**；重建为三层嵌套后旧套件仍 984 绿，证明它此前确实抓不住。四条变异最初 M1/M3 互为兜底全部存活 —— 测试在触发慢钟后又顺手渲染一次，替被测的修法干了活；拆成三个互不渲染的块后 4/4 KILLED。另修一次自己造成的全仓库 CRLF 污染（Python `write_text` 在 Windows 上把换行转成 CRLF） | 4215 passed；变异 148 + 230 全杀 |
 | 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 退回上一轮：「实际不通过，你是否做了真机实测」。本轮全程在活宿主上取证：6 轮真实切换里 2 轮 `/panel` 零请求、列文字停在旧会话；埋点证明 `Toggle` 抢先写 `bridge` 并 notify，那次渲染读到的还是旧 attribute，等 attribute 追上时 `syncSession` 已不再通知。两处修复后真机 10/10 轮正确 | 4215 passed；变异 148 + 230 全杀；**两处无测试，只有真机证据** |
 | 2026-11-21 | 产出文件卡重定为交付文档：只认汇报，删掉四路采集 | 用户 m28433 把卡片场景定为「交付文档」（给人看的文档/图片/表格/演示），m28497 批准彻底删除。删掉 git 差分、mtime 扫描、工具路径、shell 路径解析四路采集（六个文件 1,636 行产品 + 1,772 行测试），数据来源只剩 `deliverables/presented` 事件与 `report_output_files`；九张噪声表换成 23 项交付白名单；`source`/`stale`/`noise` 三字段换成 `deliverable` + `description`；图标八桶重建为六桶。3853 断言全绿，四套突变 166 + 68 + 141 + 69 全杀、0 存活、0 CRASHED。新增 DEF-172~178、D-233~D-240、R-108 |
+| 2026-11-21 | 「另有 N 个文件」数的是遗留记录，不是交付；状态升到 v3 丢弃旧 paths | 用户 m30923 截图里卡片写着「14 个文件 另有 80 个文件不是交…」，问是不是旧的文件追踪还没清。查实：状态目录里 237 个 json、98 个有 paths，全是四路采集时代写的（每条 `description` 空串）。两处修正：卡片不再说「另有 N 个」（那句话讲的是过滤器不是交付），`STATE_VERSION` 2 → 3 且 **paths 只在 v3 文件里读**。全量 3854 断言全绿，四套突变 166 + 69 + 141 + 69 全杀、残留 0。新增 DEF-179、D-241/242、R-109 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5733,3 +5734,87 @@ transcript store。修法是在 `rememberSummary` 里查一次 `condemned`。其
 3. **`docs/22` 与 `docs/23` 的「artifact 来自 `present_files`」结论已被推翻**，
    两处正文未改写（`handover/` 只增不改的规矩），更正记在 `docs/24` §1.1 的对照表里。
 4. **`docs/21` §2 与 §3 的两个 P0 随代码一起消失**，不是修好了，是那两条路没了。
+
+## 2026-11-21 · 「另有 80 个文件」不是交付，是上一代的记录在冒充它
+
+用户截了一张图：卡片头部写着 `14 个文件`，紧挨着一行灰字 `另有 80 个文件不是交…`，
+问这是旧的文件追踪留下的，还是卡片读错了字段。两个问题其实是同一个答案的一半。
+
+### 一、先查数据，不先改代码
+
+`C:/Users/26903/.dsh/plugin-data/skill-evolve/sessions/` 有 **237 个状态文件，98 个带 `paths`**。
+最新三个样本逐条打开：`session-10c7ef4a` 94 条、`session-fd4b0778` 85 条、`session-a6eb196a`
+200 条（后者是 `F:/bot/remote-web-app/app/build/...` 下的 `.arsc.flat`，构建产物）。
+**每一条的 `description` 都是空串** —— 四路采集时代写的记录里根本没有这个字段，
+而空串恰好也是 `report_output_files` 那种「只给路径不给描述」的合法形状。
+
+所以灰字数的 80 个既不是交付文档，也不是本轮采集的产物，是**上一代「这个会话碰过这个文件」的记录**。
+`另有 N 个` = `ordered.length - delivered.length`，`ordered` 就是它们。
+
+### 二、这句话本来就不该存在
+
+改数据之前先问：就算那 80 条全是今天写的代码文件，这句话该不该出现在卡上？
+**不该。** 卡片这一轮只回答一个问题——这个会话交付了哪些文档。灰字说的是
+「有多少文件被过滤器拒绝了」，那是关于过滤器的一句话，不是关于交付的一句话。
+读者想知道自己被交付了什么，不需要知道还有多少源码没进来。
+
+于是两件事分开做：
+
+1. **删掉那句话**（`packages/ui-evolve/lib/client.js` 266,933 → 266,580 字符）：
+   `skipped`、`keptNotes`、`dsse-head-note` 那个 span、`.dsse-head-note{...}` 那条 CSS 全部移除，
+   两处注释改成「The card answers one question now, and a remainder was a sentence about
+   the filter rather than about the delivery」。头部只剩一个数字。
+2. **让旧记录不再冒充交付**（`packages/ui-evolve/lib/session-state.js`）：
+   `STATE_VERSION` 2 → 3，`READABLE_VERSIONS` 加进 2，**`readState` 只在 `stored.state === STATE_VERSION` 时读 `paths`**。
+
+### 三、为什么是丢弃，不是归一化
+
+v1/v2 的 `paths` 条目意思是「这个会话碰过这个文件」，来源是四条已经不存在的采集路；
+v3 的意思是「这个会话交付了这份文档」，来源只有模型的明确动作。**同一个字段名，两个不同的断言。**
+
+归一化听起来更温和，但它需要一个判据去分辨「交付的文档」与「同回合被构建脚本重写的文件」，
+而那个判据正是这一轮删掉的东西。剩下的唯一线索是 `description` —— 空串，
+它既可能来自 v2 的采集，也可能来自只给路径的 `report_output_files`。**分不开。**
+分不开就不能假装分开了：把旧行读进来，等于替模型声明它交付了它从没提过的文件。
+
+代价是真实的：**237 个状态文件里 98 个的 `paths` 从今天起不再显示**。
+它们的 skills、tools、summary、回合号照旧读，只有 `paths` 不读。
+这是可接受的，因为那 98 份记录描述的事情已经不是这张卡在说的事情了。
+
+### 四、连锁：四个测试套件
+
+- `test/client.test.mjs` 955/0：`countNote` helper 改成 `hasNote`，三条断言反过来——
+  「and it says nothing about the rows it declined」「and the number is the whole of the header」
+  「the five it refused are not mentioned」。
+- `test/session-state.test.mjs` 348/12 → **361/0**：v1 块整段重写成「a version 1 file contributes no rows」
+  加「its skills/tools/sequence are still read」（第一次写成 `state.toolsUsed`，抛
+  `TypeError: state.toolsUsed is not a function` —— 访问器叫 `toolsSeen`）；新增 v2 块；
+  `bad-turn`/`foreign` 两块 fixture 的 `state` 改成 `STATE_VERSION`（它们测的是条目类型规则，
+  必须是本 build 写的文件）。
+- `test/fixture-data.test.mjs` **53/0**：三个 fixture 与 `scripts/make-fixture.mjs` 同步写 `state: 3`；
+  v1 块改成「and its path does not reach the card」。
+- `test/real-data.test.mjs` **29/0**：新增 `import { readState }`，对**最大的一份真实文件**
+  先断言旧记录不贡献行、但 skills 与回合数仍读得到；**再把同一份文件 `{...stored, state: 3}` 写回**，
+  后面的断言才拿得到行。路径、回合号、字节数都是这台机器的，只改版本字段——
+  为这一轮现编的 fixture 证明不了真实拼写。
+
+### 五、验证
+
+- `node test/run.mjs` **3854 passed / 0 failed**。
+- 四套突变串行：语言 **166**、持久化 **69**、面板 **141**、速度 **69**，全部 killed、0 survived、0 crashed。
+- 新增一条持久化突变「a collector row is read as a delivery」（`stored.state === STATE_VERSION` 去掉），
+  实测三个套件各自变红：`session-state` 3 failed、`fixture-data` 1 failed、`real-data` 1 failed ——
+  按 `// Measured:` 规则写明它们不是彼此的替代。
+- `find_mutation_residue.py` 0 suspicious；`grep -rc "if (false)" packages/*/lib/*.js` 零命中；
+  `report_dead_anchors2.py` TOTAL DEAD: 0。
+- 语言脚本里那条「另有 N 个」的等价突变失去了锚点，换成头部计数突变
+  （`String(delivered.length)` → `String(ordered.length)`）。
+
+### 六、这一轮没做到的
+
+1. **没有清理那 98 个旧文件本身**。它们是用户的记录，删不删该由用户决定；
+   这一轮只是让它们不再显示。要真正清理需要一条明确的删除动作。
+2. **没有回头验证 v3 文件在旧版本客户端里会怎样**。降级不在支持范围内，但没试过。
+3. **灰字删掉之后，「被拒绝的文件」在界面上完全不可见了**。这是有意的，
+   但它也意味着以后再有人问「为什么我的 .js 没进来」，界面上找不到任何线索——
+   只能读代码或读文档。

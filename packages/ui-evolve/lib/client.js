@@ -671,7 +671,6 @@ window.__ModuleLoader__.load({
 .dsse-head-stat{display:inline-flex;align-items:baseline;gap:3px;flex:0 0 auto}
 .dsse-head-stat b{color:var(--dsw-alias-label-primary,#0f1115);font-weight:600;font-variant-numeric:tabular-nums}
 .dsse-head-ago{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
-.dsse-head-note{color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.78em,10px);white-space:nowrap;flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .dsse-clip{position:relative;overflow:hidden}
 .dsse-clip[data-clipped="true"][data-expanded="false"]::after{content:"";position:absolute;left:0;right:0;bottom:0;height:34px;pointer-events:none;background:linear-gradient(to bottom,transparent,var(--dsw-alias-bg-layer-1,#fff))}
 .dsse-clip .dsse-text{max-height:9.3em;overflow:hidden}
@@ -3299,7 +3298,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // source files delivered two documents, and the card says that rather than
       // listing thirty-two rows nobody would open.
       const delivered = ordered.filter((file) => file.deliverable === true)
-      const skipped = ordered.length - delivered.length
       // A delivered document that has since been deleted is still something the
       // turn delivered, so it keeps its row -- struck through and not clickable,
       // the way Qoder draws a missing artifact. Dropping it would rewrite history:
@@ -3325,18 +3323,17 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
             { key: 'gone', label: gone.length > 0 ? '已不存在' : '', files: gone },
           ]
         : [{ key: 'folded', label: '', files: fresh.concat(earlier).slice(0, FOLDED_FILES) }]
-      // What the header promises. The bold number is how many documents this
-      // session delivered; the grey line says what was left out of it and why.
+      // What the header promises: one number, how many documents this session
+      // delivered.
       //
       // It used to count everything the session touched, which was truthful about
       // the collector and a lie to the reader: one real session showed `200 个文件`
       // above four rows, and 197 of those rows were a reviewer's copy of the
-      // repository. A second number then split those into "generated" and "older",
-      // and a third tried to explain the split. All three questions went away with
-      // the collectors that raised them: the model says what it delivered, and the
-      // whitelist says whether that is a document.
-      const keptNotes = []
-      if (skipped > 0) keptNotes.push(`另有 ${skipped} 个文件不是交付文档`)
+      // repository. Then a grey line said how many were left out, and a badge said
+      // how many were folded. The card answers one question now, and a remainder
+      // was a sentence about the filter rather than about the delivery: the reader
+      // who wants to know what the model handed over is not helped by learning how
+      // many source files it did not hand over.
       // How many rows the folded card actually draws. Equality with
       // `FOLDED_FILES` is not assumed: a session with two documents shows two.
       const foldedRows = fresh.concat(earlier).slice(0, FOLDED_FILES).length
@@ -3627,10 +3624,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         ((summary?.text !== undefined && String(summary.text).length > 0) || (data.calls ?? 0) > 0 || (data.failed ?? 0) > 0 || turnFiles > 0)
       const showTurn = turnHasContent
       const showActivity = activity.length > 0
-      // Only when something was delivered. A card that says "0 个文件 另有 12 个
-      // 文件不是交付文档" is a card about the files it is not showing, and the
-      // reader's question is what the turn handed them. A session that delivered
-      // nothing shows nothing, which is the same rule the other cards follow.
+      // Only when something was delivered. A card whose header says `0 个文件` is
+      // a card about the files it is not showing, and the reader's question is what
+      // the turn handed them. A session that delivered nothing shows nothing, which
+      // is the same rule the other cards follow.
       const showFiles = delivered.length > 0
       const pendingCandidates = Number.isFinite(data?.pendingCandidates) ? data.pendingCandidates : 0
       // Pending candidates count as content too. The header button is the panel's
@@ -3787,25 +3784,24 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                 // Two numbers and a quieter pair, in the header where they cannot be
                 // scrolled out of view — that was the whole of DEF-51.
                 //
-                // The bold one answers "how much did a person write"; the grey ones
-                // answer "and what else is in here". They add up: bold + grey = every
-                // row the card holds, which is the same total the badge counts down
-                // from. A reader who checks the arithmetic finds it closes.
+                // One number, and it answers one question: how many documents did
+                // this conversation hand over. It used to sit beside two grey
+                // remainders that split the rest into "generated" and "older", and
+                // the three of them added up to every row the card held. Those two
+                // are gone: they described the filter, and the badge already says
+                // how many rows are folded. A reader who wants the whole list opens
+                // the card, which is one gesture and no arithmetic.
                 //
-                // Zero is written as a sentence rather than as `0 个文件`. A card
-                // whose only rows are generated files has no honest subject to count,
-                // and "0 个文件 另有 3 个生成文件" reads like something failed. When
-                // nothing was written and nothing was generated the card is not drawn
-                // at all (see `showFiles`), so this branch only runs with a remainder.
+                // The number is omitted rather than written as `0 个文件` when
+                // nothing was delivered -- a card with no subject to count is not
+                // drawn at all (see `showFiles`), so this is the shape of a card
+                // whose rows are all struck through, not of an empty one.
                 head: jsxs('div', {
                   className: 'dsse-head-stats',
                   children: [
                     delivered.length > 0
                       ? jsxs('span', { className: 'dsse-head-stat', children: [jsx('b', { children: String(delivered.length) }), jsx('span', { children: '个文件' })] })
                       : null,
-                    keptNotes.length === 0
-                      ? null
-                      : jsx('span', { className: 'dsse-head-note', children: keptNotes.join(' · ') }),
                   ].filter(Boolean),
                 }),
                 // The fold's control is the same round badge the 上一轮 card uses,

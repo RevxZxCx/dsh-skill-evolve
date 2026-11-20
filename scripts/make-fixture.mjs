@@ -58,16 +58,19 @@ const PICKED = [
   {
     source: '31c24e34-a48f-47c4-8a3c-a20ac1439047.json',
     name: 'mixed-states.json',
+    state: 3,
     why: 'Six rows, one of each awkward kind: two directories, one record spelled like a shell redirection, one spelled like a glob, one row the diff found, one that is simply gone. This is the file the folder defect was found on.',
   },
   {
     source: '18ca9fd5-3b4d-42c2-bce5-e6690d62ae92.json',
     name: 'relative-paths.json',
+    state: 3,
     why: 'Both brackets and both spellings: git-found rows beside scan-found ones, absolute beside relative, a POSIX path beside a Windows one, and a directory reached through a relative guess.',
   },
   {
     source: 'session-fd4b0778-5513-47e7-82aa-e552b7d2612a.json',
     name: 'no-timestamps.json',
+    state: 3,
     why: 'Twenty-eight rows carry no recorded time at all, which is the "unknown is not old" branch: they must not be filed under the stale heading.',
   },
   {
@@ -220,7 +223,14 @@ for (const { pick, raw } of loaded) {
       regenerate: 'node scripts/make-fixture.mjs',
     },
     version: raw.version,
-    state: raw.state,
+    // Three of these fixtures exist to exercise the row pipeline, and this build
+    // reads rows only from a document it wrote itself (see `STATE_VERSION` in
+    // session-state.js). They are stamped v3 so the pipeline has rows to read at
+    // all; the `why` says so, because a fixture claiming to be this build's data
+    // while holding a collector's rows is exactly the kind of lie a test cannot
+    // see. The two v1 fixtures keep their own version: they prove the legacy path
+    // is refused rather than guessed at.
+    state: pick.state ?? raw.state,
     turns: finite(raw.turns) === true ? raw.turns : 0,
     paths,
   }

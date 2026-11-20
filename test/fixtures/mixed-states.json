@@ -1,13 +1,13 @@
 {
   "fixture": {
-    "why": "Six rows, one of each awkward kind: two directories, one record spelled like a shell redirection, one spelled like a glob, one row the diff found, one that is simply gone. This is the file the folder defect was found on.",
+    "why": "Six rows, one of each awkward kind: two directories, one record spelled like a shell redirection, one spelled like a glob, one row the diff found, one that is simply gone. This is the file the folder defect was found on. Re-stamped `state: 3`: the rows below were written by the collectors, and this build reads rows only from a document it wrote. Without the stamp the pipeline under test would read an empty list and every assertion would pass for the wrong reason.",
     "extractedFrom": "a session file under ~/.dsh/plugin-data/skill-evolve/sessions on 2026-11-15",
     "scrubbed": "every absolute root is replaced by a numbered stand-in under D:\\fixture-N or /fixturesN; relative paths, separators and trailing slashes are unchanged",
     "dropped": "previous.commands, previous.said, skills, tools, servers, session id",
     "regenerate": "node scripts/make-fixture.mjs"
   },
   "version": 1,
-  "state": 2,
+  "state": 3,
   "turns": 1,
   "paths": {
     "D:\\fixture-5\\": {

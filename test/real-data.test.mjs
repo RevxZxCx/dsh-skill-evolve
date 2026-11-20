@@ -23,13 +23,14 @@
  * fresh checkout with no history does not fail the suite.
  */
 
-import { cpSync, existsSync, readdirSync, readFileSync, statSync, rmSync } from 'node:fs'
+import { cpSync, existsSync, readdirSync, readFileSync, statSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { apply as applyPanel, Config as PanelConfig } from '../packages/ui-evolve/lib/index.js'
+import { readState } from '../packages/ui-evolve/lib/session-state.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -123,6 +124,30 @@ check(
   Number.isFinite(stored?.turns) && stored.turns > 0,
   JSON.stringify({ turns: stored?.turns, previous: stored?.previous?.turn }),
 )
+
+// The first thing real history proves: a file the collectors wrote contributes no
+// rows. Its `paths` mean "this session touched this file", which is not the claim
+// the card makes, so reading them would put files the model never offered under a
+// heading that promises it did. Asserted on the biggest real file rather than on a
+// hand-written fixture, because the rule exists for exactly this data.
+check(
+  'a record from before the card narrowed contributes no rows',
+  stored.state !== 3 && readState(stored)?.paths.size === 0,
+  JSON.stringify({ state: stored.state, rows: readState(stored)?.paths.size }),
+)
+check(
+  'but its skills and turn count are still read',
+  readState(stored)?.skills !== undefined && readState(stored)?.sequence !== undefined,
+  JSON.stringify({ skills: readState(stored)?.skills.size, sequence: readState(stored)?.sequence }),
+)
+
+// Everything below needs rows, so the same real document is re-stamped as this
+// build's own. That is not a fake: the paths, the turn numbers and the byte
+// counts are the machine's, and the only thing changed is the version field that
+// decides whether the rows are a claim this build is willing to make. A fixture
+// invented for the occasion would prove nothing about real spellings.
+const upgraded = { ...stored, state: 3 }
+writeFileSync(join(copied, biggest.name), JSON.stringify(upgraded))
 
 // ---------------------------------------------------------------------------
 // The real host half, against the copy
@@ -601,10 +626,13 @@ check(
   rows.length + offered >= delivered.length,
   JSON.stringify({ drawn: rows.length, offered, delivered: delivered.length }),
 )
+// No remainder at all. The card answers one question, and a grey line counting
+// the rows it declined is a line about the filter -- the reader who wants to know
+// what was handed over is not helped by learning how many source files were not.
 check(
-  'and the files it declined are named rather than drawn',
-  refused === 0 || textOf(firstByClass(card, 'dsse-head-note')).includes(`${refused} 个文件不是交付文档`),
-  JSON.stringify({ refused, note: textOf(firstByClass(card, 'dsse-head-note')) }),
+  'and the files it declined are not mentioned',
+  firstByClass(card, 'dsse-head-note') === undefined,
+  JSON.stringify({ refused, head: textOf(firstByClass(card, 'dsse-head-stats')) }),
 )
 
 // Press it, so the rows are on screen for every assertion below. Reading a
@@ -625,22 +653,25 @@ const full = openRows.length >= rows.length ? openRows : rows
 const headText = textOf(firstByClass(card, 'dsse-head-stats'))
 const shown = Number((headText.match(/(\d+) 个文件/u) ?? [])[1] ?? 0)
 const noteNode = firstByClass(card, 'dsse-head-note')
-const noiseInNote = Number((textOf(noteNode).match(/(\d+) 个文件不是交付文档/u) ?? [])[1] ?? 0)
 const emptyCard = headText.trim() === '' && noteNode === undefined
+// One number, and it is the delivered count. The header used to add up with two
+// grey remainders; with those gone the only arithmetic left to check is that the
+// number is the number of documents, on real data where a cap of 200 and a
+// whitelist can disagree about what that number is.
 check(
-  'the header adds up to the list it is describing',
-  emptyCard || shown + noiseInNote > 0,
-  JSON.stringify({ headText, note: textOf(noteNode) }),
+  'the header counts exactly the delivered documents',
+  emptyCard || shown === delivered.length,
+  JSON.stringify({ headText, shown, delivered: delivered.length, refused }),
 )
 check(
   'a number is never negative or absurd',
-  shown >= 0 && shown <= delivered.length && noiseInNote >= 0 && noiseInNote <= refused,
-  JSON.stringify({ shown, noiseInNote, delivered: delivered.length, refused }),
+  shown >= 0 && shown <= delivered.length,
+  JSON.stringify({ shown, delivered: delivered.length, refused }),
 )
 check(
-  'and the two numbers are the two halves of the record',
-  shown + noiseInNote === delivered.length + refused,
-  JSON.stringify({ shown, noiseInNote, recorded: delivered.length + refused }),
+  'and no grey remainder survives beside it',
+  noteNode === undefined,
+  JSON.stringify({ note: textOf(noteNode) }),
 )
 
 const titles = full.map((row) => String(row.props?.title ?? ''))
@@ -673,7 +704,7 @@ for (const row of files) byStatus[row.status] = (byStatus[row.status] ?? 0) + 1
 console.log(
   `  replayed ${sessionId} — ${files.length} rows, ${openRows.length} drawn, statuses ${JSON.stringify(byStatus)}, header ${JSON.stringify(headText)}, note ${JSON.stringify(textOf(noteNode))}`,
 )
-console.log(`  coverage ${JSON.stringify(payload.data?.sweep ?? null)}, cwd ${JSON.stringify(payload.data?.cwd)}`)
+console.log(`  cwd ${JSON.stringify(payload.data?.cwd)}`)
 
 report()
 process.exit(failed === 0 ? 0 : 1)

@@ -363,15 +363,10 @@ function looksLikeShellLeftover(path) {
   check('the v1 fixture is really v1', document.state === 1, String(document.state))
   check('and spells its one path as a bare number', typeof Object.values(document.paths)[0] === 'number', typeof Object.values(document.paths)[0])
   const { payload } = await mount(document, { cwd: 'D:\\work' })
+  // Read, not refused: the document is well-formed and its skills, tools and
+  // sequence are still worth having. What it no longer contributes is rows.
   check('a v1 document is read rather than refused', payload.ok === true, JSON.stringify(payload).slice(0, 300))
-  const rows = rowsOf(payload)
-  check('and its path reaches the card', rows.length === 1, String(rows.length))
-  check(
-    'with no invented description and no invented time',
-    rows[0]?.description === '' && (rows[0]?.at === null || rows[0]?.at === undefined),
-    JSON.stringify({ description: rows[0]?.description, at: rows[0]?.at }),
-  )
-  check('and it is still judged by the whitelist', typeof rows[0]?.deliverable === 'boolean', String(rows[0]?.deliverable))
+  check('and its path does not reach the card', rowsOf(payload).length === 0, JSON.stringify(rowsOf(payload).map((row) => row.path)))
 }
 
 {
