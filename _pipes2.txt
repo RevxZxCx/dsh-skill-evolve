@@ -1,8 +1,0 @@
-docs/handover/01-status.md block#67 fileline=72 pipes=5/4
-   | 2026-11-19 | 切会话时监控列不跟随：三条救援路径，替身原来建模了一个不存在的宿主 | 用户 m10257 报障「切换会话时监控侧栏不更新的概率变高了，并且要一段时间后才会切换到正确的侧栏」，他猜「事件驱动未生效、等 60s 兜底」方向对但机制不同 —— 切换会话本身从来不是事件驱动的（靠 Mutatio
-docs/handover/01-status.md block#68 fileline=73 pipes=5/4
-   | 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 退回上一轮：「实际不通过，你是否做了真机实测」。本轮全程在活宿主上取证：6 轮真实切换里 2 轮 `/panel` 零请求、列文字停在旧会话；埋点证
-docs/handover/03-defects.md block#164 fileline=169 pipes=4/5
-   | DEF-164 | 2026-11-19 | 会话切换的通知被吞掉：`syncSession` 只在 `bridge` 需要改动时才 `notify()` | 替身没有「bridge 已是新值、属性才追上」这个时序（`trigger()` 不带事件参数）
-docs/handover/03-defects.md block#165 fileline=170 pipes=4/5
-   | DEF-165 | 2026-11-19 | 列的会话身份靠 effect 依赖推断，而 React 允许一次渲染不提交它的 effect | 替身没有 key 的 remount 语义，`cloneElement` 注释自己写明了这一点
