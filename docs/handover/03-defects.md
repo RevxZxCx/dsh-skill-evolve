@@ -166,8 +166,8 @@
 | DEF-161 | 2026-11-18 | `pointer-events` 被算成 `none`，元素看得见、尺寸正确，但鼠标事件全部穿透到滚动体 | 基于 `getBoundingClientRect`/颜色/尺寸/`display` 的断言全部通过；一条「元素可见」的断言对「元素可交互」零覆盖 |
 | DEF-162 | 2026-11-18 | `delete node.style.display` 返回 `true` 却什么都没删 —— `element.style` 是 CSSOM 代理，`display` 不是 own property；列关掉后宿主 nav 仍被强制显示，与替身形成两条轨道 | 替身 `railNode.style` 是字面量普通对象，`delete` 在它上面真的有效，于是 `!railNode.style.display` 这条断言恒真；变异首轮 SURVIVED 才暴露（135 killed / 2 survived） |
 | DEF-163 | 2026-11-18 | 替身轨道的隐藏规则绑在 `html[data-dsse-turn-rail="1"]` 上，而「只画一条轨道」是页面级不变量、与监控列开关无关；列一关规则自己失效 | 断言把错误的作用域写成了正确契约（要求规则以该前缀开头），且正则未锚定行首，新旧两种形态都能匹配，改完仍通过 |
-| DEF-164 | 2026-11-19 | 会话切换的通知被吞掉：`syncSession` 只在 `bridge` 需要改动时才 `notify()` | 替身没有「bridge 已是新值、属性才追上」这个时序（`trigger()` 不带事件参数）
-| DEF-165 | 2026-11-19 | 列的会话身份靠 effect 依赖推断，而 React 允许一次渲染不提交它的 effect | 替身没有 key 的 remount 语义，`cloneElement` 注释自己写明了这一点
+| DEF-164 | 2026-11-19 | 会话切换的通知被吞掉：`syncSession` 只在 `bridge` 需要改动时才 `notify()` | 替身没有「bridge 已是新值、属性才追上」这个时序（`trigger()` 不带事件参数） |
+| DEF-165 | 2026-11-19 | 列的会话身份靠 effect 依赖推断，而 React 允许一次渲染不提交它的 effect | 替身没有 key 的 remount 语义，`cloneElement` 注释自己写明了这一点 |
 | DEF-166 | 2026-11-20 | 门问的是「这个 id 还有没有记录」，而不是「这条记录里有没有值得写下去的东西」；foreign 与「读不懂」两条读取分支装了空记录却不设 `empty`，迟到写入因此放行并把别人的文件整体覆盖 | 测试只构造了 `absent` 这一种空记录（它恰好设了 `empty`），另外两条分支的空记录不在任何断言里 |
 | DEF-167 | 2026-11-20 | 记录里有事实不等于磁盘上还有文件：别的进程写的文件被清掉之后，迟到写入凭记忆重建 | 「记录带事实要放行」这条修法自己有测试，但那个测试只走到「读回事实」就停了，没有走到「那个文件随后消失」 |
 | DEF-168 | 2026-11-20 | 同一个 turn 的两份 sweep 声称由内存单方面裁决，与 `rememberSweep` 自己「同 turn 可以自我纠正」的规则互相矛盾 | 合并方向的测试只构造了「turn 更新」「turn 更旧」「无编号」三种，同 turn 这一格没有 fixture |
