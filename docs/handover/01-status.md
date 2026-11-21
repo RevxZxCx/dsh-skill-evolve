@@ -73,6 +73,7 @@
 | 2026-11-19 | 切会话监控列不跟随（第二轮）：真机定因 `syncSession` 吞掉通知 + `Cards` 按会话 id 重挂 | 用户 m11145 退回上一轮：「实际不通过，你是否做了真机实测」。本轮全程在活宿主上取证：6 轮真实切换里 2 轮 `/panel` 零请求、列文字停在旧会话；埋点证明 `Toggle` 抢先写 `bridge` 并 notify，那次渲染读到的还是旧 attribute，等 attribute 追上时 `syncSession` 已不再通知。两处修复后真机 10/10 轮正确 | 4215 passed；变异 148 + 230 全杀；**两处无测试，只有真机证据** |
 | 2026-11-21 | 产出文件卡重定为交付文档：只认汇报，删掉四路采集 | 用户 m28433 把卡片场景定为「交付文档」（给人看的文档/图片/表格/演示），m28497 批准彻底删除。删掉 git 差分、mtime 扫描、工具路径、shell 路径解析四路采集（六个文件 1,636 行产品 + 1,772 行测试），数据来源只剩 `deliverables/presented` 事件与 `report_output_files`；九张噪声表换成 23 项交付白名单；`source`/`stale`/`noise` 三字段换成 `deliverable` + `description`；图标八桶重建为六桶。3853 断言全绿，四套突变 166 + 68 + 141 + 69 全杀、0 存活、0 CRASHED。新增 DEF-172~178、D-233~D-240、R-108 |
 | 2026-11-21 | 「另有 N 个文件」数的是遗留记录，不是交付；状态升到 v3 丢弃旧 paths | 用户 m30923 截图里卡片写着「14 个文件 另有 80 个文件不是交…」，问是不是旧的文件追踪还没清。查实：状态目录里 237 个 json、98 个有 paths，全是四路采集时代写的（每条 `description` 空串）。两处修正：卡片不再说「另有 N 个」（那句话讲的是过滤器不是交付），`STATE_VERSION` 2 → 3 且 **paths 只在 v3 文件里读**。全量 3854 断言全绿，四套突变 166 + 69 + 141 + 69 全杀、残留 0。新增 DEF-179、D-241/242、R-109 |
+| 2026-11-21 | docs/25 的四条性能问题：面板不再为要丢掉的行做 stat | 用户 m31462 让核对 `docs/25-产出卡性能审查报告.md` 是否属实，m31513 说「把这些都做了吧，f2 应该也是顺手的加一行」。F1 属实且实测复现（最坏真实会话 38 条记录：全部 1.02 ms / 37 行，只算交付 0.13 ms / 5 行，8.1 倍）；报告有一处过时（v3 之后 234 个旧文件的 paths 已不产生 stat），**还漏了一个更该修的问题**：`previous.paths` 没走 v3 门控，实测 74 个文件 608 条里只有 39 条是文档，F1 那笔账只是从 `paths` 挪到了 `previous.paths`。四处改动：`onlyDeliverable` 开关（默认 false，因为单测直接用源码路径调它）、`previous.paths` 在 v2 文件里置空、`delivered` 上限 160 条、HEAD 早返回。3873 断言全绿，四套突变 171 + 69 + 141 + 69 全杀、残留 0。新增 DEF-180~182、D-243~D-246、R-110 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5818,3 +5819,63 @@ v3 的意思是「这个会话交付了这份文档」，来源只有模型的�
 3. **灰字删掉之后，「被拒绝的文件」在界面上完全不可见了**。这是有意的，
    但它也意味着以后再有人问「为什么我的 .js 没进来」，界面上找不到任何线索——
    只能读代码或读文档。
+
+## 2026-11-21 · 面板为要丢掉的行付了全价
+
+### 这一轮要解决什么
+
+用户拿到一份别人写的性能审查（`docs/25`），让我判断是否属实、哪些该修。四条：
+
+- **F1** `/panel` 为最多 200 条历史路径做 `stat` 再序列化，其中约 92% 被客户端 `filter((file) => file.deliverable === true)` 丢弃。
+- **F2** `Transcript#delivered` 回合内无上限，`deliver()` 用线性 `find` 去重。
+- **F3** `HEAD /panel` 也跑完整 `readPanel`。
+- **F4** `snapshot()` 同时产出 `paths` 与 `delivered`；`deliver()` 的 JSDoc 与实现不符。
+
+### 核对的结果：三条属实，一处过时，一处漏了
+
+F1 实测复现，本机最坏的真实会话（38 条记录）：
+
+```
+all of them      1.02 ms   37 rows
+deliverables only 0.13 ms    5 rows     8.1x
+```
+
+**过时的那处**：报告说「老记录一直被按 200 条付费」，但上一轮已经把 `STATE_VERSION` 升到 3 且 paths 只在 v3 文件里读。本机 237 个会话文件里 v1 144、v2 90、v3 只有 3 —— 那 234 个旧文件已经不产生 stat 了。
+
+**漏掉的那处更值得修**：`previous.paths` 没有走同一道门。`session-state.js` 把 `previous` 整个对象原样交给 `transcript.restore()`，而 `readPanel` 在 `pathsSeen` 为空时（对 v1/v2 必然为空）回退到 `previous.paths`。实测 **74 个文件带 `previous.paths`，共 608 条，只有 39 条是交付文档（6.4%）**。F1 省下的那笔钱，从 `paths` 挪到了 `previous.paths`。
+
+### 四处改动
+
+1. **F1a** `statTouchedFiles` 加 `onlyDeliverable`（默认 `false`），`readPanel` 打开它。默认不打开不是保守，是因为十几条既有单测直接用 `.js` 路径调这个函数并期待拿到行；把默认值改掉等于让那些断言去测另一件事。
+2. **F1b** v2 文件恢复时 `previous.paths` 置空。判据同 D-241：旧条目的含义是「碰过这个文件」，不是「交付了这份文档」。
+3. **F2** `MAX_DELIVERED_ENTRIES = MAX_CARD_PATHS * 4`（160）。**满了丢新的，不驱逐旧的** —— `snapshot()` 取前 40 条，驱逐会悄悄改掉卡片已经承诺过的行。
+4. **F3** HEAD 早返回，不再建整个面板再丢掉 body。
+
+### 测试的连锁反应，和一次「绿着变少」
+
+`api.test.mjs` 有 7 条 fixture 拿 `.js` 路径当会话记录，面板开始筛白名单后它们拿不到行。改成 `.md` 之后 —— **断言总数从 402 掉到 399，而没有任何一条变红**。原因是 `for (const file of payload.files)` 按行发断言，行数从 6 降到 3，三条断言就这么消失了。
+
+修法不是把数字改回去，是在循环前钉住行数：`check('the panel answers with the three rows a reader can open', payload.files.length === 3, ...)`。
+
+**这条值得单独记**：按数据行数发断言的循环，数据一变套件覆盖就悄悄变，而绿跑看不出来。它与 DEF-93、DEF-121 同形 —— 检查器无法区分「干净」与「没跑」。
+
+`fixture-data.test.mjs` 的四条更彻底：`mixed-states.json` 六条记录**一条交付文档都没有**（两个目录形状、两个 shell 残留、两个源码），面板筛完就是 0 行。这里的修法不是放宽断言，而是**把规则下沉一层去测** —— 卡片拿到 0 行（这是新的正确答案），同时直接调 `statTouchedFiles`（不带开关）验证目录、shell 残留、缺失状态这三条规则仍然在。
+
+### 验证
+
+- 全量 **3873 passed / 0 failed**。
+- 四套突变串行：语言 **171 killed**、持久化 **69**、面板 **141**、速度 **69**，全部 `0 survived / 0 not applied / 0 crashed`。
+- 六次注入验证，每次都按 sha256 复原：F1b 两种破坏（删守卫 / 把路径还回去）、F1a 两种（删 continue / 调用点改回 false）、F3（HEAD 早返回改成 `if (false)`）、F2（去掉上限）。
+- 残留审计：`find_mutation_residue.py` 0 suspicious、`report_dead_anchors2.py` TOTAL DEAD 0、`grep "if (false)"` 零命中。
+
+### 这一轮又踩了同一个坑
+
+新写的上限断言用 `held[0].path` 读空数组的第一个元素。三条突变让列表变空，于是套件在打印 tally 之前抛 `TypeError: Cannot read properties of undefined`，runner 报 **CRASHED** —— 而 CRASHED 与 KILLED 是两种判定，前者看起来像环境问题。
+
+这是 **DEF-122 的复发**：读数组元素前必须判长度。修法是把两端先取成 `held[0]?.path` 再比较，而不是给断言套 try/catch —— 捕获的异常仍然不会告诉读者缺的是哪个属性。
+
+### 这一轮没做到的
+
+- **没有真机截图**。活宿主仍是旧 bundle（`/plugins/...client.js` 返回的字节数与磁盘不符），而这一轮的改动全在服务端（`api.js`/`session-state.js`/`transcript.js`），刷新页面就会生效，但没验证。
+- **F2 的上限只在测试里证明**。生产环境一个回合交付 160 份以上文档是没见过的形状，上限存在是为了有界，不是为了被触发。
+- **`paths` 与 `delivered` 的重复（F4 的前半）没有删**。`snapshot()` 仍然两个都给，因为 `api.js` 与 `index.js` 各有消费者；删它要同时改两处消费方，属于下一轮。

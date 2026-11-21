@@ -102,6 +102,17 @@ const REPORT_TOOLS = new Set(['report_output_files'])
 const MAX_CARD_PATHS = 40
 
 /**
+ * How many deliveries one turn may hold in memory.
+ *
+ * `MAX_CARD_PATHS` trims the snapshot, not the list, so a turn that announces
+ * the same set repeatedly kept growing the array while the card showed forty
+ * rows. Four times the card is the room given: enough that a busy turn is not
+ * truncated, small enough that the linear dedupe in `deliver` cannot be made to
+ * walk a list a model grew on purpose.
+ */
+const MAX_DELIVERED_ENTRIES = MAX_CARD_PATHS * 4
+
+/**
  * How many declared paths one call may contribute.
  *
  * A model that lists two hundred files has misunderstood the tool, and a card
@@ -526,14 +537,16 @@ class Transcript {
   }
 
   /**
-   * Record one delivered file, keeping the first mention.
+   * Record one delivered file.
    *
    * A file can arrive twice in one turn — the `present` call and the host's own
    * event, or the same file presented in two batches — and the two mentions
-   * disagree in exactly one field. The first one wins, because the second is
-   * usually the same information again; a later mention that *has* a description
-   * where the first had none fills it in rather than being dropped, since that
-   * is strictly more than what was known before.
+   * disagree in exactly one field. The path is deduplicated, and the newest
+   * *sentence* wins: a later announcement carrying a description replaces the
+   * older one, because the most recent thing the model said about the file is
+   * the true one. A later announcement carrying nothing does not erase it — the
+   * host emits one event per call and only the first tends to carry a
+   * description, so the blank one is usually the same delivery arriving again.
    *
    * @param {string} path - the path as the model wrote it.
    * @param {string} description - what the model said about it, or ''.
@@ -546,7 +559,11 @@ class Transcript {
     const said = typeof description === 'string' ? description.trim() : ''
     const existing = this.delivered.find((entry) => entry.path === absolute)
     if (existing === undefined) {
-      this.delivered.push({ path: absolute, description: said })
+      // Full, so a new path is dropped rather than growing the list. Dropping
+      // rather than evicting is deliberate: the entries already here were
+      // announced first, and `snapshot` keeps the first `MAX_CARD_PATHS` -- an
+      // eviction would quietly change rows the card had already committed to.
+      if (this.delivered.length < MAX_DELIVERED_ENTRIES) this.delivered.push({ path: absolute, description: said })
       return
     }
     // A later announcement carrying a sentence replaces the older one: the

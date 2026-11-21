@@ -2629,6 +2629,51 @@ for (const reason of ['gone', 'archived']) {
   await done(root)
 }
 
+{
+  // A file from before the card narrowed holds two kinds of path in two places:
+  // `paths` (which `readState` already refuses) and `previous.paths` (which it
+  // used to hand through whole). The second one is the door the collector-era
+  // rows came back through, because `readPanel` falls back to it whenever the
+  // remembered list is empty -- and for an old file it always is.
+  const { state, store, root, restored } = await fixture()
+  const collectorEra = {
+    state: 2,
+    turns: 9,
+    previous: { turn: 9, calls: 3, paths: ['D:\\old\\probe.py', 'D:\\old\\notes.md'], commands: [], said: 'from an old build', tools: [] },
+    skills: { alpha: { via: 'tool', at: 1 } },
+    tools: [],
+    servers: {},
+    sequence: 4,
+  }
+  await store.write('legacy', collectorEra)
+
+  const loaded = await state.load('legacy')
+  check('a version 2 file still loads', loaded === true, String(loaded))
+  check('and still reports the turn it ended on', restored[0]?.snapshot?.turns === 9, String(restored[0]?.snapshot?.turns))
+  // The sentence and the counters are still worth having: they describe a turn,
+  // and a turn means the same thing in both versions.
+  check('and still describes that turn', restored[0]?.snapshot?.previous?.said === 'from an old build', JSON.stringify(restored[0]?.snapshot?.previous))
+  // The paths are not. They mean "this session touched this file" in a v2 file,
+  // which is a different claim from the one the card makes.
+  check(
+    'but the paths it held are not handed back',
+    Array.isArray(restored[0]?.snapshot?.previous?.paths) && restored[0].snapshot.previous.paths.length === 0,
+    JSON.stringify(restored[0]?.snapshot?.previous?.paths),
+  )
+  // And the same file written by this build keeps them, or the guard would be
+  // "drop every path always" -- which would also pass the assertion above while
+  // breaking the card for every current session.
+  await store.write('current', { ...collectorEra, state: STATE_VERSION })
+  const fresh = await state.load('current')
+  check('a file this build wrote still loads', fresh === true, String(fresh))
+  check(
+    'and its paths do come back',
+    Array.isArray(restored[1]?.snapshot?.previous?.paths) && restored[1].snapshot.previous.paths.length === 2,
+    JSON.stringify(restored[1]?.snapshot?.previous?.paths),
+  )
+  await done(root)
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

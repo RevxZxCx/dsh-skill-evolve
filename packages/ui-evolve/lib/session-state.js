@@ -637,8 +637,23 @@ class SessionState {
     // snapshot built only when `previous` exists would drop that count on the
     // next write, so the number would go backwards for no reason the user could
     // see.
+    // A v1 or v2 file's `previous.paths` were inferred by the collectors that
+    // used to exist -- "this session touched this file" -- and the panel falls
+    // back to that list whenever the remembered one is empty, which for an old
+    // file is always. `readState` above refuses those paths; handing `previous`
+    // over whole would let the same records back in through the other door, and
+    // every read would `stat` them to find the few documents among them. Measured
+    // on this machine: 74 files carry such a list, 608 entries, 39 of them
+    // documents.
+    //
+    // Dropped rather than re-judged, for the reason given at `readState`: the
+    // list cannot say which of its entries were handed over. The other fields of
+    // `previous` are counted facts, not path claims, and stay.
+    const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION
+      ? { ...stored.previous, paths: [] }
+      : stored.previous
     const snapshot = Number.isFinite(stored.turns) || isRecord(stored.previous)
-      ? { turns: stored.turns, previous: stored.previous }
+      ? { turns: stored.turns, previous: restorable }
       : undefined
 
     if (current === undefined) {
@@ -722,7 +737,7 @@ class SessionState {
     // handing its turn to the transcript would install the conversation the
     // sweep just dismissed.
     if ((isRecord(stored.previous) || Number.isFinite(stored.turns)) && typeof this.restore === 'function' && this.bySession.has(sessionId) === true) {
-      this.restore(sessionId, { turns: stored.turns, previous: stored.previous })
+      this.restore(sessionId, { turns: stored.turns, previous: restorable })
     }
     // Now that the transcript has taken the stored count, its answer is the
     // whole conversation — what this process saw plus what the file remembered,

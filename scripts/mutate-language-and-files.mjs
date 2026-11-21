@@ -1600,6 +1600,47 @@ const mutations = [
     to: `const hint = [absolute, note].filter((part) => part !== '')`,
     why: 'the description is the one field the host gives that Qoder does not have; dropping it leaves the row with a path and nothing about why the file exists',
   },
+
+  {
+    file: api,
+    label: 'the panel stats the files it is about to throw away',
+    suites: ['test/api.test.mjs'],
+    from: '    if (onlyDeliverable === true && base.deliverable === false) continue',
+    to: '    if (false) continue',
+    why: 'nine of every ten rows the panel used to stat were discarded by the card, so the whole cost of the endpoint was spent deciding what not to answer with; the assertion counts stat calls rather than rows, because rows change with the whitelist and the calls only change with the switch',
+  },
+  {
+    file: api,
+    label: 'the panel forgets to ask for the switch',
+    suites: ['test/api.test.mjs'],
+    from: 'onlyDeliverable: true',
+    to: 'onlyDeliverable: false',
+    why: 'a switch nobody turns on is a comment; the default stays off because the unit tests of statTouchedFiles itself call it with source files and expect them back',
+  },
+  {
+    file: api,
+    label: 'a head request reads the whole panel before dropping it',
+    suites: ['test/api.test.mjs'],
+    from: '        if (headOnly === true) return json(res, 200, { ok: true }, true)',
+    to: '        if (false) return json(res, 200, { ok: true }, true)',
+    why: 'HEAD exists so a client can ask whether the panel changed without paying for it; answering it by building the panel and discarding the body spends the whole cost to produce nothing',
+  },
+  {
+    file: transcript,
+    label: 'the delivered list grows without a ceiling',
+    suites: ['test/transcript.test.mjs'],
+    from: '      if (this.delivered.length < MAX_DELIVERED_ENTRIES) this.delivered.push({ path: absolute, description: said })',
+    to: '      this.delivered.push({ path: absolute, description: said })',
+    why: 'the card shows forty rows, and a turn that announces four hundred should not make every later lookup walk four hundred entries; the ceiling keeps the first ones because evicting the oldest would silently change rows the card has already promised',
+  },
+  {
+    file: transcript,
+    label: 'the ceiling keeps the last files instead of the first',
+    suites: ['test/transcript.test.mjs'],
+    from: '      if (this.delivered.length < MAX_DELIVERED_ENTRIES) this.delivered.push({ path: absolute, description: said })',
+    to: '      this.delivered.unshift({ path: absolute, description: said })',
+    why: 'a ceiling that keeps the newest entries turns the card upside down once a turn is long enough, and the two orders are only distinguishable at the boundary',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a

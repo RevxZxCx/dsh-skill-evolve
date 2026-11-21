@@ -251,7 +251,23 @@ const payload = await host.panel(sessionId)
 check('the real route answers for a stored session', payload.ok === true, JSON.stringify(payload).slice(0, 300))
 
 const files = Array.isArray(payload.data?.files) ? payload.data.files : []
-check('every stored row comes back', files.length === storedRows, `${files.length} of ${storedRows}`)
+// The panel no longer hands the card every record it holds: it filters by the
+// delivery whitelist before statting, so a session full of source files and build
+// output answers with the documents only. Asserted as a set, not a count -- a
+// count computed from the same predicate inside this file would still pass if the
+// panel returned nothing at all.
+const { isDeliverable } = await import('../packages/ui-evolve/lib/api.js')
+const documentsIn = Object.keys(stored.paths ?? {}).filter((path) => isDeliverable(path))
+check(
+  'every document in the stored record comes back',
+  files.length === documentsIn.length && files.every((row) => isDeliverable(row.path)),
+  `${files.length} rows against ${documentsIn.length} documents in ${storedRows} stored records`,
+)
+check(
+  'and the rows are the documents, not merely as many',
+  JSON.stringify([...files.map((row) => row.path)].sort()) === JSON.stringify([...documentsIn].sort()),
+  JSON.stringify(files.map((row) => row.path).slice(0, 5)),
+)
 
 const statuses = files.map((row) => row.status)
 const known = new Set(['available', 'missing', 'invalid', 'unresolved', 'folder'])

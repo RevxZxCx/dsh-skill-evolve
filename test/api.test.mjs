@@ -729,8 +729,8 @@ function deps(overrides = {}) {
   // list wins outright: a turn that edited nothing must not empty the card, and
   // a turn that edited one file must not hide the rest.
   const dir = tempDir('skill-evolve-files-seen-')
-  const earlier = join(dir, 'earlier.js')
-  const later = join(dir, 'later.js')
+  const earlier = join(dir, 'earlier.md')
+  const later = join(dir, 'later.md')
   writeFileSync(earlier, 'a')
   writeFileSync(later, 'bb')
 
@@ -750,7 +750,7 @@ function deps(overrides = {}) {
   // Without a remembered list the old source is still read, so a host that has
   // not wired session state keeps showing something rather than going blank.
   const dir = tempDir('skill-evolve-files-fallback-')
-  const only = join(dir, 'only.js')
+  const only = join(dir, 'only.md')
   writeFileSync(only, 'c')
   const payload = await readPanel(
     deps({
@@ -765,7 +765,7 @@ function deps(overrides = {}) {
   // An empty remembered list is the same as no list: a session that has written
   // nothing yet is exactly the case where the fallback is the useful answer.
   const dir = tempDir('skill-evolve-files-empty-')
-  const fromTurn = join(dir, 'from-turn.js')
+  const fromTurn = join(dir, 'from-turn.md')
   writeFileSync(fromTurn, 'd')
   const payload = await readPanel(
     deps({
@@ -784,9 +784,9 @@ function deps(overrides = {}) {
   // unchanged would make the card's order depend on which source answered, and
   // the whole point of the ordering is that the file just edited is on top.
   const dir = tempDir('skill-evolve-files-fallback-order-')
-  const first = join(dir, 'first.js')
-  const second = join(dir, 'second.js')
-  const third = join(dir, 'third.js')
+  const first = join(dir, 'first.md')
+  const second = join(dir, 'second.md')
+  const third = join(dir, 'third.md')
   for (const file of [first, second, third]) writeFileSync(file, 'e')
   const payload = await readPanel(
     deps({
@@ -839,6 +839,12 @@ function deps(overrides = {}) {
   // and build scratch, not wherever a test happens to run. The rules themselves
   // are asserted on synthetic paths below, where the directory is part of the
   // input instead of an accident of the machine.
+  // Pinned, because this loop emits one assertion per row: when the panel started
+  // dropping non-documents the total fell from 402 to 399 with nothing going red,
+  // which is a change in what the suite covers that a green run cannot show. The
+  // three that go are the ones the whitelist refuses -- a dependency README, a
+  // source file, and a note under the build's scratch directory.
+  check('the panel answers with the three rows a reader can open', payload.files.length === 3, JSON.stringify(payload.files.map((file) => basename(file.path))))
   for (const file of payload.files) {
     check(`the row for ${basename(file.path)} answers the flag`, typeof file.deliverable === 'boolean', JSON.stringify(file.deliverable))
   }
@@ -909,13 +915,13 @@ function deps(overrides = {}) {
   // every relative path misses the absolute one session state remembers, leaving
   // the flag false for the whole session.
   const dir = tempDir('skill-evolve-files-relative-')
-  const file = join(dir, 'src', 'app.js')
+  const file = join(dir, 'src', 'app.md')
   mkdirSync(dirname(file), { recursive: true })
   writeFileSync(file, 'e')
   const payload = await readPanel(
     deps({
       cwdFor: () => dir,
-      transcripts: { view: () => ({ turns: 1, previous: { turn: 1, calls: 1, failed: 0, paths: ['src/app.js'], commands: [], said: 'wrote one', tools: [] } }) },
+      transcripts: { view: () => ({ turns: 1, previous: { turn: 1, calls: 1, failed: 0, paths: ['src/app.md'], commands: [], said: 'wrote one', tools: [] } }) },
     }),
     'agent-1',
   )
@@ -2497,6 +2503,48 @@ function heldBodyOf(res) {
   })
   check('a path list longer than the batch is trimmed, not issued whole', asked <= 200, `${asked} probe(s) for 260 paths`)
   check('the trim keeps the first rows, so the newest stay', trimmed.length === asked, `${trimmed.length} row(s) for ${asked} probe(s)`)
+}
+
+{
+  // The card discards every row that is not a document, so the panel asks the
+  // disk only about the ones it keeps. Asserted on `readStat` calls rather than
+  // on rows: a row count also changes when the whitelist changes, so it could
+  // pass while the filter was gone. A stat count moves only when the filter moves.
+  const dir = tempDir('skill-evolve-only-deliverable-')
+  const document = join(dir, 'report.md')
+  const script = join(dir, 'client.js')
+  const lock = join(dir, 'package-lock.json')
+  for (const file of [document, script, lock]) writeFileSync(file, 'x')
+
+  const statted = []
+  const counted = async (absolute) => {
+    statted.push(absolute)
+    return { isFile: () => true, size: 3, mtimeMs: 1 }
+  }
+
+  const all = await statTouchedFiles({ paths: [document, script, lock], cwd: dir, sessionId: 'probe', turnPaths: new Set(), turnNow: 1, now: 1, readStat: counted })
+  check('without the filter every path is statted', statted.length === 3, JSON.stringify(statted))
+  check('and every path comes back as a row', all.length === 3, JSON.stringify(all.map((row) => row.path)))
+
+  statted.length = 0
+  const kept = await statTouchedFiles({ paths: [document, script, lock], cwd: dir, sessionId: 'probe', turnPaths: new Set(), turnNow: 1, now: 1, readStat: counted, onlyDeliverable: true })
+  check('with the filter the source file is never statted', statted.includes(script) === false, JSON.stringify(statted))
+  check('and neither is the lockfile', statted.includes(lock) === false, JSON.stringify(statted))
+  check('but the document is', statted.includes(document) === true, JSON.stringify(statted))
+  check('so one row comes back where three did', kept.length === 1 && kept[0].path === document, JSON.stringify(kept.map((row) => row.path)))
+  // A filter, not a reordering: the row it keeps must still be the fully
+  // described one, or the card would get a path with no status and no size.
+  check('and the row it keeps is fully described', kept[0]?.status === 'available' && kept[0]?.bytes === 3, JSON.stringify(kept[0]))
+}
+
+{
+  // A HEAD exists to ask "is this route there". Answering it by doing the whole
+  // read means a probe pays one stat per recorded path, and the client never
+  // sends HEAD, so the only caller is a probe. The deps below would throw if the
+  // read ran: `transcripts` is missing, and the read dereferences it.
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/panel?agent=a`, method: 'HEAD' }))
+  check('a head request answers without reading the panel', res.statusCode === 200, String(res.statusCode))
+  check('and it carries no payload a reader would have to read', res.body === undefined, String(res.body))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

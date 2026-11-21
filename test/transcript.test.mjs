@@ -889,6 +889,42 @@ check(
 }
 
 
+{
+  // The delivered list is bounded, and it is bounded by dropping the newest
+  // rather than evicting the oldest. That direction is deliberate: `snapshot()`
+  // takes the first `MAX_CARD_PATHS`, so an eviction would change rows the card
+  // has already been showing, while a drop only loses rows that never appeared.
+  const capped = new TranscriptStore()
+  capped.record('agent-cap', human('hand over more than the card can hold'))
+  const ceiling = MAX_REPORTED_PATHS * 4
+  for (let i = 0; i < ceiling + 30; i += 1) {
+    capped.record('agent-cap', call('report_output_files', { paths: [`F:/work/f${i}.md`] }, `p${i}`))
+  }
+  // Read from the transcript itself, not from the snapshot: the snapshot is
+  // capped at MAX_CARD_PATHS by design, so it reports 40 whatever the store
+  // holds, and an assertion against it can never see whether the store has a
+  // ceiling at all.
+  const held = capped.for('agent-cap').delivered
+  const kept = capped.view('agent-cap').current.delivered
+  check('the delivered list has a ceiling', held.length === ceiling, String(held.length))
+  check('and the card still sees only the first page of it', kept.length === MAX_REPORTED_PATHS, String(kept.length))
+  // Read the ends only after proving there are ends. `held[0].path` on an empty
+  // list throws, and a throw here ends the file before the tally prints -- which
+  // the mutation runner reports as CRASHED, a different verdict from KILLED.
+  const first = held[0]?.path
+  const last = held[held.length - 1]?.path
+  check(
+    'and the ceiling keeps the first files rather than the last',
+    first === 'F:\\work\\f0.md' && last === `F:\\work\\f${ceiling - 1}.md`,
+    JSON.stringify([first, last]),
+  )
+  check(
+    'and a file past the ceiling is not silently in the list',
+    held.some((entry) => entry.path === `F:\\work\\f${ceiling + 29}.md`) === false,
+    'a file past the ceiling got in',
+  )
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

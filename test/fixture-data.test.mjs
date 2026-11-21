@@ -229,11 +229,37 @@ function looksLikeShellLeftover(path) {
   const { payload } = await mount(document, { cwd: 'D:\\work' })
   const rows = rowsOf(payload)
   check('the fixture reaches the route', payload.ok === true, JSON.stringify(payload).slice(0, 300))
-  check('and produces rows', rows.length > 0, String(rows.length))
+  // Not one of this fixture's six records is a document: two are directory
+  // shapes, two are shell leftovers, two are source files. The panel filters by
+  // the whitelist before it stats anything, so the card is handed nothing. That
+  // is the new fact, and it is stated rather than left as a zero that could also
+  // mean "the fixture broke".
+  check('and the card is handed nothing, because none of them is a document', rows.length === 0, JSON.stringify(rows.map((row) => row.path)))
+
+  // The four rules this fixture was built for still exist; they moved into
+  // `statTouchedFiles`, which is what the panel calls with the filter on. Asking
+  // that function directly is asking the same question the card asks, one layer
+  // down -- and unlike `rows.every(...)` over an empty list, it cannot pass by
+  // having nothing to look at.
+  const { statTouchedFiles } = await import('../packages/ui-evolve/lib/api.js')
+  const listed = Object.entries(document.paths).map(([path, raw]) => ({
+    path,
+    at: typeof raw === 'object' && raw !== null ? raw.at : undefined,
+    turn: typeof raw === 'object' && raw !== null ? raw.turn : undefined,
+  }))
+  const statted = await statTouchedFiles({
+    paths: listed,
+    cwd: 'D:\\work',
+    sessionId: 'fixture-session',
+    turnPaths: new Set(),
+    turnNow: 1,
+    now: 1794720729999,
+  })
+  check('the rules still answer without the filter on', statted.length > 0, String(statted.length))
   check(
-    'every status is one this build knows',
-    rows.every((row) => ['available', 'missing', 'invalid', 'unresolved', 'folder'].includes(row.status)),
-    JSON.stringify(rows.map((row) => row.status)),
+    'every row that survives is a status the card can draw',
+    statted.every((row) => ['available', 'missing', 'invalid', 'unresolved', 'folder'].includes(row.status)),
+    JSON.stringify(statted.map((row) => [row.path, row.status])),
   )
 
   // These roots are stand-ins, so on this machine the directories behind them do
@@ -243,7 +269,7 @@ function looksLikeShellLeftover(path) {
   // happen is either of them claiming the path exists. The case that really is a
   // directory is pinned in section 2, where `readStat` is injected so the fixture
   // can say "this one is a directory" without anyone creating it on disk.
-  const directoryish = rows.filter((row) => /[\\/]$/u.test(row.path) || row.path === '\\')
+  const directoryish = statted.filter((row) => /[\\/]$/u.test(row.path) || row.path === '\\')
   check('the fixture still holds directory-looking records', directoryish.length > 0, String(directoryish.length))
   check(
     'a directory-looking record that is absent says so rather than claiming to exist',
@@ -252,7 +278,7 @@ function looksLikeShellLeftover(path) {
   )
 
   // And the shell leftovers are not rows at all, whatever their status would be.
-  const leftovers = rows.filter((row) => looksLikeShellLeftover(row.path))
+  const leftovers = statted.filter((row) => looksLikeShellLeftover(row.path))
   check('a record spelled like a redirection is not drawn', leftovers.length === 0, JSON.stringify(leftovers.map((row) => row.path)))
 }
 
@@ -312,7 +338,12 @@ function looksLikeShellLeftover(path) {
   // nothing, would pass a test that only looked at one of them.
   const verdicts = new Set(rows.map((row) => row.deliverable))
   check('the fixture holds a file the card would show', verdicts.has(true), JSON.stringify([...verdicts]))
-  check('and a file it would not', verdicts.has(false), JSON.stringify([...verdicts]))
+  // The card is never handed a file it would not show: the panel drops those
+  // before statting them, so a `false` here would be a row the renderer has to
+  // defend against. The two answers of the whitelist are still pinned -- on
+  // `isDeliverable` directly, in `api.test.mjs`, where both sides are asserted
+  // over the same table.
+  check('and never a file it would not', verdicts.has(false) === false, JSON.stringify([...verdicts]))
   check(
     'every row answers the whitelist with a boolean',
     rows.every((row) => typeof row.deliverable === 'boolean'),
@@ -416,8 +447,11 @@ function looksLikeShellLeftover(path) {
 // is the part a fixture can answer and the other suites cannot: a real document,
 // through the real route, with the real `readPanel`.
 {
-  const document = load('mixed-states.json')
-  const { payload } = await mount(document, { cwd: 'D:\\work' })
+  // `relative-paths.json` rather than `mixed-states.json`: the latter holds no
+  // documents at all, so it would pin this section to an empty payload. This one
+  // mixes Windows and POSIX spellings and still carries four real documents.
+  const document = load('relative-paths.json')
+  const { payload } = await mount(document, { cwd: 'D:\\work\\project' })
   const rows = rowsOf(payload)
   const statuses = rows.map((row) => row.status)
   check('the fixture reaches the card as a payload', payload.ok === true)
