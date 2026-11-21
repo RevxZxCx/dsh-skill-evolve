@@ -110,6 +110,7 @@
 | R-109 | 2026-11-21 | 「另有 N 个」清理与状态 v3（用户截图驱动） | **没有独立审查者**：以「先查真实数据再改代码」代替，三套测试因版本升级而变红、逐条判定是新语义还是旧断言 | 修 3 / 推迟 3 |
 | R-110 | 2026-11-21 | docs/25 四条性能问题（F1/F2/F3/F4） | **没有独立审查者**：以「先核对报告是否属实、再改」代替；报告本身漏了一条（`previous.paths`） | 修 4 / 推迟 1 |
 | R-111 | 2026-11-21 | P1：接宿主 `produced` 通道 | **没有独立审查者**：以「先用真实会话事件确认形状、再写代码、再逐条注入验证」代替 | 修 1 / 推迟 3 |
+| R-113 | 2026-11-22 | 复核 R-112 的三条：闸门问错问题、注释与实现相反、`restorable` 零覆盖 | **没有独立审查者**：以「先沿数据流自查 R-112 的结论、再改、再逐条注入验证」代替 | 修 3 + 修 9 处失效锚点 / 推迟 1 |
 
 ---
 
@@ -4728,3 +4729,83 @@ v2 老文件恢复时 `previous.paths` 被置空，于是 `packages/ui-evolve/li
 3. **P3** 补一条变异 + 同步 `test/mutations.test.mjs` 的计数。
 4. 串行跑：全量 → 四套变异 → `node test/mutations.test.mjs`；残留扫描。
 5. 回写：`docs/25` 处置表加一行「复核（R-112）」，`docs/handover/04-reviews.md` 追加 R-113 记录这一轮。
+
+## R-113 · 复核 R-112 的三条：两条照修，一条换了做法
+
+**这一轮不是新审查，是对 R-112 的回应。** R-112 由性能优化会话写成，自包含，给的是三条待办和三条验收判据。这里的记录只写「哪些照做、哪条没照做以及为什么、以及做的过程中发现了什么 R-112 没预见到的东西」。
+
+### 一、三条的核对结果
+
+三条**全部属实**，没有一条是误报。核对方式是沿数据流自己走一遍，而不是采信报告里的行号：
+
+| R-112 的条目 | 是不是真的 | 我怎么确认的 |
+| --- | --- | --- |
+| **P1** 闸门问「声明过东西没有」，而该问「声明里有卡片留得下的东西没有」 | 是，**而且比报告的更严重** | 报告只说了这一轮卡片会空。实际上 `index.js:438` 的 `ending?.delivered ?? ending?.paths` 是 `sessionState.rememberPaths` 的唯一来源，所以 `produced` 里那份 pdf 不但这一轮看不到，**连会话累积清单都进不去** |
+| **P2** 注释写「第一次写入的描述胜出」，实现是「最后一次非空描述胜出」 | 是 | 读 `deliver()` 的 `if (said.length > 0) existing.description = said`，与注释相反 |
+| **P3** `restorable` 守卫零变异覆盖 | 是 | `grep -c restorable scripts/mutate-*.mjs` 在九个脚本里全为 0 |
+
+### 二、P1 没有照 R-112 的 A 方案做，理由是它不成立
+
+R-112 推荐 A：把「哪份清单说话」挪到 `readPanel`，`snapshot()` 同时交出两份。**A 满足不了它自己的判据②。**
+
+判据②要求「声明了交付物时仍显示声明的那份，不是并集，顺序保持」。而 `readPanel` 读的是 `previous.paths` —— 那已经是**一维路径数组**。`rememberPaths` 接受 `string | {path, description}`，归一后只剩路径与 seq，声明与写入在落盘那一刻就已经合并成同一串。`readPanel` 拿到时没有「这个是声明的」这个信息，也就无从「优先显示声明的那份」。A 要成立必须先改会话状态的存储结构，代价远超收益，而它要解决的只是「一个回合的列表选错」。
+
+所以走 B：把白名单抽成 `packages/ui-evolve/lib/deliverable.js`，`snapshot()` 里新增 `chooseRows(delivered, produced)`。
+
+### 三、修法
+
+**`chooseRows` 三分支**（`transcript.js`）：
+
+1. 声明里**有**卡片留得下的东西 → 声明说话（顺序、描述原样，不合并）。
+2. 否则，写入清单里**有** → 写入清单说话。
+3. 否则 → 老顺序（声明非空就用声明）。
+
+第三条不能省。`test/transcript.test.mjs:285` 的 `a declared file is` 断言：`report_output_files` 声明 `scripts/probe.py` 后该路径在卡上。`.py` 不是交付物。如果第 3 分支写成「都不可显示就返回空」，这条会红；而它是**对的** —— `transcript` 不是过滤器，它只决定谁说话，白名单在 `api.js` 那端。把白名单判断塞进 `transcript` 的返回路径，等于把同一个问题在两个模块里各答一次。
+
+**九处失效锚点**（这一条 R-112 完全没想到）：白名单搬家 + 闸门改写成函数，让九个突变条目的 `from:` 指向了不存在的代码。`test/mutations.test.mjs` 的锚点自检立刻抓到六条；我修完那六条、脚本能跑到底之后，第七、第八条才报出来。**如果这个自检不存在，那九条会永远 SURVIVED，而 SURVIVED 在报告里长得和「通过」一模一样。**
+
+### 四、验证
+
+| 项 | 结果 |
+| --- | --- |
+| 全量 | **3891 passed / 0 failed**（起点 3885） |
+| 语言突变 | **178 killed / 0 survived / 0 not applied / 0 crashed** |
+| 持久化突变 | **70 killed / 0 survived / 0 not applied / 0 crashed**（新增第 70 条 = P3） |
+| 面板突变 | **141 killed / 0 survived / 0 not applied** |
+| 速度突变 | **69 killed / 0 survived / 0 not applied / 0 crashed** |
+| 锚点自检 | **48 passed / 0 failed**（下限 177 / 69 / 70） |
+| 残留审计 | `packages/` 里 `if (false)` 零命中；删除行只有被替换的两处 |
+
+**四条注入验证**（改坏 `chooseRows` 的每个决定，跑 `test/transcript.test.mjs`，按 sha256 复原）：
+
+```
+KILLED    the old gate: any declaration speaks            170 passed, 2 failed
+KILLED    the write list wins whenever it has a document  168 passed, 4 failed
+KILLED    the two lists are merged instead of ranked      168 passed, 4 failed
+KILLED    the last resort is the write list even when empty 170 passed, 2 failed
+restored: True
+```
+
+第二条杀掉了四条断言，其中两条是**原有**的（`one declaration outranks every write in the same turn`）—— 这正是判据②要求的「不能弄坏」的那部分继续被守住。
+
+### 五、R-112 问的那个待确认项：我用真实数据答了
+
+R-112 问：v2 老文件恢复时 `previous.paths` 置空，`turnFiles` 变 0，而 `client.js:3622` 要求 `turnFiles > 0 || calls > 0 || failed > 0 || summary` 才画上一轮卡片 —— 这是不是想要的？
+
+**不是问题，但理由和 R-112 猜的不一样。** 它猜「语义更对所以可以接受」，实际是**根本不会有卡片消失**。本机 238 个会话文件的实测：
+
+```
+state 版本: {1: 144, 2: 88, 3: 6}
+有 previous 块: 215
+  ...带 paths: 75
+  ...去掉文件数仍会画（calls/failed > 0）: 75
+  ...会整块消失:                          0
+```
+
+75 个受影响文件的 `calls`/`failed` **无一为 0**（反向核对：`calls == 0 && failed == 0` 但有 paths 的文件数 = 0）。所以失去的只是「上一轮改了几个文件」这一个数字，卡片本身照画。
+
+### 六、这一轮没做到的
+
+1. **没有独立审查者**，与 R-110/R-111 同。我自己沿数据流复核 R-112、自己改、自己注入验证。能起一点作用的是「注入验证必须让断言变红」，它至少能证明断言不是永远为真的。
+2. **真机未验收**，原因没变：`transcript.js` 是宿主启动时加载的模块，`client.js` 是手写 bundle。两者都要重启宿主才生效。这一轮改的正是这两个位置。
+3. **R-112 记的它自己的量错**（「209 个会话 / 2,953 条路径」实为 `{1:144, 2:88, 3:6}` 个文件、v3 只有 2 个带 paths）我没有再核。它自己已经改正并写下了判据「性能审查要量读取器交出什么，不要量文件里写了什么」，我这一轮的实测（238 文件 / 75 带 paths / 0 会消失）与它改正后的数字一致，可以互相印证。

@@ -19,6 +19,7 @@ import {
   SHELL_TOOLS,
   Transcript,
   TranscriptStore,
+  chooseRows,
   readCommandArgument,
   readPathArgument,
   readPathListArgument,
@@ -1134,6 +1135,88 @@ const wrote = (id, path, extra) => ({
   }
   const held = store.for('w').produced
   check('the write channel has the card width as its ceiling', held.length === MAX_REPORTED_PATHS, String(held.length))
+}
+
+{
+  // The case the gate used to go silent on. `present` accepts any file, so a
+  // declaration is not automatically something the card can show: this turn
+  // declared the helper script it wrote *and* wrote the report the person asked
+  // for. The old gate asked only whether the declaration was non-empty, so the
+  // script spoke, the panel dropped it on the way out for not being a document,
+  // and the report -- sitting right there in the write list -- was never asked.
+  // A blank card for a turn that did hand over a document.
+  const store = new TranscriptStore()
+  store.record('w', human('write the report'))
+  store.record('w', call('write', { file_path: 'F:/work/report.pdf', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\report.pdf'))
+  store.record('w', call('present', { files: [{ path: 'F:/work/probe.py', description: 'the helper' }] }, 'c2'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a declaration the card cannot show does not silence the file it can',
+    JSON.stringify(snapshot.paths) === JSON.stringify(['F:\\work\\report.pdf']),
+    JSON.stringify(snapshot.paths),
+  )
+  check(
+    'and the dropped declaration is nowhere on the card',
+    snapshot.paths.includes('F:\\work\\probe.py') === false,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // The order that must not change: when the declaration *is* something the card
+  // can show, it speaks and the write list stays out of the way. Not a union --
+  // a turn that hands over two documents and rewrote thirty sources handed over
+  // two, and the thirty would bury them.
+  const store = new TranscriptStore()
+  store.record('w', human('write the report'))
+  store.record('w', call('write', { file_path: 'F:/work/report.pdf', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\report.pdf'))
+  store.record('w', call('present', { files: [{ path: 'F:/work/summary.md', description: 'the summary' }] }, 'c2'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a declaration the card can show still outranks the file it wrote',
+    JSON.stringify(snapshot.paths) === JSON.stringify(['F:\\work\\summary.md']),
+    JSON.stringify(snapshot.paths),
+  )
+  check(
+    'and the two lists are not merged',
+    snapshot.paths.includes('F:\\work\\report.pdf') === false,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // Neither list can leave a row. The old order has to survive, because the
+  // assertions above `a declared file is` pin a declared script to the card by
+  // asking the transcript, not the panel: the transcript is not the filter, it
+  // only decides who speaks. Making the transcript drop non-documents here would
+  // move the whitelist into the wrong module and break that contract.
+  check(
+    'a declaration that shows nothing still speaks when nothing else would',
+    JSON.stringify(chooseRows([{ path: 'F:\\work\\probe.py', description: 'the helper' }], []))
+      === JSON.stringify([{ path: 'F:\\work\\probe.py', description: 'the helper' }]),
+    JSON.stringify(chooseRows([{ path: 'F:\\work\\probe.py', description: 'the helper' }], [])),
+  )
+  check(
+    'and two files are both kept, in the order they were declared',
+    JSON.stringify(chooseRows(
+      [
+        { path: 'F:\\work\\b.md', description: 'second' },
+        { path: 'F:\\work\\a.md', description: 'first' },
+      ],
+      [],
+    ).map((row) => row.path)) === JSON.stringify(['F:\\work\\b.md', 'F:\\work\\a.md']),
+    JSON.stringify(chooseRows(
+      [
+        { path: 'F:\\work\\b.md', description: 'second' },
+        { path: 'F:\\work\\a.md', description: 'first' },
+      ],
+      [],
+    ).map((row) => row.path)),
+  )
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

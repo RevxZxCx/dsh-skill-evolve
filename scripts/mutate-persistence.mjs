@@ -687,6 +687,20 @@ const mutations = [
     to: '  if (isRecord(stored.paths)) {',
     why: 'v1 and v2 recorded "this session touched this file", inferred by four collectors that no longer exist; v3 records "this session delivered this document". Reading the old rows under the new heading puts files the model never offered in front of a reader who was promised it had, which is the whole reason the version was bumped rather than the rows normalised.',
   },
+  {
+    file: state,
+    label: 'an old file keeps the paths the version bump refused',
+    // The other door. `readState` refuses a v1/v2 file's `paths`, and the
+    // `restorable` guard refuses the same list a second time on its way out
+    // through `previous.paths` -- which the panel falls back to whenever the
+    // remembered list is empty, and for an old file it always is. Without this
+    // entry the guard had no coverage in any script: the door was bolted and
+    // nobody ever tried the handle.
+    suites: ['test/session-state.test.mjs'],
+    from: "    const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION\n",
+    to: "    const restorable = isRecord(stored.previous) && stored.previous !== undefined\n",
+    why: 'The version bump exists because v1 and v2 recorded "this session touched this file" while v3 records "this session delivered this document". `readState` refuses the old rows; handing `previous` over whole lets the same records back in through the other door, and every read would `stat` them to find the few documents among them -- on this machine 74 files, 608 entries, 39 of them documents.',
+  },
 ]
 
 // The originals, read once per file, so the interrupt path can restore from

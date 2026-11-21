@@ -186,6 +186,7 @@
 | DEF-181 | 2026-11-21 | 按数据行数发断言的循环，数据一变套件覆盖就悄悄变少，而绿跑看不出来 | 断言总数从 402 掉到 399 没有任何红；循环里每条断言都只断言那一行 |
 | DEF-182 | 2026-11-21 | 新写的上限断言对空数组取 `held[0].path`，三条突变因此报 CRASHED 而不是 KILLED | DEF-122 的复发：读数组元素前没有判长度 |
 | DEF-183 | 2026-11-21 | 一条卡片的断言在「失败的写入」上测不出守卫是否还在，因为真实失败结果没有 `meta`，两条守卫串行挡住了同一件坏事 | 注入验证第一次报 SURVIVED；补的形状是「失败但仍然带 `meta.path`」，这个形状现实里不出现 |
+| DEF-184 | 2026-11-22 | 代码搬了家，九条突变锚点还指着旧位置；锚点自检静默不报时，突变脚本会把「没跑」当成「通过」 | 抽出白名单 + 闸门改函数后，六条锚点一次失效，另两条要等前六条修好才暴露 |
 
 ---
 
@@ -3331,3 +3332,29 @@ const path = readProducedPath(data)
 **通用判据**：**当两处守卫拦的是同一件坏事时，只用一种失败形状去验证，测的是「最后一道守卫还在」，不是「每一道都在」。** 要分开它们，得造一个只违反前面那道、后面那道本可以放行的输入。
 
 这与 DEF-93、DEF-121、DEF-181 同族，但方向不同：那三条是「检查器分不清干净与没跑」，这条是「两条检查器在同一个输入上给出同一个答案，于是看不出少了一条」。
+
+## DEF-184 · 代码搬了家，九条突变锚点还指着旧位置
+
+**现象**：把白名单从 `api.js` 搬到 `deliverable.js`、把 `snapshot()` 的内联闸门改成 `chooseRows()` 之后，`test/mutations.test.mjs` 报：
+
+```
+FAIL every mutate-language-and-files.mjs anchor still exists in the file it names
+     — missing in api.js:   return DELIVERABLE_SUFFIXES.has(name.slice(dot +
+     — missing in api.js:   if (dot <= 0) return false
+     — missing in api.js:   if (slashed.endsWith('/') === true) return false
+     — missing in api.js:     if (UNDELIVERABLE_DIRS.has(folded) === true) r
+     — missing in api.js:   if (TEMPORARY_NAME.test(name) === true) return f
+     — missing in transcript.js:     const rows =
+FAIL every mutate-checklist-panel.mjs anchor still exists in the file it names
+     — missing in packages/ui-evolve/lib/api.js:     if (UNDELIVERABLE_DIRS.has(...) === true) r
+```
+
+**九条**，分布在两个脚本：`mutate-language-and-files.mjs` 五条指白名单、一条指 `snapshot()` 的内联代码、一条指 `this.delivered.slice(0, MAX_CARD_PATHS)`；`mutate-checklist-panel.mjs` 两条指白名单。`file:` 字段也全都指错。
+
+**为什么会走到这一步**：搬家是按要求做的（D-250），而突变条目里的 `from:` 是**字符串**，不是符号引用。它不会跟着代码走。这类失效没有任何运行期信号：突变脚本读不到锚点时把那一条记作 `not applied` 并继续，退出码只在 `survived.length > 0 || notApplied.length > 0` 时才非零 —— 也就是说**它会报错，但只在有人跑它的时候**。跑全量回归不会碰到它。
+
+**为什么锚点自检只报了六条**：第一次报出来的正是上面那六条。我修完这六条、脚本能跑到底之后，第七、第八条才出现（`declared paths are kept in call order` 指 `this.delivered.slice(0, MAX_CARD_PATHS)`、`the declaration no longer outranks the write` 指整个内联块）。**自检按文件分组后遇到第一条缺失就停止列举该组**，所以「修好一批、再暴露一批」是它的正常行为，不是它漏了。
+
+**教训（这条比缺陷本身重要）**：**代码搬家必须同一次改完锚点。** 一个指向不存在代码的突变条目，在报告里长得和「通过」一模一样（`not applied` 只在最后一行的汇总里出现，而那份汇总可能没人看）。这正是 DEF-93 的同形问题：**一个不能区分「干净」与「没跑」的检查器会签发通行证**。区别是这次拦住它的是自检，而不是人的注意力。
+
+**修法**：九条各自重新指向新位置，`to:` 一个都没改 —— 突变要破坏的是**现在存在的代码**，不是曾经存在的。其中「声明不再压过写入」那条从「把两份清单 concat 起来」改写成「在 `chooseRows` 里返回 `[...declared, ...written]`」，失败语义不变。两条脚本里新增 `const deliverable = path.join(repo, 'packages', 'ui-evolve', 'lib', 'deliverable.js')` 与对应的 `file:` 字段。

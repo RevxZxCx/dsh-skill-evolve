@@ -23,6 +23,7 @@
  */
 
 import { canonicalPath } from '@revxz/dsh-evolve-core'
+import { hasDeliverable } from './deliverable.js'
 
 /** How many tool calls one turn keeps before it stops recording detail. */
 const MAX_CALLS_PER_TURN = 200
@@ -564,24 +565,17 @@ class Transcript {
   snapshot() {
     const calls = [...this.calls.values()]
     const failed = calls.filter((call) => call.ok === false)
-    // Which files this turn reports. A declaration outranks a write, and one
-    // declaration is enough to outrank every write: a turn that says "here are
-    // the two documents" and also rewrote thirty source files handed over two,
-    // and mixing the two lists would bury the two in the thirty. Only when the
-    // turn said nothing does a successful write stand in for it -- see
-    // {@link MUTATION_TOOLS}.
-    const rows =
-      this.delivered.length > 0
-        ? this.delivered.slice(0, MAX_CARD_PATHS)
-        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
+    // Which files this turn reports -- see {@link chooseRows}, which owns the
+    // rule and the reasons for it.
+    const rows = chooseRows(this.delivered, this.produced)
     return {
       turn: this.turn,
       calls: calls.length,
       failed: failed.length,
-      // Deduplicated by path, first mention wins: a turn that presents the same
-      // file twice should list it once, and the description that survives is the
-      // one written the first time — a later mention with no description must
-      // not erase it.
+      // Deduplicated by path, one row per file: a turn that presents the same
+      // file twice should list it once. The row keeps the description from the
+      // last mention that had one, so a later mention that says nothing must not
+      // erase it -- `deliver()` owns that rule.
       paths: rows.map((entry) => entry.path),
       delivered: rows,
       commands: this.commands.slice(-8),
@@ -729,6 +723,43 @@ function tallyNames(calls) {
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name))
     .slice(0, 8)
+}
+
+/**
+ * Which of a turn's two file lists the card reports.
+ *
+ * A declaration outranks a write, and one declaration is enough to outrank every
+ * write: a turn that says "here are the two documents" and also rewrote thirty
+ * source files handed over two, and mixing the two lists would bury the two in
+ * the thirty. Only when the turn said nothing does a successful write stand in
+ * for it -- see {@link MUTATION_TOOLS}.
+ *
+ * The exception is the one that used to go silent. `present` accepts any file,
+ * so a declaration is not automatically something the card can show: a turn
+ * that declares the helper script it wrote and also writes the report the person
+ * asked for declared one file, handed over another, and -- because the gate
+ * asked only whether the declaration was non-empty -- showed nothing at all.
+ * The declared rows were then dropped on the way out (the panel keeps
+ * deliverables, not scripts), and the report never got its chance because the
+ * list that could have shown it was never consulted.
+ *
+ * So the gate asks the question it meant: would this list leave a row behind?
+ * If it would, it speaks and the write list stays out of the way. If it would
+ * not, and the write list would, the write list speaks. If neither would, the
+ * old order stands -- whatever the turn said, said by turns that produced
+ * nothing the card renders, is still the turn's own account of itself, and the
+ * assertions that pin a declared script to the card depend on it.
+ *
+ * @param {Array<{path: string, description: string}>} delivered - declared files.
+ * @param {Array<string>} produced - files the turn successfully wrote.
+ * @returns {Array<{path: string, description: string}>} the rows the card shows.
+ */
+function chooseRows(delivered, produced) {
+  const declared = delivered.slice(0, MAX_CARD_PATHS)
+  const written = produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
+  if (hasDeliverable(declared.map((row) => row.path)) === true) return declared
+  if (hasDeliverable(produced) === true) return written
+  return delivered.length > 0 ? declared : written
 }
 
 /**
@@ -892,4 +923,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }

@@ -485,14 +485,14 @@ const mutations = [
     // it is not showing, and without the gate on the badge a session whose only
     // files are generated would show "0 个文件" with no way in.
     label: 'a dependency is listed as the reader\'s own work',
-    file: 'packages/ui-evolve/lib/api.js',
+    file: 'packages/ui-evolve/lib/deliverable.js',
     from: `    if (UNDELIVERABLE_DIRS.has(folded) === true) return false`,
     to: `    if (false) return false`,
     suites: ['test/api.test.mjs'],
   },
   {
     label: 'a lockfile is listed as the reader\'s own work',
-    file: 'packages/ui-evolve/lib/api.js',
+    file: 'packages/ui-evolve/lib/deliverable.js',
     from: `  return DELIVERABLE_SUFFIXES.has(name.slice(dot + 1).toLowerCase())`,
     to: `  return true`,
     suites: ['test/api.test.mjs'],

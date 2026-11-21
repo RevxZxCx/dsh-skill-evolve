@@ -25,6 +25,7 @@ import { fileURLToPath } from 'node:url'
 const repo = fileURLToPath(new URL('..', import.meta.url))
 
 const api = path.join(repo, 'packages', 'ui-evolve', 'lib', 'api.js')
+const deliverable = path.join(repo, 'packages', 'ui-evolve', 'lib', 'deliverable.js')
 const revision = path.join(repo, 'packages', 'ui-evolve', 'lib', 'revision.js')
 const client = path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
 const index = path.join(repo, 'packages', 'ui-evolve', 'lib', 'index.js')
@@ -680,8 +681,8 @@ const mutations = [
     label: 'declared paths are kept in call order, so a busy turn drops them',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "        ? this.delivered.slice(0, MAX_CARD_PATHS)",
-    to: "        ? this.delivered.slice(-MAX_CARD_PATHS)",
+    from: "  const declared = delivered.slice(0, MAX_CARD_PATHS)",
+    to: "  const declared = delivered.slice(-MAX_CARD_PATHS)",
     why: 'the cap keeps the first forty; shell redirects arrive early and declarations arrive last, so call order drops exactly the files the model named out loud',
   },
   {
@@ -1488,7 +1489,7 @@ const mutations = [
   // -------------------------------------------------------------------------
 
   {
-    file: api,
+    file: deliverable,
     label: 'every declared file is a document',
     suites: ['test/api.test.mjs'],
     from: `  return DELIVERABLE_SUFFIXES.has(name.slice(dot + 1).toLowerCase())`,
@@ -1496,7 +1497,7 @@ const mutations = [
     why: 'the whitelist is the only thing keeping source files off a card whose job is to hand the reader something to open; without it every path the model mentions comes back',
   },
   {
-    file: api,
+    file: deliverable,
     label: 'a document with no extension is a document',
     suites: ['test/api.test.mjs'],
     from: `  if (dot <= 0) return false`,
@@ -1504,7 +1505,7 @@ const mutations = [
     why: 'a bare name like `Makefile` has no suffix to match, so the whitelist cannot answer for it; letting it through reopens the door the whitelist closes',
   },
   {
-    file: api,
+    file: deliverable,
     label: 'a directory that only ends in a suffix is a document',
     suites: ['test/api.test.mjs'],
     from: `  if (slashed.endsWith('/') === true) return false`,
@@ -1512,7 +1513,7 @@ const mutations = [
     why: '`/w/report.pdf/` is a directory named like a document; the trailing slash is the only evidence, because splitting on slashes throws it away',
   },
   {
-    file: api,
+    file: deliverable,
     label: 'a dependency tree ships its contents',
     suites: ['test/api.test.mjs'],
     from: `    if (UNDELIVERABLE_DIRS.has(folded) === true) return false`,
@@ -1520,7 +1521,7 @@ const mutations = [
     why: 'a document inside node_modules is a dependency, not something the reader asked for; the directory check is what keeps a package README off the card',
   },
   {
-    file: api,
+    file: deliverable,
     label: 'an office lock file is a document',
     suites: ['test/api.test.mjs'],
     from: `  if (TEMPORARY_NAME.test(name) === true) return false`,
@@ -1556,14 +1557,8 @@ const mutations = [
     file: transcript,
     label: 'the declaration no longer outranks the write',
     suites: ['test/transcript.test.mjs'],
-    from: `    const rows =
-      this.delivered.length > 0
-        ? this.delivered.slice(0, MAX_CARD_PATHS)
-        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))`,
-    to: `    const rows =
-      this.delivered.length > 0
-        ? this.delivered.slice(0, MAX_CARD_PATHS).concat(this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' })))
-        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))`,
+    from: `  if (hasDeliverable(declared.map((row) => row.path)) === true) return declared`,
+    to: `  if (hasDeliverable(declared.map((row) => row.path)) === true) return [...declared, ...written]`,
     why: 'a turn that hands over two documents and also rewrites thirty sources handed over two; merging the channels buries the two in the thirty',
   },
   {
