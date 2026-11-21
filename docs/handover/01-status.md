@@ -5962,3 +5962,17 @@ KILLED    a new turn inherits the writes of the last one            |  165 passe
 - **没有真机验证**。`transcript.js` 是宿主启动时加载的模块，改它必须**重启宿主**才生效。我把真实会话事件导出后用生产 `Transcript` 回放过，但回放证明不了运行中的面板，只能证明逻辑。这一步留给重启之后。
 - **覆盖率只重跑了一次**，数字是 `present 8 / write 9 / only_write 3`，与 `docs/26` 预估的 50% → 72% 不同源（那次是 18 回合 / 4 只写，这次是 23 回合 / 3 只写）。两次都不是全量，别当趋势。
 - **`edit` 只写不 `write` 的回合** 样本里只有 1 个（`edit_only: 1`）。P1 把 `edit` 算进来是按「我们的文档也会被 edit 补」推断的，没有实测过这种回合占多少。
+
+## 2026-11-22 · 复核产出卡的两轮实现：两处未修、一处覆盖缺口（交开发会话）
+
+复核了开发会话按 `docs/25` 做的 `ecad31f` 与 `780a9ee`，结论写在 **R-112**（`04-reviews.md`）。当前 HEAD 全量 **3885 passed / 0 failed**、`test/mutations.test.mjs` **48/0**；F1a / F1b / F2 / F3 / F4 后半确认修好（`readStat` 38→4、载荷 8,489→932 B、保留行内容与顺序完全一致）。
+
+| # | 未完项 | 性质 | 落点 |
+| --- | --- | --- | --- |
+| P1 | `produced` 兜底的闸问「声明过东西没有」而不是「声明过卡片会留下的东西」：声明了一个 `.py`、写了 `.pdf` 时卡片空白 | 真缺陷，吃掉 P1 收益的一半 | `packages/ui-evolve/lib/transcript.js:573-576`（修法见 R-112） |
+| P2 | `snapshot()` 上方注释仍写「first mention wins」，与 `deliver()` 的新语义相反 | 注释假话，F4 同类 | `packages/ui-evolve/lib/transcript.js:582-584` |
+| P3 | `restorable` 守卫没有变异条目（有双向测试） | 惯例缺口 | `packages/ui-evolve/lib/session-state.js:652` |
+
+另有一处**需要用户确认的可见变化**：v2 老文件恢复后 `previous.paths` 置空 → `turnFiles` 变 0，老会话的上一轮卡片不再报文件数。语义更对，但它是用户可见的。
+
+我这一轮**没有改任何代码**（只读复核）。我自己的错也记在 R-112 开头：`docs/25` 里 F1 的量级混了「磁盘原文」与「读取器交出的值」，虚高约一个数量级，并且漏掉了真正的漏点 `previous.paths`。

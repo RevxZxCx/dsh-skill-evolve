@@ -4605,3 +4605,126 @@ DEF-175 是 fixture 编了产品不会产生的输入；DEF-177 是基线取早�
 1. **没有真机验证**。`transcript.js` 是宿主启动时加载的，改它要重启宿主。我导出真实事件用生产 `Transcript` 回放过，但那只能证明逻辑，证明不了运行中的面板。
 2. **没有独立审查者**。七条注入验证是我自己设计、自己执行的；它们能证明「断言会红」，证明不了「该断言的都断言了」。
 3. **没有量过 `edit` 单独出现时的占比**。样本里 `edit_only: 1`，把 `edit` 算进 `MUTATION_TOOLS` 是按「我们自己的文档也会被 edit 补」推断的。
+
+## R-112 · 复核产出卡的两轮实现：两处没修干净，一处覆盖缺口
+
+**这份是给开发会话的交接单。** 它审的是 `ecad31f`（F1a / F1b / F2 / F3 / F4 后半）与 `780a9ee`（`produced` 通道）两个提交，不重复 `docs/25` 的背景 —— 背景读 `docs/25`，这里只写「复核结论」和「还要做什么」。
+
+**这一轮没有独立审查者。** 我的位置是「写那份只读审查的人回头看别人按它做的实现」，所以既不采信处置表，也不采信自己的旧报告：全部从真实数据复算。
+
+### 先记我自己的错，因为它决定了后面两条的份量
+
+我用本机真实目录 `~/.dsh/plugin-data/skill-evolve/sessions` 按 state 版本重算：
+
+```
+state versions: {1: 144, 2: 88, 3: 6}
+v3 files carrying paths: 2, entries: 11
+paths refused by readState (non-v3): 2647
+files carrying previous.paths: 75, entries: 596  (其中 73 个文件 / 591 条属于旧版本)
+```
+
+| 我在 `docs/25` 里写的 | 实际 | 差别 |
+| --- | --- | --- |
+| 209 个会话、2,953 条路径、281 条可交付 | 2,647 条从来不会被读取器交出去（`session-state.js:160` 的 v3 门控） | 量错了对象 |
+| 最坏会话 200 行、16.56 ms、64.5 KB | 最坏 38 行 | 约一个数量级 |
+| 「92% 行被丢弃」 | 方向成立（真实比例 33/37 行、载荷 8,489→932 B） | 方向对，数字虚高 |
+| 未提 `previous.paths` | 它是真正还在付费的那一扇门（DEF-180） | 我漏了 |
+
+**判据留给后来者**：性能审查要量「读取器交出什么」，不要量「文件里写了什么」；根因经常在调用方，不在被调用的函数里。他们那句更正成立，我认。
+
+### 已经确认修好的（我自己量的，不是抄他们的）
+
+最坏真实会话 `de7a09a2-c4ae-4c71-b610-baa14cbe3b8a.json`（38 行）直接调 `statTouchedFiles`：
+
+| | 修前 | 修后 |
+| --- | --- | --- |
+| `readStat` 调用次数 | 38 | **4** |
+| 载荷字节（`JSON.stringify`） | 8,489 | **932** |
+| 耗时（`readStat` 是抛 ENOENT 的桩，只作比例） | 1,783 µs | **359 µs** |
+| 保留行的内容与顺序 | — | **完全一致** |
+
+与他们的 8.1 倍（1.02 ms / 37 行 → 0.13 ms / 5 行）方向一致；`docs/25` §5 那条「像素零变化」的验收判据成立。
+
+**测试写法也对，值得照抄**：断言落在 `readStat` 的**调用次数**上而不是行数上（行数随白名单变化，会绿着说谎）；HEAD 那块的 `deps` 故意缺 `transcripts`，读就会抛。当前基线：全量 **3885 passed / 0 failed**、`node test/mutations.test.mjs` **48/0**。
+
+### 待修 P1 · `produced` 兜底的闸问错了问题（值得修）
+
+`packages/ui-evolve/lib/transcript.js:573-576`：
+
+```js
+const rows = this.delivered.length > 0
+  ? this.delivered.slice(0, MAX_CARD_PATHS)
+  : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
+```
+
+闸问的是「本轮**声明过东西**没有」，而不是「声明过**卡片会留下的东西**没有」。`transcript.js` 里没有任何后缀/白名单判断（`isDeliverable` 只在 `packages/ui-evolve/lib/api.js:529`），所以 `delivered` 可以装着非交付路径。
+
+实测（探针 `F:/dsh-plugin/.tmp-test/verify_dev_changes.mjs` 第 3、4 段，用 `beginTurn` / `deliver` / `noteCall` / `noteResult`）：
+
+```
+declared a .py, wrote a .pdf -> rows: ["F:\\work\\notes\\run.py"]
+  produced list: ["F:\\work\\out\\report.pdf"]
+  isDeliverable(.py): false    isDeliverable(.pdf): true
+no declaration, wrote a .pdf -> rows: ["F:\\work\\out\\report.pdf"]
+```
+
+**后果**：模型用 `report_output_files` 报了它写的 `run.py`，同一轮又 `write` 了 `report.pdf` → `delivered` 非空 → `produced` 被压掉 → `readPanel` 的 `onlyDeliverable` 再滤掉 `.py` → **卡片空白**，而 pdf 一直躺在 `produced` 里。
+
+这正是 P1 要救的那类回合的一半：「写了文档但没声明」被救了，「声明了别的东西也写了文档」没有。两个问题问的是同一件事 —— 这份东西算不算交付 —— 而答案只该有一个来源。
+
+**修法（推荐 A，B 备选）**
+
+- **A（推荐）**：把「哪份清单说话」的决定挪到 `readPanel`（它已经有 `isDeliverable`）。`snapshot()` 同时交出 `delivered` 与 `produced` 两份，`readPanel` 先按白名单过 `delivered`，非空用它的顺序，空则用 `produced`。理由：白名单只该有一份实现，而且它现在在 api 层已经有一份。
+- **B**：把 `isDeliverable` 抽成共享模块（例如 `deliverable.js`），`transcript.js` 引入后用「`delivered` 里有没有一条可交付」当闸。
+
+**不要做**：在 `transcript.js` 里再写一套后缀判断。两份白名单会在下一次调后缀时静默分叉，而分叉的代价是卡片答错（把碰过的文件说成交付的），比答不全更贵。
+
+**验收判据（三条，缺一不可）**
+
+1. 声明了非交付 + 写了交付 → 卡片显示那份交付文档。
+2. 声明了交付文档 → 仍然显示**声明的那份**（不是 `produced` 的并集，顺序也保持）。
+3. 什么都没声明 → 仍走 `produced`（P1 原行为不许退化）。
+
+**不能弄坏**：现有「声明优先于 produced」的断言必须继续绿；`produced` 自己的五条变异条目（`scripts/mutate-language-and-files.mjs:1562` / `:1600` / `:1608` / `:1574`）不许为了新逻辑删掉。
+
+### 待修 P2 · `snapshot()` 上方的注释与实现相反
+
+`packages/ui-evolve/lib/transcript.js:582-584`：
+
+```
+      // Deduplicated by path, first mention wins: a turn that presents the same
+      // file twice should list it once, and the description that survives is the
+      // one written the first time — a later mention with no description must
+      // not erase it.
+```
+
+而 `deliver()` 的实现与它自己的 JSDoc（`:621-635`）都已是「**最新一句描述胜出**：后来的非空描述替换旧的，后来的空描述不擦除」。这半句 `the description that survives is the one written the first time` 是假话。
+
+这处正是 F4 的同类问题：他们在 `deliver()` 那侧改了 JSDoc，紧邻 5 行、就在 `paths` / `delivered` 正上方的这处漏掉了。改一句话即可。
+
+### 待补 P3 · `restorable` 没有变异条目
+
+`packages/ui-evolve/lib/session-state.js:652` 的守卫（v2 及更早的文件恢复时把 `previous.paths` 置空）**没有任何变异条目**（`grep restorable scripts/mutate-*.mjs` 零命中）。它有一条双向测试守着（v2 置空、v3 保留 2 条，`test/session-state.test.mjs` 新增块），删掉守卫该测试会红，所以信心够；但按本仓「每条新守卫都要有变异」的惯例，缺一条。
+
+**建议加的变异**：把 `stored.state !== STATE_VERSION` 改成 `stored.previous !== undefined`（或把整条 `restorable` 换成 `stored.previous`），应当被那条 v3 断言杀死 —— 因为它会让「本构建写的文件也丢路径」。这条变异的好处是它杀的是**另一侧**：只守「v2 丢」的断言语义上等价于「永远丢」。
+
+其余新代码的变异覆盖是完整的：`onlyDeliverable` 两条（`scripts/mutate-language-and-files.mjs:1680`、`:1688`）、`headOnly`（`:1696`）、`MAX_DELIVERED_ENTRIES` 两条（`:1704`、`:1712`）、`produced` 通道多条。
+
+### 需要你确认的一处可见变化
+
+v2 老文件恢复时 `previous.paths` 被置空，于是 `packages/ui-evolve/lib/client.js:3347` 读到的 `turnFiles` 变 0；`client.js:3624` 只在 `turnFiles > 0 || calls > 0 || failed > 0 || summary` 时渲染上一轮卡片。语义上更对（以前是「有计数、列表却空」），但老会话的上一轮卡片会不再报文件数。如果这就是你要的，不用动；如果不是，得在置空处留一个「上一次构建记得 N 个文件」的说明位。
+
+### 已核实、不必重查的部分
+
+- 删掉的五个模块（`git-changes` / `git-watch` / `scan-changes` / `scan-watch` / `coverage`）无残留引用；唯一提到文件名的是 `test/index.test.mjs:2611` 的一句注释。
+- `produced` 的事件形状（`data.meta.path` 是绝对路径、失败结果没有 `meta`）已由 R-111 的三个真实会话取样确认，我复核无误。
+- `deliver()` 语义改动（最新描述胜出）没有破坏既有断言；只有 `snapshot()` 旁那处注释未同步（即 P2）。
+- 工作树干净、`origin/master` 与 HEAD 同步、`docs/25` 的处置表已被一并提交。
+
+### 建议的执行顺序
+
+1. **P1**（判断放 `readPanel` 或抽共享白名单）+ 三条验收判据的测试 + 一条变异。这一步会动 `snapshot()` 的载荷形状，所以先做。
+2. **P2** 改注释（一句话）。
+3. **P3** 补一条变异 + 同步 `test/mutations.test.mjs` 的计数。
+4. 串行跑：全量 → 四套变异 → `node test/mutations.test.mjs`；残留扫描。
+5. 回写：`docs/25` 处置表加一行「复核（R-112）」，`docs/handover/04-reviews.md` 追加 R-113 记录这一轮。
