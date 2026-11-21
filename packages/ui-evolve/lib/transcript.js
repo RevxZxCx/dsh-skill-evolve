@@ -192,6 +192,65 @@ const PRESENT_TOOLS = new Set(['present'])
  */
 const PRESENTED_EVENT = 'deliverables/presented'
 
+/**
+ * The tools that write a file, used only when a turn declared nothing.
+ *
+ * ## Why this is back after being removed
+ *
+ * The removal was justified by a measurement: on one session three collectors
+ * produced thirty-nine rows, of which three were documents, and reading a path
+ * out of an `edit` answers "what did this turn touch" rather than "what did
+ * this turn hand me". That reasoning was right about the question and never
+ * measured the cost of the answer, and the cost turned out to be most of the
+ * card: across eighteen turns of six real sessions, eight wrote a deliverable
+ * document and four of them declared it. The other four wrote the document and
+ * said nothing, so the card was blank for a turn that plainly produced
+ * something.
+ *
+ * So this is not the old collector coming back. The old one ran on every turn
+ * and merged with the declarations. This one answers only the question a blank
+ * card cannot: "the turn said nothing -- did it write anything at all?" A turn
+ * that declares even one file ignores this channel entirely, which is the shape
+ * Qoder settled on: its entry point returns the declared set as soon as that
+ * set is non-empty and never merges the two.
+ *
+ * ## What it reads, and what it refuses
+ *
+ * The path comes from the result, never from the arguments. `tool/result`
+ * carries `meta.path`, an absolute path the host resolved; the call's
+ * `file_path` is whatever the model typed and is frequently relative to a
+ * working directory this module does not know. A result the host marked as
+ * failed contributes nothing -- `write` against a file the model has not read
+ * fails with `FS_NOT_OBSERVED`, and recording that call would put a row on the
+ * card for a file that was never written.
+ */
+const MUTATION_TOOLS = new Set(['write', 'edit', 'str_replace_editor'])
+
+/**
+ * Whether a path already names a place without a working directory.
+ *
+ * Only paths the host resolved are joined against the session's cwd, so a
+ * relative path here means the host did not resolve it -- and guessing a base
+ * would put a row on the card at a location that has nothing to do with the
+ * file. Backslash-first is included because a UNC path has no drive letter.
+ */
+const ABSOLUTE_PATH = /^(?:[A-Za-z]:[\\/]|[\\/])/
+
+/**
+ * Read `meta.path` off a `tool/result`, when it names an absolute path.
+ *
+ * @param {any} data - the `tool/result` payload.
+ * @returns {string | undefined} the path, when the host resolved one.
+ */
+function readProducedPath(data) {
+  const path = data?.meta?.path
+  if (typeof path !== 'string') return undefined
+  const trimmed = path.trim()
+  if (trimmed.length === 0) return undefined
+  if (ABSOLUTE_PATH.test(trimmed) === false) return undefined
+  return trimmed
+}
+
 
 /**
  * Pull delivered files out of a `present`-shaped argument bag, with what was
@@ -384,13 +443,26 @@ class Transcript {
     /**
      * What the turn delivered, in first-mention order.
      *
-     * The only file source the card has. Each entry is `{ path, description }`,
+     * The card's primary file source. Each entry is `{ path, description }`,
      * where `description` is what the model wrote next to the file and may be
      * `''` — `present` carries one, `report_output_files` does not.
      *
      * @type {Array<{ path: string, description: string }>}
      */
     this.delivered = []
+    /**
+     * Files this turn wrote, named only by results the host resolved.
+     *
+     * Kept apart from {@link delivered} rather than pushed into it, because the
+     * two answer different questions and only one of them is a promise: a
+     * delivery is the model saying "here, this is for you", while this is "a
+     * write succeeded". `snapshot` uses this list only when `delivered` is
+     * empty, and that decision lives in one place so a later reader cannot
+     * mistake the fallback for the rule.
+     *
+     * @type {string[]}
+     */
+    this.produced = []
     /** @type {string[]} shell commands the turn ran, newest last. */
     this.commands = []
     /** @type {string[]} assistant text blocks from this turn, in order. */
@@ -441,6 +513,7 @@ class Transcript {
     this.turns = Number.isFinite(index) ? index : this.turns + 1
     this.calls.clear()
     this.delivered = []
+    this.produced = []
     this.commands = []
     this.said = []
     this.asked = typeof asked === 'string' ? clipCodePoints(asked, MAX_ASKED_CHARS) : ''
@@ -465,6 +538,7 @@ class Transcript {
     if (data?.reason?.kind !== undefined && data.reason.kind !== 'completed') {
       this.calls.clear()
       this.delivered = []
+      this.produced = []
       this.commands = []
       this.said = []
       // Cleared with the rest: this turn produces no `previous`, so a question
@@ -490,6 +564,16 @@ class Transcript {
   snapshot() {
     const calls = [...this.calls.values()]
     const failed = calls.filter((call) => call.ok === false)
+    // Which files this turn reports. A declaration outranks a write, and one
+    // declaration is enough to outrank every write: a turn that says "here are
+    // the two documents" and also rewrote thirty source files handed over two,
+    // and mixing the two lists would bury the two in the thirty. Only when the
+    // turn said nothing does a successful write stand in for it -- see
+    // {@link MUTATION_TOOLS}.
+    const rows =
+      this.delivered.length > 0
+        ? this.delivered.slice(0, MAX_CARD_PATHS)
+        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
     return {
       turn: this.turn,
       calls: calls.length,
@@ -498,8 +582,8 @@ class Transcript {
       // file twice should list it once, and the description that survives is the
       // one written the first time — a later mention with no description must
       // not erase it.
-      paths: this.delivered.slice(0, MAX_CARD_PATHS).map((entry) => entry.path),
-      delivered: this.delivered.slice(0, MAX_CARD_PATHS),
+      paths: rows.map((entry) => entry.path),
+      delivered: rows,
       commands: this.commands.slice(-8),
       said: this.said.join('\n\n').slice(0, 1200),
       tools: tallyNames(calls),
@@ -598,6 +682,17 @@ class Transcript {
     const entry = this.calls.get(id)
     if (entry === undefined) return
     entry.ok = message?.isError !== true && data?.isError !== true && data?.error === undefined
+    if (entry.ok === false) return
+    if (MUTATION_TOOLS.has(entry.name) === false) return
+    const path = readProducedPath(data)
+    if (path === undefined) return
+    const absolute = canonicalPath(path)
+    if (absolute.length === 0) return
+    if (this.produced.includes(absolute)) return
+    // Stopped at the card's own width rather than at a second number, for the
+    // same reason `MAX_REPORTED_PATHS` equals `MAX_CARD_PATHS`: a budget above
+    // the sink accepts work it then silently drops.
+    if (this.produced.length < MAX_CARD_PATHS) this.produced.push(absolute)
   }
 
   /**
@@ -797,4 +892,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }

@@ -925,6 +925,217 @@ check(
   )
 }
 
+
+// ---------------------------------------------------------------------------
+// The write channel: what a turn wrote when it declared nothing
+// ---------------------------------------------------------------------------
+
+/**
+ * A `tool/result` carrying the host's resolved absolute path.
+ *
+ * The shape is copied from a real archive, not invented: `meta.path` is where a
+ * mutation tool's target lands, and `write` additionally carries
+ * `operation: 'create'`. A fixture that put the path at the top of `data` would
+ * let the module pass while reading a shape no session produces.
+ */
+const wrote = (id, path, extra) => ({
+  type: 'tool/result',
+  data: {
+    turn: 1,
+    step: 1,
+    message: { role: 'tool', source: { callId: id }, toolCallId: id, content: [], isError: false, id: `m-${id}` },
+    meta: { operation: 'create', path, ...(extra ?? {}) },
+  },
+})
+
+{
+  // The case the whole channel exists for: a turn that wrote a document and
+  // declared nothing. Before this, the card was blank here.
+  const store = new TranscriptStore()
+  store.record('w', human('write the plan'))
+  store.record('w', call('write', { file_path: 'F:/work/plan.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\plan.md'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a turn that only wrote still reports the file it wrote',
+    JSON.stringify(snapshot.paths) === JSON.stringify(['F:\\work\\plan.md']),
+    JSON.stringify(snapshot.paths),
+  )
+  check(
+    'and the row carries no invented description',
+    JSON.stringify(snapshot.delivered) === JSON.stringify([{ path: 'F:\\work\\plan.md', description: '' }]),
+    JSON.stringify(snapshot.delivered),
+  )
+}
+
+{
+  // One declaration outranks every write. This is the shape Qoder settled on:
+  // its entry point returns the declared set as soon as it is non-empty and
+  // never merges the two, because a turn that hands over two documents and also
+  // rewrites thirty sources handed over two.
+  const store = new TranscriptStore()
+  store.record('w', human('write the plan'))
+  store.record('w', call('write', { file_path: 'F:/work/plan.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\plan.md'))
+  store.record('w', call('present', { files: [{ path: 'F:/work/report.md', description: 'the report' }] }, 'c2'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'one declaration outranks every write in the same turn',
+    JSON.stringify(snapshot.paths) === JSON.stringify(['F:\\work\\report.md']),
+    JSON.stringify(snapshot.paths),
+  )
+  check(
+    'and the file it wrote but did not declare is left out',
+    snapshot.paths.includes('F:\\work\\plan.md') === false,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // A failed write is not a file that exists. `write` against a file the model
+  // has not read fails with FS_NOT_OBSERVED and carries no `meta` at all, so
+  // the guard is really two guards; this fixture exercises the verdict.
+  const store = new TranscriptStore()
+  store.record('w', human('write the plan'))
+  store.record('w', call('write', { file_path: 'F:/work/plan.md', content: 'x' }, 'c1'))
+  store.record('w', result('c1', false, 'cannot modify: file has not been read'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a write the host refused contributes no row',
+    snapshot.paths.length === 0,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // The other half of "a failed write is not a file". The fixture above is a
+  // real failure and it carries no `meta` at all, so it cannot tell the ok
+  // guard from the path guard -- removing either one leaves it passing. This is
+  // the only shape that separates them: a result the host marked as failed that
+  // still names a path. Nothing observed produces it, and that is the point:
+  // the guard has to hold for a host build that starts reporting `meta` on
+  // failures too.
+  const store = new TranscriptStore()
+  store.record('w', human('write the plan'))
+  store.record('w', call('write', { file_path: 'F:/work/plan.md', content: 'x' }, 'c1'))
+  store.record('w', {
+    type: 'tool/result',
+    data: {
+      turn: 1,
+      step: 1,
+      message: { role: 'tool', source: { callId: 'c1' }, toolCallId: 'c1', content: [], isError: true, id: 'm-c1' },
+      meta: { operation: 'create', path: 'F:\\work\\plan.md' },
+      error: { name: 'FsError', code: 'FS_NOT_OBSERVED' },
+    },
+  })
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a failed result that still names a path contributes no row either',
+    snapshot.paths.length === 0,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // The host sometimes reports a path it did not resolve. Joining it against a
+  // working directory this module does not know would put a row on the card at
+  // a location that has nothing to do with the file.
+  const store = new TranscriptStore()
+  store.record('w', human('write the plan'))
+  store.record('w', call('write', { file_path: 'plan.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'plan.md'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a path the host did not resolve is not guessed at',
+    snapshot.paths.length === 0,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // Only the three mutation tools. A `read` result also carries `meta.path`,
+  // and recording it would put every file the turn looked at on the card.
+  const store = new TranscriptStore()
+  store.record('w', human('read the plan'))
+  store.record('w', call('read', { file_path: 'F:/work/plan.md' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\plan.md'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'a tool that only read the file contributes no row',
+    snapshot.paths.length === 0,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // The same file written twice -- a `write` then an `edit` -- is one row.
+  const store = new TranscriptStore()
+  store.record('w', human('write then fix the plan'))
+  store.record('w', call('write', { file_path: 'F:/work/plan.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\plan.md'))
+  store.record('w', call('edit', { file_path: 'F:/work/plan.md', old_string: 'x', new_string: 'y' }, 'c2'))
+  store.record('w', wrote('c2', 'F:/work/plan.md'))
+  store.record('w', endTurn())
+  const snapshot = store.view('w').current
+  check(
+    'the same file written twice is one row',
+    snapshot.paths.length === 1,
+    JSON.stringify(snapshot.paths),
+  )
+}
+
+{
+  // A fresh turn does not inherit the previous turn's writes: this list is the
+  // turn's, and only `delivered` outlives it through the session state.
+  const store = new TranscriptStore()
+  store.record('w', human('first'))
+  store.record('w', call('write', { file_path: 'F:/work/a.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\a.md'))
+  store.record('w', endTurn())
+  store.record('w', human('second'))
+  const live = store.view('w').current
+  check(
+    'a new turn starts with no writes carried over',
+    live.paths.length === 0,
+    JSON.stringify(live.paths),
+  )
+}
+
+{
+  // An abandoned turn is not a turn's worth of work: the host says the model
+  // never reached its own conclusion, so nothing it wrote is reported.
+  const store = new TranscriptStore()
+  store.record('w', human('start something'))
+  store.record('w', call('write', { file_path: 'F:/work/a.md', content: 'x' }, 'c1'))
+  store.record('w', wrote('c1', 'F:\\work\\a.md'))
+  store.record('w', endTurn('interrupted'))
+  const view = store.view('w')
+  check(
+    'an interrupted turn reports nothing it wrote',
+    view.current === undefined || view.previous === undefined,
+    JSON.stringify(view.previous),
+  )
+}
+
+{
+  // The write channel is capped at the card's own width, not at a second
+  // number. A budget above the sink would accept work it then drops silently.
+  const store = new TranscriptStore()
+  store.record('w', human('write many'))
+  for (let i = 0; i < MAX_REPORTED_PATHS + 5; i += 1) {
+    store.record('w', call('write', { file_path: `F:/work/f${i}.md`, content: 'x' }, `c${i}`))
+    store.record('w', wrote(`c${i}`, `F:\\work\\f${i}.md`))
+  }
+  const held = store.for('w').produced
+  check('the write channel has the card width as its ceiling', held.length === MAX_REPORTED_PATHS, String(held.length))
+}
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   for (const failure of failures) console.log(`  FAIL ${failure}`)

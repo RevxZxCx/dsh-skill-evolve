@@ -680,8 +680,8 @@ const mutations = [
     label: 'declared paths are kept in call order, so a busy turn drops them',
     file: transcript,
     suites: ['test/transcript.test.mjs'],
-    from: "      paths: this.delivered.slice(0, MAX_CARD_PATHS).map((entry) => entry.path),",
-    to: "      paths: this.delivered.slice(-MAX_CARD_PATHS).map((entry) => entry.path),",
+    from: "        ? this.delivered.slice(0, MAX_CARD_PATHS)",
+    to: "        ? this.delivered.slice(-MAX_CARD_PATHS)",
     why: 'the cap keeps the first forty; shell redirects arrive early and declarations arrive last, so call order drops exactly the files the model named out loud',
   },
   {
@@ -1552,6 +1552,78 @@ const mutations = [
     why: 'a turn that declares a file in two steps would list it twice, and the second row would carry the empty description',
   },
 
+  {
+    file: transcript,
+    label: 'the declaration no longer outranks the write',
+    suites: ['test/transcript.test.mjs'],
+    from: `    const rows =
+      this.delivered.length > 0
+        ? this.delivered.slice(0, MAX_CARD_PATHS)
+        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))`,
+    to: `    const rows =
+      this.delivered.length > 0
+        ? this.delivered.slice(0, MAX_CARD_PATHS).concat(this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' })))
+        : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))`,
+    why: 'a turn that hands over two documents and also rewrites thirty sources handed over two; merging the channels buries the two in the thirty',
+  },
+  {
+    file: transcript,
+    label: 'a failed write counts as a written file',
+    suites: ['test/transcript.test.mjs'],
+    from: `    if (entry.ok === false) return
+    if (MUTATION_TOOLS.has(entry.name) === false) return`,
+    to: `    if (MUTATION_TOOLS.has(entry.name) === false) return`,
+    why: 'write against a file the model has not read fails with FS_NOT_OBSERVED; a row for it would name a file that was never written',
+  },
+  {
+    file: transcript,
+    label: 'every tool that reported a path is treated as a write',
+    suites: ['test/transcript.test.mjs'],
+    from: `    if (MUTATION_TOOLS.has(entry.name) === false) return
+    const path = readProducedPath(data)`,
+    to: `    const path = readProducedPath(data)`,
+    why: 'a read result carries meta.path too, and recording it puts every file the turn looked at on the card',
+  },
+  {
+    file: transcript,
+    label: 'a path the host did not resolve is guessed at',
+    suites: ['test/transcript.test.mjs'],
+    from: `  if (ABSOLUTE_PATH.test(trimmed) === false) return undefined
+  return trimmed`,
+    to: `  return trimmed`,
+    why: 'a relative path has no known base here; joining it against a guessed working directory puts the row at a location that has nothing to do with the file',
+  },
+  {
+    file: transcript,
+    label: 'the write channel has no ceiling of its own',
+    suites: ['test/transcript.test.mjs'],
+    from: `    if (this.produced.length < MAX_CARD_PATHS) this.produced.push(absolute)`,
+    to: `    this.produced.push(absolute)`,
+    why: 'a budget above the sink accepts work it then drops silently; the two numbers have to be one',
+  },
+  {
+    file: transcript,
+    label: 'the same file written twice takes two rows',
+    suites: ['test/transcript.test.mjs'],
+    from: `    if (this.produced.includes(absolute)) return`,
+    to: `    if (false) return`,
+    why: 'a write followed by an edit is one file, and two rows would claim the turn touched two',
+  },
+  {
+    file: transcript,
+    label: 'a new turn inherits the writes of the last one',
+    suites: ['test/transcript.test.mjs'],
+    from: `    this.calls.clear()
+    this.delivered = []
+    this.produced = []
+    this.commands = []
+    this.said = []`,
+    to: `    this.calls.clear()
+    this.delivered = []
+    this.commands = []
+    this.said = []`,
+    why: 'the list describes one turn; carrying it over makes the card grow backwards through the session',
+  },
   {
     file: transcript,
     label: 'the event and the call are not both read',

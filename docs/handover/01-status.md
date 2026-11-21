@@ -74,6 +74,7 @@
 | 2026-11-21 | 产出文件卡重定为交付文档：只认汇报，删掉四路采集 | 用户 m28433 把卡片场景定为「交付文档」（给人看的文档/图片/表格/演示），m28497 批准彻底删除。删掉 git 差分、mtime 扫描、工具路径、shell 路径解析四路采集（六个文件 1,636 行产品 + 1,772 行测试），数据来源只剩 `deliverables/presented` 事件与 `report_output_files`；九张噪声表换成 23 项交付白名单；`source`/`stale`/`noise` 三字段换成 `deliverable` + `description`；图标八桶重建为六桶。3853 断言全绿，四套突变 166 + 68 + 141 + 69 全杀、0 存活、0 CRASHED。新增 DEF-172~178、D-233~D-240、R-108 |
 | 2026-11-21 | 「另有 N 个文件」数的是遗留记录，不是交付；状态升到 v3 丢弃旧 paths | 用户 m30923 截图里卡片写着「14 个文件 另有 80 个文件不是交…」，问是不是旧的文件追踪还没清。查实：状态目录里 237 个 json、98 个有 paths，全是四路采集时代写的（每条 `description` 空串）。两处修正：卡片不再说「另有 N 个」（那句话讲的是过滤器不是交付），`STATE_VERSION` 2 → 3 且 **paths 只在 v3 文件里读**。全量 3854 断言全绿，四套突变 166 + 69 + 141 + 69 全杀、残留 0。新增 DEF-179、D-241/242、R-109 |
 | 2026-11-21 | docs/25 的四条性能问题：面板不再为要丢掉的行做 stat | 用户 m31462 让核对 `docs/25-产出卡性能审查报告.md` 是否属实，m31513 说「把这些都做了吧，f2 应该也是顺手的加一行」。F1 属实且实测复现（最坏真实会话 38 条记录：全部 1.02 ms / 37 行，只算交付 0.13 ms / 5 行，8.1 倍）；报告有一处过时（v3 之后 234 个旧文件的 paths 已不产生 stat），**还漏了一个更该修的问题**：`previous.paths` 没走 v3 门控，实测 74 个文件 608 条里只有 39 条是文档，F1 那笔账只是从 `paths` 挪到了 `previous.paths`。四处改动：`onlyDeliverable` 开关（默认 false，因为单测直接用源码路径调它）、`previous.paths` 在 v2 文件里置空、`delivered` 上限 160 条、HEAD 早返回。3873 断言全绿，四套突变 171 + 69 + 141 + 69 全杀、残留 0。新增 DEF-180~182、D-243~D-246、R-110 |
+| 2026-11-21 | P1 落地：只写了没申报的回合终于有卡（接宿主 `produced`） | 用户 m32325 选定「先做 P1」。用户在 m31897 追问「`present` 是官方工具吗，模型为什么不调它」，查实：它是 DSH 官方工具，描述里那句 `prefer your final response when that suffices` 在劝模型别用；`session-151cb1ab` 43 回合 4642 次调用里 0 次 `present`；15 个会话 31 个写文档的回合里只有 9 个调过（29%）。`docs/26` 定的 P1 就是宿主 `ui-deliverables` 里早已存在的 `mutationPath()` 通道。实现：`transcript.js` 新增 `MUTATION_TOOLS`（`write`/`edit`/`str_replace_editor`）+ `readProducedPath()`（只认 `tool/result.meta.path` 且必须是绝对路径）+ `ABSOLUTE_PATH`；`this.produced` 与 `this.delivered` **两个独立数组**，`snapshot()` 里 `delivered.length > 0 ? delivered : produced` 单点收口。**3885 断言全绿，四套突变串行 178 + 69 + 141 + 69 全杀、0 存活、0 CRASHED**。新增 D-247~D-249、R-111 |
 ---
 
 ## 2026-10-30 · 首次整理
@@ -5879,3 +5880,85 @@ deliverables only 0.13 ms    5 rows     8.1x
 - **没有真机截图**。活宿主仍是旧 bundle（`/plugins/...client.js` 返回的字节数与磁盘不符），而这一轮的改动全在服务端（`api.js`/`session-state.js`/`transcript.js`），刷新页面就会生效，但没验证。
 - **F2 的上限只在测试里证明**。生产环境一个回合交付 160 份以上文档是没见过的形状，上限存在是为了有界，不是为了被触发。
 - **`paths` 与 `delivered` 的重复（F4 的前半）没有删**。`snapshot()` 仍然两个都给，因为 `api.js` 与 `index.js` 各有消费者；删它要同时改两处消费方，属于下一轮。
+
+## 2026-11-21 · 只写了没申报的回合，现在也有一张卡
+
+### 这件事从哪来
+
+用户 m31897 问：`present` 是 DSH 官方的工具吗，为什么某些时候模型不调它——是不是 bill 压缩把工具定义挤掉了。点名 `session-151cb1ab` 的最后一轮，那轮的任务是写一份真实的审查报告，但没用 `present` 汇报，所以卡片是空的。
+
+三件事查下来：
+
+- **`present` 是官方工具**，描述原文里有一句 `prefer your final response when that suffices`。这句话在劝模型别用它。
+- **不是压缩挤掉的**。那个会话有 23 个 `request/header`，每一个都是 169 个工具，`present` 每次都在名单里（第 128 位）。读法上有个坑：`tools` 在 `header.tools`，**不在 `header.config.tools`**，读后者得 0 个工具，会让人以为工具被裁掉了。
+- **那个会话一次都没调过**。43 个回合、4642 次工具调用，`present` 与 `report_output_files` 都是 0。最后一轮 18 次调用里 14 次 `bash`、2 次 `write`，报告是 bash 里跑 python 脚本写出来的。
+
+再扫 15 个会话：**31 个回合写了交付文档，只有 9 个调了 `present`，覆盖率 29%**。只认声明，七成的回合是空卡。上一轮删掉四路采集时依据的「声明最可信」在可信上是对的，在覆盖上从来没量过。
+
+### 为什么是 P1，不是把四路采集请回来
+
+`docs/26` 把 Qoder 三层读全之后有个关键发现：**DSH 宿主自己的 `ui-deliverables` 插件里早就有这套逻辑**——`mutationPath(name, argsRaw)` 认 `write`/`edit`/`str_replace_editor`，路径取成功 `tool/result` 的 `meta.path`。那就是 Qoder 通道 2 的现成实现，我们一直没接。
+
+所以补的不是「所有工具路径 + shell 解析 + git 差分 + mtime 扫描」那一整包，而是其中一条：**只认成功的写入调用，且只在一个回合一次声明都没有时启用**。这与已删那版的区别有三处，每一处都是当初删掉它的理由：
+
+| | 四路采集（已删） | 现在的 `produced` |
+| --- | --- | --- |
+| 谁产生的行 | 任何工具带出的路径、shell 重定向、git 差分、目录扫描 | 只有 `write`/`edit`/`str_replace_editor` 的成功结果 |
+| 什么时候用 | 每一轮，与声明合并 | **只在 `delivered` 为空时** |
+| 路径从哪来 | 调用参数、命令行文本、`git status` | 结果里的 `meta.path`，且必须已是绝对路径 |
+
+### 代码落在哪
+
+`packages/ui-evolve/lib/transcript.js`，99 行增、4 行删：
+
+- `MUTATION_TOOLS = new Set(['write', 'edit', 'str_replace_editor'])`，注释写清「这条路为什么在删掉之后又回来」，并把当初的测量与这一次的测量并排放着（前者说明「读 `edit` 的路径回答的是『碰了什么』而不是『交给我什么』」，后者说明「18 回合 8 个写了文档、4 个申报、另外 4 个只说了一句『已写入』」）。
+- `readProducedPath(data)` 只读 `data.meta.path`。**不读调用参数里的 `file_path`** —— 那是模型手打的，经常是相对路径，而这个模块不知道工作目录。`ABSOLUTE_PATH` 判断盘符或开头斜杠（UNC 也要过），相对路径直接返回 `undefined`：猜一个基址会把行画到与文件无关的位置上。
+- `this.produced` 与 `this.delivered` 是**两个数组**，不是往一个里塞。`snapshot()` 里一行收口：
+
+```js
+const rows =
+  this.delivered.length > 0
+    ? this.delivered.slice(0, MAX_CARD_PATHS)
+    : this.produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
+```
+
+`paths` 与 `delivered` 都从 `rows` 派生，所以下游（`index.js:438` 写盘、`api.js` 的 `readPanel`）一行都没改，`onlyDeliverable` 的白名单仍然在后一道把 `.py`/`.js` 滤掉。
+
+### 断言与它们唯一的麻烦
+
+九条新断言。其中一条不是按计划写的：**「失败的写入不算」第一次做注入验证时是 SURVIVED**。原因是真实的失败结果**根本没有 `meta`** —— 删掉 `entry.ok === false` 这条守卫之后，`readProducedPath` 仍然返回 `undefined`，两条守卫串行挡住了同一件坏事，测试分不开它们。
+
+补的形状是「宿主标了失败、但仍然给了 `meta.path`」。这个形状现实里不出现，而它正是唯一能分开两条守卫的输入：宿主若改版开始给失败结果也带 `meta`，卡片就会给一个从没写成的文件画行。
+
+七次注入验证全部 KILLED，每次都按 sha256 复原：
+
+```
+KILLED    the declaration no longer outranks the write              |  164 passed, 2 failed
+KILLED    a failed write counts as a written file                   |  165 passed, 1 failed
+KILLED    every tool that reported a path is treated as a write     |  165 passed, 1 failed
+KILLED    a relative path the host did not resolve is guessed at    |  165 passed, 1 failed
+KILLED    the write channel has no ceiling of its own               |  165 passed, 1 failed
+KILLED    the same file written twice takes two rows                |  165 passed, 1 failed
+KILLED    a new turn inherits the writes of the last one            |  165 passed, 1 failed
+```
+
+### 那次「基线 24 条失败」不是回归
+
+写完突变条目后直接 `import` 突变脚本，它打印 `BASELINE FAILED ... reported 24 failed before any mutation`。看着像 P1 打破了九个套件，实际上是**我自己上一步留下的半成品**：`snapshot()` 改过之后，突变表里有一条旧锚点还指着被替换掉的那行 `paths: this.delivered.slice(...)`，`mutations.test.mjs` 因此红一条，而那个文件在突变脚本的基线套件里。
+
+修法两处：旧锚点重定向到 `? this.delivered.slice(0, MAX_CARD_PATHS)`（它比较的是截断方向，不是派生行），锚点下限 170 → 177。
+
+**值得记的是排查顺序**：先跑一遍干净全量（`3885 passed`），确认套件本身是绿的，才回头去看突变脚本。否则「24 条失败」既可能是我的代码，也可能是别人的变异体（DEF-103 的已知现象），两种原因给出同一个数字。
+
+### 验证
+
+- 全量 **3885 passed / 0 failed**（本轮起点 3873）。
+- 四套突变**串行**跑：语言 **178 killed**、持久化 **69**、面板 **141**、速度 **69**，全部 `0 survived / 0 not applied / 0 crashed`。
+- 残留审计：`find_mutation_residue.py` 报的 19 条全部经精确复核——只把「出现在 `to:` 里但**不**出现在 `from:` 里」的行拿去比对，19 条里没有一条是变异体留在工作区的；`git status -- packages/` 只有 `transcript.js` 一个文件。
+- `report_dead_anchors2.py` TOTAL DEAD 0。
+
+### 这一轮没做到的
+
+- **没有真机验证**。`transcript.js` 是宿主启动时加载的模块，改它必须**重启宿主**才生效。我把真实会话事件导出后用生产 `Transcript` 回放过，但回放证明不了运行中的面板，只能证明逻辑。这一步留给重启之后。
+- **覆盖率只重跑了一次**，数字是 `present 8 / write 9 / only_write 3`，与 `docs/26` 预估的 50% → 72% 不同源（那次是 18 回合 / 4 只写，这次是 23 回合 / 3 只写）。两次都不是全量，别当趋势。
+- **`edit` 只写不 `write` 的回合** 样本里只有 1 个（`edit_only: 1`）。P1 把 `edit` 算进来是按「我们的文档也会被 edit 补」推断的，没有实测过这种回合占多少。
