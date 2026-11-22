@@ -1522,6 +1522,22 @@ const mutations = [
   },
   {
     file: deliverable,
+    label: 'a temporary directory never holds a report',
+    suites: ['test/api.test.mjs'],
+    from: `  'node_modules', '__pycache__',`,
+    to: `  'node_modules', '__pycache__', 'tmp', 'temp',`,
+    why: 'a report or a screenshot written to `/tmp` or `%TEMP%` is still a document, and an agent writes one there on purpose; putting the two words back hides it, and it also makes the suite pass or fail according to what the OS temp directory is called instead of what the file is',
+  },
+  {
+    file: deliverable,
+    label: 'a cached document is not a document',
+    suites: ['test/api.test.mjs'],
+    from: `  '.git', '.ssh', '.aws', '.qoder', '.qoder-cn', '.lingma',`,
+    to: `  'cache', '.cache', '.git', '.ssh', '.aws', '.qoder', '.qoder-cn', '.lingma',`,
+    why: '`cache` is a word an author gives a directory, and the same rule that hides `~/.cache/report.png` hides a project folder that happens to be called `cache`; the whitelist already answers what may appear, and a directory name is not evidence about a file',
+  },
+  {
+    file: deliverable,
     label: 'an office lock file is a document',
     suites: ['test/api.test.mjs'],
     from: `  if (TEMPORARY_NAME.test(name) === true) return false`,

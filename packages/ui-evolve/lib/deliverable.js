@@ -15,6 +15,13 @@
 // real deliverables across 14 real sessions and scored 31 of 31 with no false
 // positive; a list re-derived from taste would have to earn that score again.
 //
+// Re-measured on 2026-11-22 against a larger copy of the same database (447
+// messages, 16 sessions, 591 distinct deliverable-suffixed path tokens): 544
+// admitted, 47 refused, and every refusal is a path under `node_modules` or
+// under another program's private state. The 31/31 score cannot be replayed --
+// it walked the two channels the card used to read, and those channels are gone
+// -- so this is a different measurement, not a confirmation of the old one.
+//
 // This lives on its own because two modules ask the question at two moments.
 // `api.js` asks it on the way out, when it decides whether a row is worth a
 // `stat` and whether the card may show it at all. The transcript asks it when a
@@ -41,17 +48,27 @@ const TEMPORARY_NAME = /^(?:~\$|\.~|~)/u
 
 // Directory segments that never hold a deliverable, wherever they sit in the
 // path. Two groups, both defensible without knowing which project this is:
-// dependency and build scratch (Qoder's own list), and the directories whose
-// contents are either secrets or another program's private state.
+// dependency and build scratch, and the directories whose contents are either
+// secrets or another program's private state.
 //
-// What is deliberately absent: this repository's own scratch trees -- `_tmp-test`,
+// What is deliberately absent, and it took a bug to learn: `tmp`, `temp`,
+// `cache`, `.cache`. A document written to a temporary directory is still a
+// document -- reports, screenshots and dumps land in `/tmp` and `%TEMP%` on
+// purpose, because that is where a throwaway medium-sized file goes. Those four
+// entries refused them while the paragraph below claimed an explicit declaration
+// outranked the author's directory habits, and both could not be true. Measured
+// on Qoder's own transcripts they were refusing 36 real documents and images;
+// removing them admitted those 36 and nothing else, because the suffix list is
+// what keeps code out.
+//
+// What is also absent: this repository's own scratch trees -- `_tmp-test`,
 // `_qoder_rev`, `.review` -- and the prefix rules that grew around them. Those
 // suppressed rows the four collectors produced in bulk. The only source now is a
 // declaration, which is the model saying "this is for you"; a table about the
 // author's directory habits has no business overriding an explicit act. If a
 // declared file lives somewhere odd, showing it is the honest answer.
 const UNDELIVERABLE_DIRS = new Set([
-  '.cache', 'cache', 'tmp', 'temp', 'node_modules', '__pycache__',
+  'node_modules', '__pycache__',
   '.git', '.ssh', '.aws', '.qoder', '.qoder-cn', '.lingma',
 ])
 

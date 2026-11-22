@@ -5008,3 +5008,52 @@ TMPDIR=F:/dsh-plugin/.tmp-test    的段是 `.tmp-test`，不是 `tmp`/`temp` �
 
 - **真机验收**：`transcript.js` 与 `client.js` 都在插件启动时加载，宿主没重启就还在跑旧代码
 - 第四节那条矛盾没修（我按只读复核处理，没有动代码）
+
+---
+
+## R-116 · 复核之后自己动手：从目录表删掉四个名字，和它顺手揭出的假绿
+
+**这一轮的起点**：R-115 的第四节记下「`deliverable.js` 的白名单与它自己的注释矛盾」，
+按只读复核处理没动代码。用户看到那一节之后要求直接修（「你将这些内容进行修复」）。
+于是这一轮的身份从复核者变成实施者，审查对象是我自己。
+
+**改了什么（4 个文件）**：
+
+| 文件 | 改动 |
+|---|---|
+| `packages/ui-evolve/lib/deliverable.js` | `UNDELIVERABLE_DIRS` 删 `tmp`/`temp`/`cache`/`.cache`；注释重写成「这四个名字是被缺陷删掉的」，并补一段 2026-11-22 的重新评分 |
+| `test/api.test.mjs` | 两条断言反过来（临时目录/缓存里的文档**是**交付物）；一条按段判定的断言从 `cachetools` 换成 `node_modules_tools`（原来借的名字已经不在表里）；面板级行数 3 → 4，注释写清多出的那行是 `tmp/notes.md` |
+| `scripts/mutate-language-and-files.mjs` | 新增两条变异：`a temporary directory never holds a report`（把 `tmp`/`temp` 加回表）、`a cached document is not a document`（把 `cache`/`.cache` 加回表） |
+| `test/mutations.test.mjs` | 期望计数 185 → 187 |
+
+**重新评分（真实数据，不是估计）**：Qoder 库现在 447 条消息 / 16 个会话（`docs/24` 记的是
+435 / 14，所以当初那个 31 条无法逐条复现）。591 个去重后的可交付后缀路径：旧表放行
+508，新表放行 **544**；多出的 36 条按后缀是 txt 8、html 8、md 2、png 16、jpg 2，全部是
+文档与截图，形态是 `/tmp/out/report.md`、`%TEMP%\dsh-current-prototype.png` 这类。
+仍被拒 47 条：`.qoder-cn` 38、`node_modules` 9。**源码后缀 0 条**——白名单没动过。
+
+**顺手揭出的假绿（这一轮真正的收获）**：`test/api.test.mjs` 的 fixture 建在 `os.tmpdir()`
+下，所以不设 `TMPDIR` 时它是 **392 passed / 14 failed**，设成 `.tmp-test` 才是 409/0。
+也就是说这个套件一直只在「临时目录恰好不叫 Temp」时才是绿的，而 `test/api.test.mjs` 的
+注释还写着「the directory list names dependency and build scratch, not wherever a test
+happens to run」——那句话在默认 `%TEMP%` 下是假的。改完之后两种环境都是 **411/0**。
+
+**为什么这条比迁移本身更值钱**：变异脚本跑之前先跑基线，基线红就拒绝启动。所以这条
+依赖一直让四套变异只在一种环境里可信；而且它长得像环境问题，不像缺陷。
+
+**验收**：
+
+- `node test/api.test.mjs`：**411/0**，带 `TMPDIR` 与默认 `%TEMP%` 各一遍
+- 全量 `node test/run.mjs`：**3910/0**，同样两种环境各一遍
+- 三套变异串行：`language-and-files` **187 killed / 0 survived / 0 not applied / 0 crashed**、
+  `checklist-panel` **141 killed / 0 survived**、`persistence` **70 killed / 0 survived**
+- 新加的两条变异各自被不同断言杀死（3 failed / 1 failed），不是靠同一条
+- 跑完 `git status --porcelain` 只剩本轮 4 个文件
+
+**没做到的**：真机仍未验收（`deliverable.js` 由 `transcript.js` 与 `api.js` 在插件启动时加载，
+要重启宿主）；`docs/24` 里那 31 条交付物的原始评分无法重放（通道换成声明之后，那两个
+通道已经不存在），所以这里的 544/591 是**另一个测量**，不是对旧结论的确认——这一点
+也写进了 `deliverable.js` 的注释里。
+
+**给下一个人的一句**：如果你在这份代码里看到「注释说 A、代码做 B」，先假设两者都有
+作者，然后去找哪一方是从实测里长出来的。这一轮里，实测站在注释那边。

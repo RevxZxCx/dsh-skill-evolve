@@ -836,19 +836,24 @@ function deps(overrides = {}) {
   check('and a file it did not deliver says so too', byPath.get(image)?.turn === false, JSON.stringify(byPath.get(image)))
   // Every row carries the flag, whatever its value. The fixtures live under the OS
   // temp dir, and a `.md` there is a delivery: the directory list names dependency
-  // and build scratch, not wherever a test happens to run. The rules themselves
-  // are asserted on synthetic paths below, where the directory is part of the
-  // input instead of an accident of the machine.
+  // scratch and other programs' private state, not wherever a test or an agent
+  // happens to write a report. That used to hold only when `TMPDIR` pointed at a
+  // directory whose name the list did not know -- under the default `%TEMP%` this
+  // suite went red with 14 failures, because `Temp` is a path segment. The rules
+  // themselves are asserted on synthetic paths below, where the directory is part
+  // of the input instead of an accident of the machine.
   // Pinned, because this loop emits one assertion per row: when the panel started
   // dropping non-documents the total fell from 402 to 399 with nothing going red,
-  // which is a change in what the suite covers that a green run cannot show. The
-  // three that go are the ones the whitelist refuses -- a dependency README, a
-  // source file, and a note under the build's scratch directory.
-  check('the panel answers with the three rows a reader can open', payload.files.length === 3, JSON.stringify(payload.files.map((file) => basename(file.path))))
+  // which is a change in what the suite covers that a green run cannot show. Two
+  // of the six fixtures are what the whitelist refuses -- a dependency README and
+  // a source file. The fourth row is `tmp/notes.md`, which stopped being refused
+  // when a temporary directory became an ordinary place to write a report.
+  check('the panel answers with the four rows a reader can open', payload.files.length === 4, JSON.stringify(payload.files.map((file) => basename(file.path))))
   for (const file of payload.files) {
     check(`the row for ${basename(file.path)} answers the flag`, typeof file.deliverable === 'boolean', JSON.stringify(file.deliverable))
   }
   check('and the document written here is one, wherever the test runs', byPath.get(written)?.deliverable === true, JSON.stringify(byPath.get(written)))
+  check('and a document under a temporary directory is one of them', byPath.get(temporary)?.deliverable === true, JSON.stringify(byPath.get(temporary)))
   // The card subtracts this from every absolute path to show the directory under
   // each name, so the panel has to send it; a client cannot guess it.
   check('the payload carries the workspace the paths are relative to', payload.cwd === dir, String(payload.cwd))
@@ -885,15 +890,19 @@ function deps(overrides = {}) {
   // keeps its documents: a build output directory is where a real delivery
   // lands, and refusing it was the old filter's mistake in the other direction.
   check('a document under a dependency tree is refused', isDeliverable('/w/node_modules/pkg/README.md') === false, String(isDeliverable('/w/node_modules/pkg/README.md')))
-  check('a document under a temp directory is refused', isDeliverable('/w/tmp/notes.md') === false, String(isDeliverable('/w/tmp/notes.md')))
-  check('a document under a cache is refused', isDeliverable('/w/.cache/x.png') === false, String(isDeliverable('/w/.cache/x.png')))
+  // A temporary directory is where a throwaway report goes, so a document there is
+  // a document. Refusing these was a rule about the author's directory habits
+  // wearing the name of a rule about files, and it hid real reports and screenshots
+  // that agents wrote to `/tmp` and `%TEMP%` on purpose.
+  check('a document under a temp directory is a delivery', isDeliverable('/w/tmp/notes.md') === true, String(isDeliverable('/w/tmp/notes.md')))
+  check('and one under a cache is too', isDeliverable('/w/.cache/x.png') === true, String(isDeliverable('/w/.cache/x.png')))
   // A scratch folder this build has never heard of is somebody's project
   // directory. The card is not allowed to have opinions about names it invented
   // for its own author's habits.
   check('a document under an unknown scratch folder is a delivery', isDeliverable('/w/.probe-x/report.md') === true, String(isDeliverable('/w/.probe-x/report.md')))
   check('a document under a git directory is refused', isDeliverable('/w/.git/notes.md') === false, String(isDeliverable('/w/.git/notes.md')))
   // A directory that merely starts with a listed name is somebody's source.
-  check('a directory that merely starts like a cache is entered', isDeliverable('/w/cachetools/report.md') === true, String(isDeliverable('/w/cachetools/report.md')))
+  check('a directory that merely starts like a dependency tree is entered', isDeliverable('/w/node_modules_tools/report.md') === true, String(isDeliverable('/w/node_modules_tools/report.md')))
   check('and one that merely starts like a scratch folder too', isDeliverable('/w/.probing/report.md') === true, String(isDeliverable('/w/.probing/report.md')))
   check('a build output directory is not refused', isDeliverable('/w/dist/report.pdf') === true, String(isDeliverable('/w/dist/report.pdf')))
   check('nor is out', isDeliverable('/w/out/report.pdf') === true, String(isDeliverable('/w/out/report.pdf')))
