@@ -4891,3 +4891,120 @@ held.delivered[0].description = 'MUTATED'
 2. **文档失真由审查者 r5 抓到，不是我自己发现**。它给的判断很准：「核心声称完全属实，失真的全是过程叙事 —— 正是下一会话最可能照抄、也最没法验证的部分」。七处已就地更正（`03-defects.md` 三处、`02-decisions.md` 两处、`04-reviews.md` 一处、`01-status.md` 一处）。
 3. **真机仍未验收**：`transcript.js` 是宿主启动时加载、`client.js` 是手写 bundle，改后都要重启宿主。
 4. **范围外的一个既有失效没有修**：`test/mutate-panel.mjs` 第 4 条锚点指向 `summarise.js` 早年的签名（现签名已加 `routeKey` / `agentId`，`count=0`）。它不在这个脚本的自检清单里，属既有问题，记在这里不伪装成已修。
+
+## R-115 · 复核 `382e34d` + `4b57efc`：三条建议都修对了，一处白名单与它自己的注释矛盾
+
+复核对象是开发会话按 R-112 交回的两个提交（`382e34d` 修 P1/P2/P3，`4b57efc` 审自己那一轮抓出的四处）。
+**我没有采信两个提交信息里的任何数字**：本节的每一个数都是我自己跑出来的。
+
+### 一、R-112 的三条，逐条对照
+
+| R-112 的判断 | 实际做法 | 结论 |
+| --- | --- | --- |
+| P1 闸门问的是「声明过东西没有」，不是「声明的东西卡片留得下没有」 | 新增 `chooseRows()` / `declaredRows()` / `producedRows()`，判据改成「这份声明里有没有可显示的」 | 修对了 |
+| P2 `snapshot()` 旁注释仍写 first-mention-wins | 改成「保留最后一次带描述的提及，后来的空描述不擦除」，与 `deliver()` 同句 | 修对了 |
+| P3 `restorable` 没有任何变异条目 | `scripts/mutate-persistence.mjs` 新增一条，`to:` 打的是「保留对象、去掉清空」 | 修对了（方向也改对了一次，见 R-114 三节） |
+
+R-112 建议把选择搬进 `readPanel()`（方案 A），他们换成了方案 B：把白名单抽成
+`packages/ui-evolve/lib/deliverable.js`，两端各问同一个函数。**他们的反驳成立**，我认：
+`readPanel()` 读的是 `previous.paths`，而那份列表已经由 `rememberPaths()` 把声明与写入摊平成一份，
+到了那里就再也分不出哪条是「模型说这是给你的」。方案 A 要在那种形状上工作，只能再加一条来源标记，
+比搬家更贵。核实过全仓只有一份 `'pdf'`（`grep -c "'pdf'" packages/ui-evolve/lib/*.js` 只命中 `deliverable.js`），
+`api.js:22` 与 `transcript.js:26` 都 import 它，`api.js:1506` 仍把 `isDeliverable` 转出去，
+所以 `test/api.test.mjs` 的既有断言不用改也能跑。
+
+### 二、我自己写的 16 条判据（`F:/dsh-plugin/.tmp-test/probe_r112_fix.mjs`）
+
+真模块、真 `TranscriptStore.record()`，全部通过。除了 R-112 本身的三条验收，我另加了六条边界，
+理由是它们都能让「修好了」变成假话：
+
+- 同一份文件既被声明又被写入时，卡片那张行上的 `description` 要跟着声明走（不是空串）
+- `report_output_files` 与 `present` 两种声明形状都要认（前者无描述，后者带描述）
+- 两种都不可显示时，「旧顺序保留」不能退化成「什么都不显示」
+- 裸字符串声明（`rememberPaths` 的另一种合法入参）不能被吞成 `undefined` 行
+- 40 条脚本 + 第 41 条文档时，文档要占最后一格；而**已经在页面里的文档不能被打乱顺序**
+- 失败的写入（`isError`）不算交付
+
+### 三、他们抓到的那个缺陷，正好是我判据的缺口
+
+`4b57efc` 修的第一条是**截断先于判定**：声明 40 个脚本再加 1 份文档，文档落在第 41 位，
+`slice(0, MAX_CARD_PATHS)` 在判定之前就把它切掉了，卡片仍然是空的 —— 上一轮的「空卡」换了个阈值又回来。
+
+这一条我 R-112 **没抓到**，原因值得写下来：我的三条验收全部在问「哪份清单说话」，
+没有一条在问「宽度之内还剩几行」。**一个阈值就是一种新的失败形状，而它不在「谁说话」这条轴上。**
+以后给这类「取前 N 条」的卡片写验收，必须把「第 N+1 位正好是唯一那张该显示的东西」当作独立一条。
+
+### 四、新发现：白名单与它自己的注释矛盾（should-fix，未修）
+
+`packages/ui-evolve/lib/deliverable.js` 的注释说得很清楚：
+
+> What is deliberately absent: … a table about the author's directory habits has no business
+> overriding an explicit act. If a declared file lives somewhere odd, showing it is the honest answer.
+
+但 `UNDELIVERABLE_DIRS` 里留着 `tmp`、`temp`、`cache`、`.cache`、`node_modules`，而判定是**按路径段**做的。
+于是「一份被显式声明的文档写进了临时目录」这个组合被判成非交付。实测（`F:/dsh-plugin/.tmp-test/probe_temp_deliverable.mjs`）：
+
+| 路径 | 判定 | 应当 |
+| --- | --- | --- |
+| `C:\Users\26903\AppData\Local\Temp\skill-evolve-seen-abc\report.pdf` | `false` | 这是宿主给测试夹具的临时目录形状，也是模型 write 到 `%TEMP%` 的形状 |
+| `/tmp/report.pdf` | `false` | 同上 |
+| `/var/tmp/report.pdf` | `false` | 同上 |
+| `C:\work\Temp\report.pdf` | `false` | 一个恰好叫 `Temp` 的项目目录也会被拒 |
+
+顺带记一条判据：`F:\dsh-plugin\.tmp-test\report.pdf` 反而是 `true` —— 说明「本项目自己的临时树」是被刻意放行的，
+而「操作系统的临时目录」不是。这个不一致不是笔误，是两张表来源不同留下的缝。
+
+这三条**不是没人测**：`test/api.test.mjs:887-889` 明确钉着三种拒绝
+（`a document under a dependency tree is refused`、`a document under a temp directory is refused`、
+`a document under a cache is refused`）。所以这不是笔误，是**一条被测试钉住的目录规则，和同一个文件里那句注释打架**。
+要改就得连带改动三条断言，并重测 Qoder 那 31 条 —— 这是设计决定，不是删几个字符串。
+
+**建议**：目录表只留「别人的私有状态与密钥」那组（`.git`、`.ssh`、`.aws`、`.qoder`、`.qoder-cn`、`.lingma`），
+把 `tmp` / `temp` / `cache` / `.cache` 去掉，让「显式声明」真的压过「目录习惯」。
+代价要如实说：Qoder 那张表的 31/31 是在带着这些目录规则时量的，改动后必须重测那 31 条；
+不过今天进卡片的只有声明与写入，噪声前提已经变了。**这条我没有改代码，留给他们决定。**
+
+### 五、一处已知取舍，不是缺陷（写下来免得将来当 bug 报）
+
+`chooseRows()` 在「声明里有可显示文档」时只让声明说话，**不并集**。同一回合里写了三份文档、
+却只声明了其中一份时，另外两份既不上卡片，也不经 `snapshot().paths` 进会话累计列表。
+这是「显式声明优先」的定价，R-113 已经这么定了；将来若有人抱怨「我写的报告没出现在卡片里」，
+先看他有没有声明 —— 没有声明、且同一回合又声明了别的东西，就是这个取舍。
+
+### 六、过程：套件通常在本地绿，是因为 `TMPDIR` 恰好不叫 tmp（会误导人的坑）
+
+这一条查下去不只是一个环境变量问题，它和第四节是同一件事的两端。
+
+不带 `TMPDIR` 直跑 `node test/api.test.mjs` → **392 passed / 14 failed**，失败全在「记住的文件」那组，列表都是 `[]`；
+带上 `TMPDIR=F:/dsh-plugin/.tmp-test` → **409 / 0**。因果链是三条命令量出来的：
+
+```
+os.tmpdir()                       C:\Users\26903\AppData\Local\Temp        （TMPDIR 未设置时）
+fixture 路径                       C:\Users\…\Local\Temp\skill-evolve-files-seen-x\report.md
+isDeliverable(该路径)              false      ← `Temp` 是一个路径段，命中第四节那张表
+TMPDIR=F:/dsh-plugin/.tmp-test    的段是 `.tmp-test`，不是 `tmp`/`temp` → true → 套件绿
+```
+
+也就是说：**本机之所以全绿，是因为我们的临时目录叫 `.tmp-test` 而不是 `Temp`。** 任何人在默认
+`%TEMP%`（Windows 上就是 `…\Local\Temp`）下跑这套件，都会看到那 14 条红；变异脚本随即
+`BASELINE FAILED` 拒绝启动 —— **这个行为是对的**（宁可不出数字，也不出假数字），
+但它意味着「变异脚本跑不动」的第一嫌疑人不是代码，是 `TMPDIR`。我第一次不带 `TMPDIR` 跑四套，
+拿到的就是四条 `BASELINE FAILED`。
+
+顺带一条：`test/api.test.mjs:838-841` 那段注释说「fixtures 在 OS 临时目录下，而那里的 `.md` 是交付物，
+目录表说的是依赖与构建残渣，不是测试碰巧跑在哪」—— **这句话在默认 `%TEMP%` 下是假的**，
+它之所以看起来成立，只因为 `TMPDIR` 被改成了 `.tmp-test`。测试注释声称不依赖环境，而实际依赖环境，
+这正是「绿着但不能说明问题」的典型：它把一条真实的行为差异（临时目录里的文档算不算交付）
+藏进了一个环境变量里。
+
+### 七、数字（我自己跑的）
+
+- 全量 `TMPDIR=… node test/run.mjs` → **3908 passed / 0 failed**
+- 四套变异串行（带 `TMPDIR`）→ **185 / 70 / 141 / 69 killed，0 survived、0 not applied、0 crashed**
+- `node test/mutations.test.mjs` → **48 passed / 0 failed**
+- 跑完 `git status --porcelain` 为空（脚本把自己的改动都还原了）
+
+### 八、仍然没有的东西
+
+- **真机验收**：`transcript.js` 与 `client.js` 都在插件启动时加载，宿主没重启就还在跑旧代码
+- 第四节那条矛盾没修（我按只读复核处理，没有动代码）

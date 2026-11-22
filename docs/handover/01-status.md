@@ -6058,3 +6058,35 @@ r5 的判断很准：「核心声称完全属实，失真的全是过程叙事 �
 全量 **3908 passed / 0 failed**；四套突变串行 185 / 70 / 141 / 69 全杀，0 survived、0 not applied、**0 CRASHED**；锚点自检 48/0；独立锚点审计 465 条 MISSING/AMBIGUOUS/UNRESOLVED 全 0。
 
 没做到的：**真机仍未验收**（`transcript.js` 与 `client.js` 都要重启宿主）；**范围外的一处既有失效没修** —— `test/mutate-panel.mjs` 第 4 条锚点指向 `summarise.js` 的旧签名（`count=0`），记在 R-114 里不伪装成已修。
+
+## 2026-11-22 · 复核产出卡两轮修复：三条都对了，一处白名单与注释矛盾（R-115）
+
+开发会话按 R-112 交了 `382e34d`（P1/P2/P3）与 `4b57efc`（审自己那一轮抓出的四处）。**我重新跑了一遍，没采信他们信息里的任何数字。**
+
+**三条建议全部落地且做法正确。** R-112 提的方案 A（把卡片的选择搬进 `readPanel()`）被他们换成方案 B
+（白名单抽成 `packages/ui-evolve/lib/deliverable.js`，`api.js` 与 `transcript.js` 共用），**我认这个反驳**：
+`readPanel()` 读到的 `previous.paths` 已被 `rememberPaths()` 摊平，分不出声明与写入。
+
+**我自己写的 16 条判据全部通过**（`F:/dsh-plugin/.tmp-test/probe_r112_fix.mjs`，真模块 + 真事件形状），
+包括我另加的六条边界：同文件既声明又写入时描述要带过去、两种声明形状、失败写入不算交付、
+40 行截断时文档占最后一格且已有文档不被打乱、裸字符串声明、两种都不可显示时保留旧顺序。
+
+**他们抓到的「截断先于判定」是我 R-112 的判据缺口**，如实记账：我的三条验收都在问「哪份清单说话」，
+没有一条在问「宽度之内还剩几行」。阈值是一种新的失败形状，且不在那条轴上。
+
+**新发现一处矛盾（should-fix，我没改代码）**：`deliverable.js` 的注释说「显式声明应当压过作者的目录习惯」，
+但 `UNDELIVERABLE_DIRS` 里留着 `tmp` / `temp` / `cache`，判定又是按路径段做的，
+于是被显式声明却写在临时目录里的文档被判成非交付（实测 `%TEMP%\…\report.pdf`、`/tmp/report.pdf`、
+`C:\work\Temp\report.pdf` 全部 `false`；而本项目自己的 `.tmp-test` 反而放行）。建议只留「别人的私有状态」那组。
+
+**另一个会误导人的过程坑，根因和上面那条是同一件事**：单独直跑套件不带 `TMPDIR` 时
+`test/api.test.mjs` 是 392/14，带上 `TMPDIR=F:/dsh-plugin/.tmp-test` 才是 409/0。因果链量过：
+默认 `%TEMP%` 是 `C:\Users\…\Local\Temp`，`Temp` 是一个路径段 → 命中 `UNDELIVERABLE_DIRS` →
+夹具里的 `.md` 被判非交付 → 面板把它们丢掉 → 那一组断言拿到的列表是 `[]`。**本机全绿，只因为我们的临时目录
+叫 `.tmp-test` 而不是 `Temp`。** 变异脚本因此报 `BASELINE FAILED` 拒绝启动（行为正确）；以后「变异脚本跑不动」
+先查 `TMPDIR`，别先怀疑代码。附带一条：`test/api.test.mjs:838-841` 那段注释声称「fixtures 在 OS 临时目录下，
+那里的 `.md` 是交付物」，在默认 `%TEMP%` 下是假的。
+
+数字：全量 **3908 passed / 0 failed**；四套变异串行 **185 / 70 / 141 / 69** killed，0 survived、0 not applied、0 crashed；锚点审计 **48/0**；跑完树干净。
+
+没做到的：**真机仍未验收**（要重启宿主）；第四节那条矛盾按只读复核处理，留给他们决定。
