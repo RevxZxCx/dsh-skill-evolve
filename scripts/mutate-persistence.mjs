@@ -697,8 +697,12 @@ const mutations = [
     // entry the guard had no coverage in any script: the door was bolted and
     // nobody ever tried the handle.
     suites: ['test/session-state.test.mjs'],
-    from: "    const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION\n",
-    to: "    const restorable = isRecord(stored.previous) && stored.previous !== undefined\n",
+    // The three lines together, because the guard's answer is the ternary, not
+    // the condition: a `to:` that only touched the condition could make the
+    // clearing unconditional (killing the v3 control) rather than removing it
+    // (killing the v2 case this entry is named after).
+    from: "    const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION\n      ? { ...stored.previous, paths: [] }\n      : stored.previous\n",
+    to: "    const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION\n      ? { ...stored.previous }\n      : stored.previous\n",
     why: 'The version bump exists because v1 and v2 recorded "this session touched this file" while v3 records "this session delivered this document". `readState` refuses the old rows; handing `previous` over whole lets the same records back in through the other door, and every read would `stat` them to find the few documents among them -- on this machine 74 files, 608 entries, 39 of them documents.',
   },
 ]

@@ -28,6 +28,7 @@ import {
   readToolCallBlock,
   tallyNames
 } from '../packages/ui-evolve/lib/transcript.js'
+import * as deliverable from '../packages/ui-evolve/lib/deliverable.js'
 
 let passed = 0
 let failed = 0
@@ -1140,7 +1141,8 @@ const wrote = (id, path, extra) => ({
 {
   // The case the gate used to go silent on. `present` accepts any file, so a
   // declaration is not automatically something the card can show: this turn
-  // declared the helper script it wrote *and* wrote the report the person asked
+  // announced a script the card cannot render -- it was never even written, it
+  // only appears in the `present` call -- and wrote the report the person asked
   // for. The old gate asked only whether the declaration was non-empty, so the
   // script spoke, the panel dropped it on the way out for not being a document,
   // and the report -- sitting right there in the write list -- was never asked.
@@ -1217,6 +1219,140 @@ const wrote = (id, path, extra) => ({
       [],
     ).map((row) => row.path)),
   )
+}
+
+{
+  // The report the gate could not see, one slot past the card's width. A model
+  // that writes forty files and then hands over the one document produces
+  // exactly this, and `deliver()` keeps up to `MAX_DELIVERED_ENTRIES` of them,
+  // so the declaration really can be longer than the card. The old gate cut
+  // first and asked second: it read the forty scripts, found no document, and
+  // handed the card to a write list that had nothing either.
+  const store = new TranscriptStore()
+  store.record('cap', human('clean up the scripts and write the report'))
+  const scripts = Array.from({ length: MAX_REPORTED_PATHS }, (_, index) => `F:/work/s${index}.py`)
+  store.record('cap', call('report_output_files', { paths: scripts }, 'c1'))
+  store.record('cap', call('present', { files: [{ path: 'F:/work/report.pdf', description: 'the report' }] }, 'c2'))
+  store.record('cap', endTurn())
+  const snapshot = store.view('cap').current
+  check(
+    'a document announced past the card width still reaches the card',
+    snapshot.paths.includes('F:\\work\\report.pdf') === true,
+    JSON.stringify(snapshot.paths.slice(-2)),
+  )
+  check(
+    'and the card is still exactly as wide as it was',
+    snapshot.paths.length === MAX_REPORTED_PATHS,
+    String(snapshot.paths.length),
+  )
+  check(
+    'and the sentence the model wrote about it came along',
+    snapshot.delivered.find((row) => row.path === 'F:\\work\\report.pdf')?.description === 'the report',
+    JSON.stringify(snapshot.delivered.find((row) => row.path === 'F:\\work\\report.pdf')),
+  )
+}
+
+{
+  // The one shape where branch 2 speaks *and* a sentence exists. Both lists
+  // describe the same file, and the sentence belongs to the file, not to the
+  // list it happened to arrive on: this turn announced the helper script it
+  // wrote, and wrote that script plus the report. Nothing announced is a
+  // document, so the card is handed to the write list -- which used to build
+  // its rows with `description: ''` and throw the sentence away.
+  //
+  // A declaration of the report itself would not test this: branch 1 would
+  // speak, and branch 2 is the only place the sentence can be lost.
+  const store = new TranscriptStore()
+  store.record('said', human('write the report'))
+  store.record('said', call('write', { file_path: 'F:/work/probe.py', content: 'x' }, 'c1'))
+  store.record('said', wrote('c1', 'F:\\work\\probe.py'))
+  store.record('said', call('write', { file_path: 'F:/work/report.pdf', content: 'x' }, 'c2'))
+  store.record('said', wrote('c2', 'F:\\work\\report.pdf'))
+  store.record('said', call('present', { files: [{ path: 'F:/work/probe.py', description: 'the helper I ran' }] }, 'c3'))
+  store.record('said', endTurn())
+  const snapshot = store.view('said').current
+  check(
+    'the report is the row the write list speaks with',
+    snapshot.paths.includes('F:\\work\\report.pdf') === true,
+    JSON.stringify(snapshot.paths),
+  )
+  check(
+    'the write list keeps the sentence the declaration carried',
+    snapshot.delivered.find((row) => row.path === 'F:\\work\\probe.py')?.description === 'the helper I ran',
+    JSON.stringify(snapshot.delivered),
+  )
+}
+
+{
+  // Neither list can leave a row, so the order decides, and this is the only
+  // shape that separates "the declaration speaks" from "the write list speaks":
+  // neither side has a document, one side is empty. Returning the declaration
+  // unconditionally here drops the only file the turn produced.
+  check(
+    'a turn that wrote only scripts and declared nothing still speaks',
+    JSON.stringify(chooseRows([], ['F:\\work\\probe.py'])) === JSON.stringify([{ path: 'F:\\work\\probe.py', description: '' }]),
+    JSON.stringify(chooseRows([], ['F:\\work\\probe.py'])),
+  )
+  check(
+    'and a turn that declared only scripts speaks with them',
+    JSON.stringify(chooseRows([{ path: 'F:\\work\\probe.py', description: 'the helper' }], ['F:\\work\\probe.py']))
+      === JSON.stringify([{ path: 'F:\\work\\probe.py', description: 'the helper' }]),
+    JSON.stringify(chooseRows([{ path: 'F:\\work\\probe.py', description: 'the helper' }], ['F:\\work\\probe.py'])),
+  )
+}
+
+{
+  // A snapshot is a snapshot. `deliver()` keeps its row objects for the turn and
+  // rewrites `description` in place, so handing the originals out means the card
+  // a reader is holding changes under them. One lock stands between the store and
+  // the reader -- `declaredRows` rebuilds each row on the way out -- and it is the
+  // only one: a copy in `pageOf` as well made a second lock no single-line
+  // mutation could tell apart from the first, which is decoration, not safety.
+  //
+  // The length guard is not decoration. Reading `[0]` off an empty array throws,
+  // the suite dies before printing a tally, and the runner calls that CRASHED
+  // instead of KILLED -- so the two mutations that empty this list looked like
+  // mutations nothing tested. A check that cannot report a failure is not a check.
+  const store = new TranscriptStore()
+  store.record('alias', human('go'))
+  store.record('alias', call('present', { files: [{ path: 'F:/work/a.md', description: 'first' }] }, 'c1'))
+  const held = store.view('alias').current
+  check('the snapshot has a row to edit', held.delivered.length === 1, String(held.delivered.length))
+  if (held.delivered.length === 1) held.delivered[0].description = 'MUTATED'
+  const again = store.view('alias').current
+  check(
+    'editing a snapshot does not edit the transcript',
+    again.delivered.length === 1 && again.delivered[0].description === 'first',
+    JSON.stringify(again.delivered),
+  )
+}
+
+{
+  // Shapes a legal caller can pass. `chooseRows` is exported and `rememberPaths`
+  // accepts `string | {path, description}`, so both arrive here; a bare string
+  // came back out as a bare string and `snapshot().paths` read `undefined` off it.
+  check('a missing list is an empty card', JSON.stringify(chooseRows(undefined, undefined)) === '[]', JSON.stringify(chooseRows(undefined, undefined)))
+  check('a null row is skipped, not dereferenced', JSON.stringify(chooseRows([null], [])) === '[]', JSON.stringify(chooseRows([null], [])))
+  check(
+    'a bare path is a row with nothing said about it',
+    JSON.stringify(chooseRows(['F:/work/a.md'], [])) === JSON.stringify([{ path: 'F:/work/a.md', description: '' }]),
+    JSON.stringify(chooseRows(['F:/work/a.md'], [])),
+  )
+}
+
+{
+  // The module's whole surface. The tables are the whitelist's data: while they
+  // were exported, one `DELIVERABLE_SUFFIXES.delete('pdf')` turned every PDF in
+  // the process into something a person cannot read.
+  check(
+    'the whitelist module answers two questions and shares no data',
+    JSON.stringify(Object.keys(deliverable).sort()) === JSON.stringify(['hasDeliverable', 'isDeliverable']),
+    JSON.stringify(Object.keys(deliverable).sort()),
+  )
+  check('nothing in a list of nothing is a document', deliverable.hasDeliverable([]) === false, String(deliverable.hasDeliverable([])))
+  check('a missing list has no document in it', deliverable.hasDeliverable(undefined) === false, String(deliverable.hasDeliverable(undefined)))
+  check('a list of source files has no document in it', deliverable.hasDeliverable(['F:/w/a.py']) === false, String(deliverable.hasDeliverable(['F:/w/a.py'])))
+  check('one document is enough', deliverable.hasDeliverable(['F:/w/a.py', 'F:/w/b.pdf']) === true, String(deliverable.hasDeliverable(['F:/w/a.py', 'F:/w/b.pdf'])))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

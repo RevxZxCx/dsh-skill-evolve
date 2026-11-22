@@ -19,7 +19,7 @@
 
 import { join } from 'node:path'
 import { stat as statFile } from 'node:fs/promises'
-import { hasDeliverable, isDeliverable } from './deliverable.js'
+import { isDeliverable } from './deliverable.js'
 
 /** Largest request body accepted, in bytes. */
 /**
@@ -1502,5 +1502,4 @@ export {
   clampText,
   MAX_BODY_BYTES,
   isDeliverable,
-  hasDeliverable,
 }

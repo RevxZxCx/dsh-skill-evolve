@@ -23,7 +23,7 @@
  */
 
 import { canonicalPath } from '@revxz/dsh-evolve-core'
-import { hasDeliverable } from './deliverable.js'
+import { hasDeliverable, isDeliverable } from './deliverable.js'
 
 /** How many tool calls one turn keeps before it stops recording detail. */
 const MAX_CALLS_PER_TURN = 200
@@ -750,16 +750,123 @@ function tallyNames(calls) {
  * nothing the card renders, is still the turn's own account of itself, and the
  * assertions that pin a declared script to the card depend on it.
  *
- * @param {Array<{path: string, description: string}>} delivered - declared files.
+ * The page is the other half of the same question, and it was asked wrong too.
+ * A turn can announce more files than the card holds -- `deliver()` keeps up to
+ * `MAX_DELIVERED_ENTRIES` of them -- so "does this list carry a document" cannot
+ * be answered by looking at the page alone: a turn that announces forty scripts
+ * and then the report has its only document on position forty-one, and a gate
+ * that reads the page sees forty scripts, concludes the declaration shows
+ * nothing, and hands the card to a write list that has nothing either. The one
+ * shape the gate exists to catch came back one slot later. So the gate reads the
+ * whole list, and {@link pageOf} makes sure the page it returns carries the
+ * document the gate found.
+ *
+ * @param {Array<string | {path: string, description: string}>} delivered - declared files.
  * @param {Array<string>} produced - files the turn successfully wrote.
  * @returns {Array<{path: string, description: string}>} the rows the card shows.
  */
 function chooseRows(delivered, produced) {
-  const declared = delivered.slice(0, MAX_CARD_PATHS)
-  const written = produced.slice(0, MAX_CARD_PATHS).map((path) => ({ path, description: '' }))
-  if (hasDeliverable(declared.map((row) => row.path)) === true) return declared
-  if (hasDeliverable(produced) === true) return written
-  return delivered.length > 0 ? declared : written
+  const announced = declaredRows(delivered)
+  const written = producedRows(produced, announced)
+  if (hasDeliverable(announced.map((row) => row.path)) === true) return pageOf(announced)
+  if (hasDeliverable(written.map((row) => row.path)) === true) return pageOf(written)
+  return announced.length > 0 ? pageOf(announced) : pageOf(written)
+}
+
+/**
+ * The declared files as rows, accepting the shapes the store accepts.
+ *
+ * `rememberPaths` takes `string | {path, description}` and `chooseRows` is
+ * exported, so a caller can legally hand it either. Until this existed a bare
+ * string came back out as a bare string and `snapshot().paths` -- which reads
+ * `entry.path` -- turned it into `undefined`, one unrenderable row that the
+ * panel then dropped without saying so.
+ *
+ * @param {unknown} delivered - whatever the caller passed.
+ * @returns {Array<{path: string, description: string}>} usable rows, in order.
+ */
+function declaredRows(delivered) {
+  if (Array.isArray(delivered) === false) return []
+  const rows = []
+  for (const entry of delivered) {
+    if (typeof entry === 'string') {
+      if (entry.length > 0) rows.push({ path: entry, description: '' })
+      continue
+    }
+    if (typeof entry !== 'object' || entry === null) continue
+    if (typeof entry.path !== 'string' || entry.path.length === 0) continue
+    const description = typeof entry.description === 'string' ? entry.description : ''
+    rows.push({ path: entry.path, description })
+  }
+  return rows
+}
+
+/**
+ * The written files as rows, keeping any sentence the turn declared them with.
+ *
+ * Both lists describe the same file from two angles, and the sentence is a
+ * property of the file, not of the list it arrived on. Building these rows with
+ * an empty description -- which is what this did -- threw away the model's own
+ * words for a report it wrote and then presented, in exactly the case where the
+ * write list speaks and the declared page cannot.
+ *
+ * @param {unknown} produced - paths the turn successfully wrote.
+ * @param {Array<{path: string, description: string}>} announced - the declared rows.
+ * @returns {Array<{path: string, description: string}>} rows, in write order.
+ */
+function producedRows(produced, announced) {
+  if (Array.isArray(produced) === false) return []
+  const said = new Map()
+  for (const row of announced) {
+    if (row.description.length > 0) said.set(row.path, row.description)
+  }
+  const rows = []
+  for (const path of produced) {
+    if (typeof path !== 'string' || path.length === 0) continue
+    rows.push({ path, description: said.get(path) ?? '' })
+  }
+  return rows
+}
+
+/**
+ * At most one card's worth of rows, carrying a document if the list has one.
+ *
+ * The cap itself is the card's width and is not negotiable. What was negotiable,
+ * and wrong, is that the first `MAX_CARD_PATHS` rows were taken unconditionally:
+ * for a turn that announced forty scripts before its one report, the page held
+ * forty scripts and the report sat on position forty-one, so the panel -- which
+ * keeps deliverables and drops the rest -- drew an empty card. Here the document
+ * takes the last slot instead of the row that already had the least claim on it,
+ * and only when the page would otherwise carry no document at all: a list of
+ * documents keeps the order it was announced in, which is what the cap's own
+ * assertions pin.
+ *
+ * @param {Array<{path: string, description: string}>} rows - the whole list.
+ * @returns {Array<{path: string, description: string}>} the page.
+ */
+function pageOf(rows) {
+  // No copy here. Every row reaching this point was built by `declaredRows` or
+  // `producedRows`, so it is already this module's own object and no caller can
+  // reach the store's -- `deliver()` goes on mutating `description` in place for
+  // the rest of the turn, and a snapshot must not follow it. The copy used to be
+  // here as well as there, and no single-line mutation could tell the two apart:
+  // a second lock no test can see the absence of is decoration, not safety.
+  return pickPage(rows)
+}
+
+/**
+ * The rows that fit on the card, which is `pickPage` cut out for one reason.
+ *
+ * @param {Array<{path: string, description: string}>} rows - the whole list.
+ * @returns {Array<{path: string, description: string}>} the page.
+ */
+function pickPage(rows) {
+  if (rows.length <= MAX_CARD_PATHS) return rows
+  const page = rows.slice(0, MAX_CARD_PATHS)
+  if (page.some((row) => isDeliverable(row.path)) === true) return page
+  const document = rows.slice(MAX_CARD_PATHS).find((row) => isDeliverable(row.path))
+  if (document === undefined) return page
+  return [...page.slice(0, MAX_CARD_PATHS - 1), document]
 }
 
 /**
@@ -923,4 +1030,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, declaredRows, producedRows, pageOf, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }

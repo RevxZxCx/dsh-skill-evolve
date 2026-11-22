@@ -186,7 +186,8 @@
 | DEF-181 | 2026-11-21 | 按数据行数发断言的循环，数据一变套件覆盖就悄悄变少，而绿跑看不出来 | 断言总数从 402 掉到 399 没有任何红；循环里每条断言都只断言那一行 |
 | DEF-182 | 2026-11-21 | 新写的上限断言对空数组取 `held[0].path`，三条突变因此报 CRASHED 而不是 KILLED | DEF-122 的复发：读数组元素前没有判长度 |
 | DEF-183 | 2026-11-21 | 一条卡片的断言在「失败的写入」上测不出守卫是否还在，因为真实失败结果没有 `meta`，两条守卫串行挡住了同一件坏事 | 注入验证第一次报 SURVIVED；补的形状是「失败但仍然带 `meta.path`」，这个形状现实里不出现 |
-| DEF-184 | 2026-11-22 | 代码搬了家，九条突变锚点还指着旧位置；锚点自检静默不报时，突变脚本会把「没跑」当成「通过」 | 抽出白名单 + 闸门改函数后，六条锚点一次失效，另两条要等前六条修好才暴露 |
+| DEF-184 | 2026-11-22 | 代码搬了家，九条突变锚点还指着旧位置；锚点自检静默不报时，突变脚本会把「没跑」当成「通过」 | 抽出白名单 + 闸门改函数后，6 条 `file:` 指错、2 条 `from:` 失配，分两批手动修完；第 9 条属另一脚本同批 |
+| DEF-185 | 2026-11-22 | 断言里直接按下标取元素，缺东西时崩掉整个套件，runner 记 CRASHED 而非 KILLED | 两条本该被判 KILLED 的突变被吞成 CRASHED，看起来像「这两条没人测」 |
 
 ---
 
@@ -3351,10 +3352,51 @@ FAIL every mutate-checklist-panel.mjs anchor still exists in the file it names
 
 **九条**，分布在两个脚本：`mutate-language-and-files.mjs` 五条指白名单、一条指 `snapshot()` 的内联代码、一条指 `this.delivered.slice(0, MAX_CARD_PATHS)`；`mutate-checklist-panel.mjs` 两条指白名单。`file:` 字段也全都指错。
 
+**更正（R-114 复核）**：这一段原来写「第一次报六条，修完之后第七、第八条才出现」，加起来是八，与「九条」自相矛盾。真实构成是 **6 条 `file:` 指错 + 2 条 `from:` 随代码改写而失配**，分两批手动修、两次重跑，观感上是「先六后二」；第 9 条是 `mutate-checklist-panel.mjs` 的第二条白名单锚点，与它的同伴同批改掉。另：`file:` 并非九条全错 —— 改 `from:` 的那两条 `file:` 本来就是对的。
+
 **为什么会走到这一步**：搬家是按要求做的（D-250），而突变条目里的 `from:` 是**字符串**，不是符号引用。它不会跟着代码走。这类失效没有任何运行期信号：突变脚本读不到锚点时把那一条记作 `not applied` 并继续，退出码只在 `survived.length > 0 || notApplied.length > 0` 时才非零 —— 也就是说**它会报错，但只在有人跑它的时候**。跑全量回归不会碰到它。
 
-**为什么锚点自检只报了六条**：第一次报出来的正是上面那六条。我修完这六条、脚本能跑到底之后，第七、第八条才出现（`declared paths are kept in call order` 指 `this.delivered.slice(0, MAX_CARD_PATHS)`、`the declaration no longer outranks the write` 指整个内联块）。**自检按文件分组后遇到第一条缺失就停止列举该组**，所以「修好一批、再暴露一批」是它的正常行为，不是它漏了。
+**为什么锚点自检只报了六条**：第一次报出来的正是上面那六条。我修完这六条、脚本能跑到底之后，第七、第八条才出现（`declared paths are kept in call order` 指 `this.delivered.slice(0, MAX_CARD_PATHS)`、`the declaration no longer outranks the write` 指整个内联块）。**更正（R-114 复核）**：上面这句是反的。`test/mutations.test.mjs:345-357` 的 `for (const [position, anchor] of anchors.entries())` 对每一条锚点都检查、每条缺失都 `detail.push`，**不 break**，唯一的 `process.exit` 在 `:480`。也就是说一次运行会把该脚本的**全部**缺失列出来。当时「先六条、后两条」是**分两次手动修、两次重跑**造成的观感，不是工具的批次行为。原文把自己的操作顺序记成了工具的性质。
 
 **教训（这条比缺陷本身重要）**：**代码搬家必须同一次改完锚点。** 一个指向不存在代码的突变条目，在报告里长得和「通过」一模一样（`not applied` 只在最后一行的汇总里出现，而那份汇总可能没人看）。这正是 DEF-93 的同形问题：**一个不能区分「干净」与「没跑」的检查器会签发通行证**。区别是这次拦住它的是自检，而不是人的注意力。
 
-**修法**：九条各自重新指向新位置，`to:` 一个都没改 —— 突变要破坏的是**现在存在的代码**，不是曾经存在的。其中「声明不再压过写入」那条从「把两份清单 concat 起来」改写成「在 `chooseRows` 里返回 `[...declared, ...written]`」，失败语义不变。两条脚本里新增 `const deliverable = path.join(repo, 'packages', 'ui-evolve', 'lib', 'deliverable.js')` 与对应的 `file:` 字段。
+**修法**：九条各自重新指向新位置，`to:` 一个都没改 —— 突变要破坏的是**现在存在的代码**，不是曾经存在的。其中「声明不再压过写入」那条从「把两份清单 concat 起来」改写成「在 `chooseRows` 里返回 `[...declared, ...written]`」，失败语义不变。**更正（R-114 复核）**：只有 `scripts/mutate-language-and-files.mjs:28` 新增了 `const deliverable = path.join(repo, 'packages', 'ui-evolve', 'lib', 'deliverable.js')`；`scripts/mutate-checklist-panel.mjs` 的条目一直用路径字面量（`:488`、`:495` 直接写 `'packages/ui-evolve/lib/deliverable.js'`），它没有模块级常量可加。原文写成「两条脚本里新增」是错的。
+
+## DEF-185 · 断言按下标取元素，缺东西时崩掉整个套件
+
+**现象**：修完 `chooseRows` 之后跑语言突变套件，报 `183 killed, 0 survived, 0 not applied, 2 crashed (of 185)`。
+两条 CRASHED 是 `a presented file is no longer collected` 与 `the presented list is read from the wrong field`。
+
+**根因**：上一轮我自己写的别名断言：
+
+```js
+const held = store.view('alias').current
+held.delivered[0].description = 'MUTATED'
+```
+
+这两条突变把 `present` 的收集分支拆掉，`delivered` 变成空数组，于是 `[0]` 是 `undefined`，
+给 `undefined` 设属性抛 `TypeError`，**套件在打印 tally 之前就退出了**。runner 拿不到 tally，
+把那两条记作 CRASHED。
+
+**为什么这比红更糟**：CRASHED 与 KILLED 是两个不同的判定，但在「这条突变有没有杀伤力」这个问题上，
+它们的后果是一样的 —— 都不会被计为杀了。区别在于 CRASHED 看起来像**环境问题**，
+而且它掩盖了真相：这两条突变其实**非常有杀伤力**（修好断言后分别杀掉 12 条和 29 条断言）。
+
+**修法**：先断言有行，再改它；并且改完之后的读回也带长度判断。
+
+```js
+check('the snapshot has a row to edit', held.delivered.length === 1, String(held.delivered.length))
+if (held.delivered.length === 1) held.delivered[0].description = 'MUTATED'
+const again = store.view('alias').current
+check(
+  'editing a snapshot does not edit the transcript',
+  again.delivered.length === 1 && again.delivered[0].description === 'first',
+  JSON.stringify(again.delivered),
+)
+```
+
+**它同时暴露了一件更好的事**：修好之后这两条突变**能打印出真正的 tally 了**，CRASHED 归零。
+
+**教训**：**读数组元素前必须判长度，缺东西要表现为一条红的断言，而不是崩掉的进程。**
+这是 DEF-122 的复发（第三次）。之所以反复出现：写断言时只想到「绿」和「红」两种结局，
+而「断言没能跑完」是第三种，它有独立的名字，且长得像环境问题。

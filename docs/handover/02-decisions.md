@@ -4797,7 +4797,7 @@ skills/tools/summary/回合号照旧）；**`readState` 只在 `stored.state ===
 
 ## D-250 · 白名单抽成 `deliverable.js`，两个模块共用一个答案
 
-**决定**：`DELIVERABLE_SUFFIXES`、`TEMPORARY_NAME`、`UNDELIVERABLE_DIRS`、`isDeliverable` 从 `api.js` 整体搬到 `packages/ui-evolve/lib/deliverable.js`，另加 `hasDeliverable(paths)`。`api.js` 改成 `import { hasDeliverable, isDeliverable }`，并把两个都继续导出 —— `test/api.test.mjs` 从它 import `isDeliverable`，那条契约不因为文件搬家而改变。`api.js` 减少 3,900 字节。
+**决定**：`DELIVERABLE_SUFFIXES`、`TEMPORARY_NAME`、`UNDELIVERABLE_DIRS`、`isDeliverable` 从 `api.js` 整体搬到 `packages/ui-evolve/lib/deliverable.js`，另加 `hasDeliverable(paths)`。`api.js` 改成 `import { hasDeliverable, isDeliverable }`，并把两个都继续导出 —— `test/api.test.mjs` 从它 import `isDeliverable`，那条契约不因为文件搬家而改变。`api.js` 减少 **3,818** 字节（81,261 → 77,443；原文写 3,900 是估的）。R-114 又删掉 34 字节的死 re-export，现在是 77,409。
 
 **理由**：两个模块在两个时刻问同一个问题。`api.js` 在出口问（这行值不值得 `stat`、卡片能不能显示它），`transcript.js` 在回合结束时问（这份声明里有没有卡片会留下的东西 —— 见 D-251）。**第二份清单会让管道两端答得不一样，而且没有任何东西会报告这个分歧**：卡片只是对某一类文件静默变空。这不是假设，DEF-184 就是它的后果。
 
@@ -4815,7 +4815,7 @@ skills/tools/summary/回合号照旧）；**`readState` 只在 `stored.state ===
 
 **理由**：原来的闸门问「这个回合声明过东西没有」，而它该问「声明里有卡片会留下的东西没有」。`present` 接受任何文件，所以声明不自动等于可显示的：一个回合声明了它写的辅助脚本、同时写了用户要的报告，声明非空 → 脚本说话 → 面板按「不是文档」把脚本行丢掉 → 报告在 `produced` 里躺着，而那份可能显示它的清单**从来没被问过**。卡片空白。
 
-**第 3 分支不能省**：`test/transcript.test.mjs:285` 断言 `report_output_files` 声明 `scripts/probe.py` 后该路径**在卡上**。`.py` 不是交付物。若第 3 分支写成「都不可显示就返回空」，这条会红，而它是对的 —— **`transcript` 不是过滤器，它只决定谁说话**；白名单在 `api.js` 那端。把判断塞进 `transcript` 的返回路径，等于同一个问题在两处各答一次，正是 D-250 要避免的。
+**第 3 分支不能省**：`test/transcript.test.mjs:286` 断言（R-114 复核更正行号，原文写 285） `report_output_files` 声明 `scripts/probe.py` 后该路径**在卡上**。`.py` 不是交付物。若第 3 分支写成「都不可显示就返回空」，这条会红，而它是对的 —— **`transcript` 不是过滤器，它只决定谁说话**；白名单在 `api.js` 那端。把判断塞进 `transcript` 的返回路径，等于同一个问题在两处各答一次，正是 D-250 要避免的。
 
 **副作用（比 R-112 报的更严重，已修）**：`index.js:438` 的 `ending?.delivered ?? ending?.paths` 是 `sessionState.rememberPaths` 的唯一来源。所以闸门选错时，那份 pdf 不只这一轮卡片看不到，**连会话累积清单都进不去**。
 

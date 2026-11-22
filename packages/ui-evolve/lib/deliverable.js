@@ -106,4 +106,10 @@ function hasDeliverable(paths) {
   return false
 }
 
-export { DELIVERABLE_SUFFIXES, TEMPORARY_NAME, UNDELIVERABLE_DIRS, isDeliverable, hasDeliverable }
+// Only the two answers leave this module. The tables below are the whitelist's
+// data, not its interface: exporting them made `DELIVERABLE_SUFFIXES` a live
+// reference that any importer could edit, which is how `delete('pdf')` in a
+// test turned every PDF in the process into something a person cannot read.
+// `api.js` is the only caller that needs both of these; `transcript.js` needs
+// `hasDeliverable` and `isDeliverable`. Nothing needs the lists themselves.
+export { isDeliverable, hasDeliverable }
