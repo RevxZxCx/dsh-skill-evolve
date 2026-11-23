@@ -9,19 +9,22 @@
  *   - **stat calls** — one per row the payload will report, never one per path
  *     handed in. This is structural: the filter runs before the syscall, so a
  *     session whose paths are 92% non-deliverable must not pay for them.
- *   - **payload bytes** — what the `files` array costs on the wire. Not the whole
- *     `/panel` body: the summary text, skills and tool names are bounded by their own
- *     rules (a 6,000-character summary cap, one row per skill) and do not grow with
- *     the path count, which is the only thing this budget is about.
+ *   - **payload bytes** — what the `files` array costs on the wire, counted as
+ *     UTF-8 bytes of the serialized rows. Not the whole `/panel` body: the summary
+ *     text, skills and tool names are bounded by their own rules (a 6,000-character
+ *     summary cap, one row per skill) and do not grow with the path count, which is
+ *     the only thing this budget is about.
  *   - **elapsed** — wall time for the whole `statTouchedFiles` pass. This is the first
  *     pass over those files in this process, so it includes the cold read; the label in
  *     the output says `ms` and the manual says which pass it is.
  *
  * Three inputs, because they answer different questions:
  *
- *   1. **the worst real session on this disk** — what the reader can feed it.
- *      This measures the product, and it is the number that decides whether a
- *      person waits.
+ *   1. **the real sessions on this disk** — what the reader can feed it. Up to eight
+ *      sessions are measured (the largest by row count and the largest by deliverable
+ *      row count) and each budget is judged on the worst of them: a budget that
+ *      passes on the cheap session and fails on the expensive one passed on nothing.
+ *      The rows carry their stored description, because the payload does.
  *   2. **200 real files, every row deliverable** — the arithmetic ceiling
  *      (`MAX_TOUCHED_FILES`). No real session looks like this; it exists so a
  *      change cannot pass by being fast only on small inputs.
@@ -33,20 +36,31 @@
  *     node scripts/perf-budget.mjs            # measure and judge
  *     node scripts/perf-budget.mjs --verbose  # also show the unfiltered pass
  *
- * Exit code 0 means every budget holds; any other code means at least one line
- * below says OVER.
+ * Exit codes:
+ *
+ *     0  every budget was measured and holds
+ *     1  at least one budget is over
+ *     2  nothing is over, but at least one budget could not be measured here
+ *        (no session data, no writable temp directory). `docs/28` says a budget
+ *        that was not measured is not a pass, and a green line nobody printed is
+ *        worse: it reads as a pass.
  *
  * Sessions are read from `$DSH_HOME/plugin-data/skill-evolve/sessions`, or
- * `~/.dsh/...` when `DSH_HOME` is unset. With no files there, input 1 is
- * reported as not measured rather than silently skipped and passing.
+ * `~/.dsh/...` when `DSH_HOME` is unset.
  */
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { statTouchedFiles } from '../packages/ui-evolve/lib/api.js'
+import { isDeliverable, statTouchedFiles } from '../packages/ui-evolve/lib/api.js'
 
 const VERBOSE = process.argv.includes('--verbose')
+
+/** `MAX_TOUCHED_FILES` in `lib/api.js`, and the row cap in `lib/session-state.js`. */
+const MAX_ROWS = 200
+const MAX_STATE_BYTES = 64 * 1024
+/** How many real sessions are measured; their worst result judges each budget. */
+const SESSIONS_TO_MEASURE = 4
 
 /**
  * What one assembly may cost, in the units the contract names.
@@ -60,8 +74,10 @@ const BUDGETS = [
     id: 'stat-per-reported-row',
     inputs: ['real', 'ceiling'],
     limit: 1,
-    unit: '× rows',
-    value: (m) => (m.rows === 0 ? 0 : m.statCalls / m.rows),
+    unit: 'x rows',
+    // Stats over zero reported rows is not zero: it is every row paid for and
+    // dropped. Reported as infinity so the line cannot be green.
+    value: (m) => (m.rows === 0 ? (m.statCalls === 0 ? 0 : Number.POSITIVE_INFINITY) : m.statCalls / m.rows),
     why: 'the deliverable filter runs before readStat, so a dropped row costs no syscall',
   },
   {
@@ -70,7 +86,7 @@ const BUDGETS = [
     limit: 32 * 1024,
     unit: 'bytes',
     value: (m) => m.bytes,
-    why: 'a real session is a few dozen rows; 32 KB is 2.4× the worst case measured on 2026-11-23 (13,699 B)',
+    why: 'a real session is a few dozen rows; 32 KB is 2x the worst case measured on 2026-11-23 (15,333 B with descriptions)',
   },
   {
     id: 'payload-ceiling-session',
@@ -78,7 +94,7 @@ const BUDGETS = [
     limit: 80 * 1024,
     unit: 'bytes',
     value: (m) => m.bytes,
-    why: '200 rows x ~305 B measured = 60,941 B; 80 KB leaves room for a row to gain a field before the row count itself is the cost',
+    why: '200 rows x ~270 B measured = 54-61 KB depending on the temp path; 80 KB leaves room for a row to gain a field',
   },
   {
     id: 'elapsed-real-session',
@@ -98,10 +114,93 @@ const BUDGETS = [
   },
 ]
 
-/** One measurement: rows in, and what the reader paid for them. */
-async function measure(label, paths) {
-  const rows = paths.map((p) => (typeof p === 'string' ? { path: p } : p))
+/**
+ * The rows a session actually reports, in the order the panel reports them.
+ *
+ * `paths` is an object keyed by absolute path; the store keeps the newest
+ * `MAX_PATHS` by `seq` and `pathsSeen` hands them back newest first, capped at
+ * 200. Both halves are gated on state 3: the reader refuses `paths` from an older
+ * file (`readState`) and the loader rewrites `previous.paths` to `[]` for one
+ * (`restorable`), so a v2 file is a session the panel reports zero rows for.
+ */
+function rowsFromState(doc) {
+  const stored = doc.paths && typeof doc.paths === 'object' ? Object.entries(doc.paths) : []
+  const rows = stored
+    .filter(([, at]) => at !== null && typeof at === 'object')
+    .sort((a, b) => (b[1].seq ?? 0) - (a[1].seq ?? 0))
+    .slice(0, MAX_ROWS)
+    .map(([path, at]) => ({
+      path,
+      // The product serializes the stored description, and 51 of them were 1,744
+      // characters on the worst session here: leaving it out read 10.7% low.
+      description: typeof at.description === 'string' ? at.description : '',
+    }))
+  if (rows.length > 0) return rows
+  // The fallback the panel uses when the memory list is empty. Bare strings:
+  // the transcript's own list never carried a description.
+  const prev = Array.isArray(doc.previous?.paths) ? doc.previous.paths : []
+  return prev.slice(0, MAX_ROWS).map((path) => ({ path: String(path), description: '' }))
+}
 
+/** Rows per session, plus the biggest state file on disk. */
+async function readSessions(dir) {
+  let names
+  try {
+    names = (await readdir(dir)).filter((name) => name.endsWith('.json'))
+  } catch {
+    return null
+  }
+  const sessions = []
+  let maxBytes = 0
+  for (const name of names) {
+    let doc
+    try {
+      doc = JSON.parse(await readFile(join(dir, name), 'utf8'))
+    } catch {
+      continue
+    }
+    // A file can parse to `null` or a number; `.state` on those throws and would
+    // abort the whole run instead of skipping one unreadable session.
+    if (doc === null || typeof doc !== 'object') continue
+    // The budget is about what this file costs on disk, so ask the disk. Re-rolling
+    // the bytes with `JSON.stringify` reads 3% low on the files here (40,518 against
+    // 41,941 B) and would read far lower for a file some editor pretty-printed.
+    let bytes = 0
+    try {
+      bytes = (await stat(join(dir, name))).size
+    } catch {
+      // Unlinked between `readdir` and this stat: the store sweeps old sessions
+      // while a panel is open, and one missing file is not a broken budget.
+      continue
+    }
+    if (bytes > maxBytes) maxBytes = bytes
+    sessions.push({ name, rows: doc.state === 3 ? rowsFromState(doc) : [], bytes })
+  }
+  return { files: names.length, sessions, maxBytes }
+}
+
+const deliverableRows = (session) => session.rows.filter((row) => isDeliverable(row.path)).length
+
+/**
+ * The sessions worth measuring: the largest by row count (a stat-ratio regression) and
+ * the largest by deliverable rows (a payload or elapsed regression). Choosing by row
+ * count alone would judge the payload on a session whose rows are all dropped.
+ */
+function pickWorst(sessions, count) {
+  const byRows = [...sessions].sort((a, b) => b.rows.length - a.rows.length).slice(0, count)
+  const byDeliverable = [...sessions].sort((a, b) => deliverableRows(b) - deliverableRows(a)).slice(0, count)
+  const seen = new Set()
+  const picked = []
+  for (const one of [...byRows, ...byDeliverable]) {
+    if (seen.has(one.name)) continue
+    seen.add(one.name)
+    picked.push(one)
+  }
+  return picked
+}
+
+/** One measurement: rows in, and what the reader paid for them. */
+async function measure(label, rows) {
   // The panel's own call: deliverable rows only, which is the number that matters.
   let statCalls = 0
   const started = process.hrtime.bigint()
@@ -129,58 +228,26 @@ async function measure(label, paths) {
 
   const result = {
     label,
+    session: '',
     rows: kept.length,
     statCalls,
-    bytes: JSON.stringify(kept).length,
-    elapsedMs: Math.round(elapsedMs * 10) / 10,
+    // UTF-16 code units are not bytes: a Chinese project or user directory
+    // under-reports the wire cost by up to 3x.
+    bytes: Buffer.byteLength(JSON.stringify(kept), 'utf8'),
+    elapsedMs,
     coldCalls,
-    coldMs: Math.round(coldMs * 10) / 10,
+    coldMs,
     dropped: all.length - kept.length,
   }
   if (VERBOSE) {
     console.log(
-      `  ${label}: ${result.rows} rows / ${result.statCalls} stats / ${result.bytes} B / ${result.elapsedMs} ms` +
-        `   (no filter: ${result.coldCalls} stats / ${result.coldMs} ms, ${result.dropped} dropped)`,
+      `  ${label}${result.session === '' ? '' : ` [${result.session}]`}: ` +
+        `${result.rows} rows / ${result.statCalls} stats / ${result.bytes} B / ` +
+        `${result.elapsedMs.toFixed(1)} ms` +
+        `   (no filter: ${result.coldCalls} stats / ${result.coldMs.toFixed(1)} ms, ${result.dropped} dropped)`,
     )
   }
   return result
-}
-
-/** The session whose `paths` the reader can hand over today, plus the biggest state file. */
-async function readSessions(dir) {
-  let names
-  try {
-    names = (await readdir(dir)).filter((n) => n.endsWith('.json'))
-  } catch {
-    return null
-  }
-  let worst = null
-  let biggest = 0
-  let maxBytes = 0
-  for (const name of names) {
-    let doc
-    try {
-      doc = JSON.parse(await readFile(join(dir, name), 'utf8'))
-    } catch {
-      continue
-    }
-    // `paths` is an object keyed by absolute path and only state 3 is read at
-    // all; `previous.paths` is the fallback used when the memory list is empty,
-    // which is how a rewrite of the collector walked back in (DEF-180).
-    const map = doc.state === 3 && doc.paths && typeof doc.paths === 'object' ? Object.keys(doc.paths) : []
-    const prev = Array.isArray(doc.previous?.paths) ? doc.previous.paths : []
-    const rows = map.length > 0 ? map : prev
-    if (rows.length > biggest) {
-      biggest = rows.length
-      worst = { name, rows }
-    }
-    // The budget is about what this file costs on disk, so ask the disk. Re-rolling
-    // the bytes with `JSON.stringify` reads 3% low on the files here (40,518 against
-    // 41,941 B) and would read far lower for a file some editor pretty-printed.
-    const size = (await stat(join(dir, name))).size
-    if (size > maxBytes) maxBytes = size
-  }
-  return { files: names.length, worst, maxBytes }
 }
 
 /**
@@ -189,17 +256,24 @@ async function readSessions(dir) {
  *
  * Created rather than borrowed: a list of paths that do not exist measures the
  * miss path (slower on Windows) and would let a payload regression hide behind
- * a stat that was never going to succeed. The files are deleted by the caller.
+ * a stat that was never going to succeed.
  */
 async function makeCeilingFiles(count) {
   const dir = await mkdtemp(join(tmpdir(), 'perf-budget-'))
-  const paths = []
-  for (let i = 0; i < count; i += 1) {
-    const path = join(dir, `row-${i}.md`)
-    await writeFile(path, `row ${i}`)
-    paths.push(path)
+  try {
+    const paths = []
+    for (let i = 0; i < count; i += 1) {
+      const path = join(dir, `row-${i}.md`)
+      await writeFile(path, `row ${i}`)
+      paths.push(path)
+    }
+    return { dir, paths }
+  } catch (error) {
+    // Leaving the directory behind, or letting this abort a run whose real
+    // measurement already succeeded, are both worse than one unmeasured input.
+    await rm(dir, { recursive: true, force: true }).catch(() => {})
+    throw error
   }
-  return { dir, paths }
 }
 
 const dir = join(process.env.DSH_HOME ?? join(homedir(), '.dsh'), 'plugin-data', 'skill-evolve', 'sessions')
@@ -207,46 +281,80 @@ const measurements = []
 
 const sessions = await readSessions(dir)
 if (sessions === null) {
-  console.log(`no session files under ${dir} — the real-session input was NOT measured`)
-} else if (sessions.worst === null) {
-  console.log(`${sessions.files} session files under ${dir}, none with paths — real-session input not measured`)
+  console.log(`no session directory at ${dir} — the real-session input cannot be measured here`)
 } else {
-  console.log(`real worst session: ${sessions.worst.name} (${sessions.worst.rows.length} rows, biggest state file ${sessions.maxBytes} B)`)
-  measurements.push(await measure('real', sessions.worst.rows))
-}
-
-const ceiling = await makeCeilingFiles(200)
-try {
-  measurements.push(await measure('ceiling', ceiling.paths))
-  console.log('ceiling session: 200 deliverable rows on real files')
-} finally {
-  await rm(ceiling.dir, { recursive: true, force: true })
-}
-
-measurements.push(await measure('nothing', Array.from({ length: 200 }, (_, i) => `F:/nowhere/row-${i}.py`)))
-
-let failed = false
-for (const budget of BUDGETS) {
-  for (const m of measurements.filter((one) => budget.inputs.includes(one.label))) {
-    const value = Math.round(budget.value(m) * 10) / 10
-    const over = value > budget.limit
-    if (over) failed = true
+  const withRows = sessions.sessions.filter((one) => one.rows.length > 0)
+  if (withRows.length === 0) {
+    console.log(`${sessions.files} session files under ${dir}, none reporting rows — the real-session input cannot be measured here`)
+  } else {
+    const picked = pickWorst(withRows, SESSIONS_TO_MEASURE)
     console.log(
-      `  ${over ? 'OVER' : ' ok '}  ${budget.id} [${m.label}]  ${value} ${budget.unit}  (limit ${budget.limit})`,
+      `real sessions: ${withRows.length} with rows, measuring ${picked.length}` +
+        ` (largest by rows and by deliverable rows)`,
     )
-    if (over) console.log(`        why the limit: ${budget.why}`)
+    for (const one of picked) {
+      const result = await measure('real', one.rows)
+      result.session = one.name
+      measurements.push(result)
+    }
   }
 }
 
-if (sessions === null) {
-  // Printing nothing here is the one outcome that looks like a pass: a CI run with no
-  // session directory would show five green lines and no sixth, and nobody counts lines.
-  console.log('  --    state-file-bytes  NOT measured (no session files)')
-} else if (sessions.maxBytes > 64 * 1024) {
-  failed = true
-  console.log(`  OVER  state-file-bytes  ${sessions.maxBytes} bytes  (limit 65536)`)
-} else {
-  console.log(`  ok    state-file-bytes  ${sessions.maxBytes} bytes  (limit 65536)`)
+let ceiling = null
+try {
+  ceiling = await makeCeilingFiles(MAX_ROWS)
+} catch (error) {
+  console.log(`could not create the ceiling input (${error.message}) — that input cannot be measured here`)
+}
+if (ceiling !== null) {
+  try {
+    measurements.push(await measure('ceiling', ceiling.paths))
+  } finally {
+    await rm(ceiling.dir, { recursive: true, force: true })
+  }
 }
 
-process.exit(failed ? 1 : 0)
+measurements.push(await measure('nothing', Array.from({ length: MAX_ROWS }, (_, i) => `F:/nowhere/row-${i}.py`)))
+
+let failed = false
+let unmeasured = false
+for (const budget of BUDGETS) {
+  const matching = measurements.filter((one) => budget.inputs.includes(one.label))
+  if (matching.length === 0) {
+    // Printing nothing here is the one outcome that looks like a pass.
+    unmeasured = true
+    console.log(`  --    ${budget.id}  NOT measured (no input it applies to: ${budget.inputs.join(', ')})`)
+    continue
+  }
+  let worst = matching[0]
+  let worstValue = budget.value(worst)
+  for (const one of matching.slice(1)) {
+    const value = budget.value(one)
+    if (value > worstValue) {
+      worst = one
+      worstValue = value
+    }
+  }
+  // Compare the number, print one rounded: 57 stats over 55 rows is 1.036 and
+  // rounds to 1.0, which is the regression this budget exists for.
+  const over = worstValue > budget.limit
+  if (over) failed = true
+  const shown = Math.round(worstValue * 10) / 10
+  console.log(
+    `  ${over ? 'OVER' : ' ok '}  ${budget.id} [${worst.label}]  ${shown} ${budget.unit}  (limit ${budget.limit})`,
+  )
+  if (worst.session !== '') console.log(`        session: ${worst.session} (${worst.rows} rows reported)`)
+  if (over) console.log(`        why the limit: ${budget.why}`)
+}
+
+if (sessions === null) {
+  unmeasured = true
+  console.log('  --    state-file-bytes  NOT measured (no session directory)')
+} else if (sessions.maxBytes > MAX_STATE_BYTES) {
+  failed = true
+  console.log(`  OVER  state-file-bytes  ${sessions.maxBytes} bytes  (limit ${MAX_STATE_BYTES})`)
+} else {
+  console.log(`  ok    state-file-bytes  ${sessions.maxBytes} bytes  (limit ${MAX_STATE_BYTES})`)
+}
+
+process.exit(failed ? 1 : unmeasured ? 2 : 0)

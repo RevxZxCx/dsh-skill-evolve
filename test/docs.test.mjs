@@ -14,9 +14,12 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const root = join(import.meta.dirname, '..')
+// `import.meta.dirname` needs Node 20.11 while package.json declares >= 20; on 20.0
+// this file would throw before printing a single check.
+const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 let passed = 0
 let failed = 0
@@ -36,6 +39,14 @@ function check(label, condition, detail) {
 // than "the index does not link the manual".
 const read = (path) => (existsSync(join(root, path)) ? readFileSync(join(root, path), 'utf8') : '')
 
+/** The first heading matching `start`, up to the next `## ` heading. */
+function sectionAt(text, start) {
+  const from = text.search(start)
+  if (from === -1) return { found: false, body: '' }
+  const next = text.indexOf(String.fromCharCode(10) + '## ', from)
+  return { found: true, body: next === -1 ? text.slice(from) : text.slice(from, next) }
+}
+
 // --- the two manuals exist -------------------------------------------------
 
 const MANUAL = 'docs/27-开发与集成手册.md'
@@ -52,10 +63,21 @@ check('the performance manual exists', existsSync(join(root, PERF)), PERF)
   const index = read(INDEX)
   check('the index links the development manual', index.includes('27-开发与集成手册.md'), INDEX)
   check('the index links the performance manual', index.includes('28-性能审查手册.md'), INDEX)
+  // Both needles occur earlier in the file than the sections they name: the manual is
+  // named in the intro paragraph and `按目的进入` is forward-referenced by step 3. Comparing
+  // offsets over the whole file therefore never looks at the reading-order list itself,
+  // and it passes when that list stops naming the manual.
+  const order = sectionAt(index, /^## 新会话先读什么/m)
+  const purpose = index.search(/^## 按目的进入/m)
   check(
     'the index tells a new session to read the manual before anything else',
-    index.includes('新会话先读什么') && index.indexOf('27-开发与集成手册.md') < index.indexOf('按目的进入'),
-    'the reading order section has to come before the by-purpose section',
+    order.found && purpose !== -1 && order.body.includes('27-开发与集成手册.md'),
+    'the reading-order section has to exist, come before the by-purpose one, and name the manual',
+  )
+  check(
+    'and the reading-order section comes first',
+    order.found && purpose !== -1 && index.indexOf(order.body.slice(0, 2)) < purpose,
+    'the reading order has to come before the by-purpose section',
   )
   check(
     'the index still says the handover files are append-only',
@@ -103,20 +125,49 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
 // --- every budget the command enforces is written down -----------------------
 
 {
-  // The command is the authority on which budgets exist: an `id` that only lives
-  // in the script is a limit nobody was told about, and one that only lives in the
-  // manual is a limit nobody enforces. `sse-frame-bytes` is the exception and is
-  // named as one: it is structural, pinned by assertions, not measured here.
+  // The command is the authority on which budgets exist: an `id` that only lives in
+  // the script is a limit nobody was told about, and one that only lives in the manual
+  // is a limit nobody enforces.
+  //
+  // Both sides parse loosely on purpose. Pinning the script side to four spaces and single
+  // quotes meant a budget reformatted to two spaces, or an id carrying a digit, was invisible
+  // to the extractor -- so it existed in the command with no manual row and both sides stayed
+  // green. What closes that is the count check below: the number of rows must match the
+  // number of budgets, so a budget neither side could parse cannot pass as absent.
   const script = read('scripts/perf-budget.mjs')
   const manual = read(PERF)
-  const budgets = [...script.matchAll(/^\s{4}id: '([a-z-]+)',/gm)].map((match) => match[1])
-  const enforced = budgets.concat(script.includes('state-file-bytes') ? ['state-file-bytes'] : [])
-  const structural = ['sse-frame-bytes']
-  check('the budget command declares budgets', budgets.length >= 3, String(budgets.length))
 
-  const section = manual.slice(manual.indexOf('## 1 · 预算表'), manual.indexOf('## 2 · 怎么跑'))
-  const documented = [...section.matchAll(/^\| `([a-z-]+)` \|/gm)].map((match) => match[1])
+  const slots = [...script.matchAll(/^[ \t]*id:[ \t]*['"]([A-Za-z0-9_-]+)['"]/gm)].map((match) => match[1])
+  // `state-file-bytes` is checked after the loop over `BUDGETS` rather than listed in it;
+  // it counts as enforced only where the limit is compared, not where the name appears.
+  const enforced = slots.concat(script.includes('MAX_STATE_BYTES') ? ['state-file-bytes'] : [])
+  const structural = ['sse-frame-bytes']
+
+  check('the budget command declares budgets', slots.length >= 3, String(slots.length))
+  check('and each budget it declares appears once', new Set(slots).size === slots.length, slots.join(', '))
+  check(
+    'and the state-file limit is a comparison, not a mention',
+    script.includes('sessions.maxBytes > MAX_STATE_BYTES'),
+    'a budget counts as enforced only where the limit is compared',
+  )
+
+  const table = sectionAt(manual, /^## 1 · /m)
+  check('the performance manual has a budget table section', table.found, PERF)
+  check(
+    'and that section ends at a real heading',
+    /^## 2 · /m.test(manual),
+    'without an end marker the slice runs to the end of the file and swallows the next table',
+  )
+  const documented = [...table.body.matchAll(/^[ \t]*\|[ \t]*`([A-Za-z0-9_-]+)`[ \t]*\|/gm)].map((match) => match[1])
   check('the manual lists its budgets by id', documented.length >= 5, String(documented.length))
+  check('and lists each of them once', new Set(documented).size === documented.length, documented.join(', '))
+
+  const named = documented.filter((id) => !structural.includes(id))
+  check(
+    'and lists exactly the budgets the command enforces',
+    named.length === enforced.length && enforced.every((id) => named.includes(id)),
+    `${named.length} named in the manual, ${enforced.length} enforced by the command`,
+  )
 
   for (const id of enforced) {
     check(`the manual names the "${id}" budget`, documented.includes(id), PERF)
@@ -131,7 +182,7 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
   for (const id of structural) {
     check(
       `the manual says "${id}" is not measured by the command`,
-      section.includes(id) && section.includes('test/api.test.mjs'),
+      table.body.includes(id) && table.body.includes('test/api.test.mjs'),
       PERF,
     )
   }
