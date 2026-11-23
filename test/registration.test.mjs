@@ -50,8 +50,22 @@ function check(label, ok, detail) {
   console.log(`FAIL ${label}${detail === undefined ? '' : ` — ${detail}`}`)
 }
 
+const unreadable = new Set()
+
+/**
+ * 读一个产品文件。
+ *
+ * 文件被改名或删掉时，原来的实现抛 ENOENT，进程退出码 1、一条 FAIL 都不打印——
+ * 而「重构了文件布局」正是最需要这句加法指令的时刻。所以这里记下名字交给下面
+ * 一条专门的检查，让 53 条里剩下的照常跑完。
+ */
 function read(relative) {
-  return readFileSync(join(root, relative), 'utf8')
+  try {
+    return readFileSync(join(root, relative), 'utf8')
+  } catch {
+    unreadable.add(relative)
+    return ''
+  }
 }
 
 function unique(list) {
@@ -70,9 +84,26 @@ function countIn(file, pattern) {
   return read(file).match(pattern)?.length ?? 0
 }
 
-const CONFIG_KEY = /^ {2,6}([A-Za-z][A-Za-z0-9]*): z\./gmu
-const TOOL_NAME = /^ +name: '([a-z_]+)',$/gmu
-const COMMAND_NAME = /^ +name: '([a-z-]+)',$/gmu
+const CONFIG_KEY = /^ {2,6}([A-Za-z][A-Za-z0-9_]*): (?:z\.|[A-Za-z_$][\w$]*\()/gmu
+const TOOL_NAME = /^ +name: '([a-z_]+)'/gmu
+const COMMAND_NAME = /^ +name: '([a-z-]+)'/gmu
+
+/**
+ * 一条正则两种用法：`matchAll` 要 `/g`，`.test` 不能带 `/g`。
+ *
+ * 带 `/g` 的正则 `test()` 会留下 `lastIndex`，下一个文件就从那个偏移开始找——
+ * 一次命中会让紧跟其后的文件整个失明，而且失明与否取决于文件顺序与长度。
+ * 所以扫文件时一律用这个函数，它给每条正则配一个无状态的双胞胎。
+ */
+const stateless = new Map()
+function hits(signal, text) {
+  let probe = stateless.get(signal)
+  if (probe === undefined) {
+    probe = signal.global === true ? new RegExp(signal.source, signal.flags.replace('g', '')) : signal
+    stateless.set(signal, probe)
+  }
+  return probe.test(text) === true
+}
 
 /**
  * 每一类注册点：代码侧怎么数，§7 里哪一块必须与它相等。
@@ -89,7 +120,7 @@ const KINDS = [
       mode: 'names',
       values: namesIn(
         ['packages/ui-evolve/lib/api.js'],
-        /path === `\$\{ROUTE_PREFIX\}\/([A-Za-z-]+)`/gu,
+        /path === `\$\{ROUTE_PREFIX\}\/([A-Za-z0-9-]+)`/gu,
       ),
     }),
   },
@@ -105,12 +136,12 @@ const KINDS = [
   {
     id: 'host-events',
     label: '订阅的宿主事件',
-    add: '在对应的 `lib/index.js` 里加 `ctx.on("事件名", safe("名字", …))`，并在 §7 的 host-events 块加一行。',
+    add: '在对应的 `lib/index.js` 里加 `ctx.on(\'事件名\', safe(\'名字\', …))`（源码里全是单引号，双引号同样被认到），并在 §7 的 host-events 块加一行。',
     find: () => ({
       mode: 'names',
       values: namesIn(
         ['packages/skill-evolve/lib/index.js', 'packages/ui-evolve/lib/index.js'],
-        /ctx\.on\('([^']+)'/gu,
+        /ctx\.on\(\s*['"]([^'"]+)['"]/gu,
       ),
     }),
   },
@@ -165,6 +196,8 @@ const KINDS = [
   {
     id: 'bundle-id',
     label: '客户端 bundle id',
+    alsoFrom: 'packages/ui-evolve/package.json 的 name',
+    also: () => JSON.parse(read('packages/ui-evolve/package.json')).name,
     add: '改 `packages/ui-evolve/lib/client.js` 头部的 `id:` 时，它必须逐字等于包名，并同步 §7 的 bundle-id 块。',
     find: () => {
       const id = /^\s*id: "([^"]+)"/mu.exec(read('packages/ui-evolve/lib/client.js'))
@@ -189,12 +222,8 @@ const KINDS = [
     find: () => ({
       mode: 'names',
       values: [
-        ...readdirSync(join(root, 'scripts'))
-          .filter((name) => name.startsWith('mutate-') && name.endsWith('.mjs'))
-          .map((name) => `scripts/${name}`),
-        ...readdirSync(join(root, 'test'))
-          .filter((name) => name === 'mutate-panel.mjs')
-          .map((name) => `test/${name}`),
+        ...walk('scripts').filter((name) => /(^|\/)mutate-[^/]*\.mjs$/u.test(name)),
+        ...walk('test').filter((name) => /(^|\/)mutate-[^/]*\.mjs$/u.test(name)),
       ].sort(),
     }),
   },
@@ -223,7 +252,7 @@ const FAMILIES = [
   {
     id: 'host-events',
     label: '订阅的宿主事件',
-    signal: /ctx\.on\('/u,
+    signal: /ctx\.on\(\s*['"]/u,
     files: ['packages/skill-evolve/lib/index.js', 'packages/ui-evolve/lib/index.js'],
   },
   {
@@ -270,8 +299,8 @@ const dump = process.argv.includes('--dump')
 function blockOf(id) {
   const open = `<!-- registration:${id} -->`
   const close = `<!-- /registration:${id} -->`
-  const from = manual.indexOf(open)
-  const to = manual.indexOf(close)
+  const from = manual.lastIndexOf(open)
+  const to = manual.lastIndexOf(close)
   if (from < 0 || to < 0 || to < from) return undefined
   return manual.slice(from + open.length, to)
 }
@@ -340,8 +369,16 @@ for (const kind of KINDS) {
     check(
       `${kind.label}：${found.value} 写在 §7`,
       block.includes(`\`${found.value}\``) === true,
-      `块里要出现 \`${found.value}\`。${kind.add}`,
+      `块里要出现 \`${found.value}\`（代码里现在的值是 ${found.value}）。${kind.add}`,
     )
+    if (kind.also !== undefined) {
+      const other = kind.also()
+      check(
+        `${kind.label}：§7 与 ${kind.alsoFrom} 一致`,
+        other === found.value,
+        `§7 写 ${found.value}，${kind.alsoFrom} 写 ${String(other)}——两边必须逐字相同`,
+      )
+    }
   }
 }
 
@@ -352,21 +389,53 @@ for (const kind of KINDS) {
  * 现在一个新文件里」也会被看见。它不试图穷举宿主给的每一族 API —— 做不到，那
  * 是 §7 让人自己回答「你碰的是不是这十一族之一」的理由。
  */
-const sourceFiles = []
-for (const packageName of readdirSync(join(root, 'packages'))) {
+/**
+ * 产品源码的每个文件，递归。
+ *
+ * 只扫 `lib` 顶层会漏掉 `lib/deep/x.js` 与 `lib/index.mjs`；漏掉的形态看不出
+ * 「我没扫到」和「这里没有」的区别，所以递归到底并把 `src` 也算进来。
+ */
+function walk(relative) {
+  const found = []
   let entries = []
   try {
-    entries = readdirSync(join(root, 'packages', packageName, 'lib'))
+    entries = readdirSync(join(root, relative), { withFileTypes: true })
   } catch {
-    continue
+    return found
   }
   for (const entry of entries) {
-    if (entry.endsWith('.js') === true) sourceFiles.push(`packages/${packageName}/lib/${entry}`)
+    const next = `${relative}/${entry.name}`
+    if (entry.isDirectory() === true) found.push(...walk(next))
+    else if (/\.(?:js|mjs)$/u.test(entry.name) === true) found.push(next)
+  }
+  return found
+}
+
+const sourceFiles = []
+const packageDirs = (() => {
+  try {
+    return readdirSync(join(root, 'packages'))
+  } catch {
+    unreadable.add('packages/')
+    return []
+  }
+})()
+for (const packageName of packageDirs) {
+  for (const dir of ['lib', 'src']) {
+    sourceFiles.push(...walk(`packages/${packageName}/${dir}`))
   }
 }
 
+check(
+  '登记的每个产品文件都还在',
+  unreadable.size === 0,
+  unreadable.size === 0
+    ? undefined
+    : `${[...unreadable].sort().join(' / ')} 读不到。加法：把新路径写进 KINDS 里那条 find 的 files 与 FAMILIES 里对应那一项的 files；文件只是改名的话，改这两处即可。`,
+)
+
 for (const family of FAMILIES) {
-  const seen = sourceFiles.filter((file) => family.signal.test(read(file)) === true)
+  const seen = sourceFiles.filter((file) => hits(family.signal, read(file)) === true)
   const undeclared = seen.filter((file) => family.files.includes(file) === false)
   check(
     `${family.label}：只有登记过的文件出现这一族调用`,
@@ -400,7 +469,13 @@ check(
   ),
   '§7 开头那四个问题缺一条；它们是「先想清楚再动手」的全部内容',
 )
-const beforeFirstStep = manual.slice(0, manual.indexOf('### 第 1 步'))
+const firstStepAt = manual.indexOf('### 第 1 步')
+check(
+  `§2 的「### 第 1 步」标题还在`,
+  firstStepAt > 0,
+  '找不到这个标题，下面那条「§2 开头指向 §7」就失去意义了；改标题时同步改本文件',
+)
+const beforeFirstStep = firstStepAt < 0 ? '' : manual.slice(0, firstStepAt)
 check(
   '§2 开头指向 §7',
   /新功能[^。]*§7/u.test(beforeFirstStep) === true,

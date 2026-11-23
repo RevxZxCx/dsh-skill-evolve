@@ -6218,3 +6218,21 @@ killed，0 survived。
 四种注入（新路由 / 新配置键 / 新文件挂 `ctx.on` / 新文件定义工具）各红 1 条，恢复后逐字节一致。
 
 **没有的东西**：散文行没有东西守着；表按事件名登记，处理函数级新增不会红。
+
+## 2026-11-23（四）：两位审查者回来了，一个 P0 与十六处散文错
+| 改了什么 | 位置 | 验证 |
+| --- | --- | --- |
+| 扫文件的正则去掉 `/g` 状态污染（P0：`lastIndex` 让下一个文件失明） | `test/registration.test.mjs` | 新工具文件 80 字节 → 红；垫 7,000 字符注释也红 |
+| 三条正则放宽：尾逗号、`ctx.on` 引号与换行、蛇形配置键与非 Zod 值 | 同上 | 尾逗号 / 双引号 / `control_key` 三种注入都红 |
+| 递归扫 `packages/*/{lib,src}` 并收 `.mjs`；`mutation-suites` 递归扫 `test/` | 同上 | `lib/deep/*.mjs`、`test/mutate-new.mjs` 都红 |
+| 登记文件被改名不再崩：记下来、跑完、再出一条加法指令 | 同上 | `api.js` → `api2.js`：4 条 FAIL，含「读不到…改这两处」 |
+| `blockOf` 用 `lastIndexOf`；`beforeFirstStep` 标题缺失先红；`bundle-id` 对齐 `package.json` | 同上 | 重复块 / 标题改名 / 包名改字都红 |
+| `docs/27` §7 散文 16 处（含 `propose` 不是唯一写路由、两套方案文档判据、抄成字面量的 `[1, 2, 3]`） | `docs/27`、`docs/00` | 判据单子只留 §7 一份，`docs/00` 回指 |
+| 11 块注册点补表头与分隔行（原来 GFM 下是裸竖线） | `docs/27` | `registration.test.mjs` 56/0 |
+| `docs/28` 的 bump 数 8→7；`ui-evolve/README.md` 路由清单补 `/events` | 两份 | 全量 4011/0 |
+
+**基线**：全量 **4011 passed / 0 failed**；`registration` 56/0；`docs` 45/0；`mutations` 48/0；`perf-budget` 六条 ok、退出 0。
+
+**这一节的教训**：我在交付说明里写「两名审查者没交回结论」时那是实况，几分钟后两位都回来了（一个 P0、十六处散文错）。派了审查就等一等再宣布——`list_agents` 的成本是零。
+
+**没有的东西**：表的覆盖面仍是「见过的形态」（`startsWith` 式路由对 `KINDS` 与 `FAMILIES` 都不可见，已写进 §7 的「不覆盖什么」）；散文里的行号与常量名仍靠人核。

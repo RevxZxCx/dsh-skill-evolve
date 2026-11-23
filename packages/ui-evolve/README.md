@@ -61,7 +61,8 @@ Seven keys, all optional. They are the panel's own; the detection settings live 
 
 The panel talks to the host over a prefix route registered at
 `/api/ui-evolve`: `GET|HEAD /panel`, `GET|HEAD /speed`, `GET /models`,
-`GET|POST /config`, `GET|POST /candidates`, and `POST /propose`.
+`GET|POST /config`, `GET|POST /candidates`, `POST /propose`, and `GET /events`
+(the event stream the panel subscribes to; it answers `text/event-stream`).
 
 Every route answers `HEAD` with a body-less 200.
 
