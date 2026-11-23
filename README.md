@@ -122,10 +122,18 @@ separately.
 
 ## Working on it
 
+**Read [`docs/27-开发与集成手册.md`](docs/27-开发与集成手册.md) first.** It is the
+one entry point for a change: how the two plugins get into the host, the ten steps a
+change has to walk (tests, mutation, review, handover, push, restart, verify), the full
+list of mutation harnesses, and the fifteen numbers that are not negotiable.
+[`docs/28-性能审查手册.md`](docs/28-性能审查手册.md) holds the performance budgets
+and the command that enforces them.
+
 ```bash
-npm install                # required before anything imports core by name
-npm test                   # every suite
-node test/run.mjs signal   # one suite
+npm install                    # required before anything imports core by name
+npm test                       # every suite
+node test/run.mjs signal       # one suite
+node scripts/perf-budget.mjs    # the panel's performance budget, judged
 ```
 
 Two generators keep generated content honest, and both are safe to re-run:
@@ -139,7 +147,10 @@ node scripts/extract-host-tokens.mjs  # refresh test/host-tokens.txt from the in
 from another module has to be copied into it. `sync-gutter.mjs` is that copy, and
 `test/gutter-drift.test.mjs` fails if the copy and the module disagree.
 
-Three mutation harnesses prove the tests can fail at all:
+Ten mutation harnesses prove the tests can fail at all — one per area, each
+re-introducing a defect a review found. The list, with which one a change has to run to
+zero, is in [`docs/27-开发与集成手册.md`](docs/27-开发与集成手册.md) §3; the three
+that cover most changes are:
 
 ```bash
 node test/mutate-panel.mjs

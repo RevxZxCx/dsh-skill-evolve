@@ -9,6 +9,8 @@ It is not a memory system and not an autonomous self-improvement loop. It adds t
 
 Everything the model wants to save goes through a human unless `mode` is explicitly `auto`.
 
+**Changing this package:** read [`docs/27-开发与集成手册.md`](../../docs/27-开发与集成手册.md) first — the ten steps a change walks, the mutation harness that covers it, and the numbers it may not break.
+
 ---
 
 ## Why it is built this way

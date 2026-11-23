@@ -18,6 +18,10 @@ draws the **建议** entry in its header, which opens the candidate queue, becau
 `@revxz/dsh-skill-evolve` publishes that queue as a service and this package only
 consumes it. Without that service the entry is absent, not broken.
 
+**Changing this package:** read [`docs/27-开发与集成手册.md`](../../docs/27-开发与集成手册.md) first, and
+[`docs/28-性能审查手册.md`](../../docs/28-性能审查手册.md) before touching the panel's
+assembly path — one `/panel` call has a measured budget and a command that enforces it.
+
 ## Install
 
 ```bash
