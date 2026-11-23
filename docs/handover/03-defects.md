@@ -189,6 +189,7 @@
 | DEF-184 | 2026-11-22 | 代码搬了家，九条突变锚点还指着旧位置；锚点自检静默不报时，突变脚本会把「没跑」当成「通过」 | 抽出白名单 + 闸门改函数后，6 条 `file:` 指错、2 条 `from:` 失配，分两批手动修完；第 9 条属另一脚本同批 |
 | DEF-185 | 2026-11-22 | 断言里直接按下标取元素，缺东西时崩掉整个套件，runner 记 CRASHED 而非 KILLED | 两条本该被判 KILLED 的突变被吞成 CRASHED，看起来像「这两条没人测」 |
 | DEF-186 | 2026-11-22 | 目录表把 `tmp`/`temp`/`cache`/`.cache` 当成「永远没有交付物」，与同文件「显式声明压过作者的目录习惯」的注释直接矛盾，静默藏掉真实报告与截图 | 三条断言钉住的正是这个拒绝（`a document under a temp directory is refused`），它们是照着缺陷写绿的；本机全绿还依赖 `TMPDIR` 指向 `.tmp-test`，默认 `%TEMP%` 下 392/14 |
+| DEF-187 | 2026-11-23 | 产出卡重定之后，包 README 仍在描述 `isNoisePath`、「生成文件」分组、「`5 个文件 · 1 个生成`」徽章、`sweep` 与 coverage 合并，而这些机制已经从代码里删掉了 | 测试不读散文；重定卡片的三个提交都只加 `docs/24`–`26`，没有一条检查「README 还在讲旧架构」的机制 |
 
 ---
 
@@ -3446,3 +3447,29 @@ md 2、png 16、jpg 2），形态是 `/tmp/out/report.md`、`/tmp/kept.md`、
 **同批改掉的三处**：`test/api.test.mjs` 两条断言反过来（临时目录里的文档是交付物）、
 一条按段判定（`/w/node_modules_tools/report.md` 必须放行，原来借的是 `cachetools`）、
 面板级行数 3 → 4 并在注释里写清多出来的那一行是 `tmp/notes.md`。
+
+---
+
+## DEF-187 · README 还在讲已经删掉的四个采集器
+
+**症状**：`packages/ui-evolve/README.md` 里至少五处描述的东西在今天的代码里不存在了。
+
+| README 段落 | 它说的 | 今天的事实 |
+|---|---|---|
+| 「Once open, the list is three groups」 | 第三组是「生成文件」 | 只有 `fresh` 与 `earlier` 两组（`client.js:3321-3322`），`生成文件` 在 `client.js` 里零命中 |
+| 「Generated files are folded away」 | `isNoisePath` 在 Host 侧分类，折叠后只画人类文件，头部写「5 个文件 · 1 个生成」 | `isNoisePath` 在 `lib/` 里零命中；分类改由 `lib/deliverable.js` 的白名单回答，非文档根本进不了列表 |
+| 「Two properties keep that from turning into DEF-51 in reverse」 | 徽章、整段匹配、`cwd` 前缀剥离（DEF-70/71/72） | 全部随 `isNoisePath` 一起消失 |
+| 「a git reading and a directory scan are not awaited either」 | 迟到的四路采集 | 四路采集已删（`git-changes`、`git-watch`、`scan-changes`、`scan-watch`、`coverage`） |
+| 「The merge … its `summary` or its `sweep`」 | `sweep` 有 turn 序合并与 coverage 取弱 | v3 文档的字段是 `paths/previous/sequence/servers/session/skills/state/summary/tools/turns/updated/version`——没有 `sweep` |
+
+**为什么测试没抓到**：测试不读散文。而重定卡片那三个提交（`602dca0`、`99c3191`、
+`780a9ee`）各自只加了一份 `docs/24`–`26`，没有一个步骤问「包 README 里还有多少段在讲
+旧架构」。这类漂移在代码侧不会报错，只会让下一个人按错误的模型改代码——比如此次
+若有人相信「生成文件会被折叠并计数」，就会去找一个不存在的徽章。
+
+**修法**：按今天的代码重写这五段（README 是活文档，就地改），并在这条缺陷里留下
+「哪些句子换了、依据是哪一行代码」，让后来的人能核对。
+
+**判据（可复用）**：删掉一个机制时，`grep` 它的名字在**文档**里的命中数，和 `grep` 它在
+**代码**里的命中数，要在同一个提交里一起归零。只归零代码那一半，文档那一半会变成
+一份自信的假话——它比没有文档更贵，因为它会被信。

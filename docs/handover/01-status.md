@@ -6119,3 +6119,29 @@ killed，0 survived、0 not applied、0 crashed。
 （当年那两个通道已经不存在），这里的 544/591 是另一个测量。
 
 **记录**：DEF-186、D-253、R-116。
+
+---
+
+## 2026-11-23 · 重启之后：真机验收三项，加一处 README 漂移
+
+**真机（用户已重启宿主）**：
+
+- `GET /api/ui-evolve/panel` 带签名 cookie 返回 **200**，首次 **374ms**、同会话第二次
+  **35ms**；`files` 行都带 `deliverable` 布尔，第二条会话 5 行全是 `true`。
+- **摘要落盘在真机确认**（这是悬得最久的验收）：`~/.dsh/plugin-data/skill-evolve/sessions/`
+  下 13 个 `state: 3` 文件全部带 `summary`，含 `key`（`<session>:<turn>:<digest前16位>`）、
+  `text`、`model`、`at`。不是内存里的假象。
+- `/panel` 载荷里**已经没有 `revision` 字段**，它只从 `/events` 帧走——与 SSE 改造一致。
+  `/watch` 路由也已不存在（`holdRevision` 只被 `/speed` 用），没有留下死路由。
+- **本次改动无法用本机数据演示**：本机 244 个会话文件里 37 条「可交付后缀 + 临时目录」
+  路径全部落在 `state: 2` 文件里，而 v3 只读 v3 的 `paths`。Qoder 库里的 `/tmp/*.md`
+  与 `%TEMP%/*.png` 才是这条改动的真实形态。
+
+**查出的文档漂移（DEF-187 / D-254）**：`packages/ui-evolve/README.md` 五处仍在讲已删掉的
+架构（`isNoisePath`、「生成文件」分组与徽章、`sweep` 与 coverage 合并、迟到的 git/扫描
+采集）。已按代码重写：列表改述为「文档而不是变动的文件」、白名单与两个来源（声明优先于
+写入）、`FOLDED_FILES` 之外的折叠、以及 `sweep` 字段已不存在。`docs/24` 的旧代码摘录
+另加了一节「后续变更」。
+
+**数字**：全量 **3910/0**（带 `TMPDIR` 与默认 `%TEMP%` 各一遍）；三套变异 **187 / 141 / 70**
+killed，0 survived。

@@ -397,10 +397,9 @@ Three modules, top to bottom:
    unwritable disk must not turn a served answer into a failed one.
 
    Facts can arrive **after** the conversation they describe has been deleted.
-   The summary is the clearest case — the pre-warm is not awaited and the model
+   The summary is the case in hand — the pre-warm is not awaited and the model
    call may take twenty seconds, long enough for the host to archive the session
-   and for a sweep to remove its file — but it is not the only one: a git reading
-   and a directory scan are not awaited either. So the refusal lives in `entry()`,
+   and for a sweep to remove its file. So the refusal lives in `entry()`,
    the one funnel every writer goes through, rather than in the one writer that
    was noticed first.
 
@@ -442,14 +441,14 @@ Three modules, top to bottom:
    here as a backstop rather than counted as covered.
 
    The merge that runs when an event arrives before the first read used to carry
-   the file's skills, files and snapshot into memory but not its `summary` or its
-   `sweep` — so the *first write after a restart* erased what the previous
-   process had paid for and what it had been able to see. Both are carried now,
-   but they do not share a rule. A summary is replaced whole and has no ordering,
-   so memory wins when it has one. A sweep counts turns, so the newer claim wins
-   whichever side it came from — and when both sides claim the same turn, neither
-   gets to decide: the merge keeps whichever coverage saw less, because a turn
-   corrected in two places is a turn we are less sure about, not more.
+   the file's skills, files and snapshot into memory but not its `summary` — so
+   the *first write after a restart* erased what the previous process had paid
+   for. It is carried now, and the rule is the one a summary admits: it replaces
+   the whole value and has no ordering, so memory wins when it holds one.
+   (The record also used to carry a second such field, the `sweep` a directory
+   scan had managed to see, with a turn-ordered merge and a coverage comparison
+   for two claims about the same turn. That collector is gone, so the field is
+   gone from the document as well.)
 2. **Skills and MCP.** The skills **this session has loaded**, newest first, and
    which MCP servers have been called. What is installed is not what was used:
    the library can hold dozens of skills, and listing them all answers a question
@@ -528,30 +527,34 @@ Three modules, top to bottom:
    reserves the strip for it (`data-badge`), so a card that fits keeps its own
    padding. The header stops repeating the total once the list is showing it.
 
-   Once open, the list is three groups rather than one: this turn, 更早, and
-   生成文件, each with its own small heading and none drawn when empty. The
-   headings only appear where there is something to contrast — a first reply that
-   touched everything has no "更早" group to label.
+   Once open, the list is two groups rather than one: this turn, then 更早, each
+   with its own small heading and none drawn when empty. The 更早 heading only
+   appears where there is something to contrast — a first reply that touched
+   everything has no earlier group to label.
 
-   **Generated files are folded away, not deleted.** `node_modules/`, `dist/`,
-   `build/`, the lockfiles, the minified bundles and source maps are things the
-   session touched without anyone deciding to write them; a card whose first four
-   rows are `node_modules` entries describes the build, not the work. So
-   `isNoisePath` classifies each path on the Host and the folded card draws only
-   the human files, with the header saying how many were set aside
-   (`5 个文件 · 1 个生成`) and a 生成文件 group waiting inside.
+   **The list is documents, not files that changed.** A card whose first four
+   rows are `node_modules` entries or the scripts the turn ran describes the
+   build, not the work. So the Host decides which rows may appear at all:
+   `lib/deliverable.js` keeps the whitelist of formats a person opens —
+   documents, sheets, decks, images, video — and refuses everything else, plus
+   any path inside `node_modules`, `__pycache__` or another program's private
+   state (`.git`, `.ssh`, `.aws`, `.qoder`, `.qoder-cn`, `.lingma`). Temporary directories
+   are deliberately **not** on that list: a report or a screenshot written to
+   `/tmp` or `%TEMP%` is a document, and an agent puts a throwaway one there on
+   purpose. Source code therefore never reaches the list — there is no fold to
+   open for it and no count of what was set aside, because a row that is not a
+   document is not the work being hidden, it is something else entirely.
 
-   Two properties keep that from turning into the `DEF-51` mistake in reverse.
-   The badge appears whenever *anything* is hidden — including the case where the
-   only files are generated ones, `ordered.length > people.length` — because a
-   filter with no way out is a deletion. And the classifier is deliberately
-   conservative: it matches whole path segments and whole file names, never
-   substrings, and it only looks at the path *inside* the session's `cwd`. A
-   workspace that itself lives under `build/` would otherwise have every one of
-   its files classified as generated (`DEF-70`), which is why the prefix is
-   stripped first — case-insensitively and on the same folded string the slicing
-   uses, since `cwd` and a tool's path argument are not normalised to one another
-   (`DEF-71`, `DEF-72`).
+   Within that, a turn's list has two sources, and a declaration outranks a
+   write: what the turn said it handed over (`report_output_files`, the Host's
+   `present`), and what it wrote (`write`/`edit`, taken from the Host-resolved
+   absolute path in `meta.path`). A turn that only wrote a document still gets a
+   card; a turn whose declaration is nothing but scripts falls back to what it
+   wrote rather than drawing an empty one. Rows keep their order and their
+   one-line description — `this turn` first, then `更早` — and anything past
+   `FOLDED_FILES` sits behind `显示其余 N 个`. That fold is the reason this is
+   not the `DEF-51` mistake in reverse: the filter decides what is in the list,
+   and the one thing withheld from view is a row count the reader can open.
 
    **A row opens the file in the right sidebar.** The panel asks for
    `sidebarRight` through `ctx.inject(["sidebarRight"], ...)` — an *optional*
