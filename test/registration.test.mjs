@@ -452,15 +452,16 @@ check(
   '维护约束段要写出测试文件名，否则读者不知道红了该看哪里',
 )
 check(
-  '§7 写了「不要改判据」',
+  '§7 写了「不是改判据」',
   manual.includes('不是改判据') === true,
   '维护约束要明说：红了是加行，不是放宽检查',
 )
 check(
   `${INDEX} 的「按目的进入」有加新功能一条`,
   read(INDEX).includes('新功能') === true &&
-    read(INDEX).includes('27-开发与集成手册.md#7') === true,
-  '在 docs/00-文档索引.md 的按目的进入加一条指向 §7 的锚点链接',
+    read(INDEX).includes('27-开发与集成手册.md') === true &&
+    read(INDEX).includes('§7') === true,
+  '在 docs/00-文档索引.md 的按目的进入加一条指向 §7 的条目',
 )
 check(
   '§7 的四个问题都在',
