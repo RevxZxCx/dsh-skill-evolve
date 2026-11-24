@@ -6336,3 +6336,22 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **可见性不等于可点性**（DEF-203 第 4 条）：turn tail 只为已关闭的回合存在，所以删掉了 phase 门（「你正在打下一句」正是三条最有用的时刻）；但点击仍要 `gates.idle && gates.empty`，因为点击的实现是「先 `setDraft` 再微任务 `submit`」，机器忙碌时 submit 被拒而种子已落地——读者打的字被一条从没发出去的建议顶掉。
 
 基线：全量 **4363/0**、`client` 1065/0、`mutate-suggest` **75/75 全杀**、`perf-budget` 退出 0（payload-real 15,984 B / ceiling 63,299 B / elapsed 3.6 ms / nothing 0 / state 41,941 B）、`registration` 56/0、`docs` 45/0。
+
+
+## 2026-11-24（四）：真机验收第二轮，两处「测试看不见」的物理缺陷
+
+上一轮（三）交付后全量 4363/0、突变 75/75、perf 退出 0，但真机上一个像素都没画出来。这一轮只修了两件事，都是物理层：
+
+| 改动 | 文件 | 说明 |
+| --- | --- | --- |
+| 测量原点向上找第一个有盒子的祖先 | `packages/ui-evolve/lib/client.js` | 宿主的 `div[data-slot]{display:contents}` 没有盒子，`parentElement.getBoundingClientRect()` 恒 0×0 |
+| `.dsse-ghost` 加 `z-index:4` | `packages/ui-evolve/lib/client.js` | overlay 锚点 `z-index:auto`，宿主编辑器 `z-index:2/3`，幽灵被画在下面 |
+| 对齐假节点改成三层 `row → slot(0×0) → column` | `test/client.test.mjs` | 让「父元素没有盒子」在测试里存在 |
+| 新增幽灵层级的样式表断言 | `test/client.test.mjs` | 假 DOM 不计算层叠，只能断言 CSS 文本 |
+| 突变补 2 条锚点 | `scripts/mutate-suggest.mjs` | 75 → 77 |
+
+**真机证据**（已配对页面，桩数据不花额度）：芯片 `data-shown="true"`、`rect {left:301, width:712}` 与输入卡片逐像素相同、三项行首 `↵`、`armed="true"`；幽灵 `data-shown="true"`、文本=第一条、`Tab` 键帽独立渲染、宿主 placeholder `visibility:hidden`；`[data-slot-error]` 0。
+
+**未验证的部分**：真实模型建议。路由回 `the suggestion call failed: 422 … ExceededBudget: Spend=$70.0124, Limit=$70.00`，`/models` 显示 22 个 provider 的 `models` 全为空数组。这是账户额度，不是代码。
+
+基线：全量 **4367/0**、`client` 1069/0、`mutate-suggest` **77/77 全杀**、`perf-budget` 退出 0、`registration` 56/0、`docs` 45/0、`mutations` 55/0。

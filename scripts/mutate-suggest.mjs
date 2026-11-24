@@ -501,6 +501,24 @@ const mutations = [
   {
     file: client,
     suites: view,
+    label: 'the ghost is painted under the editor it covers',
+    from: '.dsse-ghost{position:absolute;display:flex;align-items:baseline;gap:6px;max-width:100%;pointer-events:none;z-index:4;',
+    to: '.dsse-ghost{position:absolute;display:flex;align-items:baseline;gap:6px;max-width:100%;pointer-events:none;',
+    why: 'the host scroll box is position:relative with z-index 2 and its button row has 3, while the overlay anchor this slot renders into has z-index auto: an unlayered absolute child paints underneath the editor sitting on the very coordinates it occupies, so the ghost is present, measured, and invisible',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the row gives up when its nearest wrapper has no box',
+    from: `          let outer = null
+          for (let up = node.parentElement; up !== null; up = up.parentElement) {`,
+    to: `          let outer = null
+          for (let up = node.parentElement; up !== null; up = null) {`,
+    why: 'the host wraps every slot entry in div[data-slot]{display:contents}, which generates no box at all, so stopping at the nearest parent reads 0x0 and returns before box is ever set -- the row then never draws on the real host while a fake parent with a real width passes',
+  },
+  {
+    file: client,
+    suites: view,
     label: 'the return mark is left off the offer',
     from: "                  jsx(\"span\", { className: \"dsse-suggest-enter\", \"aria-hidden\": \"true\", children: \"↵\" }),",
     to: '',

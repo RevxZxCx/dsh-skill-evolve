@@ -205,6 +205,8 @@
 | DEF-202 | 2026-11-24 | 空答案被当成「问过了」：`loaded = true` 之后 `ensureSuggest` 永久短路，转录还在沉降时的那次空答案让整轮之后行上什么都没有 | 客户端断言只覆盖了两条路径——拿到答案、以及读失败保留旧答案；「读成功但内容为空」这条路上，画出来的东西与「本来就没有」完全一样 |
 | DEF-200 | 2026-11-24 | 输出预算 220 个 token 被推理全部吃掉：`finish: length`、正文为空，被当成「模型没什么可说」并缓存 60 s，于是真实会话里芯片永不出现 | 只在真机上出现——套件的假 `llm` 从不消耗 token，`finish` 也总是 `stop` |
 | DEF-201 | 2026-11-24 | 12 秒的服务端超时正好压在实测中位数上（一次 700 token 调用要 12.6 s），路由在模型还在打字时就报「超时」，钱花了没人读 | 套件里的假 `llm` 立即返回，延迟在替身里不存在；断言只问「有定时器」，没问「定时器够不够长」 |
+| DEF-204 | 2026-11-24 | 建议行在真机上永远不显示：宿主把槽位条目包在 `div[data-slot]{display:contents}` 里，`display:contents` 不生成盒子，`getBoundingClientRect()` 是 0×0；测量函数读到 `outer.width === 0` 就 `return`，`box` 永远是 `null` | 假节点的父元素有 920 宽，“没有盒子的包装层”这个现实世界里最常见的情形在测试里不存在 |
+| DEF-205 | 2026-11-24 | 幽灵在真机上不可见：overlay 锚点 `z-index:auto`，而宿主输入框的 scroll 层是 `position:relative;z-index:2`、按钮行 `z-index:3`，不带层级的绝对定位子元素被绘制在它要代替的编辑器之下 | 假 DOM 不计算 CSS 层叠，且测试只断言属性与几何，没有一条问“它能不能被看见” |
 | DEF-203 | 2026-11-24 | 建议从输入框上方搬进正文末尾之后，三处旧前提一起作废：回合门比较的是两个不同的计数器（P0）、对齐量的是自己刚被写入的 rect（P0）、事件流跟着每轮挂载的组件走（P1） | 三处都不是新代码的 bug，是旧代码被搬到新前提上；测试也全部按旧席位写——流从芯片取、回合比数字、对齐的假节点不会动 |
 
 ---
@@ -3791,3 +3793,53 @@ error: slot entry crashed in 'conversation.input.overlay': TypeError: selector i
 - 突变 70 → **75**：新增「最新 tail 认不出来」「量自己」「忙碌时点击仍写草稿」「有草稿仍 armed」「每条 tail 各开一条流」。
 
 **教训**：**一个位置换了，它的两个假设也一起作废了。** 数字认领假设「插件和宿主从第一轮一起数」，那在旧席位（与回合无关）下无所谓；事件流假设「这个组件每会话只有一个」，那在旧席位下也成立。所以搬座位时该问的不是「这行代码还能跑吗」，而是「它当初为什么可以这样写」。第二个教训更具体：**替身必须复现它替的那个东西的物理性质**——一个不会动的 `getBoundingClientRect` 让一整类反馈回路在测试里不存在。
+
+## DEF-204 建议行在真机上永远不显示（2026-11-24）
+
+**现象**：真机上四个 `[data-dsse-suggest]` 全 `data-shown="false"`、零个 `.dsse-suggest-item`、`style.marginLeft` 为空；`[data-slot-error]` 是 0，样式已注入，说明组件跑过且没抛。
+
+**根因**：宿主把每个槽位条目包进 `div[data-slot]{display:contents}`。`display:contents` **不生成盒子**，`getBoundingClientRect()` 返回全 0。`measure()` 的第一次实现拿 `node.parentElement` 当测量原点：
+
+```js
+const outer = node.parentElement === null ? node.getBoundingClientRect() : node.parentElement.getBoundingClientRect()
+if (outer.width === 0) return          // ← 在真机上永远命中
+```
+
+于是 `box` 永远停在 `null`，而 `shown` 要求 `box !== null && box.last === true`。组件活着、测量跑了、结果被丢弃，屏幕上什么都没有。
+
+真机 DOM 链：
+```
+.dsse-suggest                    display:none（data-shown=false 时）
+div[data-slot]                   display:contents   0x0   ← 直接父元素
+div.cVfUIq_root[data-turn-tail]  display:flex  left 317 width 680
+div[data-slot]                   display:contents   0x0
+div.V4vHZW_flowItem              display:block left 317 width 680
+```
+
+**修法**：向上找**第一个 width > 0 的祖先**，找不到才退回自己的 rect。
+
+```js
+let outer = null
+for (let up = node.parentElement; up !== null; up = up.parentElement) {
+  const rect = typeof up.getBoundingClientRect === "function" ? up.getBoundingClientRect() : null
+  if (rect !== null && rect.width > 0) { outer = rect; break }
+}
+if (outer === null) outer = node.getBoundingClientRect()
+if (outer.width === 0) return
+```
+
+**为什么测试没抓到**：对齐块的假节点写成 `{ parentElement: column }`，而 `column` 有 920 宽。测试里**不存在**「父元素没有盒子」这种情形，而它在真实宿主上是**每一个**槽位条目的情形。测试造了一个不存在的世界，然后在这个世界里通过了。
+
+**修后真机**：`marginLeft: -16px`、`width: 712px`，输入卡片 `left 301 / width 712`，完全对齐。
+
+## DEF-205 幽灵被宿主编辑器盖住（2026-11-24）
+
+**现象**：`[data-dsse-ghost][data-shown="true"]`、文本正确、`getBoundingClientRect()` 是 `{left:316, top:731, w:215, h:24}` 与宿主 placeholder 完全重合、placeholder 已被掩码成 `visibility:hidden`——**但截图里输入框是空的**。
+
+**根因**：`document.elementsFromPoint()` 在该坐标返回的第一个元素是 `GRgSLq_input`（宿主编辑器），不是幽灵。宿主输入卡片内部：`GRgSLq_scroll` 是 `position:relative; z-index:2`，`GRgSLq_row` 是 `z-index:3`，而 `GRgSLq_overlayAnchor`（本槽位渲染进的那个锚点）是 `z-index:auto`。同为绝对定位、不带层级的子元素，按 DOM 顺序绘制在后者之上——锚点排第一，编辑器排第三。
+
+**修法**：给 `.dsse-ghost` 加 `z-index:4`，并保留 `pointer-events:none`（点击必须穿透到编辑器）。
+
+**为什么测试没抓到**：假 DOM 不计算 CSS 层叠，测试只断言属性与几何。几何是对的——元素真的在那里，只是被画在下面。**「存在」与「可见」是两件事，而测试只问了前者。**
+
+**教训**：两条缺陷的形状一样——**代码在替身里正确，在真实宿主里从不生效，而失败是静默的**（没有异常、没有槽位错误、`data-shown` 老老实实说 false）。真机验收之所以不能省，就是因为它能问出测试问不出的那句「屏幕上真的有东西吗」。

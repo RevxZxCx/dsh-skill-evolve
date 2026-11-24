@@ -7722,6 +7722,29 @@ async function openPanel(routes, options) {
   check('and does not clip the grab strip that hangs outside it', /overflow:hidden/.test(body) === false, body.slice(0, 120))
 }
 
+// The ghost sits in the host's overlay anchor, and that anchor has no stacking
+// context of its own: the composer's scroll box is position:relative with
+// z-index 2 and its button row has 3, while the anchor is z-index auto. An
+// unlayered absolute child therefore paints UNDER the editor it is meant to
+// stand in for -- present in the DOM, measured, masked the placeholder, and
+// invisible on screen. This is the one part of the ghost a mock DOM cannot
+// show, so it is asserted against the stylesheet text.
+// ---------------------------------------------------------------------------
+{
+  const source = readFileSync(new URL('../packages/ui-evolve/lib/client.js', import.meta.url), 'utf8')
+  const rule = /[.]dsse-ghost[{]([^}]*)[}]/.exec(source)
+  const body = rule === null ? '' : rule[1]
+  check('the ghost has a rule of its own', rule !== null, 'no .dsse-ghost rule found')
+  check(
+    'and is layered above the editor it covers',
+    /z-index:\s*\d+/.test(body),
+    'the host scroll box is z-index 2 and the anchor is auto, so an unlayered ghost is painted underneath',
+  )
+  // It must not take the clicks it sits on: the reader clicking the empty box
+  // expects the caret, not the ghost.
+  check('and lets the click through to the editor', /pointer-events:none/.test(body), body.slice(0, 120))
+}
+
 // The header holds the standing answer ("what happened last turn"), so it has to
 // stay put while the cards below it scroll. That is `position:sticky` on the
 // block that wraps the tools row and the recap — not `fixed`, which would need
@@ -8263,16 +8286,27 @@ async function openStream(instance) {
   // component writes, because a real one does. Without that, measuring the row
   // and measuring its parent return the same number and the difference between
   // them is untestable.
-  const column = { getBoundingClientRect: () => ({ left: 406, top: 1000, width: 920, height: 90 }) }
+  // The host wraps every slot entry in `div[data-slot]{display:contents}`, which
+  // generates no box: its rect is 0x0. The fake row therefore sits two levels
+  // down from the column, exactly as the real one does -- a fake whose parent
+  // has a width cannot tell "measure the parent" from "measure the first
+  // ancestor with a box", and the real host needs the latter.
+  const column = { getBoundingClientRect: () => ({ left: 406, top: 1000, width: 920, height: 90 }), parentElement: null }
+  const slot = { getBoundingClientRect: () => ({ left: 0, top: 0, width: 0, height: 0 }), parentElement: column }
   let applied = 0
   instance.renderer.setNodeForRef({
     getBoundingClientRect: () => ({ left: 406 + applied, top: 1000, width: 920, height: 90 }),
-    parentElement: column,
+    parentElement: slot,
     closest: () => null,
   })
   try {
     const first = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() })
     const style = firstByClass(first, 'dsse-suggest')?.props.style
+    check(
+      'the row is measured past a wrapper that has no box of its own',
+      style !== undefined,
+      'the host wraps slot entries in display:contents, whose rect is 0x0',
+    )
     check('the row is given the composer width', style?.width === '952px', JSON.stringify(style))
     check('and the composer left edge', style?.marginLeft === '-16px', JSON.stringify(style))
 

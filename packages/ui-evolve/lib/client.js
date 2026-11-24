@@ -1075,7 +1075,14 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
    the host's own placeholder at run time (see SuggestGhost below) rather than written
    here: the placeholder is laid out by the host's padding, and a number copied
    from one theme would land on the wrong line in the next. */
-.dsse-ghost{position:absolute;display:flex;align-items:baseline;gap:6px;max-width:100%;pointer-events:none;color:var(--dsw-alias-label-tertiary,#8b92a1);font:inherit;line-height:inherit}
+/* Above the host's own layers, or the ghost is drawn but never seen: the input
+   scroll box is position:relative with z-index 2 and the button row has 3, while
+   the overlay anchor this slot renders into has z-index auto -- so an unlayered
+   absolute child paints underneath the editor that sits over the very
+   coordinates it occupies. pointer-events:none keeps clicks going to the editor,
+   and the ghost only shows when the draft is empty, so nothing it covers is ever
+   text the reader typed. */
+.dsse-ghost{position:absolute;display:flex;align-items:baseline;gap:6px;max-width:100%;pointer-events:none;z-index:4;color:var(--dsw-alias-label-tertiary,#8b92a1);font:inherit;line-height:inherit}
 .dsse-ghost[data-shown="false"]{display:none}
 .dsse-ghost-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
 /* The keycap is drawn apart from the sentence on purpose. "Tab" inside the
@@ -5077,10 +5084,21 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // measuring the row would read back the last thing this effect wrote
           // (16 in, 0 out, 16 in ...) until React refuses with "Maximum update
           // depth exceeded".
-          const parent = node.parentElement ?? null
-          const outer = parent !== null && typeof parent.getBoundingClientRect === "function"
-            ? parent.getBoundingClientRect()
-            : node.getBoundingClientRect()
+          // Walk up to the first ancestor that actually has a box. The host wraps
+          // every slot entry in `div[data-slot]` with `display: contents`, which
+          // generates no box at all: its `getBoundingClientRect()` is 0x0, and the
+          // first version of this code read that as "cannot measure" and returned
+          // before ever setting `box` -- so the row was never drawn on the real
+          // host, while the test fake (a parent with a real width) passed.
+          let outer = null
+          for (let up = node.parentElement; up !== null; up = up.parentElement) {
+            const rect = typeof up.getBoundingClientRect === "function" ? up.getBoundingClientRect() : null
+            if (rect !== null && rect.width > 0) {
+              outer = rect
+              break
+            }
+          }
+          if (outer === null) outer = node.getBoundingClientRect()
           if (outer.width === 0) return
           const left = Math.round(target.left - outer.left)
           const width = Math.round(target.width)
