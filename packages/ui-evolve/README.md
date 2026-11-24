@@ -863,8 +863,9 @@ gesture that exists here.
 for by the composer, not by a turn-end handler, so a conversation nobody has open
 costs nothing. At most one call per identical transcript (`suggest.js` keys the
 answer on the turn plus the prompt body), a 60-second cooldown after a failure, a
-15-minute expiry, and a 12-second timeout that is deliberately shorter than the
-client's own 15-second patience — an answer that lands after the reader has
+15-minute expiry, and a 20-second timeout that is deliberately shorter than the
+client's own 25-second patience (the thinking this model does is the budget here:
+one 700-token call measured 12.6 s on the gateway the host uses) — an answer that lands after the reader has
 started typing is worse than no answer. Nothing on this path is `await`ed by the
 event loop, which is the defect Qoder shipped and fixed in 0.4.2.
 

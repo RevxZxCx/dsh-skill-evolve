@@ -6286,3 +6286,9 @@ killed，0 survived。
 顺带一处：`sanitiseSuggestion` 原来把带行内代码的候选整条丢弃，改为**解包**（反引号包住的内容取出来、去掉反引号），只保留整段围栏（三个反引号的代码块）丢弃——编码代理的下一步几乎总在点名命令或路径。失败理由也带上规模（`N lines, M characters`），因为「模型没说话」和「读取器把它全丢了」在真机上完全同形。
 
 基线：全量 **4339/0**（`suggest` 212）、`mutate-suggest` **63/63 全杀**、`perf-budget` 退出 0、`mutations` 55/0、`docs` 45/0。
+
+#### 第四处：12 秒的耐心撞上 12.6 秒的工作（DEF-201）
+
+DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 token 调用 12.6 s，而截到 12 s；把截止值放宽到 20 s、客户端 25 s，并通过 `prepareCall` 的 `configure` 回调按模型自己的能力表挑最便宜的思考（`none` → `off` → `low`，实测 14.5 s → 8.7 s）。
+
+基线：全量 **4343/0**、`mutate-suggest` **66/66 全杀**、`perf-budget` 退出 0。

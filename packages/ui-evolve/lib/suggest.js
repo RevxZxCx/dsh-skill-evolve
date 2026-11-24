@@ -100,17 +100,18 @@ export const HARD_SUGGESTION_CHARS = 400
 export const MAX_TURN_INPUT_CHARS = 4000
 
 /**
- * How long one suggestion call may take.
+ * How long the answer may take before the ask is abandoned.
  *
- * Twelve seconds, and the number is chosen from the client's side: the panel's
- * own patience is `PANEL_TIMEOUT_MS` (fifteen seconds), and a server-side
- * deadline longer than the caller's means the caller hangs up first — the answer
- * is paid for and nobody reads it, and the composer cannot even say why the row
- * did not appear. Three seconds of margin is what a chip row is worth waiting
- * for; past that the person has started typing, and a suggestion that arrives
- * over a draft is worse than no suggestion.
+ * 20 s, not 12. Measured through the gateway the host uses: one 700-token call
+ * takes 12.6 s when nothing is asked about effort, and 8.7 s at `low`. At 12 s
+ * the ceiling sat exactly on the median, so the route answered "timed out" on
+ * the live host while the model was still typing, and the money was spent on an
+ * answer nobody read. The client waits SUGGEST_REQUEST_MS (25 s), which has to
+ * stay longer than this one: if the composer gives up first the request is
+ * cancelled, the failure is not recorded, and the next repaint buys the same
+ * call again.
  */
-export const SUGGEST_TIMEOUT_MS = 12000
+export const SUGGEST_TIMEOUT_MS = 20000
 
 /**
  * How long a failure suppresses the next attempt.
@@ -131,6 +132,31 @@ export const SUGGEST_FAILURE_TTL_MS = 60000
  * cache key already catches the common case; this catches the clock.
  */
 export const SUGGEST_TTL_MS = 15 * 60 * 1000
+
+/**
+ * Ask for the least thinking the model admits to, when it says what it admits.
+ *
+ * Measured through the gateway the host uses, on the same prompt: no effort
+ * asked for took 14.5 s and 187 reasoning tokens, `low` took 8.7 s and 96. A
+ * chip that arrives twenty seconds after the turn is a chip nobody reads, so
+ * the difference is the difference between shipping this and not.
+ *
+ * The effort is only offered when the prepared model lists it, because asking
+ * for one the adapter does not know is an error, not a fallback. `none` is
+ * tried first for providers that spell "off" that way.
+ *
+ * @param {any} controls - the sampling controls already resolved for this call.
+ * @param {any} info - the prepared model's capabilities.
+ * @returns {any} the controls to dispatch with.
+ */
+function withCheapestThinking(controls, info) {
+  const efforts = info?.reasoning?.efforts
+  if (efforts === undefined || efforts === null || typeof efforts !== 'object') return controls
+  for (const wanted of ['none', 'off', 'low']) {
+    if (Object.prototype.hasOwnProperty.call(efforts, wanted)) return { ...controls, reasoningEffort: wanted }
+  }
+  return controls
+}
 
 /**
  * How many output tokens the answer may spend.
@@ -725,6 +751,7 @@ export class Suggestor {
       const call = await llm.prepareCall(
         { provider: route.provider, model: route.model, maxTokens: SUGGEST_MAX_TOKENS },
         controller.signal,
+        (controls, info) => withCheapestThinking(controls, info),
       )
       const options = {
         ...call.config,

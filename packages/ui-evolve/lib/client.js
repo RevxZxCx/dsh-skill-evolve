@@ -4585,13 +4585,15 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     /**
      * How long one suggestion request may stay out before it is abandoned.
      *
-     * Longer than the server's own twelve seconds (`SUGGEST_TIMEOUT_MS`), so the
+     * Longer than the server's own twenty seconds (`SUGGEST_TIMEOUT_MS`), so the
      * server's verdict is the one that arrives: if this page gave up first the
      * request would be cancelled, the server would record no failure, and the
      * next frame would buy the same call again. Same reasoning as
-     * `PANEL_TIMEOUT_MS`, and the same number.
+     * `PANEL_TIMEOUT_MS`, but a longer number: this wait can afford to be
+     * patient because nothing behind it is waiting, and twenty seconds of
+     * thinking is what the answer actually costs on the host's gateway.
      */
-    const SUGGEST_REQUEST_MS = 15000
+    const SUGGEST_REQUEST_MS = 25000
 
     /**
      * How long an offer may still be drawn after the answer that produced it.

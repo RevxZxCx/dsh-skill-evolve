@@ -69,19 +69,29 @@ const GOOD = JSON.stringify({ suggestions: ['Run the failing cursor test.', 'Fix
  * @param {object} [options] - behaviour switches.
  * @returns {object} the fake service plus its call log.
  */
-function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined } = {}) {
-  const log = { prepare: [], stream: [], catalog: 0 }
+function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined, efforts = undefined } = {}) {
+  // `efforts` is the reasoning menu the prepared model reports, the way the
+  // host's `prepareCall(config, signal, configure)` hands the adapter's
+  // capabilities to the configure callback. Without it this fake cannot express
+  // "a model that will not think on demand", which is the whole point of the
+  // effort adapter.
+  const log = { prepare: [], stream: [], catalog: 0, configure: 0 }
   const service = {
     log,
     async modelCatalog(signal) {
       log.catalog += 1
       return catalog
     },
-    async prepareCall(route, signal) {
+    async prepareCall(route, signal, configure) {
       log.prepare.push(route)
       if (prepareThrows !== undefined) throw prepareThrows
+      let config = { provider: route.provider, model: route.model, maxTokens: route.maxTokens }
+      if (typeof configure === 'function') {
+        log.configure += 1
+        config = configure(config, { reasoning: efforts === undefined ? undefined : { efforts } })
+      }
       return {
-        config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+        config,
         async *stream(options) {
           log.stream.push(options)
           if (streamThrows !== undefined) throw streamThrows
@@ -505,7 +515,7 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 {
-  // The deadline is twelve seconds of wall clock, which no suite can wait for.
+  // The deadline is twenty seconds of wall clock, which no suite can wait for.
   // The timer is therefore borrowed: the module's own callback is captured and
   // fired by hand, which exercises the real abort path without the wait.
   const realSetTimeout = globalThis.setTimeout
@@ -542,7 +552,12 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
     const pending = suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
     for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
     check('the call arms a deadline', armed !== null, String(armed))
-    check('twelve seconds, shorter than the composer waits', armed?.ms === SUGGEST_TIMEOUT_MS && SUGGEST_TIMEOUT_MS < 15000, String(armed?.ms))
+    // Written out, not derived: 12 s was wrong on the live host because one
+    // 700-token call takes 12.6 s there, so the deadline sat on the median and
+    // the route answered "timed out" while the model was still typing. The
+    // composer waits 25 s, and that gap is what keeps a cancelled request from
+    // buying the same call again on the next repaint.
+    check('twenty seconds, and the composer waits longer', armed?.ms === 20000 && 20000 < 25000, String(armed?.ms))
     armed?.fn()
     release()
     const answer = await pending
@@ -634,6 +649,40 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
   check('a host with no model service yields no chips', answer.items.length === 0, JSON.stringify(answer))
   check('and says so', answer.reason === 'no model service available', String(answer.reason))
+}
+
+// ---------------------------------------------------------------------------
+// the cheapest thinking the model admits to
+// ---------------------------------------------------------------------------
+
+{
+  // A chip that arrives twenty seconds after the turn is a chip nobody reads:
+  // measured on the host's gateway, the same prompt took 14.5 s with no effort
+  // asked for and 8.7 s at `low`. The effort may only be asked for when the
+  // prepared model lists it, because an unknown one is an error, not a hint.
+  const llm = fakeLlm({ efforts: { low: 'low', high: 'high' } })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('the call asks for the cheapest thinking', llm.log.prepare.length === 1 && llm.log.configure === 1, `${llm.log.prepare.length}/${llm.log.configure}`)
+  check('which is the low effort', llm.log.stream[0]?.reasoningEffort === 'low', String(llm.log.stream[0]?.reasoningEffort))
+}
+
+{
+  // A model with no reasoning menu at all must be left alone: adding a key it
+  // never declared is how a working route turns into INVALID_MODEL_REASONING.
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('a model without a menu is not given one', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
+}
+
+{
+  // "off" is spelled differently by different providers, and the cheapest one
+  // that exists beats the one this code happened to try first.
+  const llm = fakeLlm({ efforts: { none: 'none', low: 'low' } })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('an off switch is preferred to a small effort', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
 }
 
 // ---------------------------------------------------------------------------
