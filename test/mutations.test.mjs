@@ -203,7 +203,7 @@ for (const [name, expected] of [
   ["mutate-language-and-files.mjs", 187],
   ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 70],
-  ['mutate-suggest.mjs', 60],
+  ['mutate-suggest.mjs', 61],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')
   const anchors = parseAnchors(script)

@@ -90,18 +90,20 @@ const mutations = [
   {
     file: suggest,
     suites: engine,
-    label: 'the whole transcript budget cannot hold two turns',
-    from: 'export const MAX_TOTAL_INPUT_CHARS = 10000',
-    to: 'export const MAX_TOTAL_INPUT_CHARS = 6000',
-    why: 'two clipped turns already fill eight thousand characters, so the first turn never fits and a long session is read as "editing a file" with no task attached',
+    label: 'the count is read as a list of turns',
+    from: `  const previous = view?.previous
+  if (previous === undefined || previous === null`,
+    to: `  const previous = view?.turns
+  if (previous === undefined || previous === null`,
+    why: 'the transcript keeps a numerical count there, so reading it as a turn snapshot makes every real body empty and the row never appears (DEF-198); the fixtures that pass arrays cannot tell the two apart unless one of them passes a count',
   },
   {
     file: suggest,
     suites: engine,
-    label: 'the first turn is admitted whatever it costs',
-    from: '    if (first.length > 0 && first.length + 2 + tailLength <= MAX_TOTAL_INPUT_CHARS) parts = [first, ...tail]',
-    to: '    if (first.length > 0) parts = [first, ...tail]',
-    why: 'dropping the arithmetic makes the budget a comment: the prompt is then unbounded in exactly the case the ceiling exists for',
+    label: 'the turn is dropped when it is long',
+    from: '  return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)',
+    to: '  return renderPromptBody(previous).length > MAX_TURN_INPUT_CHARS ? "" : renderPromptBody(previous)',
+    why: 'dropping instead of clipping makes the row absent exactly when a turn got substantial, which is when a next step is worth most',
   },
   {
     file: suggest,
@@ -590,6 +592,14 @@ const mutations = [
     from: '        if (coalesce === false) suggest.again = true',
     to: '        void 0',
     why: 'the answer already on its way describes the turn before the one that just ended; swallowing the frame leaves the row describing a finished turn until the next one',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the input hook is called without a selector',
+    from: '      return hook((state) => state)',
+    to: '      return hook()',
+    why: 'the host builds every provided use<Name> on useSyncExternalStoreWithSelector, so its first argument is a selector and calling it bare throws inside the slot error boundary, where nothing outside can see it: both surfaces go silently missing on a real host while a stub that ignores its argument keeps the suite green (DEF-197)',
   },
 ]
 

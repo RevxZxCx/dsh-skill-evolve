@@ -6259,3 +6259,20 @@ killed，0 survived。
 **收口（第二轮评审之后）**：全量 **4338 passed / 0 failed**；`suggest` 212/0；`client` 1044/0；`api` 429/0；`registration` 56/0；`docs` 45/0；`mutations` 55/0（锚点计数已从「至少 N」改成「恰好 N」，`mutate-suggest` 60）；`mutate-suggest` **60 处全杀**；`perf-budget` 六条 ok、退出 0（real 15,984 B / ceiling 63,325 B / elapsed 3.8 ms / state 41,941 B）。
 
 第二轮只把**修复本身**交给复核员，回 10 条、全部成立（P1×2、P2×5、P3×3），其中 7 条是修复引入的。已全部修完并各自补了会因该修复而变红的断言（`test/suggest.test.mjs` 末尾一块 12 条、`test/client.test.mjs` 的「回放不复活」一条）。见 DEF-196 与 R-119。
+
+## 2026-11-24（二）：首次真机验收，两处测试看不见的缺陷
+
+用户重启宿主后要求「不要在
+当前会话测试，在 `test` 工作区新开会话验收」。GUI 走 `@linxin666/dsh-remote-web-ui` 0.4.11 的配对链接：`POST /api/pair/issue`（loopback 特有）拿 `pair-accept?pair=<token>`，在**已配对来源**（`http://192.168.0.100:19387`）下 `/api/ui-evolve/*` 才能通过 `connection.requestRejection`；在裸 `127.0.0.1` 的未登录页面上是 401。
+
+真机第一次跑，两个界面**一个都没画出来**。控制台里是被槽位错误边界吞掉的两行 `TypeError: selector is not a function`。两处缺陷（DEF-197、DEF-198）都在「替身与真实线形不一致」这一族里：
+
+| 修了什么 | 位置 | 钉住它的东西 |
+| --- | --- | --- |
+| `useInput` 是 `useSyncExternalStoreWithSelector` 生成的选择器钩子，组件改为 `hook((state) => state)` | `packages/ui-evolve/lib/client.js` 的 `useInputState` | 客户端替身 `inputHook` 自己拒绝裸调用；新增突变「the input hook is called without a selector」 |
+| `view.turns` 是**数字**，取样改读 `previous`；删掉 `MAX_TOTAL_INPUT_CHARS` 与「最后两回合 + 第一回合」规则 | `packages/ui-evolve/lib/suggest.js` 的 `renderSuggestBody` | `renderSuggestBody({ turns: 7 }) === ''` 与「计数字段 + `previous`」两条；新增突变「the count is read as a list of turns」 |
+| 裁剪上界改字面量 `4000`，不再用被测常量 | `test/suggest.test.mjs` | 突变「the quoted turn is not clipped」由存活变被杀（DEF-199） |
+
+**基线**：全量 **4332 passed / 0 failed**；`suggest` 206/0；`client` 1044/0；`api` 429/0；`registration` 56/0；`docs` 45/0；`mutations` 55/0；`mutate-suggest` **61 处全杀**；`perf-budget` 六条 ok、退出 0。
+
+**这两条是全量 4338 条断言、61 处突变、两轮评审都没抓到的东西**，只有真机跑一次才现形。原因写在 DEF-197/198 里：替身比真实对象宽容（`useInput: () => state` 忽略参数），夹具比真实宿主宽容（传数组而宿主给数字）。

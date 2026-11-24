@@ -4886,6 +4886,33 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     }
 
     /**
+     * The published input snapshot, through the host's selector hook.
+     *
+     * `useInput` is not a plain getter: the renderer builds every provided
+     * `use<Name>` hook on `useSyncExternalStoreWithSelector`, so the first
+     * argument is the selector and it is called as `selector(snapshot)`. Calling
+     * it with no argument throws `TypeError: selector is not a function` inside
+     * the slot's error boundary, which is invisible from the outside -- the
+     * composer simply never gets a row, and both of this feature's surfaces go
+     * quietly missing on a real host while every mock in the suite still
+     * answers, because a stub that ignores its argument cannot notice.
+     *
+     * The selector returns the snapshot itself rather than a derived object:
+     * a fresh object literal per call would defeat the hook's identity check and
+     * re-render on every store notification. Returning `state` lets the hook's
+     * own `Object.is` decide, which is exactly the granularity this row wants --
+     * it reads draft, phase and attachment count together anyway.
+     *
+     * @param {object} props - the slot's props, which carry the host's kit.
+     * @returns {object|undefined} the snapshot, or undefined without a hook.
+     */
+    function useInputState(props) {
+      const hook = props?.useInput
+      if (typeof hook !== "function") return undefined
+      return hook((state) => state)
+    }
+
+    /**
      * The chips above the composer.
      *
      * Session-scoped, so it exists only while a conversation is on screen, and
@@ -4898,7 +4925,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      */
     function SuggestChips(props) {
       const sessionId = typeof props?.sessionId === "string" ? props.sessionId : ""
-      const input = typeof props?.useInput === "function" ? props.useInput() : undefined
+      const input = useInputState(props)
       const gates = suggestGates(input)
       const [, force] = React.useState(0)
 
@@ -4990,7 +5017,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      */
     function SuggestGhost(props) {
       const sessionId = typeof props?.sessionId === "string" ? props.sessionId : ""
-      const input = typeof props?.useInput === "function" ? props.useInput() : undefined
+      const input = useInputState(props)
       const gates = suggestGates(input)
       const [, force] = React.useState(0)
       const [place, setPlace] = React.useState(null)

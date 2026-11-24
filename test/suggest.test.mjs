@@ -21,7 +21,6 @@ import {
   HARD_SUGGESTION_CHARS,
   MAX_SUGGESTIONS,
   MAX_SUGGESTION_CHARS,
-  MAX_TOTAL_INPUT_CHARS,
   MAX_TURN_INPUT_CHARS,
   MIN_SUGGESTIONS,
   SUGGEST_FAILURE_TTL_MS,
@@ -272,38 +271,32 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 
 {
   check('no view is an empty body', renderSuggestBody(undefined) === '')
-  check('no turns is an empty body', renderSuggestBody({ turns: [] }) === '')
-  check('a view without turns is an empty body', renderSuggestBody({ previous: snapshot(1) }) === '')
+  check('a view with no finished turn is an empty body', renderSuggestBody({ turns: 0 }) === '')
 
-  const one = renderSuggestBody({ turns: [snapshot(1, 'It is a stale fixture.')] })
-  check('one turn is quoted', one.includes('It is a stale fixture.'), one.slice(0, 80))
+  const one = renderSuggestBody({ turns: 1, previous: snapshot(1, 'It is a stale fixture.') })
+  check('the finished turn is quoted', one.includes('It is a stale fixture.'), one.slice(0, 80))
 
-  // A turn is quoted when its "What the user asked:" header is present; the
-  // body's own blank lines are the reason sections are counted this way.
-  const turnCount = (text) => (text.match(/What the user asked:/g) ?? []).length
-  const many = ['first task', 'second', 'third', 'fourth', 'fifth']
-  const body = renderSuggestBody({ turns: many.map((said, index) => snapshot(index + 1, said)) })
-  check('the first turn is quoted when it fits', body.includes('first task'), body.slice(0, 120))
-  check('the last two turns are quoted', body.includes('fourth') && body.includes('fifth'), body.slice(0, 200))
-  check('a middle turn is not quoted', body.includes('second') === false && body.includes('third') === false)
-  check('three turns are quoted at most', turnCount(body) === 3, String(turnCount(body)))
+  // `turns` is a count, not a list: the transcript keeps `previous` plus how
+  // many turns it has seen. Reading it as an array is what made the body empty
+  // on every real session while these fixtures, which passed arrays, stayed
+  // green (DEF-198) -- so the count on its own must produce nothing.
+  check('a bare count is not a turn', renderSuggestBody({ turns: 7 }) === '')
+  const counted = renderSuggestBody({ turns: 7, previous: snapshot(7, 'Ship the fix.') })
+  check('the count adds no turn of its own', (counted.match(/What the user asked:/g) ?? []).length === 1, String(counted.length))
+  check('and the finished turn is still quoted', counted.includes('Ship the fix.'), counted.slice(0, 80))
 
-  const twoTurns = renderSuggestBody({ turns: [snapshot(1, 'aaa'), snapshot(2, 'bbb')] })
-  check('with two turns both are quoted and nothing else', turnCount(twoTurns) === 2, String(turnCount(twoTurns)))
-
-  // The ceiling holds by construction: a first turn that would overflow is left
-  // out, so the body cannot grow past the budget however long the turns are.
+  // Clipping, not dropping: a long turn is what a real session looks like, and
+  // a body that vanished for long turns would be absent exactly when it matters.
   const huge = { turn: 1, asked: 'x'.repeat(MAX_TURN_INPUT_CHARS * 2), said: 'y'.repeat(MAX_TURN_INPUT_CHARS * 2), paths: [], tools: [], commands: [] }
-  const wide = renderSuggestBody({ turns: [huge, snapshot(2, 'z'.repeat(MAX_TURN_INPUT_CHARS * 2)), snapshot(3, 'w'.repeat(MAX_TURN_INPUT_CHARS * 2))] })
-  check('an over-long first turn is left out', wide.includes('xxxx') === false, wide.slice(0, 40))
-  check('the budget is ten thousand characters, not more', MAX_TOTAL_INPUT_CHARS === 10000, String(MAX_TOTAL_INPUT_CHARS))
-  check('the body never exceeds the budget', wide.length <= MAX_TOTAL_INPUT_CHARS, String(wide.length))
-  check('each turn is clipped', wide.split('\n\n').every((part) => part.length <= MAX_TURN_INPUT_CHARS) === true)
+  const clipped = renderSuggestBody({ turns: 1, previous: huge })
+  // A literal, not the constant: comparing against `MAX_TURN_INPUT_CHARS` would
+  // pass with any value it was mutated to, which is how this survived its own
+  // mutation the first time (DEF-194's lesson, again).
+  check('an over-long turn is clipped to four thousand characters', clipped.length <= 4000, String(clipped.length))
+  check('and not dropped', clipped.startsWith('What the user asked:'), clipped.slice(0, 40))
 
-  const fifty = Array.from({ length: 50 }, (_, index) => snapshot(index + 1, index === 0 ? 'the stated task' : `turn ${index + 1}`))
-  const resumed = renderSuggestBody({ turns: fifty })
-  check('a fifty-turn session still quotes its first turn', resumed.includes('the stated task'), resumed.slice(0, 60))
-  check('and its last two', resumed.includes('turn 49') && resumed.includes('turn 50'))
+  const nullish = renderSuggestBody({ turns: 1, previous: null })
+  check('a null previous is an empty body', nullish === '', nullish)
 
   check('the same turn and text give the same key', suggestKey(3, 'body') === suggestKey(3, 'body'))
   check('a different turn gives a different key', suggestKey(3, 'body') !== suggestKey(4, 'body'))

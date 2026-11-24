@@ -100,24 +100,6 @@ export const HARD_SUGGESTION_CHARS = 400
 export const MAX_TURN_INPUT_CHARS = 4000
 
 /**
- * The ceiling on the whole quoted transcript.
- *
- * The arithmetic is the reason for the number, and it is a ceiling rather than a
- * sampling threshold on purpose. Two turns are clipped to `MAX_TURN_INPUT_CHARS`
- * each, so eight thousand characters arrive whatever the session looks like; the
- * remaining allowance is what the first turn is admitted on. A first turn is
- * admitted only when it fits — that is the whole rule — so the prompt cannot
- * grow with the conversation, and "a session resumed after fifty turns" costs
- * the same as a session of three.
- *
- * The first turn is worth that allowance because it is the one that states the
- * task. The last two say where the work is; without the first, a long session
- * reads as "editing a file" with no subject, and a next step inferred from that
- * is a next step about the wrong thing.
- */
-export const MAX_TOTAL_INPUT_CHARS = 10000
-
-/**
  * How long one suggestion call may take.
  *
  * Twelve seconds, and the number is chosen from the client's side: the panel's
@@ -569,40 +551,31 @@ export function clampCount(value) {
 }
 
 /**
- * Render the turns a suggestion is inferred from.
+ * Render the turn a suggestion is inferred from.
  *
- * The last two turns, because a next step is about the arc rather than the last
- * message: the turn that just ended says where the work is, the one before it
- * says what the work is.
+ * One turn, because one is all the panel keeps. `transcripts.view()` returns
+ * `{ turns, current, previous }` where `turns` is a *count* of human turns,
+ * `previous` is the last finished turn's snapshot, and `current` is the turn
+ * that is still open (or the cleared one between turns). An earlier version of
+ * this function read `view.turns` as an array of turn snapshots and sampled
+ * "the last two, plus the first when it fits". That array never exists, so the
+ * body came out empty for every real session and the route answered "the turn
+ * left nothing to go on" forever -- while the fixtures, which passed arrays,
+ * stayed green (DEF-198). The sampling rule went with the mistake: with one
+ * snapshot there is nothing to sample, and the turn that just ended is also the
+ * only turn a next step can be about.
  *
- * The first turn is then admitted as well, if it fits in what two clipped turns
- * leave of `MAX_TOTAL_INPUT_CHARS`. That is the one that states the task — a
- * session resumed after fifty turns would otherwise be read from its last two
- * alone, which is "typing in a file" with no subject attached.
- *
- * The rule is "if it fits", not "if the transcript is long", and the difference
- * is deliberate: a threshold on the transcript would be a branch nothing can
- * reach, because two turns are clipped to `MAX_TURN_INPUT_CHARS` each and can
- * never be long enough on their own. Here the ceiling holds by construction —
- * every part is clipped, and a part is added only when the sum still fits — so
- * the result cannot exceed the budget whatever it is handed.
+ * Clipped, because one turn can quote a file's worth of text and the prompt
+ * only needs to know where the work stands. There is no second budget to hold:
+ * one clipped part is the whole body, so `MAX_TURN_INPUT_CHARS` is the ceiling.
  *
  * @param {object | undefined} view - the transcript view.
  * @returns {string} the prompt body, possibly empty.
  */
 export function renderSuggestBody(view) {
-  const turns = Array.isArray(view?.turns) ? view.turns.filter((turn) => turn !== null && typeof turn === 'object') : []
-  if (turns.length === 0) return ''
-  const describe = (snapshot) => renderPromptBody(snapshot).slice(0, MAX_TURN_INPUT_CHARS)
-  const tail = turns.slice(-2).map(describe)
-  const tailLength = tail.join('\n\n').length
-  let parts = tail
-  if (turns.length > 2) {
-    const first = describe(turns[0])
-    // Two characters for the separator that will sit between them.
-    if (first.length > 0 && first.length + 2 + tailLength <= MAX_TOTAL_INPUT_CHARS) parts = [first, ...tail]
-  }
-  return parts.filter((part) => part.length > 0).join('\n\n')
+  const previous = view?.previous
+  if (previous === undefined || previous === null || typeof previous !== 'object' || Array.isArray(previous)) return ''
+  return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)
 }
 
 /**

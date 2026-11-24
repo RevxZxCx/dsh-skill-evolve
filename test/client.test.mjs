@@ -7955,6 +7955,25 @@ function inputState(over) {
 }
 
 /**
+ * The host's per-session `useInput` hook, as the renderer really builds it.
+ *
+ * Every provided `use<Name>` is `useSyncExternalStoreWithSelector`, so the first
+ * argument is a selector and it is called as `selector(snapshot)`. A stub shaped
+ * `() => state` ignores that argument and therefore cannot notice a component
+ * that forgets to pass one -- which is exactly how both surfaces shipped dead on
+ * a real host while this whole suite was green (DEF-197).
+ *
+ * @param {object} [over] - fields to override on the snapshot.
+ * @returns {Function} the hook.
+ */
+function inputHook(over) {
+  return (selector) => {
+    if (typeof selector !== 'function') throw new TypeError('selector is not a function')
+    return selector(inputState(over))
+  }
+}
+
+/**
  * A recording `inputActions` face.
  *
  * @returns {object} the face, with `calls` holding `[verb, ...args]` in order.
@@ -8069,7 +8088,7 @@ async function settledSeat(instance, name, props) {
   const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
   instance.module.apply(instance.ctx)
   const actions = recordingActions()
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: actions }
   const tree = await settledSeat(instance, 'suggestions', props)
 
   const panel = firstByClass(tree, 'dsse-suggest')
@@ -8111,7 +8130,7 @@ async function settledSeat(instance, name, props) {
 {
   const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
   instance.module.apply(instance.ctx)
-  const props = (over) => ({ sessionId: 'session-a', useInput: () => inputState(over), inputActions: recordingActions() })
+  const props = (over) => ({ sessionId: 'session-a', useInput: inputHook(over), inputActions: recordingActions() })
   await settledSeat(instance, 'suggestions', props())
 
   const busy = await instance.renderer.deepRender(instance.seat('suggestions'), props({ phase: 'submitting' }))
@@ -8131,18 +8150,30 @@ async function settledSeat(instance, name, props) {
     'still shown',
   )
 
-  // `useInput` returning nothing is a different path from a machine reporting
-  // `inert`: no hook at all is what a seat registered outside the composer's
-  // provide channel sees, and the fallback that keeps the chips off it is only
-  // exercised here.
+  // A published store with nothing in it is a different path from a machine
+  // reporting `inert`: the selector runs and hands back undefined.
   const absent = await instance.renderer.deepRender(instance.seat('suggestions'), {
     sessionId: 'session-a',
-    useInput: () => undefined,
+    useInput: (selector) => selector(undefined),
     inputActions: recordingActions(),
   })
   check(
-    'and a session with no input machine at all',
+    'and a session whose published input state is empty',
     firstByClass(absent, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'still shown',
+  )
+
+  // The other path: a seat registered outside the composer's provide channel
+  // gets no hook at all. `useInputState` must not throw and must not read a
+  // machine, because the slot boundary would turn a throw into a surface that
+  // simply never appears -- the DEF-197 failure mode, silently.
+  const hookless = await instance.renderer.deepRender(instance.seat('suggestions'), {
+    sessionId: 'session-a',
+    inputActions: recordingActions(),
+  })
+  check(
+    'and a seat with no input hook at all is hidden rather than broken',
+    firstByClass(hookless, 'dsse-suggest')?.props['data-shown'] === 'false',
     'still shown',
   )
 
@@ -8161,7 +8192,7 @@ async function settledSeat(instance, name, props) {
 {
   const empty = boot({ routes: suggestRoute([]) })
   empty.module.apply(empty.ctx)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
   const tree = await settledSeat(empty, 'suggestions', props)
   check(
     'no offers means no panel',
@@ -8171,7 +8202,7 @@ async function settledSeat(instance, name, props) {
 
   const off = boot({ routes: suggestRoute(SUGGEST_TEXTS, { enabled: false }) })
   off.module.apply(off.ctx)
-  const offTree = await settledSeat(off, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  const offTree = await settledSeat(off, 'suggestions', { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() })
   check(
     'a host that switched the feature off draws nothing',
     firstByClass(offTree, 'dsse-suggest')?.props['data-shown'] === 'false',
@@ -8185,7 +8216,7 @@ async function settledSeat(instance, name, props) {
   const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
   instance.module.apply(instance.ctx)
   const actions = recordingActions()
-  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions })
+  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: inputHook(), inputActions: actions })
 
   const second = byClass(tree, 'dsse-suggest-item')[1]
   second.props.onClick()
@@ -8210,7 +8241,7 @@ async function settledSeat(instance, name, props) {
   delete face.setDraft
   let threw = false
   try {
-    const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: face })
+    const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: inputHook(), inputActions: face })
     byClass(tree, 'dsse-suggest-item')[0].props.onClick()
     await settle()
   } catch {
@@ -8228,7 +8259,7 @@ async function settledSeat(instance, name, props) {
   instance.module.apply(instance.ctx)
   instance.renderer.setNodeForRef(fixture.anchor)
   const actions = recordingActions()
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: actions }
   const tree = await settledSeat(instance, 'ghost', props)
 
   const ghost = firstByClass(tree, 'dsse-ghost')
@@ -8289,7 +8320,7 @@ async function settledSeat(instance, name, props) {
   const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
   instance.module.apply(instance.ctx)
   instance.renderer.setNodeForRef(fixture.anchor)
-  const props = (over) => ({ sessionId: 'session-a', useInput: () => inputState(over), inputActions: recordingActions() })
+  const props = (over) => ({ sessionId: 'session-a', useInput: inputHook(over), inputActions: recordingActions() })
   await settledSeat(instance, 'ghost', props())
 
   const drafted = await instance.renderer.deepRender(instance.seat('ghost'), props({ draft: '我已经在写了' }))
@@ -8314,7 +8345,7 @@ async function settledSeat(instance, name, props) {
   const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
   instance.module.apply(instance.ctx)
   instance.renderer.setNodeForRef(fixture.anchor)
-  const tree = await settledSeat(instance, 'ghost', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  const tree = await settledSeat(instance, 'ghost', { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() })
   const ghost = firstByClass(tree, 'dsse-ghost')
   check('a composer with no placeholder draws no ghost', ghost?.props['data-shown'] === 'false', String(ghost?.props['data-shown']))
   check('and says it is hidden rather than pretending', ghost?.props.style?.visibility === 'hidden', JSON.stringify(ghost?.props.style))
@@ -8335,7 +8366,7 @@ async function settledSeat(instance, name, props) {
   instance.module.apply(instance.ctx)
   const fixture = composerCard()
   instance.renderer.setNodeForRef(fixture.anchor)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
 
   await settledSeat(instance, 'suggestions', props)
   const first = await settledSeat(instance, 'ghost', props)
@@ -8356,7 +8387,7 @@ async function settledSeat(instance, name, props) {
   // loop, and the next frame is what asks again.
   const instance = boot({ routes: { '/api/ui-evolve/suggestions': new Error('offline') } })
   instance.module.apply(instance.ctx)
-  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() })
   check(
     'a failed read draws nothing rather than an error line',
     firstByClass(tree, 'dsse-suggest')?.props['data-shown'] === 'false',
@@ -8380,7 +8411,7 @@ async function settledSeat(instance, name, props) {
     },
   })
   instance.module.apply(instance.ctx)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
   const before = await settledSeat(instance, 'suggestions', props)
   check('the offer is drawn before the failure', firstByClass(before, 'dsse-suggest')?.props['data-shown'] === 'true', 'nothing drawn')
   online = false
@@ -8402,7 +8433,7 @@ async function settledSeat(instance, name, props) {
   // take over because the stream keeps pretending it will come back.
   const instance = boot({ routes: { '/api/ui-evolve/suggestions': { ok: true, data: { enabled: true, items: [{ text: '先跑一遍失败的那个用例' }], at: 1 } } } })
   instance.module.apply(instance.ctx)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
   await instance.renderer.render(instance.seat('suggestions'), props)
   const stream = instance.streamFor('session-a')
   check('the chip column follows the stream', stream !== undefined && stream.closed === false, 'no stream')
@@ -8430,7 +8461,7 @@ async function settledSeat(instance, name, props) {
   try {
     const instance = boot({ routes: { '/api/ui-evolve/suggestions': () => stall } })
     instance.module.apply(instance.ctx)
-    const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+    const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
     await instance.renderer.render(instance.seat('suggestions'), props)
     const deadline = armed.find((row) => row.ms > 1000)
     check('the ask arms a deadline', deadline !== undefined, JSON.stringify(armed.map((row) => row.ms)))
@@ -8470,7 +8501,7 @@ async function settledSeat(instance, name, props) {
   })
   instance.module.apply(instance.ctx)
   const actions = recordingActions()
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: actions }
   const first = await settledSeat(instance, 'suggestions', props)
   byClass(first, 'dsse-suggest-item')[1].props.onClick()
   await settle()
@@ -8513,7 +8544,7 @@ async function settledSeat(instance, name, props) {
   const stale = suggestRoute(SUGGEST_TEXTS, { at: Date.now() - 16 * 60 * 1000 })
   const instance = boot({ routes: stale })
   instance.module.apply(instance.ctx)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
   const chips = await settledSeat(instance, 'suggestions', props)
   check('an answer past its lifetime draws no chips', firstByClass(chips, 'dsse-suggest')?.props['data-shown'] === 'false', 'stale chips drawn')
 
@@ -8542,7 +8573,7 @@ async function settledSeat(instance, name, props) {
     },
   })
   instance.module.apply(instance.ctx)
-  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
   const pending = settledSeat(instance, 'suggestions', props)
   await settle()
   check('the first read is in flight', served === 1, String(served))

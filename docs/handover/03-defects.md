@@ -199,6 +199,9 @@
 | DEF-194 | 2026-11-24 | 第一轮突变 9 处存活：断言与被测共享常量或时钟（边界样本从常量推导、调用前取消、超时用例挂死） | 它们不是漏路径，而是断言不能假；共享常量的断言跟着常量动，共享时钟的断言被删掉后变成 CRASHED |
 | DEF-195 | 2026-11-24 | 三处假绿（`length >= 2`、永真的长度上界、只看异常逃逸）与两条只改注释/只换状态码的变异 | 断言只观察了「没有崩」，没观察「发生了什么」；变异脚本自身也没有判据要求行为必须改变 |
 | DEF-196 | 2026-11-24 | 第二轮评审 10 条全部成立：缓存回放让已点芯片复活（P1）、`$` 匹配窗口末端导致句末判错（P1）、`[2]` 抢走答案、`[fix]` 被误丢、两槽位买两次调用 | 第一轮的断言只问「函数返回什么」，没有一条是针对刚改的那条规则的反例；修复引入的缺陷需要反例 |
+| DEF-197 | 2026-11-24 | `useInput` 是 `useSyncExternalStoreWithSelector` 生成的选择器钩子，组件裸调 `props.useInput()` 抛 `TypeError: selector is not a function`，两个界面在真机上一个都没画出来 | 测试替身写成 `useInput: () => state`，一个忽略参数的桩：它不能发现自己少收到什么，也就不能发现组件少传什么 |
+| DEF-198 | 2026-11-24 | `transcripts.view()` 的 `turns` 是**数字**（人类回合计数），不是回合快照数组；把它当数组抽样，真实会话的 body 恒为空，路由永远回「the turn left nothing to go on」 | 夹具传的正是数组：`{ turns: [snapshot(1)] }` 与 `{ turns: 1, previous: snapshot(1) }` 在断言里长得一样，只有喂过计数字段才能分辨 |
+| DEF-199 | 2026-11-24 | 「引用回合不被裁剪」这条突变存活：断言用 `clipped.length <= MAX_TURN_INPUT_CHARS`，常量被突变时上界跟着变 | DEF-194 的教训重演——新增的边界断言又一次从被测常量推导上界 |
 
 ---
 
@@ -3654,3 +3657,40 @@ md 2、png 16、jpg 2），形态是 `/tmp/out/report.md`、`/tmp/kept.md`、
 **为什么测试没抓到**：第一轮补的断言恰好都是「这个函数返回什么」的形状，而没有一条问「**在我刚改动的那条规则上，反向的例子是什么**」。`clipSentence` 的用例全用 `a` 占位，从不含文件名；`parseSuggestions` 的用例只在正文以 `{` 开头时带尾巴；行读取器的用例没有一条是「列表中间有一行代码」。修复引入的缺陷，需要的是**针对这次改动的那条规则的**反例，而不是原功能的正例。
 
 **教训**：修一个 P1 之后，第一件要做的事是给它写一条**会因这次修复而变红**的断言（本轮补了 12 条，`test/suggest.test.mjs:775` 起）；第二件事是问「这条修复在什么输入下反而更糟」。
+
+
+## DEF-197 · 选择器钩子被当成取值函数：真机上两个界面都不存在
+
+真机验收（`test` 工作区、新会话、一问一答）时发现：composer 上方没有芯片行，输入框里也没有幽灵补全。控制台里只有一行
+
+```
+error: slot entry crashed in 'conversation.input.dock': TypeError: selector is not a function
+    at memoizedSelector (...)
+error: slot entry crashed in 'conversation.input.overlay': TypeError: selector is not a function
+```
+
+宿主的 provide 通道给每个 `hooks` 源生成一个 `use<Name>`，全部建立在 `useSyncExternalStoreWithSelector` 上，所以 `useInput` 的第一个参数是**选择器**，内部按 `selector(snapshot)` 调用。组件写的是 `props.useInput()`——渲染即抛，异常被槽位错误边界吞掉，外面看到的只是「没有说话的那一行」。
+
+**为什么测试没抓到**：替身是 `useInput: () => inputState()`。它忽略参数、返回状态，于是「组件有没有传选择器」这个唯一会出错的维度，在替身里根本不存在。这与 DEF-193（服务端发字符串、客户端读 `item.text`）是同一族：**替身比真实对象宽容**，宽容处正好盖住该半边的错。
+
+**修法**：
+- `useInputState(props)`：`const hook = props?.useInput; if (typeof hook !== "function") return undefined; return hook((state) => state)`。选择器返回快照本身而不是新建对象，否则每次 store 通知都会换引用、击穿钩子的同一性判断。
+- 替身改成 `inputHook(over)`：`(selector) => { if (typeof selector !== 'function') throw new TypeError('selector is not a function'); return selector(inputState(over)) }`。桩自己会拒绝错误调用，17 个用例共用一个形状。
+- 新增一条突变「the input hook is called without a selector」（`hook((state) => state)` → `hook()`），必须让客户端套件变红。
+
+**教训**：替身要复现被替身对象的**签名**，不只是返回值。凡是「宿主注入的东西」，替身都该按宿主真实调用它的方式来调。
+
+## DEF-198 · 计数字段被当成数组：建议永远为空
+
+同一个会话，响应是 `{"enabled":true,"items":[],"reason":"the turn left nothing to go on"}`，而 `/panel` 对同一会话能给出 `turn: 1` 与一段真实摘要——说明转录是有内容的，是取样函数读错了字段。
+
+`transcripts.view(agentId)` 的契约是 `{ turns, current, previous }`：`turns` 是**数字**（`this.turns = this.turns + 1`），`previous` 才是那个已结束回合的快照，`current` 是仍敞着的回合（两回合之间是清空的那份）。`renderSuggestBody` 写的是 `Array.isArray(view?.turns) ? view.turns.filter(...) : []`，永远得到 `[]`，于是 body 恒空。
+
+**为什么测试没抓到**：夹具全部传数组（`{ turns: [snapshot(1, '…')] }`）。数组和数字在「取最后一个元素」这类断言里不可能被混淆，但也没有任何一条用例喂过数字——而真实宿主只给数字。
+
+**修法**：
+- `renderSuggestBody(view)` 只读 `previous`：`if (previous === undefined || previous === null || typeof previous !== 'object' || Array.isArray(previous)) return ''`，然后 `renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)`。
+- **删掉 `MAX_TOTAL_INPUT_CHARS` 与「最后两回合 + 第一回合」的抽样规则**：只有一个快照可抽样，规则本身就是错的。常量随之消失（它守的那条分支已不存在），`docs/29` §8.5 记录这处设计改口。
+- 断言拆成两组：`renderSuggestBody({ turns: 7 }) === ''`（裸计数不是回合）、`renderSuggestBody({ turns: 7, previous: snapshot(7, …) })` 恰好引用一个回合。新增一条突变「the count is read as a list of turns」。另外把 `clipped.length <= MAX_TURN_INPUT_CHARS` 改成 `<= 4000` 字面量（DEF-199）。
+
+**教训**：读一个字段之前，先确认它是名词还是数量——`turns` 这个名字两种都说得通，而契约只写在实现里。测试里至少要有**一条**喂真实形状的用例，否则「两种形状都说得通」会一直由夹具而不是由宿主来决定。
