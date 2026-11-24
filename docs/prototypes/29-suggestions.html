@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>原型 · 下一轮提示词建议（底栏芯片 + 输入栏 TAB 填充）</title>
+<style>
+  /* 全部颜色走宿主 --dsw-* 变量，缺失时给一个中性兜底，方便脱离宿主单独查看。 */
+  :root {
+    --bg: var(--dsw-background-primary, #1a1a1a);
+    --bg-soft: var(--dsw-background-secondary, #212121);
+    --bg-card: var(--dsw-background-elevated, #262626);
+    --fg: var(--dsw-text-primary, #e8e8e8);
+    --fg-soft: var(--dsw-text-secondary, #a0a0a0);
+    --fg-faint: var(--dsw-text-tertiary, #6f6f6f);
+    --line: var(--dsw-border-tertiary, #333);
+    --line-soft: var(--dsw-border-secondary, #2b2b2b);
+    --accent: var(--dsw-text-accent, #7aa2f7);
+    --radius: var(--dsw-radius-lg, 12px);
+    --font: var(--dsw-font-sans, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif);
+    --mono: var(--dsw-font-mono, ui-monospace, "Cascadia Code", Consolas, monospace);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 40px 24px 80px;
+    background: #101010; color: var(--fg); font-family: var(--font);
+    display: flex; flex-direction: column; align-items: center; gap: 28px;
+  }
+  .stage-label {
+    width: min(760px, 100%); font-size: 12px; letter-spacing: .04em;
+    color: var(--fg-faint); text-transform: uppercase;
+  }
+  .page-title { width: min(760px, 100%); font-size: 15px; color: var(--fg-soft); line-height: 1.7; margin-bottom: -12px; }
+  .page-title b { color: var(--fg); font-weight: 600; }
+
+  /* ── 会话列 ───────────────────────────────────────────── */
+  .conversation {
+    width: min(760px, 100%);
+    background: var(--bg); border: 1px solid var(--line-soft);
+    border-radius: 16px; padding: 22px 22px 14px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .msg { font-size: 14px; line-height: 1.75; color: var(--fg); }
+  .msg.user {
+    align-self: flex-end; max-width: 78%;
+    background: var(--bg-soft); border: 1px solid var(--line-soft);
+    border-radius: var(--radius); padding: 9px 13px;
+  }
+  .msg.assistant { max-width: 100%; }
+  .msg .dim { color: var(--fg-soft); }
+  .msg code {
+    font-family: var(--mono); font-size: 12.5px;
+    background: var(--bg-soft); border: 1px solid var(--line-soft);
+    border-radius: 5px; padding: 1px 5px;
+  }
+
+  /* ── 舱位 A：芯片（conversation.input.dock, order 10） ── */
+  .dock {
+    /* Qoder 的三条视觉纪律：虚线分隔、上方留白、一句话一条 */
+    margin: 2px 4px 0;
+    border-top: 1px dashed var(--line);
+    padding-top: 14px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .dock-head {
+    font-size: 11.5px; color: var(--fg-faint);
+    letter-spacing: .03em; margin-bottom: 2px;
+  }
+  .chip {
+    display: flex; align-items: center; gap: 9px;
+    width: 100%; text-align: left; cursor: pointer;
+    background: transparent; color: var(--fg);
+    border: 1px solid var(--line-soft); border-radius: 9px;
+    padding: 8px 11px; font: inherit; font-size: 13.5px; line-height: 1.5;
+    transition: background .12s ease, border-color .12s ease;
+  }
+  .chip:hover, .chip:focus-visible {
+    background: var(--bg-soft); border-color: var(--line); outline: none;
+  }
+  .chip .arrow { margin-left: auto; color: var(--fg-faint); font-size: 13px; flex: none; }
+  .chip:hover .arrow { color: var(--fg-soft); }
+
+  /* ── 输入卡片 ─────────────────────────────────────────── */
+  .composer {
+    background: var(--bg-card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 13px 10px;
+    display: flex; flex-direction: column; gap: 8px;
+    position: relative;
+  }
+  .composer.focused { border-color: #4a4a4a; }
+  .editor-row { position: relative; min-height: 40px; display: flex; }
+  .editor {
+    flex: 1; font-size: 14px; line-height: 1.6; color: var(--fg);
+    outline: none; word-break: break-word; padding-top: 1px;
+  }
+  .editor:empty::before { content: attr(data-placeholder); color: var(--fg-faint); }
+  /* 幽灵可见时必须压掉宿主占位符，否则两段文字叠在同一位置。
+     真实实现里这一步是给 composer 根节点加 [data-dsse-ghost] 属性 + 一条作用域规则。 */
+  .composer[data-dsse-ghost] .editor:empty::before { content: none; }
+
+  /* ── 舱位 B：幽灵补全 ───────────────────────────────────── */
+  /* 绝对定位、pointer-events:none；坐标由 JS 现场测量编辑器得出，从不缓存。 */
+  .ghost {
+    position: absolute; left: 0; top: 0;
+    pointer-events: none; white-space: nowrap;
+    color: var(--fg-faint); font-style: italic;
+    font-size: 14px; line-height: 1.6;
+    display: flex; align-items: baseline; gap: 8px;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* 「Tab」单独渲染成键帽，绝不并进提示词文本 —— 否则会被读成句子的一部分 */
+  .kbd {
+    font-style: normal; font-family: var(--font); font-size: 10.5px;
+    color: var(--fg-soft); background: var(--bg-soft);
+    border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 1px 5px; flex: none;
+    letter-spacing: .02em;
+  }
+  .composer-bar { display: flex; align-items: center; gap: 8px; }
+  .spacer { flex: 1; }
+  .pill {
+    font-size: 11.5px; color: var(--fg-faint);
+    border: 1px solid var(--line-soft); border-radius: 999px; padding: 2px 9px;
+  }
+  .send {
+    width: 26px; height: 26px; border-radius: 50%;
+    border: 1px solid var(--line); background: var(--bg-soft);
+    color: var(--fg-soft); font-size: 12px; cursor: pointer;
+  }
+
+  /* ── 说明区 ───────────────────────────────────────────── */
+  .notes { width: min(760px, 100%); color: var(--fg-soft); font-size: 13px; line-height: 1.85; }
+  .notes h2 { font-size: 13px; color: var(--fg); margin: 22px 0 6px; font-weight: 600; }
+  .notes code { font-family: var(--mono); font-size: 12px; color: var(--fg); }
+  .notes table { border-collapse: collapse; width: 100%; margin-top: 8px; font-size: 12.5px; }
+  .notes th, .notes td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  .notes th { color: var(--fg); font-weight: 600; }
+  .hint { color: var(--accent); }
+  .statebox { width: min(760px, 100%); font-size: 12px; color: var(--fg-faint); font-family: var(--mono); }
+</style>
+</head>
+<body>
+
+<p class="page-title">
+  <b>原型 · 下一轮提示词建议</b>　两个界面面、同一份数据、两种接受动作：<br>
+  芯片 = 填入并发送　·　幽灵 = 只填入不发送。在下面输入卡片里按 <code>Tab</code> 可试。
+</p>
+
+<p class="stage-label">① 一轮刚结束（建议已就绪，输入栏为空且聚焦）</p>
+
+<div class="conversation" id="conv">
+  <div class="msg user">把注册表那 11 个块重新对一遍，顺手把散文列也校了</div>
+  <div class="msg assistant">
+    校完了。<span class="dim">11 个块的名字与计数全部一致，散文列改了 16 处：其中 <code>api.js:14</code> 那句「唯一会写的路由是 POST /propose」是错的，<code>POST /config</code> 和 <code>POST /candidates</code> 也写。全量 <code>4011 passed / 0 failed</code>。</span>
+  </div>
+
+  <!-- 舱位 A：conversation.input.dock，id: "suggestions"，order: 10（todo=0 与 queue=20 之间） -->
+  <div class="dock" id="dock" data-suggestions>
+    <div class="dock-head">后续建议</div>
+    <button class="chip"><span>跑一遍全量测试和性能预算，确认这轮没有回归</span><span class="arrow">→</span></button>
+    <button class="chip"><span>把这次的 16 处散文修正写进 01-status 和 04-reviews</span><span class="arrow">→</span></button>
+    <button class="chip"><span>检查注册表对新增路由的覆盖，看有没有漏掉的块</span><span class="arrow">→</span></button>
+  </div>
+
+  <div class="composer focused" id="composer">
+    <div class="editor-row">
+      <!-- 舱位 B：conversation.input.overlay，画在 data-composer-overlay 锚点里 -->
+      <div class="ghost" id="ghost">
+        <span id="ghostText">继续把这次改动补上测试，尤其是散文列的判据</span>
+        <kbd class="kbd">Tab</kbd>
+      </div>
+      <div class="editor" id="editor" contenteditable="true" data-placeholder="继续这个任务…" spellcheck="false"></div>
+    </div>
+    <div class="composer-bar">
+      <span class="pill">Haiku 5.5</span>
+      <span class="spacer"></span>
+      <button class="send" title="发送">▷</button>
+    </div>
+  </div>
+</div>
+<p class="statebox" id="state">状态：芯片可见（3 条） · 幽灵可见 · 草稿为空</p>
+
+<!--
+
+  ══════════════════════════════════════════════════════════════════
+  以下是设计说明，不属于界面本身。
+  ══════════════════════════════════════════════════════════════════
+
+-->
+<div class="notes">
+
+  <h2>1 · 两处出口为什么是同一份数据</h2>
+  建议只有一份（服务端每轮最多生成一次，内存里存 2–3 条整句）。差别只在<strong>接受动作</strong>：
+  <table>
+    <tr><th>舱位</th><th>槽位</th><th>接受动作</th><th>为什么不这么做的反面</th></tr>
+    <tr>
+      <td>芯片</td><td><code>conversation.input.dock</code>（order 10）</td>
+      <td><code>setDraft(text)</code> → <code>submit()</code></td>
+      <td>若直接 <code>conversation.send(text)</code>，就绕过了宿主的输入守卫与提交机（队列、权限、plan 模式、附件、去重）</td>
+    </tr>
+    <tr>
+      <td>幽灵</td><td><code>conversation.input.overlay</code></td>
+      <td>仅 <code>setDraft(text)</code> + <code>persistDraft()</code></td>
+      <td>若只改草稿 store 而不进编辑器，Lexical 的文档模型不知道有字，下一次 commit 会覆盖</td>
+    </tr>
+  </table>
+
+  <h2>2 · 幽灵的显示条件（十项全真才出现）</h2>
+  芯片的六条（有建议 / 是最新已完成回合 / 不在运行 / 没用过没关掉 / 没被审批占用 / 不在发送中）
+  再加四条：<code>draft === ''</code>、<code>phase === 'plain'</code>（命令菜单打开时 <code>Tab</code> 属于宿主）、
+  无附件、输入栏聚焦。任何一条为假就整个不渲染，而不是渲染一个空壳。
+
+  <h2>3 · 键位</h2>
+  <table>
+    <tr><th>键</th><th>行为</th></tr>
+    <tr><td><code>Tab</code></td><td>填入草稿、光标落句尾、<strong>不发送</strong>；本地标记本轮已用</td></tr>
+    <tr><td><code>Escape</code></td><td>本轮隐藏幽灵（不回写服务端）</td></tr>
+    <tr><td><code>Shift+Tab</code> / <code>Ctrl+Tab</code></td><td><strong>不拦截</strong>，交还宿主</td></tr>
+    <tr><td>输入法组字中（<code>isComposing</code>）</td><td><strong>不拦截</strong>，否则中文拼音会被 Tab 打断</td></tr>
+  </table>
+
+  <h2>4 · 三条视觉纪律（别让后来的人改掉）</h2>
+  ① 芯片是<strong>一句话</strong>，不是「标题 + 说明」——需要二次阅读的标签会让人多想一秒，而这一秒正是功能要省掉的东西。<br>
+  ② 幽灵是<strong>灰斜体</strong>且与真实文本不同色，否则用户会以为输入栏里已经有字了。<br>
+  ③ <code>Tab</code> 渲染成<strong>键帽</strong>，绝不并进提示词文本，否则会被读成句子的一部分。<br>
+  ④ 芯片区用<strong>虚线</strong>与人分开、上方留白，别做成输入框的一部分。
+
+  <h2>5 · 一份「不该照抄」的清单</h2>
+  Qoder 的芯片也是<strong>点击即发送</strong>，但它的建议<strong>不持久化</strong>、随消息删除清空、且只保留最新一轮；
+  它 0.4.2 修过的一个缺陷是「建议生成阻塞了下一个请求」——所以我们的生成是 fire-and-forget，<strong>任何路径都不 await 模型</strong>。
+  t3code 的实测数据（Codex 小线程 ~11k input tokens/次）来自「把整条线程发过去」；我们沿用面板已有的
+  <code>Transcript.snapshot</code> 渲染体（≤6000 字符），这是量级上最大的一个差别。
+
+</div>
+
+<script>
+  // 纯原型交互：按 Tab 填入、Esc 隐藏、点芯片=填入并发送。
+  const editor = document.getElementById('editor')
+  const ghost = document.getElementById('ghost')
+  const dock = document.getElementById('dock')
+  const composer = document.getElementById('composer')
+  const state = document.getElementById('state')
+  const GHOST_TEXT = document.getElementById('ghostText').textContent
+  let used = false
+
+  function fillDraft(text) {
+    // 真实实现走 inputActions.setDraft(text)：净化占位符、换行分段、光标落句尾、
+    // 且并入历史记录（所以「TAB 填入」不是一个单独的撤销步）。
+    editor.textContent = text
+    const range = document.createRange()
+    range.selectNodeContents(editor)
+    range.collapse(false)
+    const sel = window.getSelection()
+    sel.removeAllRanges()
+    sel.addRange(range)
+  }
+
+  function refresh() {
+    const draft = editor.textContent.trim()
+    // 幽灵：本轮未用过 && 草稿为空 && 聚焦
+    const ghostOn = !used && draft === '' && document.activeElement === editor
+    ghost.style.display = ghostOn ? 'flex' : 'none'
+    if (ghostOn) composer.setAttribute('data-dsse-ghost', '')
+    else composer.removeAttribute('data-dsse-ghost')
+    composer.classList.toggle('focused', document.activeElement === editor)
+    const parts = []
+    parts.push(dock.style.display === 'none' ? '芯片隐藏' : '芯片可见（3 条）')
+    parts.push(ghostOn ? '幽灵可见' : '幽灵隐藏')
+    parts.push('草稿' + (draft === '' ? '为空' : '：' + draft.slice(0, 24) + (draft.length > 24 ? '…' : '')))
+    state.textContent = '状态：' + parts.join(' · ')
+  }
+
+  editor.addEventListener('focus', refresh)
+  editor.addEventListener('blur', refresh)
+  editor.addEventListener('input', refresh)
+
+  editor.addEventListener('keydown', (e) => {
+    if (e.isComposing) return
+    if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey && !e.altKey && !used && editor.textContent.trim() === '') {
+      e.preventDefault()
+      used = true
+      fillDraft(GHOST_TEXT)
+      refresh()
+    } else if (e.key === 'Escape' && !used) {
+      used = true
+      refresh()
+    }
+  })
+
+  dock.querySelectorAll('.chip').forEach((chip) => {
+    chip.addEventListener('click', () => {
+      fillDraft(chip.textContent.replace('→', '').trim())
+      used = true
+      dock.style.display = 'none'   // 点了就立刻隐藏，不等服务端
+      refresh()
+      // 真实实现紧接着 inputActions.submit()
+    })
+  })
+
+  refresh()
+  editor.focus()
+</script>
+</body>
+</html>

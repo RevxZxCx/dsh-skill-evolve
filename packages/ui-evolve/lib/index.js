@@ -37,6 +37,7 @@ import { createReportTool } from './report-tool.js'
 import { TranscriptStore, readToolCallBlock } from './transcript.js'
 import { Revisions } from './revision.js'
 import { Summariser } from './summarise.js'
+import { Suggestor } from './suggest.js'
 import { createPanelApi, ROUTE_PREFIX } from './api.js'
 import { SessionState } from './session-state.js'
 import { SpeedMeter } from './speed.js'
@@ -619,13 +620,16 @@ export function apply(ctx, config, options) {
     // thousand sessions should not keep a thousand numbers.
     revisions.forget(agentId)
     // The summariser keeps its own per-session record: which sessions have a
-    // The summariser keeps its own per-session record: which sessions have a
     // reader. That set gates the warm-up, and its doc is explicit that leaving
     // an entry behind changes the gate's question from "is somebody watching
     // this session" to "did anybody ever open it" — after which a host running
     // background sessions pays one model call per turn on every session whose
     // panel was opened once, however long ago.
     summariser.forget(agentId)
+    // The suggested-next-step cache is keyed by session too, and a disposed
+    // session will never be asked about again. Its maps are bounded by live
+    // sessions only because of this line.
+    suggestor.forget(agentId)
   }))
 
   // ------------------------------------------------------------- summariser --
@@ -647,6 +651,26 @@ export function apply(ctx, config, options) {
     // process that dies within a second of a summary loses only that one.
     stored: (agentId) => sessionState.summarySeen(agentId),
     persist: (agentId, summary) => sessionState.rememberSummary(agentId, summary)
+  })
+
+  // ------------------------------------------------------------- suggestions --
+  //
+  // The second thing here that spends money, and the one that spends it least:
+  // it has no event of its own. Where the summariser fires once per completed
+  // turn whether or not anybody is looking, this fires only when the composer
+  // asks, which it does for the one session in front of a person. A session
+  // running in the background, or ten of them, cost nothing.
+  //
+  // That is also why nothing here is awaited on a turn boundary. The failure
+  // this avoids is public: Qoder shipped it in 0.4.2 — "Prompt Suggestion
+  // processing could block the next request; suggestion generation no longer
+  // delays subsequent chat responses" — and a call that is only made from a
+  // route handler cannot block a turn that is not asking for one.
+  const suggestor = new Suggestor({
+    config: () => liveConfig(),
+    // Same reason as the summariser's: read through `service()`, never held.
+    llm: () => service('llm'),
+    log
   })
 
   // ------------------------------------------------------------- the pruner --
@@ -860,6 +884,7 @@ export function apply(ctx, config, options) {
 
       transcripts,
       summariser,
+      suggestor,
       sessionState,
 
       /**

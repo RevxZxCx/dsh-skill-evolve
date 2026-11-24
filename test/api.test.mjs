@@ -1591,7 +1591,77 @@ async function route(overrides, req) {
   check('and it reads the session it was asked about', asked.length === 1 && asked[0] === 'agent-1', JSON.stringify(asked))
 }
 
-// ---- the long poll on the speed route ----
+// ---- the next-step suggestions route ----
+//
+// The only route in this plugin that reaches a model on a read, so the cases
+// below are mostly about what it refuses to do: no session, no engine, no body,
+// no POST. The one case that does spend is checked for the shape it hands back,
+// because that is the whole contract the composer draws from.
+{
+  const asked = []
+  const res = await route(
+    {
+      suggestor: {
+        suggestions: async (request) => {
+          asked.push(request)
+          return { enabled: true, items: ['Run the failing test.', 'Commit the fix.'], at: 1, model: 'p/m', pinned: false }
+        },
+      },
+      transcripts: { view: () => ({ turns: [{ turn: 1, said: 'x' }], previous: { turn: 1 } }) },
+      routeFor: () => ({ provider: 'live', model: 'model-l' }),
+    },
+    fakeReq({ url: `${ROUTE_PREFIX}/suggestions?agent=agent-7` }),
+  )
+  check('the suggestions route answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and hands the chips through', bodyOf(res).data.items.length === 2, String(res.body))
+  check('and asks about the session in the query', asked[0]?.agentId === 'agent-7', JSON.stringify(asked[0]?.agentId))
+  check('and passes the transcript it read', asked[0]?.view?.turns?.length === 1, JSON.stringify(asked[0]?.view))
+  check('and passes the session route for the model call', asked[0]?.sessionRoute?.provider === 'live', JSON.stringify(asked[0]?.sessionRoute))
+  check('the payload fits one SSE-free response', Buffer.byteLength(res.body) <= 2048, String(Buffer.byteLength(res.body)))
+}
+
+{
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/suggestions` }))
+  check('a suggestions request without a session is a 400', res.statusCode === 400, String(res.statusCode))
+  check('and it says which id is missing', bodyOf(res).code === 'error.agent.missing', String(res.body))
+}
+
+{
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/suggestions?agent=` }))
+  check('an empty session id is rejected too', res.statusCode === 400, String(res.statusCode))
+}
+
+{
+  // A HEAD is what a health check sends. It must not reach a model.
+  let called = 0
+  const res = await route(
+    { suggestor: { suggestions: async () => { called += 1; return { enabled: true, items: ['a'] } } } },
+    fakeReq({ url: `${ROUTE_PREFIX}/suggestions?agent=agent-1`, method: 'HEAD' }),
+  )
+  check('a head request to the suggestions route answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and carries no body', res.body === undefined, String(res.body))
+  check('and buys nothing', called === 0, String(called))
+}
+
+{
+  // "Off" has to be readable as off, not as absent: the composer draws no row
+  // either way, but only one of the two tells it not to ask again.
+  const res = await route({}, fakeReq({ url: `${ROUTE_PREFIX}/suggestions?agent=agent-1` }))
+  check('a host with no engine answers 200', res.statusCode === 200, String(res.statusCode))
+  check('and says the feature is off', bodyOf(res).data.enabled === false, String(res.body))
+  check('and gives a reason the client can show', typeof bodyOf(res).data.reason === 'string' && bodyOf(res).data.reason.length > 0, String(res.body))
+  check('and lists nothing', bodyOf(res).data.items.length === 0, String(res.body))
+}
+
+{
+  const res = await route(
+    { suggestor: { suggestions: async () => ({ enabled: true, items: [] }) } },
+    fakeReq({ url: `${ROUTE_PREFIX}/suggestions?agent=agent-1`, method: 'POST', body: '{}' }),
+  )
+  check('a post to a read is refused', res.statusCode === 405, String(res.statusCode))
+  check('and says the method is the problem', bodyOf(res).code === 'error.method.unsupported', String(res.body))
+}
+
 //
 // The badge used to discover a reply by asking on a timer, and the timer had to
 // be slow enough not to be traffic — which made it slower than most replies. The

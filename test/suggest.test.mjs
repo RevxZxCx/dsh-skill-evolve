@@ -1,0 +1,810 @@
+/**
+ * Tests for the suggestion engine, the second module here that spends money.
+ *
+ * Most of these are about *not* calling the model, because that is the whole
+ * design: the route is asked by a composer, so a session nobody is looking at
+ * costs nothing, and the gates below are what keeps even a watched session down
+ * to one paid call per finished turn. The rest pin the parsing, because a
+ * suggestion is drawn as one line and anything that cannot be drawn has to be
+ * dropped rather than truncated at render time — a chip that ends mid-word in
+ * the interface is a defect the model cannot be asked to fix.
+ *
+ * The invariants worth stating up front, because the cases below are instances:
+ *
+ *   * no gate ever calls the model;
+ *   * one turn, one call — a repaint, a second browser, or a concurrent ask
+ *     shares the answer;
+ *   * nothing this module returns can exceed the prompt or the chip budget.
+ */
+
+import {
+  HARD_SUGGESTION_CHARS,
+  MAX_SUGGESTIONS,
+  MAX_SUGGESTION_CHARS,
+  MAX_TOTAL_INPUT_CHARS,
+  MAX_TURN_INPUT_CHARS,
+  MIN_SUGGESTIONS,
+  SUGGEST_FAILURE_TTL_MS,
+  SUGGEST_TIMEOUT_MS,
+  SUGGEST_TTL_MS,
+  Suggestor,
+  clampCount,
+  clipSentence,
+  parseSuggestions,
+  renderSuggestBody,
+  sanitiseSuggestion,
+  suggestKey,
+  unfence
+} from '../packages/ui-evolve/lib/suggest.js'
+
+let passed = 0
+let failed = 0
+const failures = []
+
+function check(label, condition, detail) {
+  if (condition) {
+    passed += 1
+    return
+  }
+  failed += 1
+  failures.push(detail === undefined ? label : `${label} — ${detail}`)
+}
+
+/** Build a chunk stream from a list of chunks. */
+async function* stream(chunks) {
+  for (const chunk of chunks) yield chunk
+}
+
+const GOOD = JSON.stringify({ suggestions: ['Run the failing cursor test.', 'Fix the cursor jump at the line end.', 'Add a regression test for the jump.'] })
+
+/**
+ * A fake llm service that records calls.
+ *
+ * The catalogue defaults to one provider with one model, so that "a call was
+ * made" means what it says: a block that is about the gates, the cache or the
+ * parsing should not have to repeat the route every time, and one that is about
+ * the route overrides this. Blocks that must reach *no* route say so with an
+ * empty catalogue, which is the case a fresh host is in before any adapter has
+ * published a model.
+ *
+ * @param {object} [options] - behaviour switches.
+ * @returns {object} the fake service plus its call log.
+ */
+function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined } = {}) {
+  const log = { prepare: [], stream: [], catalog: 0 }
+  const service = {
+    log,
+    async modelCatalog(signal) {
+      log.catalog += 1
+      return catalog
+    },
+    async prepareCall(route, signal) {
+      log.prepare.push(route)
+      if (prepareThrows !== undefined) throw prepareThrows
+      return {
+        config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+        async *stream(options) {
+          log.stream.push(options)
+          if (streamThrows !== undefined) throw streamThrows
+          if (delay !== undefined) await delay()
+          yield { type: 'text-delta', text }
+          yield { type: 'finish', reason: finish }
+          signal?.throwIfAborted?.()
+        }
+      }
+    }
+  }
+  return service
+}
+
+/** A transcript view with the given finished turns. */
+function viewWith(...turns) {
+  return { turns, current: { turn: turns.length + 1 }, previous: turns.length === 0 ? undefined : turns[turns.length - 1] }
+}
+
+const snapshot = (turn, said = 'The test fails because the fixture is stale.') => ({
+  turn,
+  asked: `turn ${turn} request`,
+  calls: 4,
+  failed: 1,
+  paths: ['F:/a.js'],
+  commands: ['npm test'],
+  tools: [{ name: 'bash', count: 3 }],
+  said
+})
+
+/** A clock a test can move. */
+function clock(start = 1000) {
+  let value = start
+  return {
+    now: () => value,
+    advance(ms) {
+      value += ms
+    }
+  }
+}
+
+const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 3, summaryProvider: '', summaryModel: '', ...over })
+
+// ---------------------------------------------------------------------------
+// clampCount — the interface supports two or three, whatever was configured
+// ---------------------------------------------------------------------------
+
+{
+  check('the default count is three', clampCount(3) === 3, String(clampCount(3)))
+  check('one is raised to the minimum', clampCount(1) === MIN_SUGGESTIONS, String(clampCount(1)))
+  check('zero is raised to the minimum', clampCount(0) === MIN_SUGGESTIONS, String(clampCount(0)))
+  check('the minimum is kept', clampCount(2) === 2, String(clampCount(2)))
+  check('more than the maximum is cut to it', clampCount(9) === MAX_SUGGESTIONS, String(clampCount(9)))
+  check('a fractional count is rounded', clampCount(2.6) === 3, String(clampCount(2.6)))
+  check('a negative count is raised to the minimum', clampCount(-4) === MIN_SUGGESTIONS, String(clampCount(-4)))
+  check('missing falls back to the maximum', clampCount(undefined) === MAX_SUGGESTIONS, String(clampCount(undefined)))
+  check('NaN falls back to the maximum', clampCount(Number.NaN) === MAX_SUGGESTIONS, String(clampCount(Number.NaN)))
+  check('a numeric string is not a number', clampCount('2') === MAX_SUGGESTIONS, String(clampCount('2')))
+  check('Infinity falls back to the maximum', clampCount(Number.POSITIVE_INFINITY) === MAX_SUGGESTIONS, String(clampCount(Number.POSITIVE_INFINITY)))
+}
+
+// ---------------------------------------------------------------------------
+// unfence — an envelope is not content
+// ---------------------------------------------------------------------------
+
+{
+  check('a plain object is untouched', unfence('{"a":1}') === '{"a":1}')
+  check('a json fence is removed', unfence('```json\n{"a":1}\n```') === '{"a":1}', unfence('```json\n{"a":1}\n```'))
+  check('a bare fence is removed', unfence('```\n{"a":1}\n```') === '{"a":1}', unfence('```\n{"a":1}\n```'))
+  check('a preamble is cut at the brace', unfence('Here are three suggestions:\n{"a":1}') === '{"a":1}', unfence('Here are three suggestions:\n{"a":1}'))
+  check('text with no brace is left alone', unfence('one\ntwo') === 'one\ntwo', unfence('one\ntwo'))
+  check('a non-string is empty', unfence(undefined) === '')
+  check('a fence with no closing fence keeps the body', unfence('```json\n{"a":1}').includes('{"a":1}') === true)
+}
+
+// ---------------------------------------------------------------------------
+// sanitiseSuggestion — everything here makes a line drawable, never a new claim
+// ---------------------------------------------------------------------------
+
+{
+  check('surrounding whitespace goes', sanitiseSuggestion('  Run the tests.  ') === 'Run the tests.')
+  check('a bullet goes', sanitiseSuggestion('- Run the tests.') === 'Run the tests.')
+  check('a star bullet goes', sanitiseSuggestion('* Run the tests.') === 'Run the tests.')
+  check('a dot number goes', sanitiseSuggestion('1. Run the tests.') === 'Run the tests.')
+  check('a paren number goes', sanitiseSuggestion('2) Run the tests.') === 'Run the tests.')
+  check('a "next step:" label goes', sanitiseSuggestion('Next step: Run the tests.') === 'Run the tests.')
+  check('a chinese label goes', sanitiseSuggestion('下一步：跑测试。') === '跑测试。', sanitiseSuggestion('下一步：跑测试。'))
+  check('a chinese suggestion label goes', sanitiseSuggestion('建议：跑测试。') === '跑测试。', sanitiseSuggestion('建议：跑测试。'))
+  check('surrounding double quotes go', sanitiseSuggestion('"Run the tests."') === 'Run the tests.')
+  check('surrounding curly quotes go', sanitiseSuggestion('“Run the tests.”') === 'Run the tests.', sanitiseSuggestion('“Run the tests.”'))
+  check('an inner apostrophe is untouched', sanitiseSuggestion("Fix the file's header.") === "Fix the file's header.")
+  check('double spaces collapse', sanitiseSuggestion('Run  the   tests.') === 'Run the tests.')
+  check('two lines keep the first', sanitiseSuggestion('Run the tests.\nThen commit.') === 'Run the tests.', sanitiseSuggestion('Run the tests.\nThen commit.'))
+  check('a leading blank line is skipped', sanitiseSuggestion('\n\nRun the tests.') === 'Run the tests.')
+  check('a code fence is dropped', sanitiseSuggestion('```js\ngo()\n```') === '', sanitiseSuggestion('```js\ngo()\n```'))
+  check('inline code is dropped', sanitiseSuggestion('Run `npm test`.') === '', sanitiseSuggestion('Run `npm test`.'))
+  check('a url is dropped', sanitiseSuggestion('https://example.com/x') === '')
+  check('a file url is dropped', sanitiseSuggestion('file:///F:/a.js') === '')
+  check('an empty string is dropped', sanitiseSuggestion('   ') === '')
+  check('a non-string is dropped', sanitiseSuggestion({ text: 'x' }) === '')
+  check('a paragraph is dropped outright', sanitiseSuggestion('x'.repeat(HARD_SUGGESTION_CHARS + 1)) === '')
+  // Absolute lengths, not the constant, for the two checks below. The line
+  // above derives its length from HARD_SUGGESTION_CHARS and therefore agrees
+  // with whatever the constant says — mutating the constant to a million
+  // leaves it green while every real paragraph starts being cut instead of
+  // dropped. These two pin the number itself: four hundred characters is a
+  // paragraph and is dropped, just under it is a long sentence and is cut.
+  // Four hundred characters is a paragraph and is dropped; one character
+  // under it is still a (very long) sentence and gets cut to the first clause.
+  check('a four hundred and one character paragraph is dropped', sanitiseSuggestion(`字${'好'.repeat(400)}`) === '', String(sanitiseSuggestion(`字${'好'.repeat(400)}`).length))
+  check('four hundred characters is cut, not dropped', sanitiseSuggestion(`字${'好'.repeat(399)}`).length > 0, 'the boundary moved down')
+  check('and just under four hundred is cut, not dropped', sanitiseSuggestion(`字${'好'.repeat(396)}`).length > 0, String(sanitiseSuggestion(`字${'好'.repeat(396)}`).length))
+  // Literal 300, not `HARD_SUGGESTION_CHARS - 1`: a sample built from the
+  // constant that decides whether the sample is dropped cannot test it. And it
+  // has to be under the drop limit *and* over the chip width, or the assertion
+  // is `''.length <= 120` -- true, and about nothing.
+  check('a long line under the drop limit is cut to a chip', sanitiseSuggestion('x'.repeat(300)).length <= MAX_SUGGESTION_CHARS, String(sanitiseSuggestion('x'.repeat(300)).length))
+  check('a full sentence under the drop limit survives as its first sentence', sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`) === `${'a'.repeat(60)}.`, sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`))
+  check('a long unpunctuated line ends with an ellipsis', sanitiseSuggestion(`${'a'.repeat(HARD_SUGGESTION_CHARS - 100)}`).endsWith('…') === true)
+  check('the result is never longer than a chip', sanitiseSuggestion(`${'word '.repeat(60)}.`).length <= 120, String(sanitiseSuggestion(`${'word '.repeat(60)}.`).length))
+}
+
+// ---------------------------------------------------------------------------
+// clipSentence
+// ---------------------------------------------------------------------------
+
+{
+  check('a short line is returned as is', clipSentence('Run the tests.') === 'Run the tests.')
+  // Literal lengths rather than `MAX_SUGGESTION_CHARS - 1`: a sample derived
+  // from the constant moves with it, so widening the limit or narrowing the
+  // comparison from <= to < would leave this green while behaviour changed.
+  const atLimit = `${'a'.repeat(119)}x`
+  check('a line of exactly 120 characters is kept whole', atLimit.length === 120 && clipSentence(atLimit) === atLimit, String(clipSentence(atLimit).length))
+  const overLimit = `${'a'.repeat(120)}x`
+  check('one character more gains an ellipsis', overLimit.length === 121 && clipSentence(overLimit).endsWith('…') === true, clipSentence(overLimit).slice(-4))
+  const dotted = `Refactor ${'packages/ui-evolve/lib/suggest.js '.repeat(5)}`
+  check('a filename period is not a sentence end', clipSentence(dotted).endsWith('.') === false, clipSentence(dotted).slice(-16))
+  const twoSentences = `${'a'.repeat(60)}. ${'b'.repeat(200)}.`
+  check('a second sentence is cut at the first', clipSentence(twoSentences) === `${'a'.repeat(60)}.`, clipSentence(twoSentences).slice(-12))
+  const noEnd = 'word '.repeat(60).trim()
+  check('no sentence end falls back to an ellipsis', clipSentence(noEnd).endsWith('…') === true)
+  // The fallback has to cut at a space, not at the limit. This line puts a
+  // space at 110 and a word that would be split by cutting at 120, which is
+  // the difference between "…apply the mi…" and something a person can read.
+  const splitWord = `${'a'.repeat(110)} ${'b'.repeat(30)}`
+  check('the fallback cut lands on the space, not inside the word', clipSentence(splitWord) === `${'a'.repeat(110)}…`, clipSentence(splitWord).slice(-14))
+  check('and leaves no trailing space before the ellipsis', clipSentence(splitWord).trimEnd() === clipSentence(splitWord), JSON.stringify(clipSentence(splitWord).slice(-4)))
+  check('a cjk run with no spaces is cut at the limit', [...clipSentence('好'.repeat(MAX_SUGGESTION_CHARS + 10))].length <= MAX_SUGGESTION_CHARS + 1)
+}
+
+// ---------------------------------------------------------------------------
+// parseSuggestions — the contract, and what is still usable when it is broken
+// ---------------------------------------------------------------------------
+
+{
+  const three = parseSuggestions(GOOD, 3)
+  check('the contract parses to three chips', three.length === 3, JSON.stringify(three))
+  check('and keeps the model order', three[0] === 'Run the failing cursor test.', three[0])
+  check('a fenced contract parses', parseSuggestions(`\`\`\`json\n${GOOD}\n\`\`\``, 3).length === 3)
+  check('a bare array parses', parseSuggestions('["Run the tests.","Then commit.","Then push."]', 3).length === 3)
+  check('a preamble before the object is tolerated', parseSuggestions(`Here you go:\n${GOOD}`, 3).length === 3)
+  check('one line per suggestion parses', parseSuggestions('Run the tests.\nThen commit.', 3).length === 2)
+  check('a single suggestion is refused', parseSuggestions('{"suggestions":["Only one."]}', 3).length === 0)
+  check('plain prose is refused', parseSuggestions('You could run the tests and then commit the change.', 3).length === 0)
+  check('an empty string is refused', parseSuggestions('', 3).length === 0)
+  check('a non-string is refused', parseSuggestions(undefined, 3).length === 0)
+  check('an empty object is refused', parseSuggestions('{}', 3).length === 0)
+  check('junk after a brace is refused', parseSuggestions('{not json at all}', 3).length === 0)
+  const deduped = parseSuggestions('["Run the tests.","Run the tests.","Run  the tests.","Then commit."]', 3)
+  check('duplicates are dropped case- and space-insensitively', deduped.length === 2, JSON.stringify(deduped))
+  check('the count caps the list', parseSuggestions('["A one.","B two.","C three.","D four."]', 2).length === 2)
+  check('a count below the minimum is raised', parseSuggestions('["A one.","B two.","C three.","D four."]', 1).length === MIN_SUGGESTIONS)
+  const withJunk = parseSuggestions('["Run the tests.","`npm test`","https://x.dev","Then commit."]', 3)
+  check('unusable items are dropped and the rest kept', withJunk.length === 2, JSON.stringify(withJunk))
+  check('every chip is within the width', withJunk.every((item) => item.length <= MAX_SUGGESTION_CHARS) === true)
+  check('a list of bullets parses', parseSuggestions('- Run the tests.\n- Then commit.', 3).length === 2)
+  const withProse = parseSuggestions('Run the tests.\nThen commit.\n\nThat is all I would do here.', 3)
+  check('a trailing prose paragraph is not a suggestion list', withProse.length === 2, JSON.stringify(withProse))
+  check('and the paragraph is not one of the chips', withProse.includes('That is all I would do here.') === false, JSON.stringify(withProse))
+  const jsonThenProse = parseSuggestions('{"suggestions":["Fix the failing test.","Update the docs."]}\nHope that helps!', 3)
+  check('a JSON answer with a line after it yields exactly its two', JSON.stringify(jsonThenProse) === JSON.stringify(['Fix the failing test.', 'Update the docs.']), JSON.stringify(jsonThenProse))
+}
+
+// ---------------------------------------------------------------------------
+// renderSuggestBody and suggestKey — what the model is shown
+// ---------------------------------------------------------------------------
+
+{
+  check('no view is an empty body', renderSuggestBody(undefined) === '')
+  check('no turns is an empty body', renderSuggestBody({ turns: [] }) === '')
+  check('a view without turns is an empty body', renderSuggestBody({ previous: snapshot(1) }) === '')
+
+  const one = renderSuggestBody({ turns: [snapshot(1, 'It is a stale fixture.')] })
+  check('one turn is quoted', one.includes('It is a stale fixture.'), one.slice(0, 80))
+
+  // A turn is quoted when its "What the user asked:" header is present; the
+  // body's own blank lines are the reason sections are counted this way.
+  const turnCount = (text) => (text.match(/What the user asked:/g) ?? []).length
+  const many = ['first task', 'second', 'third', 'fourth', 'fifth']
+  const body = renderSuggestBody({ turns: many.map((said, index) => snapshot(index + 1, said)) })
+  check('the first turn is quoted when it fits', body.includes('first task'), body.slice(0, 120))
+  check('the last two turns are quoted', body.includes('fourth') && body.includes('fifth'), body.slice(0, 200))
+  check('a middle turn is not quoted', body.includes('second') === false && body.includes('third') === false)
+  check('three turns are quoted at most', turnCount(body) === 3, String(turnCount(body)))
+
+  const twoTurns = renderSuggestBody({ turns: [snapshot(1, 'aaa'), snapshot(2, 'bbb')] })
+  check('with two turns both are quoted and nothing else', turnCount(twoTurns) === 2, String(turnCount(twoTurns)))
+
+  // The ceiling holds by construction: a first turn that would overflow is left
+  // out, so the body cannot grow past the budget however long the turns are.
+  const huge = { turn: 1, asked: 'x'.repeat(MAX_TURN_INPUT_CHARS * 2), said: 'y'.repeat(MAX_TURN_INPUT_CHARS * 2), paths: [], tools: [], commands: [] }
+  const wide = renderSuggestBody({ turns: [huge, snapshot(2, 'z'.repeat(MAX_TURN_INPUT_CHARS * 2)), snapshot(3, 'w'.repeat(MAX_TURN_INPUT_CHARS * 2))] })
+  check('an over-long first turn is left out', wide.includes('xxxx') === false, wide.slice(0, 40))
+  check('the budget is ten thousand characters, not more', MAX_TOTAL_INPUT_CHARS === 10000, String(MAX_TOTAL_INPUT_CHARS))
+  check('the body never exceeds the budget', wide.length <= MAX_TOTAL_INPUT_CHARS, String(wide.length))
+  check('each turn is clipped', wide.split('\n\n').every((part) => part.length <= MAX_TURN_INPUT_CHARS) === true)
+
+  const fifty = Array.from({ length: 50 }, (_, index) => snapshot(index + 1, index === 0 ? 'the stated task' : `turn ${index + 1}`))
+  const resumed = renderSuggestBody({ turns: fifty })
+  check('a fifty-turn session still quotes its first turn', resumed.includes('the stated task'), resumed.slice(0, 60))
+  check('and its last two', resumed.includes('turn 49') && resumed.includes('turn 50'))
+
+  check('the same turn and text give the same key', suggestKey(3, 'body') === suggestKey(3, 'body'))
+  check('a different turn gives a different key', suggestKey(3, 'body') !== suggestKey(4, 'body'))
+  check('different text in the same turn gives a different key', suggestKey(3, 'body') !== suggestKey(3, 'body '))
+  check('a missing turn counts as zero', suggestKey(undefined, 'body') === suggestKey(0, 'body'))
+  check('the key is a short hex string', /^[0-9a-f]{1,8}$/.test(suggestKey(3, 'body')) === true, suggestKey(3, 'body'))
+}
+
+// ---------------------------------------------------------------------------
+// the gates — every one of these must end without a call
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  check('constructing one calls nothing', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+  check('and asks for no catalogue', llm.log.catalog === 0, String(llm.log.catalog))
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the first ask does call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config({ panelSuggestions: false }), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a switched-off feature answers with enabled:false', answer.enabled === false, JSON.stringify(answer))
+  check('a switched-off feature lists nothing', Array.isArray(answer.items) && answer.items.length === 0)
+  check('a switched-off feature calls nothing', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+  check('and says why', answer.reason === 'turned off in settings', String(answer.reason))
+}
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const noSession = await suggestor.suggestions({ agentId: '', view: viewWith(snapshot(1)) })
+  check('no session is not a suggestion', noSession.items.length === 0, JSON.stringify(noSession))
+
+  const noTurn = await suggestor.suggestions({ agentId: 'a', view: viewWith() })
+  check('no finished turn is not a suggestion', noTurn.items.length === 0, JSON.stringify(noTurn))
+  check('and says so', noTurn.reason === 'no completed turn yet', String(noTurn.reason))
+  check('but the feature still reads as enabled', noTurn.enabled === true)
+
+  const emptyBody = await suggestor.suggestions({ agentId: 'a', view: { turns: [{ turn: 1 }], previous: { turn: 1 } } })
+  check('a turn with nothing to quote is not a suggestion', emptyBody.items.length === 0, JSON.stringify(emptyBody))
+  check('none of those three called the model', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
+// one turn, one call — cache, concurrency, and the clock
+// ---------------------------------------------------------------------------
+
+{
+  const time = clock()
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: time.now })
+  const first = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a successful call answers with items', first.items.length === 3, JSON.stringify(first))
+  check('and with the route it used', typeof first.model === 'string' && first.model.includes('/'), String(first.model))
+  check('and with the time', typeof first.at === 'number', String(first.at))
+
+  const again = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a repaint is served from memory', again.cached === true, JSON.stringify(again))
+  check('with the same items', JSON.stringify(again.items) === JSON.stringify(first.items))
+  check('and without a second call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  time.advance(SUGGEST_TTL_MS - 1)
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('inside the fifteen minutes it is still reused', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  time.advance(2)
+  const stale = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('past it the answer is bought again', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+  check('and comes back uncached', stale.cached === undefined, JSON.stringify(stale.cached))
+
+  const nextTurn = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1), snapshot(2)) })
+  check('a new turn is a new question', llm.log.prepare.length === 3, String(llm.log.prepare.length))
+  check('and answers for the new turn', nextTurn.items.length === 3)
+
+  const otherSession = await suggestor.suggestions({ agentId: 'b', view: viewWith(snapshot(1)) })
+  check('another session is another question', llm.log.prepare.length === 4, String(llm.log.prepare.length))
+  check('and also answers', otherSession.items.length === 3)
+}
+
+{
+  // No delay fixture: `inflight.set` happens synchronously before the first
+  // await, so the dedup this block is about is decided in the same tick. A
+  // wall-clock sleep here was a real 5 ms of a fake-clock suite that bought
+  // nothing.
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const [a, b] = await Promise.all([
+    suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) }),
+    suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  ])
+  check('two concurrent asks make one call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  check('and share the answer', JSON.stringify(a.items) === JSON.stringify(b.items))
+  const after = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the shared answer is then cached', after.cached === true, JSON.stringify(after))
+  check('still one call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
+// failures — one bad route is not retried on every repaint
+// ---------------------------------------------------------------------------
+
+{
+  const time = clock()
+  const llm = fakeLlm({ prepareThrows: new Error('no credit') })
+  const suggestor = new Suggestor({ config: config(), llm, now: time.now })
+  const first = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a failed call answers with no items', first.items.length === 0, JSON.stringify(first))
+  check('and says it failed', String(first.reason).includes('no credit'), String(first.reason))
+  check('the call was made once', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+
+  const during = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a repaint inside the cooldown does not retry', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  check('and reports the remembered reason', String(during.reason).includes('no credit'), String(during.reason))
+
+  time.advance(SUGGEST_FAILURE_TTL_MS + 1)
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('past the cooldown it tries again', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+}
+
+{
+  const llm = fakeLlm({ text: 'I cannot help with that.' })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('an unusable answer yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('and is remembered as a failure', suggestor.failed.size === 1, String(suggestor.failed.size))
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('so the repaint does not pay again', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  const llm = fakeLlm({ finish: { kind: 'error', failure: { message: 'overloaded' } } })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a stream that ends in an error yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('and the reason keeps the model own words', String(answer.reason).includes('overloaded'), String(answer.reason))
+  check('and is remembered as a failure', suggestor.failed.size === 1, String(suggestor.failed.size))
+}
+
+{
+  const controller = new AbortController()
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  controller.abort()
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), signal: controller.signal })
+  check('an aborted ask yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('an aborted ask is not remembered as a failure', suggestor.failed.size === 0, String(suggestor.failed.size))
+  check('and made no call', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+{
+  // A cancellation that arrives while the call is in flight, which is the one
+  // the composer actually produces: it aborts on unmount, after the request
+  // has been paid for. The abort is the caller's decision, so it must not be
+  // written into the failure memory — that memory exists to stop paying twice
+  // for a route that is broken, and a route that was never allowed to answer
+  // is not evidence of anything.
+  let resume = () => {}
+  const held = new Promise((resolve) => {
+    resume = resolve
+  })
+  const llm = fakeLlm({ delay: () => held })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const controller = new AbortController()
+  const pending = suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), signal: controller.signal })
+  for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+  check('the call is in flight before the cancel', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  controller.abort()
+  resume()
+  const answer = await pending
+  check('a cancelled call yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('and is not written into the failure memory', suggestor.failed.size === 0, String(suggestor.failed.size))
+  const again = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('so the next ask still buys an answer', llm.log.prepare.length === 2 && again.items.length === 3, `${llm.log.prepare.length} calls, ${again.items.length} chips`)
+}
+
+{
+  // A cancellation is the caller's decision, not the model's verdict, so it
+  // must not silence the next ask. The composer aborts when it unmounts, which
+  // happens on every navigation; remembering that as a failure would leave a
+  // working route suppressed for a minute on no evidence.
+  const controller = new AbortController()
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  controller.abort()
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), signal: controller.signal })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), signal: new AbortController().signal })
+  check('the ask after a cancelled ask still reaches the model', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+{
+  // The switch has to be an explicit yes. Reading an absent key as yes means a
+  // profile that never configured this plugin starts paying for it the moment
+  // the version that has the feature is installed.
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: () => ({ summaryProvider: '', summaryModel: '' }), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('an unset switch counts as off', answer.enabled === false, JSON.stringify(answer))
+  check('so it never reaches the model', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+{
+  // The deadline is twelve seconds of wall clock, which no suite can wait for.
+  // The timer is therefore borrowed: the module's own callback is captured and
+  // fired by hand, which exercises the real abort path without the wait.
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  let armed = null
+  globalThis.setTimeout = (fn, ms) => {
+    armed = { fn, ms }
+    return { unref() {} }
+  }
+  globalThis.clearTimeout = () => {}
+  try {
+    // The stream hangs until the test lets it go. It holds a handle the block
+    // can release in every path, so a build that never arms the deadline fails
+    // an assertion instead of leaving the await pending forever — a suite that
+    // hangs reports nothing, and a crash hides which invariant broke.
+    let release = () => {}
+    const held = new Promise((resolve) => {
+      release = resolve
+    })
+    const llm = fakeLlm({ delay: () => held })
+    llm.prepareCall = async (route, signal) => ({
+      config: { provider: route.provider, model: route.model, maxTokens: route.maxTokens },
+      async *stream() {
+        await held
+        // The abort fires before the stream is released, so look at the flag
+        // rather than subscribing: a listener added after the event would
+        // never run, and the call would look like a model that said nothing.
+        if (signal?.aborted === true) throw new Error('aborted')
+        yield { type: 'text-delta', text: GOOD }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    })
+    const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+    const pending = suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve()
+    check('the call arms a deadline', armed !== null, String(armed))
+    check('twelve seconds, shorter than the composer waits', armed?.ms === SUGGEST_TIMEOUT_MS && SUGGEST_TIMEOUT_MS < 15000, String(armed?.ms))
+    armed?.fn()
+    release()
+    const answer = await pending
+    check('a stalled stream yields no chips', answer.items.length === 0, JSON.stringify(answer))
+    check('and says the call ran out of time', /timed out/.test(answer.reason ?? ''), String(answer.reason))
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    globalThis.clearTimeout = realClearTimeout
+  }
+}
+
+{
+  // A reset follows a settings change, and the failure memory is about a route:
+  // keeping it would let a route that was just removed suppress a route that
+  // was just chosen.
+  const llm = fakeLlm({ prepareThrows: new Error('nope') })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  suggestor.reset()
+  check('a reset drops the failure memory too', suggestor.failed.size === 0, String(suggestor.failed.size))
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('so the new route is tried immediately', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
+// the route: pinned, then the session's own, then the catalogue
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config({ summaryProvider: 'pinned', summaryModel: 'model-p' }), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), sessionRoute: { provider: 'live', model: 'model-l' } })
+  const pinned = llm.log.prepare[0]
+  check('a pinned pair wins over the session route', pinned?.provider === 'pinned', JSON.stringify(pinned))
+  check('and says it was pinned', answer.pinned === true, JSON.stringify(answer.pinned))
+  check('so the catalogue is never asked', llm.log.catalog === 0, String(llm.log.catalog))
+}
+
+{
+  const llm = fakeLlm({ catalog: [{ id: 'cat', models: [{ id: 'model-c' }] }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)), sessionRoute: { provider: 'live', model: 'model-l' } })
+  const routedTo = llm.log.prepare[0]
+  check('the session route wins over the catalogue', routedTo?.provider === 'live', JSON.stringify(routedTo))
+  check('and is not called pinned', answer.pinned === false, JSON.stringify(answer.pinned))
+  check('the catalogue is not consulted', llm.log.catalog === 0, String(llm.log.catalog))
+}
+
+{
+  const llm = fakeLlm({ catalog: [{ id: 'cat', models: [{ id: 'model-c' }] }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('with no session route the catalogue is walked', llm.log.catalog === 1, String(llm.log.catalog))
+  // Read the call defensively: the failure this block exists to catch is
+  // "no call was made", and `prepare[0].provider` would crash the suite on it
+  // instead of failing one assertion, which hides the cause behind a stack.
+  const first = llm.log.prepare[0]
+  check('and the first advertised model is used', first?.provider === 'cat' && first?.model === 'model-c', JSON.stringify(first))
+}
+
+{
+  const llm = fakeLlm({ catalog: [{ id: 'empty', models: [] }, { id: 'lazy', listModels: async () => [{ id: 'late' }] }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  // Read the call defensively, for the same reason as above: the failure this
+  // block guards is "the skipping went wrong", and indexing an empty log would
+  // turn that into a stack trace that names the test rather than the code.
+  const skipped = llm.log.prepare[0]
+  check('a provider with no models is skipped', skipped?.provider === 'lazy', JSON.stringify(skipped))
+  check('and a provider that lists lazily is asked', skipped?.model === 'late', JSON.stringify(skipped))
+}
+
+{
+  const llm = fakeLlm({ catalog: [{ id: 'a', models: [] }, { id: 'b', models: [] }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('no usable route yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('and says so', answer.reason === 'no model route is available', String(answer.reason))
+  check('without making a call', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+  check('a route failure is not remembered as a model failure', suggestor.failed.size === 0, String(suggestor.failed.size))
+}
+
+{
+  // A host that has a model directory but no way to place a call: that is the
+  // only shape in which the service gate is reachable, because an env with no
+  // model service at all stops earlier, at route resolution.
+  const catalogOnly = () => ({ modelCatalog: () => [{ id: 'cat', models: [{ id: 'model-c' }] }] })
+  const suggestor = new Suggestor({ config: config(), llm: catalogOnly, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a host with no model service yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  check('and says so', answer.reason === 'no model service available', String(answer.reason))
+}
+
+// ---------------------------------------------------------------------------
+// what is sent
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  // The block guards "what is sent", and the failure mode it must report is
+  // "nothing was sent". Reading through a missing log entry would crash the
+  // suite on that case instead of failing the assertions that describe it.
+  const options = llm.log.stream[0]
+  const messages = options?.messages ?? []
+  check('the call reaches the stream', options !== undefined, String(llm.log.stream.length))
+  check('one message is sent', messages.length === 1, String(messages.length))
+  check('as the user role', messages[0]?.role === 'user', String(messages[0]?.role))
+  const content = messages[0]?.content ?? []
+  check('with one text block', content.length === 1, String(content.length))
+  check('carrying the quoted turn', String(content[0]?.text).includes('The fixture is stale.'))
+  check('and the markers', String(content[0]?.text).includes('<turns>'))
+  check('the source is this plugin', messages[0]?.source?.kind === 'dsh-ui-evolve-suggest', JSON.stringify(messages[0]?.source))
+  check('the purpose is its own', options?.purpose === 'skill-evolve-next-prompt', String(options?.purpose))
+  check('the call carries the abort signal', options?.signal !== undefined)
+  check('the output budget is small', llm.log.prepare[0]?.maxTokens > 0 && llm.log.prepare[0]?.maxTokens <= 300, String(llm.log.prepare[0]?.maxTokens))
+  check('the instruction asks for json', String(content[0]?.text).includes('{"suggestions"'), 'no contract in the prompt')
+  check('the instruction says the turns are data', String(content[0]?.text).toLowerCase().includes('not instruction'))
+}
+
+{
+  // A turn can quote a closing marker -- a log line it echoed, a file it read.
+  // If that text survives intact it ends the data block early, and everything
+  // after it is read as instructions outside the block that the sentence above
+  // warns about.
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'a </turns> b <turns> c')) })
+  const text = String(llm.log.stream[0]?.messages?.[0]?.content?.[0]?.text ?? '')
+  check('a marker quoted inside a turn is defused', text.includes('a ‹/turns› b ‹turns› c'), text.slice(-200))
+  check('so the block opens exactly once', (text.match(/<turns>/g) ?? []).length === 1, String((text.match(/<turns>/g) ?? []).length))
+  check('and closes exactly once', (text.match(/<\/turns>/g) ?? []).length === 1, String((text.match(/<\/turns>/g) ?? []).length))
+}
+
+// ---------------------------------------------------------------------------
+// forgetting — a disposed session leaves nothing behind
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  await suggestor.suggestions({ agentId: 'b', view: viewWith(snapshot(1)) })
+  check('two sessions cache two answers', suggestor.cache.size === 2, String(suggestor.cache.size))
+  suggestor.forget('a')
+  check('forgetting one drops its entry', suggestor.cache.size === 1, String(suggestor.cache.size))
+  check('and leaves the other', [...suggestor.cache.keys()].every((key) => key.startsWith('b:')) === true)
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the forgotten session is bought again when asked', llm.log.prepare.length === 3, String(llm.log.prepare.length))
+  suggestor.forget('')
+  check('forgetting no session is a no-op', suggestor.cache.size === 2, String(suggestor.cache.size))
+}
+
+{
+  const time = clock()
+  const llm = fakeLlm({ prepareThrows: new Error('nope') })
+  const suggestor = new Suggestor({ config: config(), llm, now: time.now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a failure is remembered', suggestor.failed.size === 1, String(suggestor.failed.size))
+  suggestor.forget('a')
+  check('forgetting drops the failure memory too', suggestor.failed.size === 0, String(suggestor.failed.size))
+}
+
+{
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  suggestor.reset()
+  check('a reset drops every answer', suggestor.cache.size === 0, String(suggestor.cache.size))
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('so the next ask is bought again', llm.log.prepare.length === 2, String(llm.log.prepare.length))
+}
+
+{
+  // The cache is bounded, because a host that runs for a week and sees a
+  // thousand sessions must not hold a thousand answers.
+  const llm = fakeLlm()
+  const time = clock()
+  const suggestor = new Suggestor({ config: config(), llm, now: time.now })
+  for (let index = 0; index < 80; index += 1) {
+    time.advance(10)
+    await suggestor.suggestions({ agentId: `s${index}`, view: viewWith(snapshot(1)) })
+  }
+  check('the cache stays bounded', suggestor.cache.size <= 64, String(suggestor.cache.size))
+  check('and keeps the newest', [...suggestor.cache.keys()].some((key) => key.startsWith('s79:')) === true)
+}
+
+// ---------------------------------------------------------------------------
+// the answer cannot exceed what the composer can draw
+// ---------------------------------------------------------------------------
+
+{
+  const llm = fakeLlm({ text: JSON.stringify({ suggestions: ['a'.repeat(90) + '.', 'b'.repeat(500) + '.', 'c'.repeat(90) + '.'] }) })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  // The chip is at most `MAX_SUGGESTION_CHARS`, or one more when the extra
+  // character is the full stop that ends the sentence: a sentence ending exactly
+  // at the boundary keeps its stop instead of being cut to an ellipsis, which is
+  // why the allowance exists rather than being a rounding detail.
+  const drawable = (item) => item.length <= MAX_SUGGESTION_CHARS || (item.length === MAX_SUGGESTION_CHARS + 1 && /[。！？.!?…]$/.test(item))
+  check('a mixed answer still yields chips', answer.items.length >= MIN_SUGGESTIONS, JSON.stringify(answer.items.map((item) => item.length)))
+  check('every chip is drawable', answer.items.every(drawable) === true, JSON.stringify(answer.items.map((item) => item.length)))
+  check('a paragraph is dropped rather than cut into a chip', answer.items.some((item) => item.startsWith('b')) === false, JSON.stringify(answer.items.map((item) => item.slice(0, 4))))
+}
+
+{
+  const llm = fakeLlm({ text: JSON.stringify({ suggestions: ['A one.', 'B two.', 'C three.', 'D four.', 'E five.'] }) })
+  const suggestor = new Suggestor({ config: config({ suggestionCount: 2 }), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the configured count caps the row', answer.items.length === 2, String(answer.items.length))
+}
+
+// ---------------------------------------------------------------------------
+// the second round of review: what the first round's fixes got wrong
+// ---------------------------------------------------------------------------
+
+{
+  // `$` inside a window that is itself a slice matches the window's own end, so
+  // every character at the cut looked like a sentence end and a chip was clipped
+  // mid-token -- `Refactor .../lib/suggest.js` came back as `.../lib/suggest.`
+  const file = `${'a'.repeat(120)}.js is stale`
+  const clipped = clipSentence(file)
+  check('a period followed by more text is not a sentence end', clipped.endsWith('.') === false, clipped.slice(-14))
+  check('and the chip is closed with an ellipsis instead', clipped.endsWith('…') === true, clipped.slice(-4))
+  check('the ellipsis counts inside the width', clipped.length <= 120, String(clipped.length))
+  // A period on the very last usable character must not push the chip to 121:
+  // the sentence branch is held to the same width as the ellipsis branch.
+  const ending = clipSentence(`${'a'.repeat(120)}.`)
+  check('a period at the edge does not widen the chip', ending.length === 120, String(ending.length))
+
+  // A bracketed number in the preamble used to parse as the answer, and because
+  // a value had been found the line reader never ran.
+  const preamble = parseSuggestions('Here are [2] options:\nFix the failing cursor test\nRun the failing suite')
+  check('a bracketed number in the preamble is not the answer', preamble.length === 2, JSON.stringify(preamble))
+  check('and the preamble itself is not a chip', preamble.includes('Here are [2] options:') === false, JSON.stringify(preamble))
+  // An introducer ending in a colon is a line, not a step.
+  const introduced = parseSuggestions('Here are three things:\nFix the failing cursor test\nRun the failing suite')
+  check('an introducer ending in a colon is dropped', introduced.includes('Here are three things:') === false, JSON.stringify(introduced))
+
+  // An item parsed out of the contract may legitimately begin with a bracket;
+  // the markup guard belongs to the line reader, not to every candidate.
+  const bracketed = parseSuggestions(JSON.stringify({ suggestions: ['[fix] the failing cursor test', 'Run the failing suite'] }))
+  check('a bracketed item from the contract survives', bracketed.length === 2, JSON.stringify(bracketed))
+
+  // A closing paragraph after one bullet is the prose the blank-line rule exists
+  // to drop, even though the row is then too short to draw.
+  check('a closing paragraph after a single bullet is not a chip', parseSuggestions('- Fix the failing cursor test\n\nThat is all I would do here.').length === 0)
+  // But a bulleted list separated by blank lines is one list.
+  check('bullets separated by blank lines are all kept', parseSuggestions('- Fix it\n\n- Run it\n\n- Ship it').length === 3)
+  // And a plain list with one item formatted as code keeps the other two.
+  const rescues = parseSuggestions('Fix the failing cursor test\nRun `pnpm test`\n\nAdd a regression test for the empty input case')
+  check('a code-formatted item does not cost the rest of the row', rescues.length === 2, JSON.stringify(rescues))
+  check('and the code item itself is not a chip', rescues.some((item) => item.includes('`')) === false, JSON.stringify(rescues))
+}
+
+console.log(`\n${passed} passed, ${failed} failed`)
+if (failed > 0) {
+  for (const failure of failures) console.log(`  FAIL ${failure}`)
+  process.exit(1)
+}

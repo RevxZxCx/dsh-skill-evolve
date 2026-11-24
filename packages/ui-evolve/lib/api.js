@@ -1041,6 +1041,51 @@ function createPanelApi(deps) {
         if (headOnly !== true) await speedWait(deps, req, agentId, url.searchParams)
         return json(res, 200, { ok: true, data: deps.speedOf(agentId) }, headOnly)
       }
+      // "What should I do next". A read, and the only route in this plugin that
+      // reaches a model on behalf of a turn that has already finished.
+      //
+      // It is its own route rather than a field on `/panel` for two reasons, and
+      // the second is the important one. The panel is polled on a clock, and
+      // this call takes hundreds of milliseconds; folding them together would
+      // either slow every poll down or let the panel's own deadline cancel the
+      // call. And the panel is asked about sessions nobody is watching — the
+      // route is only ever asked by a composer, which exists for the one session
+      // in front of a person. That is what makes "not being looked at" cost
+      // nothing (see `lib/suggest.js`), and it is why this route may sit behind
+      // an ordinary request with no further gate than its own cache.
+      if (path === `${ROUTE_PREFIX}/suggestions`) {
+        // No switch branch here: the route answers even when suggestions are
+        // turned off, because "off" is a fact the composer has to be able to
+        // read. A 404 would leave it retrying, and an empty list with no reason
+        // would leave it unable to tell "off" from "nothing yet" — the two cases
+        // that differ in whether the next turn's chip row ever appears.
+        //
+        // The one route here that reaches a model on a read is also the one that
+        // says so: the shared method gate lets POST through because most routes
+        // take a body, and a POST to this one would buy a set of chips for a
+        // caller that is not a composer.
+        if (req.method !== 'GET' && req.method !== 'HEAD') {
+          return json(res, 405, { ok: false, code: 'error.method.unsupported', error: `${req.method} is not supported on a read` })
+        }
+        if (typeof agentId !== 'string' || agentId.length === 0) {
+          return json(res, 400, { ok: false, code: 'error.agent.missing', error: 'the suggestions route needs a session id' }, headOnly)
+        }
+        if (typeof deps.suggestor?.suggestions !== 'function') {
+          return json(res, 200, { ok: true, data: { enabled: false, items: [], reason: 'this panel does not suggest' } }, headOnly)
+        }
+        // A probe learns only that the route exists. Answering it fully would
+        // mean a paid call for a HEAD, and the client's health check does not
+        // ask with one.
+        if (headOnly === true) return json(res, 200, { ok: true, data: { enabled: true, items: [] } }, true)
+        const view = await viewOf(deps, agentId)
+        // The session's own route first, exactly as the summary does: a route
+        // this session is already running on is proven reachable and authorised
+        // for this account, while a catalogue entry only proves some adapter
+        // advertised it.
+        const sessionRoute = typeof deps.routeFor === 'function' ? deps.routeFor(agentId) : undefined
+        const answer = await deps.suggestor.suggestions({ agentId, view, sessionRoute })
+        return json(res, 200, { ok: true, data: answer })
+      }
       // `config` is a read on GET/HEAD and a write on POST. The read is checked
       // by method as well as path: matching on the path alone made the write
       // branch below unreachable, so the panel's switches answered "saved" and
@@ -1381,9 +1426,9 @@ async function readPanel(deps, agentId) {
 /**
  * The settings the panel can change from inside itself.
  *
- * Only three, and all three are about the panel. Everything that governs the
- * detector lives in the host's own settings UI, where changing it is a decision
- * with a diff.
+ * Five, and all five are about the panel. Everything that governs the detector
+ * lives in the host's own settings UI, where changing it is a decision with a
+ * diff.
  *
  * @param {object} deps - the API dependencies.
  * @returns {object} the payload.
@@ -1400,6 +1445,14 @@ function readConfig(deps) {
     // finite value that would collapse the column on the first measurement.
     monitorColumn: config.monitorColumn !== false,
     monitorWidth: Number.isFinite(config.monitorWidth) ? config.monitorWidth : null,
+    // The next-step switches. `panelSuggestions` is read by the panel's own
+    // settings row, so "off" has to survive the round trip to the switches that
+    // turned it off; `suggestionCount` follows `monitorWidth` in going out as
+    // `null` rather than a substituted number when the setting is not a number,
+    // because the client treats a finite value as the answer and anything else
+    // as "use the designed default".
+    panelSuggestions: config.panelSuggestions !== false,
+    suggestionCount: Number.isFinite(config.suggestionCount) ? config.suggestionCount : null,
   }
 }
 
@@ -1474,11 +1527,19 @@ function writeConfig(deps, body) {
   // file from here would let one plugin rewrite another's settings.
   if (typeof body?.monitorColumn === 'boolean') patch.monitorColumn = body.monitorColumn
   if (Number.isFinite(body?.monitorWidth)) patch.monitorWidth = body.monitorWidth
+  if (typeof body?.panelSuggestions === 'boolean') patch.panelSuggestions = body.panelSuggestions
+  if (Number.isFinite(body?.suggestionCount)) patch.suggestionCount = body.suggestionCount
   if (Object.keys(patch).length === 0) {
     return { ...readConfig(deps), ok: false, reason: 'nothing to change' }
   }
   deps.applyOverride(patch)
   if (patch.summaryProvider !== undefined || patch.summaryModel !== undefined) deps.summariser.reset()
+  // A suggestion says "given these turns, do this next". Turning the feature off
+  // and on again, or changing how many chips are asked for, changes the question
+  // — but the cache is keyed by turn and text, so a stale answer would survive
+  // both. Dropping it costs at most one call on the next turn, and the
+  // alternative is a switch that appears not to have worked.
+  if (patch.panelSuggestions !== undefined || patch.suggestionCount !== undefined) deps.suggestor?.reset?.()
   return {
     ...readConfig(deps),
     ok: true,

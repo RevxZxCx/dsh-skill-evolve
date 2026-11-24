@@ -51,6 +51,8 @@ window.__ModuleLoader__.load({
     const NS = "@revxz/dsh-ui-evolve"
     const PANEL_ID = "@revxz/dsh-ui-evolve:cards"
     const TOGGLE_ID = "@revxz/dsh-ui-evolve:toggle"
+    const SUGGEST_ID = "@revxz/dsh-ui-evolve:suggestions"
+    const GHOST_ID = "@revxz/dsh-ui-evolve:ghost"
     /**
      * How often the panel asks when nothing has told it to.
      *
@@ -1038,6 +1040,53 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
    it, so the overlap it measured was an artefact of the probe rather than a
    property of the layout. Keeping the rule would only disturb the host's
    stacking to fix a collision that does not happen. */
+
+/* ---- next-step suggestions ------------------------------------------------
+   Two surfaces over one answer: a short list above the composer (the turn just
+   finished, so here is what could come next) and a ghost line inside the empty
+   composer (the same first item, ready to be seeded by Tab).
+
+   Neither is a card. A card in the dock would put a panel between the reader and
+   the box they are about to type in, and the dock's own furniture — the queue —
+   is already a full-width bordered row. So the list borrows the row shape the
+   cards use for their list bodies: transparent, radius 7, the sheet colour on
+   hover. Nothing new is introduced to look at; the offer reads as text that
+   happens to be clickable, which is what it is. */
+
+/* Hidden means gone, not "zero height": an empty grid still occupies the dock's
+   gap, and a gap that appears and disappears under the composer reads as the
+   host's layout moving. */
+.dsse-suggest{display:grid;gap:1px;padding:0}
+.dsse-suggest[data-shown="false"]{display:none}
+.dsse-suggest-item{display:flex;align-items:center;gap:8px;width:100%;min-height:30px;padding:4px 8px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:.92em;line-height:1.45;text-align:left;cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
+.dsse-suggest-item:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
+.dsse-suggest-item:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
+/* One line each, ellipsised. The server already shortens to roughly a chip's
+   worth of characters; this is the backstop for a wide character run that still
+   does not fit, and it is the reason a chip cannot push the composer down. */
+.dsse-suggest-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* The arrow appears on hover only. Three permanent arrows in a column of text
+   look like a menu; one arrow on the row the pointer is on looks like a row you
+   can follow. */
+.dsse-suggest-go{flex:0 0 auto;width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:0;transition:opacity 160ms ease}
+.dsse-suggest-item:hover .dsse-suggest-go,.dsse-suggest-item:focus-visible .dsse-suggest-go{opacity:1}
+
+/* The ghost is text *in* the box, not a bar over it. Its offset is measured from
+   the host's own placeholder at run time (see SuggestGhost below) rather than written
+   here: the placeholder is laid out by the host's padding, and a number copied
+   from one theme would land on the wrong line in the next. */
+.dsse-ghost{position:absolute;display:flex;align-items:baseline;gap:6px;max-width:100%;pointer-events:none;color:var(--dsw-alias-label-tertiary,#8b92a1);font:inherit;line-height:inherit}
+.dsse-ghost[data-shown="false"]{display:none}
+.dsse-ghost-text{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
+/* The keycap is drawn apart from the sentence on purpose. "Tab" inside the
+   suggestion would be read as part of the prompt -- and typed, if the reader
+   selected the line. As its own box the same word is unambiguously a key. */
+.dsse-ghost-key{flex:0 0 auto;display:inline-grid;place-items:center;min-width:26px;height:17px;padding:0 5px;border:1px solid var(--dsw-alias-border-l2,rgba(15,17,21,.16));border-radius:4px;background:var(--dsw-alias-bg-layer-1,#fff);color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:max(.72em,10px);font-style:normal;line-height:1;user-select:none}
+/* The host keeps its placeholder laid out while we cover it, so the measurement
+   above stays valid on every render. Visibility rather than display, and no
+   !important: the box keeps its geometry, so the ghost can be re-measured
+   without a frame where neither text is in the DOM. */
+[data-composer-placeholder][data-dsse-ghosted="true"]{visibility:hidden}
 `
     let typographyObserver = null
     let typographyContent = null
@@ -4510,6 +4559,553 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       })
     }
 
+    /* -----------------------------------------------------------------------
+     * Next-step suggestions (docs/29).
+     *
+     * Two surfaces, one answer: the chips above the composer and the ghost line
+     * inside it are the same list, fetched once per turn.
+     *
+     * The whole thing is *on demand*. There is no turn-end handler here and no
+     * timer: the server only generates when this page asks, and the page only
+     * asks when a composer is on screen. That is deliberate, and it is the one
+     * place this differs from the design note -- the note had a "somebody is
+     * looking at this session" gate that a background pass would check; asking
+     * from the composer is that gate, made unfalsifiable. Qoder shipped the same
+     * feature the other way round and had to bugfix it: "Prompt Suggestion
+     * processing could block the next request". Nothing here can block a
+     * request, because nothing here runs during one.
+     *
+     * The refresh trigger is the panel's own push stream, opened a second time
+     * for the composer (`/events` fans out to every listener; a frame is two
+     * numbers). It is not free, so it is opened once per mounted composer and
+     * closed with it, and it carries no payload -- it only says "the transcript
+     * moved", which is exactly when a finished turn becomes offerable.
+     */
+
+    /**
+     * How long one suggestion request may stay out before it is abandoned.
+     *
+     * Longer than the server's own twelve seconds (`SUGGEST_TIMEOUT_MS`), so the
+     * server's verdict is the one that arrives: if this page gave up first the
+     * request would be cancelled, the server would record no failure, and the
+     * next frame would buy the same call again. Same reasoning as
+     * `PANEL_TIMEOUT_MS`, and the same number.
+     */
+    const SUGGEST_REQUEST_MS = 15000
+
+    /**
+     * How long an offer may still be drawn after the answer that produced it.
+     *
+     * The same fifteen minutes as the server's `SUGGEST_TTL_MS`, and for the
+     * same reason: past it the server would not serve this answer any more, so
+     * a page still holding it is showing something the machine has already
+     * disowned. It matters because a failed refresh deliberately keeps the last
+     * answer on screen (an error line under the composer is worse than an
+     * offer that is a few minutes old), and "keeps it" must not mean "keeps it
+     * forever".
+     */
+    const SUGGEST_MAX_AGE_MS = 15 * 60 * 1000
+
+    /**
+     * What the page currently knows about the suggestions for one session.
+     *
+     * Module scope rather than component state because the chips and the ghost
+     * are two slots with two mount points: one fetch serves both, and a shared
+     * store is also what keeps them from disagreeing for a frame (the ghost
+     * showing the second item while the chips list starts at the first).
+     *
+     * `loaded` is separate from `items.length` on purpose. "Asked and there are
+     * none" and "not asked yet" look identical in an empty array, and only one
+     * of them may be drawn as nothing -- the other would flash the composer's
+     * own placeholder back in after every turn that produced no offer.
+     */
+    const suggest = {
+      sessionId: "",
+      items: [],
+      enabled: true,
+      reason: "",
+      loaded: false,
+      at: 0,
+      // The texts this page has already acted on. A chip that was clicked has
+      // been sent; without this the same sentence is offered again the moment
+      // the input machine returns to rest, and clicking twice sends a prompt
+      // twice.
+      used: new Set(),
+      expiry: null,
+      // A frame that arrived while a request was out. Coalescing the requests
+      // is right (a burst of frames must not buy a burst of calls); dropping
+      // the last one is not, because that is the frame that says the turn the
+      // reader is looking at has ended.
+      again: false,
+      listeners: new Set(),
+      inflight: null,
+    }
+
+    function subscribeSuggest(listener) {
+      suggest.listeners.add(listener)
+      return () => {
+        suggest.listeners.delete(listener)
+      }
+    }
+
+    function notifySuggest() {
+      for (const listener of [...suggest.listeners]) listener()
+    }
+
+    /**
+     * Wake the row when its answer gets too old to show.
+     *
+     * `fresh` is computed during render, and nothing renders at the fifteen
+     * minute mark on its own: with the stream closed or a quiet transcript, a
+     * chip from an hour ago stays drawn and the promise that "keeps it" does
+     * not mean "keeps it forever" quietly stops being true. One timer per
+     * answer, reconfigured on every successful read, is the smallest thing that
+     * makes the boundary real. It only notifies -- the render then finds `at`
+     * too old and draws nothing.
+     */
+    function armExpiry() {
+      if (suggest.expiry !== null) {
+        clearTimeout(suggest.expiry)
+        suggest.expiry = null
+      }
+      if (suggest.at <= 0) return
+      const left = suggest.at + SUGGEST_MAX_AGE_MS - Date.now()
+      suggest.expiry = setTimeout(() => {
+        suggest.expiry = null
+        notifySuggest()
+      }, left > 0 ? left : 0)
+    }
+
+    /**
+     * Forget everything for the session that is no longer on screen.
+     *
+     * The in-flight request is aborted rather than left to land: its answer
+     * would be written against the session the reader has just left.
+     *
+     * @param {string} sessionId - the session that replaced it.
+     */
+    function resetSuggest(sessionId) {
+      if (suggest.inflight !== null) {
+        suggest.inflight.abort()
+        suggest.inflight = null
+      }
+      armExpiry()
+      suggest.sessionId = sessionId
+      suggest.items = []
+      suggest.enabled = true
+      suggest.reason = ""
+      suggest.loaded = false
+      suggest.at = 0
+      suggest.used.clear()
+      suggest.again = false
+    }
+
+    /**
+     * Ask once, and keep the answer.
+     *
+     * A second call while one is out does not start a second request: the
+     * answer on its way describes the same transcript, and a queue of them
+     * would let a burst of stream frames buy a burst of calls. It does set
+     * `again`, though, because one of those frames may be the one that says the
+     * turn now on screen has finished -- the answer in flight was bought before
+     * it and would land describing the previous one.
+     *
+     * @param {string} sessionId - whose suggestions to ask for.
+     * @returns {Promise<void>} resolves when this request is done.
+     */
+    async function loadSuggest(sessionId, coalesce = false) {
+      if (sessionId === "") return
+      if (suggest.sessionId !== sessionId) resetSuggest(sessionId)
+      if (suggest.inflight !== null) {
+        // A mount joins the request that is already out and asks for nothing
+        // more: both slots mount in the same commit, so queueing a follow-up
+        // here would buy a second call on every mount. Only a stream frame --
+        // which may be the one announcing that the turn on screen has ended --
+        // is worth a second ask.
+        if (coalesce === false) suggest.again = true
+        return
+      }
+      const controller = new AbortController()
+      suggest.inflight = controller
+      // The timer is the client's own, not a `Promise.race`: aborting the fetch
+      // is what tells the server to stop, and a raced promise would leave the
+      // request running against a page that had already moved on.
+      const timer = setTimeout(() => controller.abort(), SUGGEST_REQUEST_MS)
+      try {
+        const data = await call(`/suggestions?agent=${encodeURIComponent(sessionId)}`, { signal: controller.signal })
+        if (suggest.sessionId !== sessionId) return
+        suggest.enabled = data?.enabled !== false
+        // The wire carries strings (`suggest.js` pushes the text and the route
+        // passes the answer through). An object carrying `text` is accepted
+        // too, and not out of politeness: this read and the fixture the client
+        // suite feeds were written against different shapes once, and both
+        // halves stayed green while nothing could be drawn. Accepting both is
+        // what makes that mismatch impossible to reintroduce silently.
+        suggest.items = Array.isArray(data?.items)
+          ? data.items
+              .map((item) => (typeof item === "string" ? item : item?.text))
+              .filter((text) => typeof text === "string" && text !== "")
+              .map((text) => ({ text }))
+          : []
+        suggest.reason = typeof data?.reason === "string" ? data.reason : ""
+        // A retired chip comes back only when the answer behind it is a *new*
+        // answer. The server answers a frame during a turn from its cache with
+        // the same `items` and the same `at`, so clearing on every successful
+        // read would put the chip the reader just clicked back on the row the
+        // moment the turn ended -- and clicking it again would send the same
+        // prompt twice. `at` is the identity of the answer; if it did not move,
+        // nothing was re-bought and nothing is re-offerable.
+        const stamp = Number.isFinite(data?.at) ? data.at : 0
+        if (stamp !== suggest.at) suggest.used.clear()
+        suggest.at = stamp
+        armExpiry()
+        suggest.loaded = true
+      } catch (error) {
+        // A failed read is not "there are none". Keep the last answer and draw
+        // nothing new: an error line under the composer because an offer could
+        // not be fetched is worse than a missing offer, and the next stream
+        // frame asks again. `loaded` is untouched for the same reason -- a
+        // failed first read must not be mistaken for an empty one.
+        if (suggest.sessionId === sessionId) suggest.reason = error instanceof Error ? error.message : String(error)
+      } finally {
+        clearTimeout(timer)
+        if (suggest.inflight === controller) suggest.inflight = null
+        notifySuggest()
+        // One more ask for the frame that arrived while this one was out. Read
+        // and cleared first, so a frame that lands during the retry sets it
+        // again and is honoured instead of lost.
+        if (suggest.again === true) {
+          suggest.again = false
+          void loadSuggest(suggest.sessionId)
+        }
+      }
+    }
+
+    /**
+     * Ask for this session's offer unless the answer is already in hand.
+     *
+     * Two slots read the same store and either can mount first, so both need a
+     * way in that cannot cost a second call: `loadSuggest` is the refresh (a
+     * stream frame, a session change) and this is the mount.
+     *
+     * @param {string} sessionId - whose suggestions to ask for.
+     * @returns {Promise<void>|undefined} the request, or nothing when the store
+     *   already holds this session's answer.
+     */
+    function ensureSuggest(sessionId) {
+      if (sessionId === "") return undefined
+      if (suggest.sessionId === sessionId && suggest.loaded === true) return undefined
+      return loadSuggest(sessionId)
+    }
+
+    /**
+     * Seed the composer with an offer, through the host's own action face.
+     *
+     * `setDraft` is the verb the host uses for a seed the reader did not type
+     * (draft initialization, moving a draft between conversations): it clears
+     * the document, keeps the caret at the end, and merges into history so the
+     * seed is not an undoable step of its own. It is also the only public way
+     * in -- the editor is Lexical, and assigning to a textarea's value is not a
+     * gesture that exists here.
+     *
+     * @param {object} actions - the `inputActions` prop.
+     * @param {string} text - the suggestion.
+     * @returns {boolean} whether anything was written.
+     */
+    function seedDraft(actions, text) {
+      if (actions === null || typeof actions !== "object") return false
+      if (typeof actions.setDraft !== "function") return false
+      try {
+        actions.setDraft(text)
+        // Flush it to the conversation store now. The host would do this on the
+        // next edit tick; a seeded draft has no edit tick, and a seed the reader
+        // reloads away is a suggestion they accepted and lost.
+        if (typeof actions.persistDraft === "function") actions.persistDraft()
+      } catch {
+        return false
+      }
+      return true
+    }
+
+    /**
+     * Seed the composer and send it, which is what a chip click means.
+     *
+     * The send is deferred by one microtask because `submit` reads the published
+     * input snapshot rather than the editor: the seed lands in the editor
+     * synchronously, and the snapshot that `submit` checks for "is there
+     * anything to send" is published from the same update. A microtask is the
+     * smallest delay that is always after that publication.
+     *
+     * @param {object} actions - the `inputActions` prop.
+     * @param {string} text - the suggestion.
+     * @returns {void}
+     */
+    function sendSuggestion(actions, text) {
+      if (seedDraft(actions, text) === false) return
+      // Retire the chip now, not when the answer to it comes back. The send is
+      // in flight; the input machine hides the row while it is busy, and the
+      // moment it returns to rest this same sentence would otherwise be offered
+      // again -- a clickable chip that sends a prompt the turn already received.
+      //
+      // Before the `submit` check, and not after it: a face that can seed but
+      // not send still put the sentence in the box, so the chip is spent even
+      // though no turn started.
+      suggest.used.add(text)
+      notifySuggest()
+      if (typeof actions.submit !== "function") return
+      queueMicrotask(() => {
+        try {
+          actions.submit()
+        } catch {
+          // The seed is still in the box, and Enter sends it. Failing loudly
+          // here would put an error under a composer that is already usable.
+        }
+      })
+    }
+
+    /**
+     * Whether both surfaces may draw for this state.
+     *
+     * @param {object} input - the published input snapshot.
+     * @returns {object} the gates, each named so a test can read them.
+     */
+    function suggestGates(input) {
+      const draft = typeof input?.draft === "string" ? input.draft : ""
+      const phase = typeof input?.phase === "string" ? input.phase : "inert"
+      const attachments = Array.isArray(input?.attachmentIds) ? input.attachmentIds.length : 0
+      return {
+        // `plain` is the submit machine's resting phase (not "idle": the machine
+        // has no such state). Anything else means a submission is being
+        // adjudicated, is in flight, or the session is inert -- in all three the
+        // composer is not offering anything.
+        idle: phase === "plain",
+        empty: draft.trim() === "",
+        bare: attachments === 0,
+        draft,
+      }
+    }
+
+    /**
+     * The chips above the composer.
+     *
+     * Session-scoped, so it exists only while a conversation is on screen, and
+     * it is the component that owns the fetch and the stream for both surfaces:
+     * the ghost mounts inside the composer card, which is drawn even when the
+     * dock is collapsed, so it cannot own a connection on its own.
+     *
+     * @param {object} props - injected props plus the host's provided kit.
+     * @returns {object|null} the element, or null when there is nothing to offer.
+     */
+    function SuggestChips(props) {
+      const sessionId = typeof props?.sessionId === "string" ? props.sessionId : ""
+      const input = typeof props?.useInput === "function" ? props.useInput() : undefined
+      const gates = suggestGates(input)
+      const [, force] = React.useState(0)
+
+      React.useEffect(() => {
+        ensureStyle()
+        return subscribeSuggest(() => force((value) => value + 1))
+      }, [])
+
+      React.useEffect(() => {
+        if (sessionId === "") return undefined
+        loadSuggest(sessionId)
+        // No `EventSource` (a test harness, an old renderer): the chips still
+        // load on mount and on every remount. What is lost is the refetch when a
+        // turn ends while this composer stays mounted, which is the common case
+        // in a real browser and never the case in the tests.
+        if (typeof EventSource !== "function") return undefined
+        const opened = new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))
+        opened.addEventListener("message", () => loadSuggest(sessionId))
+        // Closing on a fatal failure is what lets the browser retry on its own
+        // schedule instead of the stream looking healthy and silent forever;
+        // a dropped connection (readyState CONNECTING) is left alone for exactly
+        // the same reason the card column leaves it alone.
+        opened.addEventListener("error", () => {
+          if (opened.readyState === 2) opened.close()
+        })
+        return () => opened.close()
+      }, [sessionId])
+
+      // What is still on offer: the answered list minus what has been sent, and
+      // only while the answer is younger than the server would serve it. Both
+      // conditions guard the same failure -- a row that says "here is what to
+      // do next" while describing a turn that is no longer the last one.
+      const offer = suggest.items.filter((item) => suggest.used.has(item.text) === false)
+      const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS
+      const shown =
+        sessionId !== "" &&
+        suggest.sessionId === sessionId &&
+        suggest.loaded === true &&
+        suggest.enabled === true &&
+        fresh &&
+        offer.length > 0 &&
+        gates.idle
+      // The gate is read through a closure in the click handler, so the handler
+      // is rebuilt when it changes -- but the handlers here are cheap and a
+      // stale one could only fire a send the gate would have refused a frame
+      // later, which the input machine refuses anyway.
+      return jsx("div", {
+        className: "dsse-suggest",
+        "data-dsse-suggest": "1",
+        "data-shown": shown ? "true" : "false",
+        "aria-label": "后续建议",
+        children: shown
+          ? offer.map((item, index) =>
+              jsxs("button", {
+                type: "button",
+                className: "dsse-suggest-item",
+                "data-index": index,
+                title: item.text,
+                onClick: () => sendSuggestion(props?.inputActions, item.text),
+                // Children go in `props`, not in the third argument: the third
+                // argument of `jsxs` is the key, so a list passed there becomes a
+                // key and the button renders empty. Caught by this feature's own
+                // suite, which is the only thing that looks inside the label.
+                children: [
+                  jsx("span", { className: "dsse-suggest-text", children: item.text }),
+                  jsx("svg", {
+                    className: "dsse-suggest-go",
+                    viewBox: "0 0 24 24",
+                    "aria-hidden": "true",
+                    children: jsx("path", { d: "M5 12h13M12 6l6 6-6 6" }),
+                  }),
+                ],
+              }),
+            )
+          : null,
+      })
+    }
+
+    /**
+     * The ghost line inside an empty composer.
+     *
+     * Drawn from the first offer, in the host's own placeholder position, and it
+     * takes Tab (or the right arrow) to seed the draft -- not to send it. The
+     * two surfaces therefore mean two different things on purpose: a chip is a
+     * decision, Tab is a start.
+     *
+     * @param {object} props - injected props plus the host's provided kit.
+     * @returns {object} the element.
+     */
+    function SuggestGhost(props) {
+      const sessionId = typeof props?.sessionId === "string" ? props.sessionId : ""
+      const input = typeof props?.useInput === "function" ? props.useInput() : undefined
+      const gates = suggestGates(input)
+      const [, force] = React.useState(0)
+      const [place, setPlace] = React.useState(null)
+      const nodeRef = React.useRef(null)
+
+      React.useEffect(() => {
+        ensureStyle()
+        return subscribeSuggest(() => force((value) => value + 1))
+      }, [])
+
+      // The ghost loads too, even though the chips are the surface that owns the
+      // stream. Depending on another slot having mounted first would make this
+      // line appear or not depending on whether the dock happened to be drawn,
+      // and `ensureSuggest` reads the shared store first, so the second surface
+      // costs nothing.
+      React.useEffect(() => {
+        ensureSuggest(sessionId)
+      }, [sessionId])
+
+      // The ghost offers the first item still on offer -- the same list the
+      // chips draw, minus whatever has been sent, and under the same age rule.
+      // A ghost that keeps proposing a prompt already spent is worse than no
+      // ghost: it is the one line the reader sees while deciding what to type.
+      const lead = suggest.items.find((item) => suggest.used.has(item.text) === false)
+      const text = lead?.text ?? ""
+      const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS
+      const shown =
+        sessionId !== "" &&
+        suggest.sessionId === sessionId &&
+        suggest.loaded === true &&
+        suggest.enabled === true &&
+        fresh &&
+        text !== "" &&
+        gates.idle &&
+        gates.empty &&
+        gates.bare
+
+      // What the key handler needs, kept in a ref so the listener is registered
+      // once per session rather than once per keystroke's worth of render.
+      const live = React.useRef({ shown, text, actions: props?.inputActions })
+      live.current = { shown, text, actions: props?.inputActions }
+
+      // Position over the host's placeholder and hide it while we are there.
+      //
+      // Measured, not written into the stylesheet: the placeholder is laid out
+      // by the host's own padding and line height, and a constant copied from
+      // one theme lands on the wrong line in the next. `useLayoutEffect` because
+      // a frame with both texts drawn is exactly the double image this exists to
+      // avoid.
+      React.useLayoutEffect(() => {
+        const node = nodeRef.current
+        const card = node === null ? null : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
+        const placeholder = card === null ? null : card.querySelector("[data-composer-placeholder]")
+        if (placeholder === null) {
+          // No placeholder to measure against means no line to draw on. The
+          // ghost stays away rather than guessing an offset -- an offer in the
+          // wrong place is worse than no offer.
+          if (place !== null) setPlace(null)
+          return undefined
+        }
+        placeholder.setAttribute("data-dsse-ghosted", shown ? "true" : "false")
+        if (shown !== true) return () => placeholder.setAttribute("data-dsse-ghosted", "false")
+        const box = placeholder.getBoundingClientRect()
+        const frame = card.getBoundingClientRect()
+        const left = Math.round(box.left - frame.left)
+        const top = Math.round(box.top - frame.top)
+        if (place === null || place.left !== left || place.top !== top) setPlace({ left, top })
+        return () => placeholder.setAttribute("data-dsse-ghosted", "false")
+      })
+
+      React.useEffect(() => {
+        const node = nodeRef.current
+        const card = node === null ? null : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
+        if (card === null) return undefined
+        const onKeyDown = (event) => {
+          if (live.current.shown !== true) return
+          if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return
+          const tab = event.key === "Tab" && event.shiftKey !== true
+          const arrow = event.key === "ArrowRight" && event.shiftKey !== true
+          if (tab === false && arrow === false) return
+          // Capture phase, on the composer card: the editor underneath owns Tab
+          // (indentation, menu navigation) and would take this keystroke before
+          // any listener of ours that was not capturing.
+          event.preventDefault()
+          event.stopPropagation()
+          seedDraft(live.current.actions, live.current.text)
+        }
+        // Escape is deliberately not handled. The host binds it to stop the
+        // running turn; taking it to dismiss an offer would trade a real control
+        // for a cosmetic one, on a line that is already out of the way.
+        card.addEventListener("keydown", onKeyDown, true)
+        return () => card.removeEventListener("keydown", onKeyDown, true)
+      }, [sessionId])
+
+      // `data-shown` describes what is on the screen, not what the gates said:
+      // an element that reports itself shown while its inline style says
+      // `visibility:hidden` is a lie, and the one case that produces it -- a
+      // composer card with no placeholder to measure against -- is precisely the
+      // case a reader would call a bug. The gates stay on `shown` for masking the
+      // host's placeholder, which has to happen before the measurement.
+      const drawn = shown === true && place !== null
+      return jsx("div", {
+        ref: nodeRef,
+        className: "dsse-ghost",
+        "data-dsse-ghost": "1",
+        "data-shown": drawn ? "true" : "false",
+        "aria-hidden": "true",
+        style: place === null ? { left: 0, top: 0, visibility: "hidden" } : { left: `${place.left}px`, top: `${place.top}px` },
+        children: [
+          jsx("span", { className: "dsse-ghost-text", children: text }, "text"),
+          jsx("span", { className: "dsse-ghost-key", children: "Tab" }, "key"),
+        ],
+      })
+    }
+
     /**
      * The header button that opens the cards.
      *
@@ -4645,11 +5241,62 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         "skill-evolve: card overlay",
       )
 
+      // The offer above the composer. `conversation.input.dock` is the row stack
+      // the host draws directly over the input card — the queue lives in it
+      // (order 20) and the host's todo panel before that (order 0). Order 30 is
+      // last of the three, i.e. nearest the box it fills: the queue describes
+      // messages already committed, and this describes the one thing you are
+      // about to do, so it belongs at the bottom of the stack rather than in the
+      // middle of it.
+      ctx.effect(
+        () =>
+          ctx.slots.inject("conversation.input.dock", () =>
+            ctx.slots.register(
+              {
+                name: "conversation.input.dock",
+                id: SUGGEST_ID,
+                order: 30,
+                registrant: NS,
+                inject: (sessionId) => ({ sessionId }),
+              },
+              SuggestChips,
+            ),
+          ),
+        "skill-evolve: next-step chips",
+      )
+
+      // The ghost line inside an empty composer. `conversation.input.overlay` is
+      // a zero-height anchor at the card's top edge (`position:absolute;
+      // inset:0 0 auto`), so a node absolutely positioned inside it floats over
+      // the editor's first line — which is exactly where a completion belongs,
+      // and the only place it can be drawn without touching the editor.
+      ctx.effect(
+        () =>
+          ctx.slots.inject("conversation.input.overlay", () =>
+            ctx.slots.register(
+              {
+                name: "conversation.input.overlay",
+                id: GHOST_ID,
+                order: 10,
+                registrant: NS,
+                inject: (sessionId) => ({ sessionId }),
+              },
+              SuggestGhost,
+            ),
+          ),
+        "skill-evolve: composer ghost",
+      )
+
       ctx.effect(
         () => () => {
           bridge.open = false
           bridge.listeners.clear()
           openResource = undefined
+          // The offer is per session and per turn, and the plugin is leaving: an
+          // in-flight request is aborted rather than left to land in a store
+          // nobody subscribes to any more.
+          resetSuggest("")
+          suggest.listeners.clear()
           stopHostTypography()
           // The reservation is a modification of the host's own scroll container.
           // Leaving it behind keeps the conversation narrowed after the plugin is

@@ -21,6 +21,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { placeMonitor, MONITOR_MIN_WIDTH, MONITOR_MAX_WIDTH } from '../packages/ui-evolve/lib/gutter.js'
+// The server's own deadline, so the client's can be asserted to outwait it
+// rather than merely to be a number.
+import { SUGGEST_TIMEOUT_MS } from '../packages/ui-evolve/lib/suggest.js'
 
 const here = fileURLToPath(new URL('.', import.meta.url))
 const repo = join(here, '..')
@@ -1250,7 +1253,10 @@ check('the bundle requires react', booted.requested.includes('react'), JSON.stri
 
 booted.module.apply(booted.ctx)
 
-check('two slots are injected', booted.injectedNames.length === 2, JSON.stringify(booted.injectedNames))
+// Four seats, counted rather than listed twice: the count is what catches a
+// fifth seat arriving without anyone deciding it should, and the named checks
+// below are what catch a seat moving.
+check('four slots are injected', booted.injectedNames.length === 4, JSON.stringify(booted.injectedNames))
 // `utilities` is the right-aligned run in the session header; `actions` is the
 // left half beside the tab strip. The switch has to be next to the window
 // buttons, so this names the seat it must land in rather than just its presence.
@@ -1260,23 +1266,50 @@ check(
   JSON.stringify(booted.injectedNames),
 )
 check('the cards go into the shell overlay', booted.injectedNames.includes('shell.overlay'), JSON.stringify(booted.injectedNames))
-check('both seats registered', booted.registrations.length === 2, String(booted.registrations.length))
+// The offer has to sit over the input card, not in the header and not in the
+// shell overlay: it is about the box below it, and both of those seats are a
+// screen away from the thing a click would fill.
+check(
+  'the next-step offer goes into the composer dock',
+  booted.injectedNames.includes('conversation.input.dock'),
+  JSON.stringify(booted.injectedNames),
+)
+// The ghost is drawn inside the card itself — it has to overlay the editor's
+// first line, which only `conversation.input.overlay` (the zero-height anchor at
+// the card's top edge) can position it against.
+check(
+  'the completion ghost goes into the composer overlay',
+  booted.injectedNames.includes('conversation.input.overlay'),
+  JSON.stringify(booted.injectedNames),
+)
+check('all four seats registered', booted.registrations.length === 4, String(booted.registrations.length))
 // Named rather than counted: the count alone passed while a new effect could be
 // added anywhere, and what matters is that each one is registered under its own
 // label so its dispose shows up as its own line in the plugin's lifetime.
 check(
-  'four effects are declared, each named',
+  'six effects are declared, each named',
   JSON.stringify(booted.effects) === JSON.stringify([
     'skill-evolve: panel toggle',
     'skill-evolve: card overlay',
+    'skill-evolve: next-step chips',
+    'skill-evolve: composer ghost',
     'skill-evolve: panel teardown',
     'skill-evolve: sidebar preview',
   ]),
   JSON.stringify(booted.effects),
 )
 
+// The slot a registration names has to be the slot it was injected into, and the
+// mapping is written out per id rather than derived: a ternary ending in "not
+// toggle, therefore the overlay" would have quietly accepted both new seats.
+const SEAT_OF = {
+  '@revxz/dsh-ui-evolve:toggle': 'conversation.session.header.utilities',
+  '@revxz/dsh-ui-evolve:cards': 'shell.overlay',
+  '@revxz/dsh-ui-evolve:suggestions': 'conversation.input.dock',
+  '@revxz/dsh-ui-evolve:ghost': 'conversation.input.overlay',
+}
 for (const { spec } of booted.registrations) {
-  const expected = spec.id.endsWith(':toggle') ? 'conversation.session.header.utilities' : 'shell.overlay'
+  const expected = SEAT_OF[spec.id]
   check(`"${spec.id}" declares the slot it registers into`, spec.name === expected, `${spec.id} → ${spec.name}`)
   check(`"${spec.id}" names this plugin as registrant`, spec.registrant === '@revxz/dsh-ui-evolve', String(spec.registrant))
   check(`"${spec.id}" carries a numeric order`, Number.isFinite(spec.order), String(spec.order))
@@ -2765,7 +2798,12 @@ check(
   // The list is transcribed from the host's own registrations; a typo in a slot
   // name is not a crash, it is a seat nothing ever draws into — the quietest
   // possible failure.
-  const published = new Set(['conversation.session.header.utilities', 'shell.overlay'])
+  const published = new Set([
+    'conversation.session.header.utilities',
+    'shell.overlay',
+    'conversation.input.dock',
+    'conversation.input.overlay',
+  ])
   for (const name of booted.injectedNames) {
     check(`"${name}" is a slot the host publishes`, published.has(name), name)
   }
@@ -6215,7 +6253,7 @@ async function openPanel(routes, options) {
   check('the file is still listed without a sidebar', row !== undefined && textOf(row).includes('only.md'), textOf(tree).slice(0, 160))
   check('but it is not dressed up as a button', row?.type !== 'button' && row?.props?.onClick === undefined, String(row?.type))
   check('and the plugin still asked for the service it could not get', JSON.stringify(instance.injectedServices).includes('sidebarRight'), JSON.stringify(instance.injectedServices))
-  check('the missing sidebar is not a load failure', instance.registrations.length === 2, String(instance.registrations.length))
+  check('the missing sidebar is not a load failure', instance.registrations.length === 4, String(instance.registrations.length))
   // A card that already fits gets no control at all. Rendering one whenever the
   // list is non-empty would put a badge labelled "展开全部 1 个" on a card with
   // nothing behind it — a control that cannot reveal anything. And with no badge
@@ -7860,6 +7898,665 @@ async function openPanel(routes, options) {
   check('and is wide enough to hit without aiming', width !== null && Number(width[1]) >= 16, width === null ? 'no width' : width[1])
   check('and reaches outside the column edge', /left:-\d+px/.test(gripCss), gripCss.slice(0, 120))
   check('and still shows where the edge is', source.includes('.dsse-monitor-grip::after'), 'no visible line on the strip')
+}
+
+// ---------------------------------------------------------------------------
+// Next-step suggestions: the chips above the composer, and the ghost inside it
+// ---------------------------------------------------------------------------
+//
+// Two surfaces read one answer and mean two different things: a chip seeds the
+// draft *and* sends it, Tab only seeds it. That difference is invisible in a
+// screenshot, so it has to be pinned here -- a build where Tab also sent would
+// look exactly like a working one until a reader lost a draft they were about
+// to edit.
+
+/**
+ * One `/suggestions` answer, shaped like the route's envelope.
+ *
+ * @param {string[]} texts - the offers, in order.
+ * @param {object} [over] - `enabled`, `reason`, `at`.
+ * @returns {object} path prefix → payload.
+ */
+function suggestRoute(texts, over) {
+  const settings = over ?? {}
+  return {
+    '/api/ui-evolve/suggestions': {
+      ok: true,
+      data: {
+        enabled: settings.enabled !== false,
+        // Strings, exactly as `suggest.js` pushes them. A stub that widened
+        // this to `{ text }` is what let a client that read `item.text` stay
+        // green against a server that sends plain strings.
+        items: texts.slice(),
+        reason: typeof settings.reason === 'string' ? settings.reason : '',
+        // `Date.now()` rather than a small ordinal: the chips now refuse an
+        // answer older than `SUGGEST_MAX_AGE_MS`, and a stub timestamped in
+        // 1970 is an answer the server would no longer stand behind.
+        at: typeof settings.at === 'number' ? settings.at : Date.now(),
+      },
+    },
+  }
+}
+
+const SUGGEST_TEXTS = [
+  '把失败的 cursor 测试修好',
+  '给新加的路由补一条 HEAD 断言',
+  '更新 docs/27 的注册表',
+]
+
+/**
+ * The published input snapshot, as the composer provides it.
+ *
+ * @param {object} [over] - fields to replace.
+ * @returns {object} the snapshot.
+ */
+function inputState(over) {
+  return { draft: '', phase: 'plain', attachmentIds: [], queue: [], ...over }
+}
+
+/**
+ * A recording `inputActions` face.
+ *
+ * @returns {object} the face, with `calls` holding `[verb, ...args]` in order.
+ */
+function recordingActions() {
+  const calls = []
+  return {
+    calls,
+    setDraft: (text) => calls.push(['setDraft', text]),
+    persistDraft: () => calls.push(['persistDraft']),
+    submit: () => calls.push(['submit']),
+  }
+}
+
+/**
+ * A composer card with a placeholder the ghost can measure against.
+ *
+ * The ghost finds its line by walking up to `[data-composer-overlay]` and then
+ * asking the card for the placeholder, so the fixture answers exactly those two
+ * questions. The document stub answers neither on purpose: a ghost positioned
+ * from a constant is the bug this fixture exists to catch.
+ *
+ * @param {object} [options] - `frame` and `line`, in viewport coordinates.
+ * @returns {object} the card, its anchor, and what was written to it.
+ */
+function composerCard(options) {
+  const settings = options ?? {}
+  const frame = settings.frame ?? { left: 4, top: 20 }
+  const line = settings.line ?? { left: 24, top: 46 }
+  const marks = new Map()
+  const listeners = []
+  const placeholder = settings.missing === true ? null : {
+    getBoundingClientRect: () => ({ left: line.left, top: line.top, right: line.left + 400, bottom: line.top + 20, width: 400, height: 20 }),
+    setAttribute: (name, value) => marks.set(name, String(value)),
+    getAttribute: (name) => marks.get(name) ?? null,
+  }
+  const card = {
+    getBoundingClientRect: () => ({ left: frame.left, top: frame.top, right: frame.left + 800, bottom: frame.top + 120, width: 800, height: 120 }),
+    querySelector: (selector) => (selector === '[data-composer-placeholder]' ? placeholder : null),
+    addEventListener: (type, handler, capture) => listeners.push({ type, handler, capture }),
+    removeEventListener: (type, handler) => {
+      const at = listeners.findIndex((row) => row.handler === handler)
+      if (at >= 0) listeners.splice(at, 1)
+    },
+  }
+  const anchor = {
+    // The overlay anchor is the card's child; the card is what holds both the
+    // placeholder and the ghost's own node, which is why the walk goes one level
+    // up rather than stopping at the anchor.
+    parentElement: card,
+    closest: (selector) => (selector === '[data-composer-overlay]' ? anchor : null),
+  }
+  return {
+    card,
+    anchor,
+    marks,
+    listeners,
+    ghosted: () => marks.get('data-dsse-ghosted') ?? null,
+    keydowns: () => listeners.filter((row) => row.type === 'keydown'),
+  }
+}
+
+/**
+ * A keystroke as a capturing listener receives it.
+ *
+ * @param {string} key - `event.key`.
+ * @param {object} [over] - modifier flags, `defaultPrevented`.
+ * @returns {object} the event, with `seen` recording what was done to it.
+ */
+function keystroke(key, over) {
+  const seen = { prevented: false, stopped: false }
+  return {
+    key,
+    shiftKey: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    defaultPrevented: false,
+    ...over,
+    preventDefault() {
+      seen.prevented = true
+    },
+    stopPropagation() {
+      seen.stopped = true
+    },
+    seen,
+  }
+}
+
+/**
+ * Render one seat, let its request land, and render it again.
+ *
+ * The second render is not laziness: the answer is applied through a store and a
+ * state bump, and a single `render` returns the tree from before that bump.
+ *
+ * @param {object} instance - a booted bundle.
+ * @param {string} name - the slot id suffix, `suggestions` or `ghost`.
+ * @param {object} props - the props the host would inject.
+ * @returns {Promise<object>} the settled tree.
+ */
+async function settledSeat(instance, name, props) {
+  await instance.renderer.render(instance.seat(name), props)
+  await settle()
+  return instance.renderer.deepRender(instance.seat(name), props)
+}
+
+// --- the chips -------------------------------------------------------------
+
+{
+  // The stamped answer, and a way to move the stamp: `at` is the identity of an
+  // answer, so "the same answer again" and "a new answer" differ only here.
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  const actions = recordingActions()
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const tree = await settledSeat(instance, 'suggestions', props)
+
+  const panel = firstByClass(tree, 'dsse-suggest')
+  check('the chips draw a panel', panel !== undefined, 'no .dsse-suggest node')
+  check('and it is shown when a finished turn has offers', panel?.props['data-shown'] === 'true', String(panel?.props['data-shown']))
+  check('it carries a label a screen reader can read', typeof panel?.props['aria-label'] === 'string' && panel.props['aria-label'] !== '', String(panel?.props['aria-label']))
+
+  const items = byClass(tree, 'dsse-suggest-item')
+  check('one button per offer', items.length === SUGGEST_TEXTS.length, `${items.length} buttons for ${SUGGEST_TEXTS.length} offers`)
+  check(
+    'in the order the server sent them',
+    JSON.stringify(items.map((row) => textOf(row))) === JSON.stringify(SUGGEST_TEXTS),
+    JSON.stringify(items.map((row) => textOf(row))),
+  )
+  check('each button is a real button', items.every((row) => row.type === 'button' && row.props.type === 'button'), items.map((row) => row.type).join(','))
+  check(
+    'and its index is on it, so a click can be attributed',
+    JSON.stringify(items.map((row) => row.props['data-index'])) === JSON.stringify(SUGGEST_TEXTS.map((_, at) => at)),
+    JSON.stringify(items.map((row) => row.props['data-index'])),
+  )
+  check(
+    'a truncated chip still shows the whole offer on hover',
+    items.every((row) => row.props.title === textOf(row)),
+    JSON.stringify(items.map((row) => row.props.title)),
+  )
+
+  const asked = instance.calls.filter((row) => row.url.includes('/suggestions?'))
+  check('exactly one request for the offers', asked.length === 1, `${asked.length} requests`)
+  check('and it names the session', asked[0]?.url.includes('agent=session-a') === true, asked[0]?.url ?? 'none')
+  // HEAD is the cheap question; a GET that spent a model call to be told what
+  // the session is would be the same bug in the other direction.
+  const sources = instance.eventSources
+  check('and one stream, to hear about the next turn', sources.length === 1, `${sources.length} sources`)
+  check('which is scoped to the same session', sources[0]?.url.includes('/events?agent=session-a') === true, sources[0]?.url ?? 'none')
+}
+
+// --- the chips hide while the composer is busy -----------------------------
+
+{
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  const props = (over) => ({ sessionId: 'session-a', useInput: () => inputState(over), inputActions: recordingActions() })
+  await settledSeat(instance, 'suggestions', props())
+
+  const busy = await instance.renderer.deepRender(instance.seat('suggestions'), props({ phase: 'submitting' }))
+  check(
+    'a submission in flight hides the chips',
+    firstByClass(busy, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(busy, 'dsse-suggest-item').length === 0,
+    String(firstByClass(busy, 'dsse-suggest')?.props['data-shown']),
+  )
+
+  const adjudicating = await instance.renderer.deepRender(instance.seat('suggestions'), props({ phase: 'adjudicating' }))
+  check('so does one being adjudicated', firstByClass(adjudicating, 'dsse-suggest')?.props['data-shown'] === 'false', 'still shown')
+
+  const inert = await instance.renderer.deepRender(instance.seat('suggestions'), props({ phase: 'inert' }))
+  check(
+    'and an input machine parked at inert',
+    firstByClass(inert, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'still shown',
+  )
+
+  // `useInput` returning nothing is a different path from a machine reporting
+  // `inert`: no hook at all is what a seat registered outside the composer's
+  // provide channel sees, and the fallback that keeps the chips off it is only
+  // exercised here.
+  const absent = await instance.renderer.deepRender(instance.seat('suggestions'), {
+    sessionId: 'session-a',
+    useInput: () => undefined,
+    inputActions: recordingActions(),
+  })
+  check(
+    'and a session with no input machine at all',
+    firstByClass(absent, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'still shown',
+  )
+
+  // A drafted prompt is not a reason to hide them: Tab leaves the chip where it
+  // was, and a reader who is halfway through editing still wants the other two.
+  const drafted = await instance.renderer.deepRender(instance.seat('suggestions'), props({ draft: '一半的句子' }))
+  check(
+    'but a half-written draft does not',
+    firstByClass(drafted, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'hidden by the draft gate',
+  )
+}
+
+// --- nothing to offer, and the switch --------------------------------------
+
+{
+  const empty = boot({ routes: suggestRoute([]) })
+  empty.module.apply(empty.ctx)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const tree = await settledSeat(empty, 'suggestions', props)
+  check(
+    'no offers means no panel',
+    firstByClass(tree, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(tree, 'dsse-suggest-item').length === 0,
+    'a panel was drawn',
+  )
+
+  const off = boot({ routes: suggestRoute(SUGGEST_TEXTS, { enabled: false }) })
+  off.module.apply(off.ctx)
+  const offTree = await settledSeat(off, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  check(
+    'a host that switched the feature off draws nothing',
+    firstByClass(offTree, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'still drawn',
+  )
+}
+
+// --- a chip is a decision: seed and send -----------------------------------
+
+{
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  const actions = recordingActions()
+  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions })
+
+  const second = byClass(tree, 'dsse-suggest-item')[1]
+  second.props.onClick()
+  check('a chip click seeds the draft with its own text', actions.calls[0]?.[0] === 'setDraft' && actions.calls[0][1] === SUGGEST_TEXTS[1], JSON.stringify(actions.calls[0]))
+  check('and flushes it to the conversation store', actions.calls[1]?.[0] === 'persistDraft', JSON.stringify(actions.calls[1]))
+  // `submit` reads the published snapshot, which is written by the same update
+  // that seeded the editor. Sending synchronously would send whatever was there
+  // before the seed -- an empty prompt, or the previous one.
+  check('and does not send before that seed is published', actions.calls.length === 2, JSON.stringify(actions.calls.map((row) => row[0])))
+  await settle()
+  check('and then sends it', actions.calls[2]?.[0] === 'submit', JSON.stringify(actions.calls.map((row) => row[0])))
+  check('once', actions.calls.filter((row) => row[0] === 'submit').length === 1, String(actions.calls.filter((row) => row[0] === 'submit').length))
+}
+
+{
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  // An action face with no `setDraft` and a `submit` that records: observing an
+  // escaping exception cannot tell "did nothing" from "seeded and sent", because
+  // the send is wrapped in its own try/catch. Counting the verbs can.
+  const face = recordingActions()
+  delete face.setDraft
+  let threw = false
+  try {
+    const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: face })
+    byClass(tree, 'dsse-suggest-item')[0].props.onClick()
+    await settle()
+  } catch {
+    threw = true
+  }
+  check('a click on a face that cannot seed does not throw', threw === false, 'the handler threw')
+  check('and sends nothing', face.calls.length === 0, JSON.stringify(face.calls))
+}
+
+// --- the ghost -------------------------------------------------------------
+
+{
+  const fixture = composerCard()
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  instance.renderer.setNodeForRef(fixture.anchor)
+  const actions = recordingActions()
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const tree = await settledSeat(instance, 'ghost', props)
+
+  const ghost = firstByClass(tree, 'dsse-ghost')
+  check('the ghost draws a line', ghost !== undefined, 'no .dsse-ghost node')
+  check('and it is shown over an empty composer', ghost?.props['data-shown'] === 'true', String(ghost?.props['data-shown']))
+  check('it speaks the lead offer', textOf(firstByClass(tree, 'dsse-ghost-text')) === SUGGEST_TEXTS[0], textOf(firstByClass(tree, 'dsse-ghost-text')))
+  check('and names the key twice: once for the reader, once for the reader', byClass(tree, 'dsse-ghost-key').length === 1 && textOf(firstByClass(tree, 'dsse-ghost-key')) === 'Tab', textOf(firstByClass(tree, 'dsse-ghost-key')))
+  // Painted where the host's placeholder sits, not at an offset copied from a
+  // theme: the fixture puts the line at (24,46) inside a card at (4,20).
+  check('it sits on the placeholder line', ghost?.props.style.left === '20px' && ghost.props.style.top === '26px', JSON.stringify(ghost?.props.style))
+  check('and the host placeholder is out of the way while it is there', fixture.ghosted() === 'true', String(fixture.ghosted()))
+  check('the fetch is only made once even though two slots read it', instance.calls.filter((row) => row.url.includes('/suggestions?')).length === 1, String(instance.calls.filter((row) => row.url.includes('/suggestions?')).length))
+
+  const handlers = fixture.keydowns()
+  check('one key listener, on the composer card', handlers.length === 1, `${handlers.length} listeners`)
+  check('registered in the capture phase', handlers[0]?.capture === true, String(handlers[0]?.capture))
+
+  const tab = keystroke('Tab')
+  handlers[0].handler(tab)
+  check('Tab is taken before the editor indents with it', tab.seen.prevented === true && tab.seen.stopped === true, JSON.stringify(tab.seen))
+  check('and it seeds the draft', actions.calls[0]?.[0] === 'setDraft' && actions.calls[0][1] === SUGGEST_TEXTS[0], JSON.stringify(actions.calls[0]))
+  check('and flushes it', actions.calls[1]?.[0] === 'persistDraft', JSON.stringify(actions.calls[1]))
+  await settle()
+  // The whole point of the second surface: Tab fills, it does not send.
+  check('but it does not send', actions.calls.filter((row) => row[0] === 'submit').length === 0, JSON.stringify(actions.calls.map((row) => row[0])))
+
+  const arrow = keystroke('ArrowRight')
+  handlers[0].handler(arrow)
+  check('the right arrow does the same', arrow.seen.prevented === true, JSON.stringify(arrow.seen))
+
+  const shifted = keystroke('Tab', { shiftKey: true })
+  handlers[0].handler(shifted)
+  check(
+    'shift-Tab is left to the browser, which means focus back',
+    shifted.seen.prevented === false,
+    'stole the focus shortcut',
+  )
+  const modified = keystroke('Tab', { metaKey: true })
+  handlers[0].handler(modified)
+  check('a modified Tab belongs to the browser or the OS', modified.seen.prevented === false, 'stole a host shortcut')
+  const escape = keystroke('Escape')
+  handlers[0].handler(escape)
+  check(
+    'Escape is not ours: the host binds it to stopping the turn',
+    escape.seen.prevented === false,
+    'traded a real control for a cosmetic one',
+  )
+
+  instance.renderer.unmount()
+  check('an unmount hands the placeholder back', fixture.ghosted() === 'false', String(fixture.ghosted()))
+  check('and drops the key listener with it', fixture.keydowns().length === 0, `${fixture.keydowns().length} listeners left`)
+}
+
+// --- the ghost's gates -----------------------------------------------------
+
+{
+  const fixture = composerCard()
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  instance.renderer.setNodeForRef(fixture.anchor)
+  const props = (over) => ({ sessionId: 'session-a', useInput: () => inputState(over), inputActions: recordingActions() })
+  await settledSeat(instance, 'ghost', props())
+
+  const drafted = await instance.renderer.deepRender(instance.seat('ghost'), props({ draft: '我已经在写了' }))
+  check(
+    'a draft of your own takes the line away',
+    firstByClass(drafted, 'dsse-ghost')?.props['data-shown'] === 'false' && fixture.ghosted() === 'false',
+    'still drawn over a drafted composer',
+  )
+
+  const attached = await instance.renderer.deepRender(instance.seat('ghost'), props({ attachmentIds: ['file-1'] }))
+  check('so does an attachment', firstByClass(attached, 'dsse-ghost')?.props['data-shown'] === 'false', 'still drawn')
+
+  const busy = await instance.renderer.deepRender(instance.seat('ghost'), props({ phase: 'submitting' }))
+  check('and so does a submission in flight', firstByClass(busy, 'dsse-ghost')?.props['data-shown'] === 'false', 'still drawn')
+}
+
+{
+  // No placeholder to measure means no line to draw on. The line stays away
+  // rather than guessing an offset, and says so through `data-shown` rather than
+  // claiming to be drawn while its style hides it.
+  const fixture = composerCard({ missing: true })
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  instance.renderer.setNodeForRef(fixture.anchor)
+  const tree = await settledSeat(instance, 'ghost', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  const ghost = firstByClass(tree, 'dsse-ghost')
+  check('a composer with no placeholder draws no ghost', ghost?.props['data-shown'] === 'false', String(ghost?.props['data-shown']))
+  check('and says it is hidden rather than pretending', ghost?.props.style?.visibility === 'hidden', JSON.stringify(ghost?.props.style))
+}
+
+// --- one answer, two surfaces, and a stream that refreshes it --------------
+
+{
+  let served = 0
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        served += 1
+        return { ok: true, data: { enabled: true, items: [`第 ${served} 次答复`], at: Date.now() } }
+      },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const fixture = composerCard()
+  instance.renderer.setNodeForRef(fixture.anchor)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+
+  await settledSeat(instance, 'suggestions', props)
+  const first = await settledSeat(instance, 'ghost', props)
+  check('the second slot reads the answer instead of buying it again', served === 1, `${served} calls`)
+  check('and still draws the offer', firstByClass(first, 'dsse-ghost')?.props['data-shown'] === 'true', 'ghost missing')
+
+  // A turn just ended: the host bumps the revision, the stream says so, and the
+  // offer has to be the one for the turn that ended -- not the previous one.
+  instance.streamFor('session-a').emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  const refreshed = await settledSeat(instance, 'suggestions', props)
+  check('a stream frame buys a fresh answer', served === 2, `${served} calls`)
+  check('and the chips show the new one', textOf(refreshed).includes('第 2 次答复'), textOf(refreshed).slice(0, 80))
+}
+
+{
+  // A failure is not "there are none". Nothing is drawn, nothing is retried in a
+  // loop, and the next frame is what asks again.
+  const instance = boot({ routes: { '/api/ui-evolve/suggestions': new Error('offline') } })
+  instance.module.apply(instance.ctx)
+  const tree = await settledSeat(instance, 'suggestions', { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() })
+  check(
+    'a failed read draws nothing rather than an error line',
+    firstByClass(tree, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'drew a panel after a failure',
+  )
+  check('and is not retried on any clock', instance.calls.filter((row) => row.url.includes('/suggestions?')).length === 1, String(instance.calls.filter((row) => row.url.includes('/suggestions?')).length))
+}
+
+{
+  // The same failure, after a success. What is on screen was true a moment ago
+  // and is still the best answer anyone has: an offer that disappears because a
+  // later fetch failed teaches the reader the row is unreliable, and the reason
+  // is something they can do nothing about.
+  let online = true
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        if (online === false) throw new Error('offline')
+        return { ok: true, data: { enabled: true, items: ['先跑一遍失败的那个用例', '再补一条 HEAD 断言'], at: Date.now() } }
+      },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const before = await settledSeat(instance, 'suggestions', props)
+  check('the offer is drawn before the failure', firstByClass(before, 'dsse-suggest')?.props['data-shown'] === 'true', 'nothing drawn')
+  online = false
+  instance.streamFor('session-a').emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  const after = await settledSeat(instance, 'suggestions', props)
+  check(
+    'a failed refresh keeps the offer that was already true',
+    firstByClass(after, 'dsse-suggest')?.props['data-shown'] === 'true' && textOf(after).includes('先跑一遍失败的那个用例'),
+    textOf(after).slice(0, 80),
+  )
+}
+
+{
+  // A route that a dispose removed must stop being followed. If the chip
+  // column keeps the EventSource open after the browser gives up on it, every
+  // disposed session leaves a socket reconnecting for the life of the page,
+  // and the sixty second poll that exists for exactly this case never gets to
+  // take over because the stream keeps pretending it will come back.
+  const instance = boot({ routes: { '/api/ui-evolve/suggestions': { ok: true, data: { enabled: true, items: [{ text: '先跑一遍失败的那个用例' }], at: 1 } } } })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  await instance.renderer.render(instance.seat('suggestions'), props)
+  const stream = instance.streamFor('session-a')
+  check('the chip column follows the stream', stream !== undefined && stream.closed === false, 'no stream')
+  stream.failFatal()
+  check('a stream the browser gave up on is closed', stream.closed === true, 'the stream reconnects forever')
+}
+
+{
+  // The client has to outwait the server. When the client gives up first it
+  // cancels the request mid flight, so the answer is bought and nobody reads
+  // it — and because the cancellation is not a failure, the next frame buys
+  // the same answer again. The delay is read off the timer the bundle arms
+  // rather than off the constant, because the constant is what is being
+  // checked.
+  const realSetTimeout = globalThis.setTimeout
+  const armed = []
+  let release = () => {}
+  const stall = new Promise((resolve) => {
+    release = resolve
+  })
+  globalThis.setTimeout = (fn, ms) => {
+    armed.push({ fn, ms })
+    return realSetTimeout(() => {}, 0)
+  }
+  try {
+    const instance = boot({ routes: { '/api/ui-evolve/suggestions': () => stall } })
+    instance.module.apply(instance.ctx)
+    const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+    await instance.renderer.render(instance.seat('suggestions'), props)
+    const deadline = armed.find((row) => row.ms > 1000)
+    check('the ask arms a deadline', deadline !== undefined, JSON.stringify(armed.map((row) => row.ms)))
+    check('longer than the server waits', deadline?.ms > SUGGEST_TIMEOUT_MS, `${deadline?.ms} vs ${SUGGEST_TIMEOUT_MS}`)
+    const signal = instance.calls.at(-1)?.init?.signal
+    check('and the deadline aborts the request', signal !== undefined && signal.aborted === false, 'no signal on the fetch')
+    deadline?.fn()
+    check('so a slow answer is dropped, not kept pending', signal?.aborted === true, 'the timer did not abort')
+  } finally {
+    globalThis.setTimeout = realSetTimeout
+    // Answer the stalled request with a well-formed envelope rather than with
+    // null: the load is still pending when the assertions finish, and feeding
+    // it null would reject inside the bundle and take the suite down with a
+    // stack instead of leaving a failed assertion on the report.
+    release({ ok: true, data: { enabled: true, items: [], at: 1 } })
+  }
+}
+
+// --- an offer is retired once taken, and expires on its own ----------------
+
+{
+  // Clicking a chip must take that chip off the row. The input machine hides the
+  // whole row while a turn is in flight and shows it again when the machine
+  // settles; if the clicked text stayed in the list, the same sentence would be
+  // offered again the moment the session went quiet, and one click would be
+  // worth sending the same prompt twice.
+  // The stamped answer, and a way to move the stamp: `at` is the identity of
+  // an answer, so "the same answer again" and "a new answer" differ only here.
+  let stamp = Date.now()
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => ({
+        ok: true,
+        data: { enabled: true, items: SUGGEST_TEXTS.slice(), reason: '', at: stamp },
+      }),
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const actions = recordingActions()
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: actions }
+  const first = await settledSeat(instance, 'suggestions', props)
+  byClass(first, 'dsse-suggest-item')[1].props.onClick()
+  await settle()
+
+  const after = await settledSeat(instance, 'suggestions', props)
+  const left = byClass(after, 'dsse-suggest-item').map((node) => textOf(node))
+  check('the clicked chip leaves the row', left.includes(SUGGEST_TEXTS[1]) === false, JSON.stringify(left))
+  check('and the others stay', left.length === SUGGEST_TEXTS.length - 1, JSON.stringify(left))
+  check('the row is still drawn', firstByClass(after, 'dsse-suggest')?.props['data-shown'] === 'true', 'row vanished')
+
+  // A replay is not a new answer. The server answers a frame during the turn
+  // from its cache -- same `items`, same `at` -- so a read is not evidence that
+  // anything was re-bought, and the chip the reader just clicked must stay off
+  // the row. This is the shape of the bug that made one click send twice: the
+  // frame arrived mid-turn (row hidden), the turn ended without a fresh read,
+  // and the row came back carrying the spent prompt.
+  instance.streamFor('session-a').emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  const replayed = await settledSeat(instance, 'suggestions', props)
+  const still = byClass(replayed, 'dsse-suggest-item').map((node) => textOf(node))
+  check('a replay of the same answer does not bring the chip back', still.includes(SUGGEST_TEXTS[1]) === false, JSON.stringify(still))
+  check('so the replay still draws the row, one chip short', still.length === SUGGEST_TEXTS.length - 1, JSON.stringify(still))
+
+  // A genuinely new answer starts a new set: text taken under the previous one
+  // is allowed back, because the model may make the same point about a
+  // different turn. `at` is how the client tells the two apart.
+  stamp += 60000
+  instance.streamFor('session-a').emit({ agent: 'session-a', revision: 3 })
+  await settle()
+  const fresh = await settledSeat(instance, 'suggestions', props)
+  const back = byClass(fresh, 'dsse-suggest-item').map((node) => textOf(node))
+  check('a fresh answer makes every chip available again', back.length === SUGGEST_TEXTS.length, JSON.stringify(back))
+}
+
+{
+  // An answer older than the server's own lifetime is one the server would no
+  // longer stand behind, so it is not drawn. This matters because a failed
+  // refresh deliberately keeps the last answer: "kept" must not mean "kept
+  // forever".
+  const stale = suggestRoute(SUGGEST_TEXTS, { at: Date.now() - 16 * 60 * 1000 })
+  const instance = boot({ routes: stale })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const chips = await settledSeat(instance, 'suggestions', props)
+  check('an answer past its lifetime draws no chips', firstByClass(chips, 'dsse-suggest')?.props['data-shown'] === 'false', 'stale chips drawn')
+
+  const fixture = composerCard()
+  const ghostInstance = boot({ routes: stale })
+  ghostInstance.module.apply(ghostInstance.ctx)
+  ghostInstance.renderer.setNodeForRef(fixture.anchor)
+  const ghost = await settledSeat(ghostInstance, 'ghost', props)
+  check('and no ghost either', firstByClass(ghost, 'dsse-ghost')?.props['data-shown'] === 'false', 'stale ghost drawn')
+  check('and the host placeholder is left alone', fixture.ghosted() === 'false', fixture.ghosted())
+}
+
+{
+  // A frame that arrives while a read is in flight must not be swallowed: the
+  // answer already on its way describes the turn before the one that just
+  // ended. The frame is remembered and the read is repeated once it settles.
+  const gate = deferred()
+  let served = 0
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        served += 1
+        if (served === 1) return gate.promise
+        return { ok: true, data: { enabled: true, items: ['第三代答复'], at: Date.now() } }
+      },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: () => inputState(), inputActions: recordingActions() }
+  const pending = settledSeat(instance, 'suggestions', props)
+  await settle()
+  check('the first read is in flight', served === 1, String(served))
+
+  instance.streamFor('session-a').emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  check('a frame during the read does not start a second one', served === 1, String(served))
+
+  gate.resolve({ ok: true, data: { enabled: true, items: ['旧答复'], at: Date.now() } })
+  await pending
+  await settle()
+  check('and is honoured when the read settles', served === 2, String(served))
+  const after = await settledSeat(instance, 'suggestions', props)
+  check('so the row carries the newer answer', textOf(after).includes('第三代答复'), textOf(after).slice(0, 60))
 }
 
 report()

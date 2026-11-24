@@ -56,15 +56,22 @@ Seven keys, all optional. They are the panel's own; the detection settings live 
 | `summaryModel` | `""` | Model for that summary. Only read together with `summaryProvider`; setting one alone pins nothing |
 | `monitorColumn` | `true` | Draw the cards in the column. This is the only layout there is: turning it off leaves no panel, which is what the header switch does |
 | `monitorWidth` | `300` | Width of that column in px. The grip writes it back; the ends are clamped to 220–460 in `lib/gutter.js` |
+| `panelSuggestions` | `true` | Offer the next step after a turn ends: chips above the composer, and one line of ghost text inside an empty one. Default on because the offer only costs a call when a composer asks for it |
+| `suggestionCount` | `3` | How many offers to ask for. Clamped to 2–3 in `lib/suggest.js` — one chip is a button, not a choice |
 
 ## The routes
 
 The panel talks to the host over a prefix route registered at
 `/api/ui-evolve`: `GET|HEAD /panel`, `GET|HEAD /speed`, `GET /models`,
-`GET|POST /config`, `GET|POST /candidates`, `POST /propose`, and `GET /events`
-(the event stream the panel subscribes to; it answers `text/event-stream`).
+`GET|POST /config`, `GET|POST /candidates`, `POST /propose`,
+`GET|HEAD /suggestions`, and `GET /events` (the event stream the panel
+subscribes to; it answers `text/event-stream`).
 
-Every route answers `HEAD` with a body-less 200.
+Every route answers `HEAD` with a body-less 200. `/suggestions` is the exception
+to one habit: it is the only read that spends a model call, so it refuses
+anything that is not `GET` or `HEAD`, and its `HEAD` answers without generating
+anything. A `POST` here would be buying a set of chips for a caller that is not
+the composer.
 
 The browser side and the host side cannot share a constant — `lib/client.js` is a
 hand-written bundle with no `import` and no build step — so the prefix appears as a
@@ -823,7 +830,44 @@ reports `no-room` rather than overlapping the text. On a narrow window the cards
 disappear and the handle remains, because a panel that cannot fit should not
 squeeze the thing it is annotating.
 
-### When the panel is shown, and how it learns
+### The offer at the end of a turn
+
+Two surfaces read one answer and mean two different things.
+
+**The chips** sit in `conversation.input.dock`, the row immediately above the
+composer (`order: 30` — after the queue panel, because the queue describes what
+was submitted and these describe what to do next). They appear once a turn has
+finished and the input machine is back to its resting phase, and they stay while
+you type: a reader halfway through a sentence still wants the other two offers.
+
+**The ghost** is one line of italic text inside an empty composer, in the host's
+own placeholder position, with the key drawn as a separate keycap so "Tab" is not
+read as part of the sentence. `Tab` — or the right arrow — seeds the draft and
+stops there. `Escape` is deliberately not ours: the host binds it to stopping the
+running turn, and taking it to dismiss an offer would trade a real control for a
+cosmetic one.
+
+**A chip is a decision; a key is a start.** Clicking a chip seeds the draft and
+then sends it, one microtask later, because `inputActions.submit()` reads the
+*published* input snapshot rather than the editor and a synchronous send would
+post whatever was in the box before the seed. Hitting Tab only seeds. That
+difference is the whole point of having both, and it is why the two verbs are
+tested separately in `test/client.test.mjs`.
+
+Both surfaces walk through the host's public action face
+(`inputActions.setDraft` / `persistDraft` / `submit`) rather than reaching into
+the editor: the composer is Lexical, so assigning to a textarea's value is not a
+gesture that exists here.
+
+**It costs one call, and only when someone is looking.** `/suggestions` is asked
+for by the composer, not by a turn-end handler, so a conversation nobody has open
+costs nothing. At most one call per identical transcript (`suggest.js` keys the
+answer on the turn plus the prompt body), a 60-second cooldown after a failure, a
+15-minute expiry, and a 12-second timeout that is deliberately shorter than the
+client's own 15-second patience — an answer that lands after the reader has
+started typing is worse than no answer. Nothing on this path is `await`ed by the
+event loop, which is the defect Qoder shipped and fixed in 0.4.2.
+
 
 **Only in a conversation.** The host renders `[data-conversation-content]` on
 *every* page — the conversation, the settling state while one opens, and the

@@ -6236,3 +6236,26 @@ killed，0 survived。
 **这一节的教训**：我在交付说明里写「两名审查者没交回结论」时那是实况，几分钟后两位都回来了（一个 P0、十六处散文错）。派了审查就等一等再宣布——`list_agents` 的成本是零。
 
 **没有的东西**：表的覆盖面仍是「见过的形态」（`startsWith` 式路由对 `KINDS` 与 `FAMILIES` 都不可见，已写进 §7 的「不覆盖什么」）；散文里的行号与常量名仍靠人核。
+
+
+## 2026-11-24（一）：下一轮提示词建议，底栏芯片与输入栏幽灵
+
+| 改了什么 | 位置 | 验证 |
+| --- | --- | --- |
+| 生成器：严格 JSON 输出、句末裁剪、去重、单条拒绝、五道闸门 | `packages/ui-evolve/lib/suggest.js` | `test/suggest.test.mjs` 200/0 |
+| 新增 `GET\|HEAD /suggestions`：同前缀下唯一会在读里花钱的路由 | `packages/ui-evolve/lib/api.js` | `test/api.test.mjs` 429/0（405 / 400 / 无体 HEAD / ≤2048 B） |
+| 两个配置键：`panelSuggestions`（默认开）、`suggestionCount`（2–3 夹取） | `config.js`、`api.js` | 往返 + 改键丢缓存 |
+| 芯片进 `conversation.input.dock`（order 30）、幽灵进 `conversation.input.overlay` | `packages/ui-evolve/lib/client.js` | `test/client.test.mjs` 1042/0 |
+| `defuseMarkers` 加 tag 参数并导出：`<turns>` 与 `<transcript>` 共用一个守卫 | `packages/ui-evolve/lib/summarise.js` | 引用闭标记的回合不再提前闭合 |
+| 两道退役闸门：点击即退役（`used`）、答案十五分钟作废 | `client.js` | 三块新行为断言 |
+| 注册点表、README、`docs/28` 第八条判据 | `docs/27` §7、`packages/ui-evolve/README.md`、`docs/28` | registration 56/0、docs 45/0 |
+
+**基线**：全量 **4324 passed / 0 failed**；`suggest` 200/0；`client` 1042/0；`api` 429/0；`registration` 56/0；`docs` 45/0；`mutations` 55/0；`mutate-suggest` **59 处全杀**；`perf-budget` 六条 ok、退出 0（real 15,984 B / ceiling 63,325 B / elapsed 4.2 ms / state 41,941 B）。
+
+**与 `docs/29` 设计的一处偏离**：第五道闸门原写「有人在看」的 `viewed` 集合加 `turn/end` 预热，落地改成**纯按需**——没有 turn 处理器，只有 composer 索要时才生成。按需本身就是「有人在看」的证据，而且彻底消掉了「生成挡住下一轮」这一类缺陷（Qoder 0.4.2 的公开缺陷）。
+
+**没有的东西**：芯片与幽灵的观感只在原型与假 DOM 里验过，真机截图尚未取；`at` 的新鲜度只在渲染时求值，没有自己的定时器——页面上没有别的动静时，过期的一行会留到下一次通知。
+
+**收口（第二轮评审之后）**：全量 **4338 passed / 0 failed**；`suggest` 212/0；`client` 1044/0；`api` 429/0；`registration` 56/0；`docs` 45/0；`mutations` 55/0（锚点计数已从「至少 N」改成「恰好 N」，`mutate-suggest` 60）；`mutate-suggest` **60 处全杀**；`perf-budget` 六条 ok、退出 0（real 15,984 B / ceiling 63,325 B / elapsed 3.8 ms / state 41,941 B）。
+
+第二轮只把**修复本身**交给复核员，回 10 条、全部成立（P1×2、P2×5、P3×3），其中 7 条是修复引入的。已全部修完并各自补了会因该修复而变红的断言（`test/suggest.test.mjs` 末尾一块 12 条、`test/client.test.mjs` 的「回放不复活」一条）。见 DEF-196 与 R-119。

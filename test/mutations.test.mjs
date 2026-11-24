@@ -203,6 +203,7 @@ for (const [name, expected] of [
   ["mutate-language-and-files.mjs", 187],
   ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 70],
+  ['mutate-suggest.mjs', 60],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')
   const anchors = parseAnchors(script)
@@ -238,7 +239,12 @@ for (const [name, expected] of [
     }
   }
 
-  check(`${name} declares the anchors it is supposed to`, anchors.length >= expected, `found ${anchors.length}, expected at least ${expected}`)
+  // Equality, not a floor. `>=` was the opening this list left for the thing it
+  // was written to catch: six anchors deleted together with their `file:` lines
+  // still satisfied `owners.length === anchors.length`, and the six that were
+  // left were still found in their files -- so a script could lose a tenth of
+  // its coverage with every check in this block green.
+  check(`${name} declares exactly the anchors it has`, anchors.length === expected, `found ${anchors.length}, expected ${expected}`)
   const unresolved = owners.filter((owner) => !targets.has(owner))
   check(
     `every ${name} mutation names a target that resolves to a file`,

@@ -1,11 +1,11 @@
 /**
  * Validated configuration for `@revxz/dsh-ui-evolve`.
  *
- * These five switches describe a card, not a candidate: how the previous-turn
- * summary is produced, which gutter the cards float in, and whether they start
- * collapsed. They lived in `@revxz/dsh-skill-evolve` before the split, where a
- * profile that only wanted the panel still had to install the whole detector to
- * change them.
+ * These seven switches describe a card, not a candidate: how the previous-turn
+ * summary is produced, which gutter the cards float in, whether they start
+ * collapsed, and whether a finished turn offers a next step. They lived in
+ * `@revxz/dsh-skill-evolve` before the split, where a profile that only wanted
+ * the panel still had to install the whole detector to change them.
  *
  * Every field is optional so the bundle patch can mount the plugin with no
  * `config:` block at all.
@@ -85,5 +85,33 @@ export const Config = z.object({
    * glanced at. The clamp lives in `gutter.js` beside the arithmetic that
    * depends on it, not here, so the two cannot drift.
    */
-  monitorWidth: z.number().default(300)
+  monitorWidth: z.number().default(300),
+
+  /**
+   * Offer what to do next, once a turn has finished.
+   *
+   * Three chips under the answer and one grey line in an empty composer —
+   * `lib/suggest.js` explains what they are and how they are produced. On by
+   * default for the same reason `panelSummary` is: this is the feature, and a
+   * switch nobody turns on is a feature nobody has.
+   *
+   * It is the second switch that spends money (the `SUGGEST` budget in
+   * `docs/28`), and it spends it only while somebody is looking: the call is
+   * made by the route the composer asks, never by a turn event, so a session in
+   * the background costs nothing. The two spending switches are independent on
+   * purpose — one buys a description of the past, the other a proposal about
+   * the future, and a person may want either without the other.
+   */
+  panelSuggestions: z.boolean().default(true),
+
+  /**
+   * How many chips a finished turn offers.
+   *
+   * Three is what the row was designed at, and the ceiling: a fourth chip is a
+   * fourth decision in a place a person wants to glance at and stop. Clamped
+   * into `[2, 3]` where it is used (`lib/suggest.js`), not here, for the same
+   * reason `monitorWidth` is clamped beside its arithmetic — the constraint and
+   * the code that depends on it must not be able to drift apart.
+   */
+  suggestionCount: z.number().default(3)
 })

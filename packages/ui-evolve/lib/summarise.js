@@ -118,11 +118,20 @@ const TRANSCRIPT_CLOSE = '</transcript>'
  * as the tag it was while being impossible to close. Escaping to entities would
  * put `&lt;` in front of a model that does not need HTML.
  *
+ * The tag name is a parameter because there is a second framed block in this
+ * package: the suggestion prompt wraps the same rendered turns in `<turns>`.
+ * Two framings with one guard means the guard has to know both, otherwise the
+ * newer block is defended only by the sentence that says it is data.
+ *
  * @param {string} body - raw transcript text.
+ * @param {string} [tag] - the element name to defuse, without brackets.
  * @returns {string} text whose markers cannot close the block.
  */
-function defuseMarkers(body) {
-  return String(body).replace(/<\s*(\/?)\s*transcript\s*>/gi, (tag, slash) => (slash === '/' ? '‹/transcript›' : '‹transcript›'))
+function defuseMarkers(body, tag = 'transcript') {
+  const name = String(tag).replace(/[^A-Za-z0-9-]/g, '')
+  if (name === '') return String(body)
+  const pattern = new RegExp(`<\\s*(\\/?)\\s*${name}\\s*>`, 'gi')
+  return String(body).replace(pattern, (whole, slash) => (slash === '/' ? `‹/${name}›` : `‹${name}›`))
 }
 
 /**
@@ -847,6 +856,7 @@ ${TRANSCRIPT_CLOSE}` }],
 export {
   Summariser,
   matchesStored,
+  defuseMarkers,
   MAX_SUMMARY_CHARS,
   MAX_INPUT_CHARS,
   SUMMARY_TIMEOUT_MS,
