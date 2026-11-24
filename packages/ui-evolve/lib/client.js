@@ -1056,8 +1056,9 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
 /* Hidden means gone, not "zero height": an empty grid still occupies the dock's
    gap, and a gap that appears and disappears under the composer reads as the
    host's layout moving. */
-.dsse-suggest{display:grid;gap:1px;padding:0}
+.dsse-suggest{display:grid;gap:1px;margin:10px 0 2px;padding:8px 0 0;border-top:1px dashed var(--dsw-alias-border-l2,rgba(15,17,21,.1));box-sizing:border-box}
 .dsse-suggest[data-shown="false"]{display:none}
+.dsse-suggest-enter{flex:0 0 auto;width:1.1em;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:1em;line-height:1.45;text-align:center}
 .dsse-suggest-item{display:flex;align-items:center;gap:8px;width:100%;min-height:30px;padding:4px 8px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:.92em;line-height:1.45;text-align:left;cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-suggest-item:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
 .dsse-suggest-item:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
@@ -1065,11 +1066,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
    worth of characters; this is the backstop for a wide character run that still
    does not fit, and it is the reason a chip cannot push the composer down. */
 .dsse-suggest-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* The arrow appears on hover only. Three permanent arrows in a column of text
-   look like a menu; one arrow on the row the pointer is on looks like a row you
-   can follow. */
-.dsse-suggest-go{flex:0 0 auto;width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;color:var(--dsw-alias-label-tertiary,#8b92a1);opacity:0;transition:opacity 160ms ease}
-.dsse-suggest-item:hover .dsse-suggest-go,.dsse-suggest-item:focus-visible .dsse-suggest-go{opacity:1}
+/* The return symbol is always drawn and never a hover affordance: it is the mark
+   that says "this is what Enter would send", which is only legible if it is there
+   before the pointer arrives. Hovering only darkens it. */
+.dsse-suggest-item:hover .dsse-suggest-enter,.dsse-suggest-item:focus-visible .dsse-suggest-enter{color:var(--dsw-alias-label-secondary,#5b6270)}
 
 /* The ghost is text *in* the box, not a bar over it. Its offset is measured from
    the host's own placeholder at run time (see SuggestGhost below) rather than written
@@ -4639,6 +4639,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       reason: "",
       loaded: false,
       at: 0,
+      // Which turn the answer on screen describes. The offers are drawn at the
+      // tail of a turn, so this is what keeps them under the turn they belong to
+      // rather than under whichever turn happens to be last in the DOM.
+      turn: undefined,
       // An empty answer is not an answer. On the live host the frame that
       // arrives as a turn ends can be answered from a transcript that is still
       // settling, and the route then reports nothing to go on -- a second later
@@ -4718,6 +4722,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       suggest.reason = ""
       suggest.loaded = false
       suggest.at = 0
+      suggest.turn = undefined
       suggest.used.clear()
       suggest.again = false
       if (suggest.retry !== null) {
@@ -4782,6 +4787,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // moment the turn ended -- and clicking it again would send the same
         // prompt twice. `at` is the identity of the answer; if it did not move,
         // nothing was re-bought and nothing is re-offerable.
+        suggest.turn = typeof data?.turn === "number" ? data.turn : undefined
         const stamp = Number.isFinite(data?.at) ? data.at : 0
         if (stamp !== suggest.at) suggest.used.clear()
         suggest.at = stamp
@@ -4961,43 +4967,69 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * @param {object} props - injected props plus the host's provided kit.
      * @returns {object|null} the element, or null when there is nothing to offer.
      */
+    /**
+     * The offers at the tail of a finished turn.
+     *
+     * Mounted in `conversation.chat.turnTail`, which the host renders once per
+     * turn, right under the closing prose and above the turn's own action row --
+     * the same seat its delivered-file card uses. Three things follow from that
+     * seat and none of them are true of the composer dock this started in:
+     *
+     * 1. The row belongs to a *turn*, so it is drawn only for the turn the answer
+     *    describes (`suggest.turn`). Otherwise the offers for the last turn stay
+     *    under the turn before it as the conversation grows.
+     * 2. Nudge chips off the composer's own strip, where the todo panel and the
+     *    queue panel already live and where they were mistaken for a toolbar.
+     * 3. The transcript column is inset from the composer: measured on this host
+     *    the composer card is 16px wider on each side. So the row is measured
+     *    against the composer and given that width and that left edge; the column
+     *    is resizable, so the measurement is redone when either side resizes.
+     *    When the composer cannot be found the row keeps the transcript's own
+     *    width -- a row that is slightly narrow is fine, a row pinned to a
+     *    guessed pixel width is not.
+     */
     function SuggestChips(props) {
       const sessionId = typeof props?.sessionId === "string" ? props.sessionId : ""
+      const turn = typeof props?.turn === "number" ? props.turn : undefined
       const input = useInputState(props)
       const gates = suggestGates(input)
       const [, force] = React.useState(0)
+      const hostRef = React.useRef(null)
+      const [box, setBox] = React.useState(null)
 
       React.useEffect(() => {
         ensureStyle()
         return subscribeSuggest(() => force((value) => value + 1))
       }, [])
 
+      // The row does not own the stream, and that is a consequence of the seat:
+      // this component is now mounted once per turn, so an `EventSource` here
+      // would be one per turn in the transcript -- ten turns, ten streams, and
+      // at six the browser's per-origin cap against the local host is spent and
+      // the host's own requests queue behind them. The composer's ghost is a
+      // single instance for the session, so it keeps the stream and this row
+      // only reads the store it fills.
       React.useEffect(() => {
-        if (sessionId === "") return undefined
-        loadSuggest(sessionId)
-        // No `EventSource` (a test harness, an old renderer): the chips still
-        // load on mount and on every remount. What is lost is the refetch when a
-        // turn ends while this composer stays mounted, which is the common case
-        // in a real browser and never the case in the tests.
-        if (typeof EventSource !== "function") return undefined
-        const opened = new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))
-        opened.addEventListener("message", () => loadSuggest(sessionId))
-        // Closing on a fatal failure is what lets the browser retry on its own
-        // schedule instead of the stream looking healthy and silent forever;
-        // a dropped connection (readyState CONNECTING) is left alone for exactly
-        // the same reason the card column leaves it alone.
-        opened.addEventListener("error", () => {
-          if (opened.readyState === 2) opened.close()
-        })
-        return () => opened.close()
+        ensureSuggest(sessionId)
       }, [sessionId])
 
-      // What is still on offer: the answered list minus what has been sent, and
-      // only while the answer is younger than the server would serve it. Both
-      // conditions guard the same failure -- a row that says "here is what to
-      // do next" while describing a turn that is no longer the last one.
       const offer = suggest.items.filter((item) => suggest.used.has(item.text) === false)
       const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS
+      // A turn tail only exists for a turn the host knows about, so the input
+      // machine's phase says nothing about this one: the reader may well be
+      // typing the next prompt while these three sit under the last answer, and
+      // that is exactly when they are most useful. The gate is "is this the turn
+      // the answer is about" -- asked of the transcript, not of a counter.
+      //
+      // Not by comparing numbers. The answer carries `previous.turn`, which
+      // `transcript.js` numbers locally on purpose ("resuming an old
+      // conversation begins mid-sequence"), while the host numbers turns from
+      // the start of the session; the two agree only for a conversation this
+      // plugin has watched since host turn one, and on a resumed one the offers
+      // would be fetched, paid for, and drawn nowhere -- the worst of both.
+      // What both sides do agree on is which tail is the last one: the host
+      // appends one per finished turn, in order, and the offers describe the
+      // step after the newest of them.
       const shown =
         sessionId !== "" &&
         suggest.sessionId === sessionId &&
@@ -5005,36 +5037,122 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         suggest.enabled === true &&
         fresh &&
         offer.length > 0 &&
-        gates.idle
-      // The gate is read through a closure in the click handler, so the handler
-      // is rebuilt when it changes -- but the handlers here are cheap and a
-      // stale one could only fire a send the gate would have refused a frame
-      // later, which the input machine refuses anyway.
+        box !== null &&
+        box.last === true
+
+      // The width the composer has, not the width this row was given. Both sides
+      // change with the window and with the column being dragged, and only the
+      // composer knows where the reader expects a prompt to start.
+      React.useLayoutEffect(() => {
+        const node = hostRef.current
+        if (node === null || typeof document === "undefined") return undefined
+        let frame = null
+        const measure = () => {
+          // Which tail is the newest. The host draws one per finished turn and
+          // keeps them in order, so the last one is the turn whose "what next"
+          // this row is; under any earlier turn it would be a list of steps
+          // already overtaken. A host tree with no tails at all (a harness, a
+          // page mid-navigation) is not evidence against this row, so it counts
+          // as last.
+          const tails = typeof document.querySelectorAll === "function"
+            ? document.querySelectorAll("[data-turn-tail]")
+            : null
+          const mine = typeof node.closest === "function" ? node.closest("[data-turn-tail]") : null
+          const last = tails === null || tails.length === 0 || tails[tails.length - 1] === mine
+
+          const card = typeof document.querySelector === "function"
+            ? document.querySelector("[data-composer-overlay]")?.parentElement ?? null
+            : null
+          if (card === null) {
+            setBox((old) =>
+              old !== null && old.left === null && old.last === last ? old : { left: null, width: null, last },
+            )
+            return
+          }
+          const target = card.getBoundingClientRect()
+          if (target.width === 0) return
+          // Where this row would start with no margin of its own. The parent's
+          // left edge is that number, and it is the only number here that this
+          // effect cannot move: `marginLeft` shifts the row's own rect, so
+          // measuring the row would read back the last thing this effect wrote
+          // (16 in, 0 out, 16 in ...) until React refuses with "Maximum update
+          // depth exceeded".
+          const parent = node.parentElement ?? null
+          const outer = parent !== null && typeof parent.getBoundingClientRect === "function"
+            ? parent.getBoundingClientRect()
+            : node.getBoundingClientRect()
+          if (outer.width === 0) return
+          const left = Math.round(target.left - outer.left)
+          const width = Math.round(target.width)
+          // Compared against the previous value before it is stored: this runs
+          // on every resize frame, and an object that differs every time would
+          // re-render the row for nothing.
+          setBox((old) =>
+            old !== null && old.left === left && old.width === width && old.last === last
+              ? old
+              : { left, width, last },
+          )
+        }
+        frame = measure
+        frame()
+        let observer = null
+        if (typeof ResizeObserver !== "undefined") {
+          observer = new ResizeObserver(() => frame())
+          observer.observe(node)
+          const card = document.querySelector("[data-composer-overlay]")?.parentElement ?? null
+          if (card !== null) observer.observe(card)
+        }
+        if (typeof window !== "undefined") window.addEventListener("resize", frame)
+        return () => {
+          if (observer !== null) observer.disconnect()
+          if (typeof window !== "undefined") window.removeEventListener("resize", frame)
+        }
+      })
+
+      // A chip is a decision, so it may only fire when the decision can be
+      // carried out: the machine is quiet and the box is empty. Both conditions
+      // are about not destroying input -- a busy machine refuses the submit, and
+      // a non-empty draft is somebody's half-written sentence.
+      const armed = gates.idle === true && gates.empty === true
+
+      // Read through a closure so the handler is rebuilt when the gates change:
+      // a handler captured a frame earlier could only fire a send the machine
+      // would have refused anyway, but the row it belongs to would already be
+      // gone.
       return jsx("div", {
+        ref: hostRef,
         className: "dsse-suggest",
         "data-dsse-suggest": "1",
         "data-shown": shown ? "true" : "false",
         "aria-label": "后续建议",
+        style:
+          box === null || box.left === null ? undefined : { marginLeft: `${box.left}px`, width: `${box.width}px` },
         children: shown
           ? offer.map((item, index) =>
               jsxs("button", {
                 type: "button",
                 className: "dsse-suggest-item",
                 "data-index": index,
-                title: item.text,
-                onClick: () => sendSuggestion(props?.inputActions, item.text),
+                title: armed ? item.text : `${item.text}：输入框非空或这一轮还在跑，先清空再点`,
+                // Visible and readable on a busy machine on purpose -- the three
+                // offers are worth comparing while the next turn streams -- but
+                // a click that cannot send must not write the draft either:
+                // `sendSuggestion` seeds first and submits on a microtask, so on
+                // a busy machine the seed would land and the send would be
+                // refused, leaving the reader's half-written sentence replaced
+                // by a prompt that was never sent.
+                "data-armed": armed ? "true" : "false",
+                "aria-disabled": armed ? "false" : "true",
+                onClick: () => {
+                  if (armed) sendSuggestion(props?.inputActions, item.text)
+                },
                 // Children go in `props`, not in the third argument: the third
                 // argument of `jsxs` is the key, so a list passed there becomes a
                 // key and the button renders empty. Caught by this feature's own
                 // suite, which is the only thing that looks inside the label.
                 children: [
+                  jsx("span", { className: "dsse-suggest-enter", "aria-hidden": "true", children: "↵" }),
                   jsx("span", { className: "dsse-suggest-text", children: item.text }),
-                  jsx("svg", {
-                    className: "dsse-suggest-go",
-                    viewBox: "0 0 24 24",
-                    "aria-hidden": "true",
-                    children: jsx("path", { d: "M5 12h13M12 6l6 6-6 6" }),
-                  }),
                 ],
               }),
             )
@@ -5066,13 +5184,29 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         return subscribeSuggest(() => force((value) => value + 1))
       }, [])
 
-      // The ghost loads too, even though the chips are the surface that owns the
-      // stream. Depending on another slot having mounted first would make this
-      // line appear or not depending on whether the dock happened to be drawn,
-      // and `ensureSuggest` reads the shared store first, so the second surface
-      // costs nothing.
+      // The ghost is the single instance for this session (the composer exists
+      // once, while a turn tail exists once per turn), so the stream lives here.
+      // It loads the store itself as well: depending on another slot having
+      // mounted first would make this line appear or not depending on whether
+      // that slot happened to be drawn, and `ensureSuggest` reads the shared
+      // store before it spends anything.
       React.useEffect(() => {
+        if (sessionId === "") return undefined
         ensureSuggest(sessionId)
+        // No `EventSource` (a test harness, an old renderer): the line still
+        // loads on mount and on every session change. What is lost is the
+        // refetch when a turn ends while this composer stays mounted.
+        if (typeof EventSource !== "function") return undefined
+        const opened = new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))
+        opened.addEventListener("message", () => loadSuggest(sessionId))
+        // Closing on a fatal failure is what lets the browser retry on its own
+        // schedule instead of the stream looking healthy and silent forever;
+        // a dropped connection (readyState CONNECTING) is left alone for exactly
+        // the same reason the card column leaves it alone.
+        opened.addEventListener("error", () => {
+          if (opened.readyState === 2) opened.close()
+        })
+        return () => opened.close()
       }, [sessionId])
 
       // The ghost offers the first item still on offer -- the same list the
@@ -5107,7 +5241,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // avoid.
       React.useLayoutEffect(() => {
         const node = nodeRef.current
-        const card = node === null ? null : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
+        const card =
+          node === null || typeof node.closest !== "function"
+            ? null
+            : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
         const placeholder = card === null ? null : card.querySelector("[data-composer-placeholder]")
         if (placeholder === null) {
           // No placeholder to measure against means no line to draw on. The
@@ -5128,7 +5265,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
 
       React.useEffect(() => {
         const node = nodeRef.current
-        const card = node === null ? null : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
+        const card =
+          node === null || typeof node.closest !== "function"
+            ? null
+            : (node.closest("[data-composer-overlay]")?.parentElement ?? null)
         if (card === null) return undefined
         const onKeyDown = (event) => {
           if (live.current.shown !== true) return
@@ -5306,19 +5446,18 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         "skill-evolve: card overlay",
       )
 
-      // The offer above the composer. `conversation.input.dock` is the row stack
-      // the host draws directly over the input card — the queue lives in it
-      // (order 20) and the host's todo panel before that (order 0). Order 30 is
-      // last of the three, i.e. nearest the box it fills: the queue describes
-      // messages already committed, and this describes the one thing you are
-      // about to do, so it belongs at the bottom of the stack rather than in the
-      // middle of it.
+      // The tail of a finished turn, not the strip above the composer. That
+      // strip already carries the host's todo panel (order 0) and queue panel
+      // (order 20), and a third row in it reads as a toolbar for the composer —
+      // the opposite of what these are, which is the end of the answer above
+      // them. `conversation.chat.turnTail` is where the host draws its own
+      // delivered-files card and where Qoder draws its next-step list.
       ctx.effect(
         () =>
-          ctx.slots.inject("conversation.input.dock", () =>
+          ctx.slots.inject("conversation.chat.turnTail", () =>
             ctx.slots.register(
               {
-                name: "conversation.input.dock",
+                name: "conversation.chat.turnTail",
                 id: SUGGEST_ID,
                 order: 30,
                 registrant: NS,

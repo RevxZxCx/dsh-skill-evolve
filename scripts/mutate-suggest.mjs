@@ -466,11 +466,45 @@ const mutations = [
   {
     file: client,
     suites: view,
-    label: 'the chips are drawn during a running turn',
+    label: 'the row is drawn under every turn in the conversation',
     from: `        offer.length > 0 &&
-        gates.idle`,
-    to: '        offer.length > 0',
-    why: 'offering the next step while the current one is being written is the one moment the row is noise; the gate is the only thing that separates the two',
+        box !== null &&
+        box.last === true`,
+    to: `        offer.length > 0 &&
+        true`,
+    why: 'the seat is one-per-turn, so without the tail check the same three offers are drawn under every turn in the transcript -- each one a list of steps for a turn it did not describe',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the newest tail is never identified, so the row is drawn nowhere',
+    from: '          const last = tails === null || tails.length === 0 || tails[tails.length - 1] === mine',
+    to: '          const last = tails === null || tails.length === 0',
+    why: 'the offers describe the step after the newest finished turn; a row that cannot tell which tail it is in either draws under all of them or, as here, under none of the ones that matter',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the row is not measured against the composer',
+    from: "        style:\n          box === null || box.left === null ? undefined : { marginLeft: `${box.left}px`, width: `${box.width}px` },",
+    to: '        style: undefined,',
+    why: 'the transcript column is inset from the composer, so an unmeasured row starts 16px right of the box it is supposed to continue; the width and the left edge have to come from the composer, not from the column',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the row is measured against itself, so the margin chases its own rect',
+    from: '          const left = Math.round(target.left - outer.left)',
+    to: '          const left = Math.round(target.left - node.getBoundingClientRect().left)',
+    why: 'marginLeft moves the very rect being read, so measuring the row instead of its parent turns one measurement into a loop: 16 in, 0 out, 16 in again until React refuses with "Maximum update depth exceeded"',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the return mark is left off the offer',
+    from: "                  jsx(\"span\", { className: \"dsse-suggest-enter\", \"aria-hidden\": \"true\", children: \"↵\" }),",
+    to: '',
+    why: 'the mark is the only thing that says "Enter would send this"; without it the row is three sentences that look like a summary rather than three choices',
   },
   {
     file: client,
@@ -526,6 +560,26 @@ const mutations = [
   {
     file: client,
     suites: view,
+    label: 'a click on a busy composer writes the draft it cannot send',
+    from: `                onClick: () => {
+                  if (armed) sendSuggestion(props?.inputActions, item.text)
+                },`,
+    to: `                onClick: () => {
+                  sendSuggestion(props?.inputActions, item.text)
+                },`,
+    why: 'sendSuggestion seeds the draft first and submits on a microtask, so a click the machine will refuse still replaces whatever the reader had typed with a prompt that was never sent',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'a chip is armed while the composer holds a draft',
+    from: '      const armed = gates.idle === true && gates.empty === true',
+    to: '      const armed = gates.idle === true',
+    why: 'a non-empty draft is somebody half-written sentence; a chip that fires over it destroys their typing, and the ghost refuses on exactly this condition',
+  },
+  {
+    file: client,
+    suites: view,
     label: 'the send happens in the same tick as the seed',
     from: '      queueMicrotask(() => {',
     to: '      ;(() => {',
@@ -562,6 +616,16 @@ const mutations = [
     from: '        if (suggest.sessionId === sessionId) suggest.reason = error instanceof Error ? error.message : String(error)',
     to: '        if (suggest.sessionId === sessionId) { suggest.items = []; suggest.reason = error instanceof Error ? error.message : String(error) }',
     why: 'a single failed request would take the row away until the next stream frame, and the reason is something the person can do nothing about while the previous answer was still valid',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'every turn tail opens its own stream',
+    from: `      React.useEffect(() => {
+        ensureSuggest(sessionId)
+      }, [sessionId])`,
+    to: "      React.useEffect(() => {\n        if (typeof EventSource === 'function') {\n          new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))\n        }\n        ensureSuggest(sessionId)\n      }, [sessionId])",
+    why: 'a turn tail is mounted once per turn, so a stream here is one per turn; at six the browser per-origin cap against the local host is spent and the host own requests queue behind them',
   },
   {
     file: client,

@@ -6309,3 +6309,30 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 然后发现 **DEF-202**：turn 3 结束后帧到得太早，路由按还在沉降的正文回了空答案，客户端把 `loaded` 置真，`ensureSuggest` 从此短路——行上一整轮什么都没有，而手动再查路由其实是新的三条。修法：空答案装一只 15 s 定时器重问一次（`retried` 闩住，只一次；服务端失败记忆一分钟内重问不花钱）。
 
 基线：全量 **4350/0**、`client` 1052/0、`mutate-suggest` 68 处、`perf-budget` 退出 0。
+
+## 2026-11-24（三）：建议搬进正文末尾，宽度对齐输入框，行首回车符号
+
+用户看过真机截图后指出三件事：位置不对（显示在输入框上方那条 strip 里，与「任务」待办面板挤在一起，读起来像工具栏而不像回答的结尾）、宽度不协调（没有跟输入框对齐）、表现方式不对（Qoder 是在每行前面放一个回车符号）。
+
+改动：
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/suggest.js` | 答案里带上 `turn`（缓存路径、失败记忆路径、合流路径三处都要带，且要在存进 inflight 之前包好） |
+| `packages/ui-evolve/lib/client.js` | 席位从 `conversation.input.dock` 换到 `conversation.chat.turnTail`；每行行首 `↵`（`aria-hidden`）取代尾部箭头；宽度与左边界实测输入卡片（`ResizeObserver` + `window.resize`）；`data-armed` 点击门 |
+| `test/client.test.mjs` | `turn` 进夹具；新增 `offerText`（行首多了记号，`textOf` 会把 `↵` 算进去）；「忙碌隐藏」换成「tail 归属 + 对齐 + 不可测」三块 |
+| `scripts/mutate-suggest.mjs` | 70 → 75 |
+| `docs/27` §7 | slots 表的 `conversation.input.dock` 行改为 `conversation.chat.turnTail` |
+| `docs/29` | 新增 §8.7 |
+
+**席位为什么是 `conversation.chat.turnTail`**：宿主为每一轮在正文末尾留了这个槽位（`kind: "list"`、`scope: "session"`，参数 `{ turn, seq, openFile }`），它自己的交付文件卡片、计划预览、排期卡片都注册在这里——宿主认可的「这一轮的结尾」。代价是**每轮画一次**，所以这一行必须认领自己属于哪一轮。
+
+**第一版认领用数字，是错的**（DEF-203 第 1 条）：`previous.turn` 是本地计数、`props.turn` 是绝对号，续聊的旧会话里建议被取回、付钱、永不显示。改成顺序判据——只看「自己是不是最后一条 `[data-turn-tail]`」。
+
+**对齐必须量，不能写死**（实测 1922px 视口）：输入卡片 `left 390 / width 952`，正文列 `left 406 / width 920`，左右各内缩 16px。这个 16 是 padding 的结果，会话区域可拖宽、窗口会变，所以只能运行时测。测量的原点是**父元素**——第一版量自己，而 `marginLeft` 移动的正是那个 rect，于是 16/0/16 振荡到 React 报 `Maximum update depth exceeded`（DEF-203 第 2 条）。
+
+**流不能跟着席位走**（DEF-203 第 3 条）：`EventSource` 留在幽灵（每会话一个），芯片只读同一个 store；否则十个回合的会话开十条 `/events`，撞上浏览器同源连接上限。
+
+**可见性不等于可点性**（DEF-203 第 4 条）：turn tail 只为已关闭的回合存在，所以删掉了 phase 门（「你正在打下一句」正是三条最有用的时刻）；但点击仍要 `gates.idle && gates.empty`，因为点击的实现是「先 `setDraft` 再微任务 `submit`」，机器忙碌时 submit 被拒而种子已落地——读者打的字被一条从没发出去的建议顶掉。
+
+基线：全量 **4363/0**、`client` 1065/0、`mutate-suggest` **75/75 全杀**、`perf-budget` 退出 0（payload-real 15,984 B / ceiling 63,299 B / elapsed 3.6 ms / nothing 0 / state 41,941 B）、`registration` 56/0、`docs` 45/0。

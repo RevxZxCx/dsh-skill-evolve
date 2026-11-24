@@ -702,24 +702,34 @@ export class Suggestor {
 
     const count = clampCount(config.suggestionCount)
     const key = `${agentId}:${suggestKey(previous.turn, body)}:${count}`
+    // The turn the answer describes travels with the answer. The composer draws
+    // the offers at the tail of a *turn*, so it has to know which turn this
+    // answer is about; without it the row would have to guess from "is this the
+    // last turn in the DOM", which is wrong for exactly the interval between a
+    // turn closing and the next one starting.
+    const turn = previous.turn
     const cached = this.cache.get(key)
     const now = this.now()
     if (cached !== undefined && now - cached.at < SUGGEST_TTL_MS) {
-      return { enabled: true, items: cached.items, at: cached.at, cached: true }
+      return { enabled: true, items: cached.items, at: cached.at, cached: true, turn }
     }
     if (cached !== undefined) this.cache.delete(key)
 
     const failed = this.failed.get(key)
     if (failed !== undefined && now - failed.at < SUGGEST_FAILURE_TTL_MS) {
-      return { enabled: true, items: [], reason: failed.reason }
+      return { enabled: true, items: [], reason: failed.reason, turn }
     }
 
     const running = this.inflight.get(key)
     if (running !== undefined) return running
 
-    const task = this.run({ key, body, count, sessionRoute, signal }).finally(() => this.inflight.delete(key))
+    // Wrapped before it is stored, so a caller that joins a call already in
+    // flight gets the same `turn` as the caller that started it. The key
+    // contains the turn, so the two cannot disagree -- but a caller that read
+    // the field off only one of the two answers could.
+    const task = this.run({ key, body, count, sessionRoute, signal }).then((answer) => ({ ...answer, turn }))
     this.inflight.set(key, task)
-    return task
+    return task.finally(() => this.inflight.delete(key))
   }
 
   /**
