@@ -41,6 +41,49 @@ const MAX_SAID_BLOCKS = 40
 const MAX_SAID_CHARS = 2000
 
 /**
+ * How much of a whole turn's assistant prose one snapshot carries, in characters.
+ *
+ * The budget counts the mark below, so the visible excerpt is a little shorter
+ * than this number.
+ */
+const MAX_SAID_EXCERPT = 1200
+
+/**
+ * What a cut excerpt ends with.
+ *
+ * The cut used to be a bare `slice`, which is a lie by omission: the reader sees
+ * a sentence that stops in the middle and concludes the turn was interrupted.
+ * That is what happened on the live host -- the model read a truncated excerpt of
+ * a longer reply and proposed "finish the second half of the answer" as the next
+ * step, which is the one suggestion nobody wants. The mark costs about a hundred
+ * characters and removes the inference.
+ */
+const SAID_CUT_MARK = '[excerpt ends here: the reply was longer than this and was cut for length, so nothing in the turn was left unfinished]'
+
+/**
+ * Cut text to a budget and say so, preferring a boundary a reader would pause at.
+ *
+ * A cut that lands mid-word reads as a broken stream rather than a long one, so
+ * the window is trimmed back to the last paragraph break, then to the last
+ * sentence end, and only then to the budget itself.
+ *
+ * @param {string} text - the text to cut.
+ * @param {number} limit - the most characters the result may have, mark included.
+ * @param {string} mark - what to append when the text did not fit.
+ * @returns {string} the text, whole when it fits.
+ */
+function excerptOf(text, limit, mark) {
+  const chars = Array.from(text)
+  if (chars.length <= limit) return text
+  const budget = Math.max(0, limit - Array.from(mark).length - 2)
+  const window = chars.slice(0, budget).join('')
+  const para = window.lastIndexOf('\n\n')
+  const stop = Math.max(window.lastIndexOf('。'), window.lastIndexOf('！'), window.lastIndexOf('？'), window.lastIndexOf('. '))
+  const at = para > budget / 2 ? para : stop > budget / 2 ? stop + 1 : window.length
+  return `${window.slice(0, at).trimEnd()}\n\n${mark}`
+}
+
+/**
  * How much of the user's own message one turn keeps, in characters.
  *
  * Same order as the per-message cap the prompt already applies to transcript
@@ -579,7 +622,7 @@ class Transcript {
       paths: rows.map((entry) => entry.path),
       delivered: rows,
       commands: this.commands.slice(-8),
-      said: this.said.join('\n\n').slice(0, 1200),
+      said: excerptOf(this.said.join('\n\n'), MAX_SAID_EXCERPT, SAID_CUT_MARK),
       tools: tallyNames(calls),
       asked: this.asked,
     }
@@ -1030,4 +1073,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, declaredRows, producedRows, pageOf, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, declaredRows, producedRows, pageOf, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_SAID_EXCERPT, SAID_CUT_MARK, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames, excerptOf }

@@ -21,6 +21,7 @@
  */
 
 import { createHash } from 'node:crypto'
+import { excerptOf } from './transcript.js'
 
 /**
  * Read a dependency handed over either as a live value or as a function.
@@ -57,6 +58,17 @@ const MAX_SUMMARY_CHARS = 300
 
 /** Longest prompt input, in characters, before the transcript is truncated. */
 const MAX_INPUT_CHARS = 6000
+
+/**
+ * What a transcript cut short ends with.
+ *
+ * A bare `slice` here meant the prompt could end mid-sentence, and a model that
+ * reads an unfinished sentence proposes finishing it -- on the live host it
+ * proposed "complete the truncated second half of the answer", which described
+ * our own prompt budget rather than the work. The mark says which of the two it
+ * is looking at.
+ */
+const INPUT_CUT_MARK = '[transcript ends here: this is an excerpt cut to fit a length budget, not the end of the work]'
 
 /** Wall clock budget for one summary call. */
 const SUMMARY_TIMEOUT_MS = 20000
@@ -198,9 +210,14 @@ const INSTRUCTION = [
  * is asked to read, not text it is asked to obey.
  *
  * @param {object | undefined} snapshot - the snapshot from `Transcript.snapshot`.
+ * @param {number} [limit] - the most characters the body may have, cut mark
+ *   included. The panel summary and the next-step offer quote the same turn at
+ *   different sizes, and each has to be cut exactly once: cutting an
+ *   already-marked body again removes the mark and brings back the very
+ *   inference the mark exists to prevent (DEF-206).
  * @returns {string} the prompt body, possibly empty.
  */
-function renderPromptBody(snapshot) {
+function renderPromptBody(snapshot, limit = MAX_INPUT_CHARS) {
   if (snapshot === null || typeof snapshot !== 'object') return ''
   const lines = []
   const asked = typeof snapshot.asked === 'string' ? snapshot.asked.trim() : ''
@@ -230,7 +247,7 @@ function renderPromptBody(snapshot) {
   const said = typeof snapshot.said === 'string' ? snapshot.said.trim() : ''
   if (said.length > 0) lines.push(`What the assistant said:\n${said}`)
 
-  return lines.join('\n\n').slice(0, MAX_INPUT_CHARS)
+  return excerptOf(lines.join('\n\n'), limit, INPUT_CUT_MARK)
 }
 
 /**
@@ -859,6 +876,7 @@ export {
   defuseMarkers,
   MAX_SUMMARY_CHARS,
   MAX_INPUT_CHARS,
+  INPUT_CUT_MARK,
   SUMMARY_TIMEOUT_MS,
   SUMMARY_FAILURE_TTL_MS,
   SUMMARY_MAX_TOKENS,

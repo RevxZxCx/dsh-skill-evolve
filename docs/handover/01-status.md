@@ -6355,3 +6355,25 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **未验证的部分**：真实模型建议。路由回 `the suggestion call failed: 422 … ExceededBudget: Spend=$70.0124, Limit=$70.00`，`/models` 显示 22 个 provider 的 `models` 全为空数组。这是账户额度，不是代码。
 
 基线：全量 **4367/0**、`client` 1069/0、`mutate-suggest` **77/77 全杀**、`perf-budget` 退出 0、`registration` 56/0、`docs` 45/0、`mutations` 55/0。
+
+## 2026-11-25（一）：提示词里的截断自报家门（DEF-206）
+
+真机第一次跑出三条建议时，第一条是「补完被截断的第二部分回答」。上一轮回答本来完整——是我们自己把它切在句子中间且没留标记，模型据此判定「话没说完」。
+
+**改动**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/transcript.js` | 新增导出 `excerptOf(text, limit, mark)`（优先段落边界、其次句末标点，只有落在窗口后半段才采用）+ `MAX_SAID_EXCERPT = 1200` + `SAID_CUT_MARK`；`snapshot()` 的 `said` 改用 `excerptOf` |
+| `packages/ui-evolve/lib/summarise.js` | `renderPromptBody(snapshot, limit = MAX_INPUT_CHARS)` 接受预算、只收口一次；新增导出 `INPUT_CUT_MARK` |
+| `packages/ui-evolve/lib/suggest.js` | `renderSuggestBody` 传预算进去（不再二次 `slice`）；`INSTRUCTION` 加五条禁止「补完/继续/复述」 |
+| `test/transcript.test.mjs` | 194 → **204**：keep/cut 边界（1200 原样、1201 恰好 1200 且带标记）、两个互相排斥的边界样本、CJK 句号、标记必须自解释 |
+| `test/summarise.test.mjs` | 235 → **237**：`INPUT_CUT_MARK` 两段语义断言 |
+| `test/suggest.test.mjs` | 219 → **221**：`asked: 'x'.repeat(5000)` 落在 4000/6000 之间，钉住「只切一次」 |
+| `scripts/mutate-suggest.mjs` | 82 处（新增 5 条：快照裸切、切点落在词中、装配体裸切、二次切片、指令放行补完）；`test/mutations.test.mjs` 期望 81 → 82 |
+
+**基线**：全量 **4392 passed / 0 failed**；`transcript` 204/0、`summarise` 237/0、`suggest` 221/0；`mutations` 静态 55/0；`mutate-suggest` **82 killed / 0 survived / 0 crashed**；`perf-budget` 六条 ok、退出 0；`docs` 45/0；`registration` 56/0。
+
+**自审抓到的第三层（P1）**：`renderSuggestBody` 原本在已带标记的装配体上再 `slice` 一次。摘要预算 6000、建议预算 4000，两者之间的每个回合都会把标记切掉，缺陷 100% 复现，而当时三套测试、82 条突变、全量 4387 条断言全绿。修法是预算下传。**这是本轮唯一一次「测试全绿但产品错」，也是唯一一次由逐行读 diff 而不是由测试或评审发现的。**
+
+**评审**：`send_message` 唤醒三名评审员，`reviewer-tests-server` 回来了并给出 3 条（2 P2 + 1 P3，全部成立、全部已修，记录见 `.review/u123-tests.md` 与 R-123），另外两名超时未回。

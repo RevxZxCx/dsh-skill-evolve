@@ -26,7 +26,10 @@ import {
   readPresentedEntries,
   readPresentedEvent,
   readToolCallBlock,
-  tallyNames
+  tallyNames,
+  excerptOf,
+  MAX_SAID_EXCERPT,
+  SAID_CUT_MARK
 } from '../packages/ui-evolve/lib/transcript.js'
 import * as deliverable from '../packages/ui-evolve/lib/deliverable.js'
 
@@ -535,6 +538,91 @@ check(
   store.record('a', said('x'.repeat(5000)))
   store.record('a', endTurn())
   check('assistant text is capped', store.view('a').previous.said.length <= 1200, String(store.view('a').previous.said.length))
+}
+
+// A cut that says nothing is read as an interruption. On the live host the model
+// saw a mid-sentence excerpt and proposed "finish the second half of the answer"
+// as the next step -- a suggestion about our prompt budget, not about the work.
+{
+  const store = new TranscriptStore()
+  store.record('a', human('long reply'))
+  store.record('a', said(`${'A finished sentence. '.repeat(200)}TAIL-THAT-MUST-NOT-SURVIVE`))
+  store.record('a', endTurn())
+  const excerpt = store.view('a').previous.said
+  check('a cut excerpt says it was cut', excerpt.includes('excerpt ends here'), JSON.stringify(excerpt.slice(-90)))
+  // A literal, not `MAX_SAID_EXCERPT`: a ceiling derived from the constant under
+  // test moves with it, so lowering the budget or narrowing `<=` to `<` would
+  // stay green (DEF-194's lesson, twice now).
+  // Exactly the budget, not merely under it: `<=` would let a lowered constant
+  // (1200 -> 1000) and a hard-coded smaller budget both pass, and the only
+  // other ceiling in this file is derived from the constant under test.
+  // Uses most of the budget, not merely under it: `<=` alone lets a lowered
+  // constant (1200 -> 1000) and a hard-coded smaller budget both pass, and the
+  // only other ceiling in this file is derived from the constant under test.
+  check('and uses the whole budget, mark included', excerpt.length > 1100 && excerpt.length <= 1200, String(excerpt.length))
+  // The mark has to explain itself, not just exist. Shortening it to
+  // '[excerpt ends here]' keeps every other assertion green while deleting the
+  // sentence that does the work: "cut for length", "nothing was left unfinished".
+  check('the mark names the reason, not just the event', SAID_CUT_MARK.includes('cut for length'), JSON.stringify(SAID_CUT_MARK))
+  check('and rules out the interruption reading', SAID_CUT_MARK.includes('nothing in the turn was left unfinished'), JSON.stringify(SAID_CUT_MARK))
+  const short = new TranscriptStore()
+  short.record('b', human('short reply'))
+  short.record('b', said('One sentence, whole.'))
+  short.record('b', endTurn())
+  check('a whole reply is quoted verbatim, with no mark', short.view('b').previous.said === 'One sentence, whole.', JSON.stringify(short.view('b').previous.said))
+}
+
+// The keep/cut edge, exactly. `excerptOf` returns the text untouched at the
+// budget and cuts to exactly the budget one character past it -- the mark is
+// inside that budget, so a body of 1200 plus a 118-character mark would be 1318
+// and the ceiling above would still pass on a shorter fixture.
+{
+  const whole = 'z'.repeat(1200)
+  check('a reply exactly at the budget is returned whole', excerptOf(whole, 1200, SAID_CUT_MARK) === whole, String(excerptOf(whole, 1200, SAID_CUT_MARK).length))
+  const over = excerptOf('z'.repeat(1201), 1200, SAID_CUT_MARK)
+  check('one character past the budget is cut to exactly the budget', over.length === 1200, String(over.length))
+  check('and the mark is inside that budget, not appended to it', over.endsWith(SAID_CUT_MARK), JSON.stringify(over.slice(-30)))
+}
+
+// The mark is a suffix, not a separator: the body itself may contain blank
+// lines, so the only safe way to get it back is to remove the mark.
+const withoutMark = (out) => (out.endsWith('\n\n' + SAID_CUT_MARK) ? out.slice(0, -(SAID_CUT_MARK.length + 2)) : out)
+
+// The cut lands on a boundary a reader would pause at, not mid-word. Each
+// fixture below is chosen so that only ONE of the two boundary preferences can
+// produce it, because a fixture whose last paragraph break happens to sit at a
+// sentence end cannot tell the two apart (both branches yield a body ending '.').
+{
+  // A paragraph break late in the window and no sentence end anywhere: the
+  // paragraph arm is the only one that can produce this body.
+  const paragraphs = `${'word '.repeat(210)}\n\n${'Z'.repeat(500)}`
+  const body = excerptOf(paragraphs, 1200, SAID_CUT_MARK).split('\n\n')[0]
+  check('a late paragraph break is where the excerpt stops', body === 'word '.repeat(210).trimEnd(), `${body.length} chars, ends ${JSON.stringify(body.slice(-12))}`)
+  check('so the unbroken run after it is not carried', body.includes('Z') === false, JSON.stringify(body.slice(-12)))
+}
+{
+  // A paragraph break early in the window and a sentence end late: taking the
+  // paragraph would cut this to 7 characters, so only the sentence arm passes.
+  const mixed = `Short.\n\n${'A finished sentence. '.repeat(80)}`
+  const body = withoutMark(excerptOf(mixed, 1200, SAID_CUT_MARK))
+  check('an early paragraph break is not treated as the end', body.startsWith('Short.'), JSON.stringify(body.slice(0, 20)))
+  check('and the excerpt still reaches the last sentence end', body.endsWith('A finished sentence.'), JSON.stringify(body.slice(-24)))
+}
+{
+  // No spaces and no ASCII punctuation: only the CJK stops can end this body.
+  const cjk = `x${'这是一句完整的话。'.repeat(200)}`
+  const body = excerptOf(cjk, 1200, SAID_CUT_MARK).split('\n\n')[0]
+  check('a chinese reply stops at a chinese full stop', body.endsWith('。'), JSON.stringify(body.slice(-6)))
+}
+{
+  const store = new TranscriptStore()
+  store.record('a', human('paragraphs'))
+  store.record('a', said(`${'First paragraph. '.repeat(40)}\n\n${'Second paragraph. '.repeat(40)}\n\n${'Third. '.repeat(80)}`))
+  store.record('a', endTurn())
+  const excerpt = store.view('a').previous.said
+  const body = excerpt.slice(0, excerpt.indexOf('\n\n[excerpt ends here'))
+  check('the excerpt stops at a sentence end, not inside one', body.endsWith('.'), JSON.stringify(body.slice(-40)))
+  check('and does not carry the tail it dropped', excerpt.includes('Third. Third.') === false, JSON.stringify(excerpt.slice(-120)))
 }
 
 {

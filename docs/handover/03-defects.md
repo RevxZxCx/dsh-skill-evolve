@@ -208,6 +208,7 @@
 | DEF-204 | 2026-11-24 | 建议行在真机上永远不显示：宿主把槽位条目包在 `div[data-slot]{display:contents}` 里，`display:contents` 不生成盒子，`getBoundingClientRect()` 是 0×0；测量函数读到 `outer.width === 0` 就 `return`，`box` 永远是 `null` | 假节点的父元素有 920 宽，“没有盒子的包装层”这个现实世界里最常见的情形在测试里不存在 |
 | DEF-205 | 2026-11-24 | 幽灵在真机上不可见：overlay 锚点 `z-index:auto`，而宿主输入框的 scroll 层是 `position:relative;z-index:2`、按钮行 `z-index:3`，不带层级的绝对定位子元素被绘制在它要代替的编辑器之下 | 假 DOM 不计算 CSS 层叠，且测试只断言属性与几何，没有一条问“它能不能被看见” |
 | DEF-203 | 2026-11-24 | 建议从输入框上方搬进正文末尾之后，三处旧前提一起作废：回合门比较的是两个不同的计数器（P0）、对齐量的是自己刚被写入的 rect（P0）、事件流跟着每轮挂载的组件走（P1） | 三处都不是新代码的 bug，是旧代码被搬到新前提上；测试也全部按旧席位写——流从芯片取、回合比数字、对齐的假节点不会动 |
+| DEF-206 | 2026-11-25 | 提示词里上一轮的回答被裸 `slice` 硬切（快照 1200 字符、装配体 6000 字符），切点落在句子中间且没有任何标记，模型据此把「补完被截断的后半段」当成下一步——这是这个功能最显眼的错法 | 套件只断言长度上界与内容存在，没有一条问「切点后面像不像话没说完」；而模型读到的正是那个「像」，测试读不到 |
 
 ---
 
@@ -3845,3 +3846,31 @@ if (outer.width === 0) return
 **一条假证据（必须记下来）**：我最初把 `document.elementsFromPoint()` 返回 `GRgSLq_input` 当成“幽灵被盖住”的证据。那是错的：`elementsFromPoint` 会跳过 `pointer-events:none` 的元素，而幽灵正好带着它。用一个临时节点实测：带 `pointer-events` 时 `elementsFromPoint` 能报它（`true`），加上 `pointer-events:none` 后报不到（`false`）。所以那一步只能证明“幽灵不接受点击”，不能证明层叠。结论对了，证据是假的——这比错结论更危险，因为下一个人会拿着它去推其他事。可靠的做法是 A/B：改属性、截图、改回、再截图。
 
 **教训**：两条缺陷的形状一样——**代码在替身里正确，在真实宿主里从不生效，而失败是静默的**（没有异常、没有槽位错误、`data-shown` 老老实实说 false）。真机验收之所以不能省，就是因为它能问出测试问不出的那句「屏幕上真的有东西吗」。
+
+## DEF-206 提示词把上一轮回答硬切，模型据此建议「补完」（2026-11-25）
+
+**现象**：真机上第一条建议是「补完被截断的第二部分回答，说明与 Qoder 在触发时机上的完整差异」。上一轮的回答本来完整，是我们自己把它切了。
+
+**根因**：三层裁剪，每一层都用裸 `slice`，切点落在句子中间且不留任何标记：
+
+1. `packages/ui-evolve/lib/transcript.js:582`（改前）`said: this.said.join('\n\n').slice(0, 1200)`
+2. `packages/ui-evolve/lib/summarise.js:233`（改前）`return lines.join('\n\n').slice(0, MAX_INPUT_CHARS)`（`MAX_INPUT_CHARS = 6000`）
+
+模型读到的最后一句停在半截，它唯一合理的解释就是「这段话没说完」，于是把「补完」当成下一步。**这不是模型笨，是我们在提示词里写了一个错误的句子。**
+
+**修法**（三层一起改，缺一层就复发）：
+
+- `packages/ui-evolve/lib/transcript.js` 新增导出 `excerptOf(text, limit, mark)`：按码点计长度；超限时优先取最后一个 `\n\n`（段落边界），其次取最后一个句末标点（`。！？` 与后随空白的 `.!?`），**只有边界落在窗口后半段才采用**，否则按预算硬切；返回 `窗口 + '\n\n' + mark`。新增 `MAX_SAID_EXCERPT = 1200` 与 `SAID_CUT_MARK = '[excerpt ends here: the reply was longer than this and was cut for length, so nothing in the turn was left unfinished]'`。
+- `packages/ui-evolve/lib/summarise.js` 的 `renderPromptBody` 末尾改为 `excerptOf(..., MAX_INPUT_CHARS, INPUT_CUT_MARK)`，`INPUT_CUT_MARK = '[transcript ends here: this is an excerpt cut to fit a length budget, not the end of the work]'`。
+- `packages/ui-evolve/lib/suggest.js` 的 `INSTRUCTION` 加五条：*"The turn below is an EXCERPT. A sentence that stops in the middle means the excerpt was cut, not that the assistant was interrupted. Never propose finishing, completing, continuing, or restating a previous answer -- that describes our prompt budget, not the work. If the excerpt looks unfinished, propose the next piece of work anyway."*
+- **第三层（自查时才发现的，见下）**：`packages/ui-evolve/lib/suggest.js:627`（改前）`return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)` —— 在已经带标记的 6000 字符装配体上又裸切到 4000。`renderPromptBody` 改为接受预算 `renderPromptBody(snapshot, limit = MAX_INPUT_CHARS)`，`renderSuggestBody` 传 `MAX_TURN_INPUT_CHARS` 进去，**只切一次、只留一个标记**。
+
+第三层的成因值得单独记：摘要的预算是 6000，建议的预算是 4000，两者之间的每个回合都会让第二次 `slice` 开火，而它切掉的正是刚加上的 `INPUT_CUT_MARK`。也就是说**修完前两层之后，缺陷在 4000–6000 字符的回合上仍然 100% 复现**，而 `test/suggest.test.mjs` 原有的两条断言（`clipped.length <= 4000`、`clipped.startsWith('What the user asked:')`）全绿。这是我自己的 diff 里肉眼可见的一行，只有在我逐行读自己改的东西时才被抓到——派出去的评审一个都没回来（见 R-123）。
+
+标记与指令是两件事：标记说**发生了什么**，指令说**该怎么办**。只做标记，模型仍会礼貌地补完；只做指令，它得先猜为什么那句话断了。
+
+**为什么测试没抓到**：三套件里关于长度的断言全部是上界（`length <= 1200`、`length <= 6000`）与包含关系（`includes('What the assistant said:')`）。**没有一条问「截断处看起来像什么」**——而模型读到的正是那个「像」。这类缺陷的形状是：所有断言都成立，产品仍然错，因为断言描述的是我们想要的（短），不是模型看到的（话没说完）。
+
+第三层更难看：它连「断言不够严」都不是，而是**同一个错误在同一个文件里出现两次，中间隔着我刚写好的修复**。`renderPromptBody` 的返回值从此有了一个约定（它自己会收口并留标记），而 `renderSuggestBody` 在同一个 commit 里就违反了这个约定。新加的断言用 `asked: 'x'.repeat(5000)` 落在两个预算之间，并已验证它能杀回旧代码（改回 `.slice(...)` → `220 passed, 1 failed`，`FAIL a body cut once still says it was cut`）。
+
+**教训**：提示词里的每一段文本都是产品的一部分，而它一旦被程序裁过，就必须在文本里说明自己被裁过。裁剪函数返回的不只是字符串，它是在替我们向模型陈述一个事实；陈述错了，模型就会照着错的做，而且做得很有道理。**推论：一个函数一旦开始「替调用方收口」，调用方就不能再收一次口**——这条约定要么写进签名（传预算进去），要么写进断言（长度落在两个预算之间时标记还在）。

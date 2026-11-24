@@ -205,6 +205,11 @@ const INSTRUCTION = [
   '- Base each on the task in progress, not on the last thing that happened. If',
   '  the turn finished something, propose the next unfinished thing; if it found',
   '  a problem, propose the fix.',
+  '- The turn below is an EXCERPT. A sentence that stops in the middle means the',
+  '  excerpt was cut, not that the assistant was interrupted. Never propose',
+  '  finishing, completing, continuing, or restating a previous answer -- that',
+  '  describes our prompt budget, not the work. If the excerpt looks unfinished,',
+  '  propose the next piece of work anyway.',
   '- Write in the language the person is writing in — the language of what they',
   '  asked, not the language of the file paths or commands.',
   '- No code, no markdown, no file paths unless the turn itself named them, no',
@@ -610,8 +615,12 @@ export function clampCount(value) {
  * only turn a next step can be about.
  *
  * Clipped, because one turn can quote a file's worth of text and the prompt
- * only needs to know where the work stands. There is no second budget to hold:
- * one clipped part is the whole body, so `MAX_TURN_INPUT_CHARS` is the ceiling.
+ * only needs to know where the work stands. The budget is passed down rather
+ * than applied afterwards: `renderPromptBody` cuts once and appends its cut
+ * mark, so slicing the result again would cut the mark off and leave the model
+ * reading a sentence that just stops -- the exact inference the mark exists to
+ * prevent (DEF-206). This body is 4000 characters while the summary's is 6000,
+ * so the second slice used to fire on any turn between the two numbers.
  *
  * @param {object | undefined} view - the transcript view.
  * @returns {string} the prompt body, possibly empty.
@@ -619,7 +628,7 @@ export function clampCount(value) {
 export function renderSuggestBody(view) {
   const previous = view?.previous
   if (previous === undefined || previous === null || typeof previous !== 'object' || Array.isArray(previous)) return ''
-  return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)
+  return renderPromptBody(previous, MAX_TURN_INPUT_CHARS)
 }
 
 /**

@@ -117,6 +117,7 @@
 | R-120 | 2026-11-24 | 第三轮：真机验收修完的客户端增量（选择器钩子），只喂那 31 行 | 0 条成立，4 个疑问逐条带证据排除；附带一处测试标签不实（不是 `client.js` 缺陷） | 修 0 / 记录 1（测试标签已改） |
 | R-122 | 2026-11-24 | 真机验收（不是评审员）：四条 DOM/几何证据推翻「测试全绿=能用」 | 2 条 P0（`display:contents` 无盒子、幽灵被 z-index 盖住） | 修 2 / 驳回 0 |
 | R-121 | 2026-11-24 | 席位迁移：建议从输入框上方挪到正文末尾（6 文件 259 增 / 122 删，791 行 diff） | 8 条全部成立（2 P0、2 P1、4 P2/P3）——两条 P0 都是「旧前提被搬到新席位后作废」 | 修 8 / 驳回 0 |
+| R-123 | 2026-11-25 | 截断修复（DEF-206 三层，4 文件，356 行 diff）：派出去的评审员一个都没回来，改为自审 | 1 条 P1（`renderSuggestBody` 在已带标记的装配体上二次切片），另有 1 条锚点过期 | 修 2 / 驳回 0 |
 
 ---
 
@@ -5212,3 +5213,18 @@ m17868 追加要求「注册点表要自带维护约束」）：
 **一条必须记下来的假证据**：我最初用 `document.elementsFromPoint()` 当层叠证据，它返回的是宿主编辑器而不是幽灵。但 `elementsFromPoint` **会跳过 `pointer-events:none` 的元素**，而幽灵恰好带着 `pointer-events:none`——实测：同一个临时节点，不加该属性时 `true`，加上后 `false`。所以那一步只能证明“幽灵不接收点击”，与层叠无关。结论对了而证据是假的，比错结论更危险：下一个人会拿着它去推别的事。可靠的做法是 A/B：改属性 → 截图 → 改回 → 再截图。
 
 **给下一轮的规矩**：`lib/client.js` 的任何改动，测试全绿只是入场券；**必须**在已配对页面上 reload 一次，看 `data-shown`、看 rect、看截图。三条证据缺一条就不算通过。
+
+## R-123 截断修复（DEF-206 三层）：评审员全员失联，改为自审
+
+**范围**：4 文件（`packages/ui-evolve/lib/transcript.js`、`summarise.js`、`suggest.js`、`test/*`），diff 356 行 / 18,259 B，存 `.review/r123-excerpt.diff`。按 docs/27 §2 第 6 步属于「200–600 行，两到三次串行评审」。
+
+**派发失败**：`send_message` 唤醒 `reviewer-engine`、`reviewer-tests-server`、`reviewer-delta-engine` 各一次，`wait_agent` 每次等到超时（60 s / 120 s），`.review/` 里始终只有我自己写的 diff。`subagent` 在本仓库历史上从未成功过（R-117 记了四次静默消失，本轮再记一次）。**结论：本仓库不能依赖派发评审，只能自审，并把自审当成正式环节记下来。**
+
+**自审的产出（2 条，都成立）**：
+
+1. **[P1] `packages/ui-evolve/lib/suggest.js:627`** `return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)` —— 在已经带 `INPUT_CUT_MARK` 的 6000 字符装配体上又裸切到 4000。摘要预算 6000 与建议预算 4000 之间的每个回合，第二次 `slice` 都会把标记切掉，缺陷 100% 复现。原有两条断言（`clipped.length <= 4000`、`clipped.startsWith('What the user asked:')`）全绿。
+   - 修法：`renderPromptBody(snapshot, limit = MAX_INPUT_CHARS)`，预算下传，只切一次。
+   - 钉法：新断言用 `asked: 'x'.repeat(5000)`（**落在 4000 与 6000 之间**），已用临时脚本验证能杀回旧代码（`220 passed, 1 failed`，`FAIL a body cut once still says it was cut`）。
+2. **锚点过期**：`scripts/mutate-suggest.mjs:812` 的 `from` 仍写 `MAX_INPUT_CHARS`，而源码已改为 `limit`。`test/mutations.test.mjs` 报 `missing in summarise.js: return excerptOf(lines.join('`。这类失败是好的：**改签名的那一刻，所有引用旧签名的锚点都该红。**
+
+**这一轮最该记住的**：这个 P1 是我自己在同一个 commit 里造出来的，而且就在我刚写好「只切一次」的修复下面隔着一个函数。三套测试、82 条突变、全量 4380 条断言全绿，它们没有一条看见它——因为**它们检查的都是「返回值够不够短」，没有一条检查「这个返回值是不是已经收过口了」**。派出去的三个评审员一个都没回来，唯一抓住它的是逐行读自己的 diff。这不是流程的胜利，是流程失效后的兜底。

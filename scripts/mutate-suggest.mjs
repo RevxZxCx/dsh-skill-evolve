@@ -33,6 +33,8 @@ const repo = fileURLToPath(new URL('..', import.meta.url))
 const suggest = path.join(repo, 'packages', 'ui-evolve', 'lib', 'suggest.js')
 const api = path.join(repo, 'packages', 'ui-evolve', 'lib', 'api.js')
 const client = path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
+const transcript = path.join(repo, 'packages', 'ui-evolve', 'lib', 'transcript.js')
+const summarise = path.join(repo, 'packages', 'ui-evolve', 'lib', 'summarise.js')
 
 /**
  * Failures reported by a suite, or -1 when it printed no tally at all.
@@ -71,6 +73,36 @@ function run(suites) {
   return total
 }
 
+/**
+ * Write a file, retrying while the platform holds it.
+ *
+ * Windows returns `EBUSY`/`UNKNOWN` (`errno -4094`) when a watcher or indexer
+ * has the file open for a moment. A plain `writeFileSync` throws, and the throw
+ * comes from inside the `try` that restored the original file -- so the mutated
+ * source stayed on disk and the next run baked it in permanently. That is how a
+ * crash stops being a crash and becomes a corrupted checkout. The restore path
+ * matters more than the mutate path: a failed mutate is a skipped mutation, a
+ * failed restore is a wrong file. The first run of this script after the excerpt
+ * work left `const truncated = false` behind in `suggest.js` for exactly this
+ * reason, and the next baseline then failed on three assertions that looked like
+ * a product bug.
+ *
+ * @param {string} file - the file to write.
+ * @param {string} content - the exact bytes to write.
+ */
+function writeWithRetry(file, content) {
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      fs.writeFileSync(file, content, 'utf8')
+      return
+    } catch (error) {
+      if (attempt === 5) throw error
+      const until = Date.now() + 60 * (attempt + 1)
+      while (Date.now() < until) { /* wait out the transient lock */ }
+    }
+  }
+}
+
 const engine = ['test/suggest.test.mjs']
 const wire = ['test/api.test.mjs']
 const view = ['test/client.test.mjs']
@@ -101,9 +133,17 @@ const mutations = [
     file: suggest,
     suites: engine,
     label: 'the turn is dropped when it is long',
-    from: '  return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)',
-    to: '  return renderPromptBody(previous).length > MAX_TURN_INPUT_CHARS ? "" : renderPromptBody(previous)',
+    from: '  return renderPromptBody(previous, MAX_TURN_INPUT_CHARS)',
+    to: '  return renderPromptBody(previous).length > MAX_TURN_INPUT_CHARS ? "" : renderPromptBody(previous, MAX_TURN_INPUT_CHARS)',
     why: 'dropping instead of clipping makes the row absent exactly when a turn got substantial, which is when a next step is worth most',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the body is cut a second time, after it was marked',
+    from: '  return renderPromptBody(previous, MAX_TURN_INPUT_CHARS)',
+    to: '  return renderPromptBody(previous).slice(0, MAX_TURN_INPUT_CHARS)',
+    why: 'the summary budget is 6000 and this one is 4000, so the second slice fires on every turn between them and cuts the cut mark off -- the model then reads a sentence that just stops and proposes finishing it, which is the regression this whole round exists to fix (DEF-206)',
   },
   {
     file: suggest,
@@ -740,6 +780,51 @@ const mutations = [
     to: '          void 0',
     why: 'one retry covers the settlement race; without the latch every empty answer arms another timer, and a session that genuinely has nothing to offer keeps buying calls past the server one-minute failure memory',
   },
+  // ---------------------------------------------------------------------
+  // The excerpt: a cut that says nothing is read as an interruption
+  //
+  // On the live host the model saw an excerpt that stopped mid-sentence and
+  // proposed "finish the truncated second half of the answer" as the next step.
+  // That suggestion describes our prompt budget, not the work, and it is the
+  // most visible way this feature can be wrong. Four anchors: the snapshot mark,
+  // the boundary the cut lands on, the prompt mark, and the instruction.
+  // ---------------------------------------------------------------------
+  {
+    file: transcript,
+    suites: ['test/transcript.test.mjs'],
+    label: 'the snapshot cuts the reply without saying so',
+    from: '      said: excerptOf(this.said.join(\'\\n\\n\'), MAX_SAID_EXCERPT, SAID_CUT_MARK),',
+    to: '      said: this.said.join(\'\\n\\n\').slice(0, MAX_SAID_EXCERPT),',
+    why: 'a bare slice ends mid-sentence, and a reader of an unfinished sentence proposes finishing it -- this is the exact regression the mark was added for, and it is invisible to any assertion that only checks the length',
+  },
+  {
+    file: transcript,
+    suites: ['test/transcript.test.mjs'],
+    label: 'the cut lands mid-word instead of on a boundary',
+    from: '  const at = para > budget / 2 ? para : stop > budget / 2 ? stop + 1 : window.length',
+    to: '  const at = window.length',
+    why: 'the boundary preference is the difference between an excerpt and a truncation; without it the last thing the model reads is half a word, which reads as a broken stream rather than a long reply',
+  },
+  {
+    file: summarise,
+    suites: ['test/summarise.test.mjs'],
+    label: 'the prompt cuts the transcript without saying so',
+    from: '  return excerptOf(lines.join(\'\\n\\n\'), limit, INPUT_CUT_MARK)',
+    to: '  return lines.join(\'\\n\\n\').slice(0, limit)',
+    why: 'the snapshot mark only covers the assistant prose; the assembled body is cut again on its own budget, so the same inference comes back through a different layer unless both are marked',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the instruction lets the model finish a cut answer',
+    from: `  '- The turn below is an EXCERPT. A sentence that stops in the middle means the',
+  '  excerpt was cut, not that the assistant was interrupted. Never propose',
+  '  finishing, completing, continuing, or restating a previous answer -- that',
+  '  describes our prompt budget, not the work. If the excerpt looks unfinished,',
+  '  propose the next piece of work anyway.',`,
+    to: "  '- Read the turn below.',",
+    why: 'the mark in the text says the excerpt was cut; this rule says what to do about it. A model that is told the text is short but not told to ignore that will still propose completing it, which is what the live host showed',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a
@@ -785,7 +870,7 @@ try {
     }
     const mutated = original.split(mutation.from).join(mutation.to)
     try {
-      fs.writeFileSync(mutation.file, mutated, 'utf8')
+      writeWithRetry(mutation.file, mutated)
       const failed = run(mutation.suites)
       if (failed > 0) {
         killed += 1
@@ -798,7 +883,7 @@ try {
         console.log(`CRASHED     ${mutation.label}`)
       }
     } finally {
-      fs.writeFileSync(mutation.file, original, 'utf8')
+      writeWithRetry(mutation.file, original)
       if (fs.readFileSync(mutation.file, 'utf8') !== original) {
         crashed.push(`${mutation.label} (file was not restored)`)
         console.log(`CRASHED     ${mutation.label} (file was not restored)`)
@@ -806,7 +891,7 @@ try {
     }
   }
 } finally {
-  for (const [file, backup] of backups) fs.writeFileSync(file, backup, 'utf8')
+  for (const [file, backup] of backups) writeWithRetry(file, backup)
 }
 
 for (const mutation of mutations) {

@@ -307,6 +307,16 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // mutation the first time (DEF-194's lesson, again).
   check('an over-long turn is clipped to four thousand characters', clipped.length <= 4000, String(clipped.length))
   check('and not dropped', clipped.startsWith('What the user asked:'), clipped.slice(0, 40))
+  // The body is cut once, at its own budget, and the cut is announced. A second
+  // slice after the fact -- the shape this code had when it shipped -- removes
+  // the announcement and leaves a sentence that just stops, which is precisely
+  // what made the model propose "finish the truncated answer" on the live host.
+  // The window between the two budgets (4000 here, 6000 in the summary) is where
+  // the second slice used to fire, so the fixture has to land inside it.
+  const between = { turn: 1, asked: 'x'.repeat(5000), said: '', paths: [], tools: [], commands: [] }
+  const once = renderSuggestBody({ turns: 1, previous: between })
+  check('a body cut once still says it was cut', once.includes('transcript ends here'), once.slice(-120))
+  check('and stays inside its own budget', once.length <= 4000, String(once.length))
 
   const nullish = renderSuggestBody({ turns: 1, previous: null })
   check('a null previous is an empty body', nullish === '', nullish)
@@ -738,6 +748,12 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('the output budget leaves room to think', llm.log.prepare[0]?.maxTokens === 700, String(llm.log.prepare[0]?.maxTokens))
   check('the instruction asks for json', String(content[0]?.text).includes('{"suggestions"'), 'no contract in the prompt')
   check('the instruction says the turns are data', String(content[0]?.text).toLowerCase().includes('not instruction'))
+  // The live host produced "finish the truncated second half of the answer" as a
+  // suggestion, because the excerpt it read stopped mid-sentence. The instruction
+  // has to name that mistake, or the model keeps making it.
+  check('the instruction forbids finishing an unfinished-looking excerpt', String(content[0]?.text).includes('Never propose'), 'no warning about the excerpt')
+  check('and says the excerpt was cut, not interrupted', String(content[0]?.text).includes('EXCERPT') && String(content[0]?.text).includes('cut'), 'no statement that the turn is an excerpt')
+  check('and still forbids questions', String(content[0]?.text).includes('questions'), 'the rest of the rules went missing')
 }
 
 {

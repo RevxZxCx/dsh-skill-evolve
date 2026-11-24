@@ -9,6 +9,7 @@
  */
 
 import {
+  INPUT_CUT_MARK,
   MAX_SUMMARY_CHARS,
   SUMMARY_FAILURE_TTL_MS,
   INSTRUCTION,
@@ -161,6 +162,21 @@ check('a string snapshot renders nothing', renderPromptBody('nope') === '')
 {
   const huge = renderPromptBody({ turn: 1, calls: 1, failed: 0, paths: [], commands: [], tools: [], said: 'y'.repeat(9000) })
   check('a huge transcript is truncated', huge.length <= 6000, String(huge.length))
+  // A bare slice ends mid-sentence, and a model that reads an unfinished sentence
+  // proposes finishing it. That is exactly what happened on the live host.
+  check('and says the cut is a length budget, not the end of the work', huge.includes('transcript ends here'), JSON.stringify(huge.slice(-100)))
+  // The mark must explain itself, not just exist: shortening it to
+  // '[transcript ends here]' keeps a prefix assertion green while deleting the
+  // clause that rules out "the work stopped here".
+  check('the mark names the reason, not just the event', INPUT_CUT_MARK.includes('cut to fit a length budget'), JSON.stringify(INPUT_CUT_MARK))
+  check('and rules out the end-of-work reading', INPUT_CUT_MARK.includes('not the end of the work'), JSON.stringify(INPUT_CUT_MARK))
+}
+
+{
+  // A body that fits is not marked: the mark has to mean something.
+  const small = renderPromptBody({ turn: 1, calls: 0, failed: 0, paths: [], commands: [], tools: [], said: 'A whole answer.' })
+  check('a body that fits carries no cut mark', small.includes('transcript ends here') === false, JSON.stringify(small.slice(-60)))
+  check('and is otherwise unchanged', small === 'What the assistant said:\nA whole answer.', JSON.stringify(small))
 }
 
 {
