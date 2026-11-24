@@ -5205,8 +5205,10 @@ m17868 追加要求「注册点表要自带维护约束」）：
 1. `[data-slot-error]` 数一数 → 排除组件抛错；
 2. 目标元素在不在 DOM、`data-shown` 是什么 → 排除「没渲染」；
 3. `getBoundingClientRect()` 是多少 → 排除「渲染成 0 尺寸」；
-4. `document.elementsFromPoint(x, y)` 最上面是谁 → 排除「画了但被盖住」。
+4. 层叠：把目标元素的 `z-index` 临时改成 `auto` 再截一张图。图里没了就证明它靠层叧才能看见。
 
 第 4 步是这一轮唯一能发现 DEF-205 的动作，前 3 步全部指向「一切正常」。
+
+**一条必须记下来的假证据**：我最初用 `document.elementsFromPoint()` 当层叠证据，它返回的是宿主编辑器而不是幽灵。但 `elementsFromPoint` **会跳过 `pointer-events:none` 的元素**，而幽灵恰好带着 `pointer-events:none`——实测：同一个临时节点，不加该属性时 `true`，加上后 `false`。所以那一步只能证明“幽灵不接收点击”，与层叠无关。结论对了而证据是假的，比错结论更危险：下一个人会拿着它去推别的事。可靠的做法是 A/B：改属性 → 截图 → 改回 → 再截图。
 
 **给下一轮的规矩**：`lib/client.js` 的任何改动，测试全绿只是入场券；**必须**在已配对页面上 reload 一次，看 `data-shown`、看 rect、看截图。三条证据缺一条就不算通过。

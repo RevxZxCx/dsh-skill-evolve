@@ -3836,10 +3836,12 @@ if (outer.width === 0) return
 
 **现象**：`[data-dsse-ghost][data-shown="true"]`、文本正确、`getBoundingClientRect()` 是 `{left:316, top:731, w:215, h:24}` 与宿主 placeholder 完全重合、placeholder 已被掩码成 `visibility:hidden`——**但截图里输入框是空的**。
 
-**根因**：`document.elementsFromPoint()` 在该坐标返回的第一个元素是 `GRgSLq_input`（宿主编辑器），不是幽灵。宿主输入卡片内部：`GRgSLq_scroll` 是 `position:relative; z-index:2`，`GRgSLq_row` 是 `z-index:3`，而 `GRgSLq_overlayAnchor`（本槽位渲染进的那个锚点）是 `z-index:auto`。同为绝对定位、不带层级的子元素，按 DOM 顺序绘制在后者之上——锚点排第一，编辑器排第三。
+**根因**：宿主输入卡片内部的层叠使幽灵被绘制在编辑器之下。**证据是 A/B 对照而不是 `elementsFromPoint`**（见下方“一条假证据”）：把真机上的 `.dsse-ghost` 内联改成 `z-index:auto` → 截图里输入框空白；改回 `z-index:4` → 幽灵重新出现。宿主输入卡片内部：`GRgSLq_scroll` 是 `position:relative; z-index:2`，`GRgSLq_row` 是 `z-index:3`，而 `GRgSLq_overlayAnchor`（本槽位渲染进的那个锚点）是 `z-index:auto`。同为绝对定位、不带层级的子元素，按 DOM 顺序绘制在后者之上——锚点排第一，编辑器排第三。
 
 **修法**：给 `.dsse-ghost` 加 `z-index:4`，并保留 `pointer-events:none`（点击必须穿透到编辑器）。
 
 **为什么测试没抓到**：假 DOM 不计算 CSS 层叠，测试只断言属性与几何。几何是对的——元素真的在那里，只是被画在下面。**「存在」与「可见」是两件事，而测试只问了前者。**
+
+**一条假证据（必须记下来）**：我最初把 `document.elementsFromPoint()` 返回 `GRgSLq_input` 当成“幽灵被盖住”的证据。那是错的：`elementsFromPoint` 会跳过 `pointer-events:none` 的元素，而幽灵正好带着它。用一个临时节点实测：带 `pointer-events` 时 `elementsFromPoint` 能报它（`true`），加上 `pointer-events:none` 后报不到（`false`）。所以那一步只能证明“幽灵不接受点击”，不能证明层叠。结论对了，证据是假的——这比错结论更危险，因为下一个人会拿着它去推其他事。可靠的做法是 A/B：改属性、截图、改回、再截图。
 
 **教训**：两条缺陷的形状一样——**代码在替身里正确，在真实宿主里从不生效，而失败是静默的**（没有异常、没有槽位错误、`data-shown` 老老实实说 false）。真机验收之所以不能省，就是因为它能问出测试问不出的那句「屏幕上真的有东西吗」。
