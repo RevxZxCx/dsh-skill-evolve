@@ -118,6 +118,17 @@ function excerptOf(text, limit, mark) {
 const MAX_ASKED_CHARS = 600
 
 /**
+ * The mark that says the question itself was cut.
+ *
+ * The assistant half has carried one since DEF-206, and the user half did not —
+ * which is the same defect one line up: a request longer than 600 characters
+ * reached both prompts ending mid-word, and a model reading "Please refactor the
+ * cursor handling so that … the cursor h" cannot tell that from a question that
+ * stopped there. The mark costs its own length out of the same budget.
+ */
+const ASKED_CUT_MARK = '[request ends here: the message was longer than this and was cut for length]'
+
+/**
  * Shell tools, kept only so the summary can quote what a turn ran.
  *
  * This used to be a file source as well: `writtenPaths` parsed the command for
@@ -434,22 +445,6 @@ function readCommandArgument(raw) {
   return undefined
 }
 
-/**
- * Trim text to a budget counted in code points.
- *
- * `String#slice` counts UTF-16 units, so cutting between the two halves of an
- * astral character (an emoji, a rare CJK ideograph) leaves a lone surrogate —
- * which reaches the prompt as U+FFFD. The budget is a character budget, so it
- * has to be spent in characters.
- *
- * @param {string} text
- * @param {number} limit
- * @returns {string}
- */
-function clipCodePoints(text, limit) {
-  const chars = Array.from(text)
-  return chars.length <= limit ? text : chars.slice(0, limit).join('')
-}
 
 /**
  * Read the text of a human message out of its content blocks.
@@ -464,7 +459,7 @@ function clipCodePoints(text, limit) {
  * @returns {string} the text, or '' when there is none.
  */
 function readUserText(content) {
-  if (typeof content === 'string') return clipCodePoints(content.trim(), MAX_ASKED_CHARS)
+  if (typeof content === 'string') return excerptOf(content.trim(), MAX_ASKED_CHARS, ASKED_CUT_MARK)
   if (!Array.isArray(content)) return ''
   const parts = []
   for (const block of content) {
@@ -473,7 +468,7 @@ function readUserText(content) {
     const text = typeof block.text === 'string' ? block.text.trim() : ''
     if (text.length > 0) parts.push(text)
   }
-  return clipCodePoints(parts.join('\n\n'), MAX_ASKED_CHARS)
+  return excerptOf(parts.join('\n\n'), MAX_ASKED_CHARS, ASKED_CUT_MARK)
 }
 
 /**
@@ -583,7 +578,7 @@ class Transcript {
     this.produced = []
     this.commands = []
     this.said = []
-    this.asked = typeof asked === 'string' ? clipCodePoints(asked, MAX_ASKED_CHARS) : ''
+    this.asked = typeof asked === 'string' ? excerptOf(asked, MAX_ASKED_CHARS, ASKED_CUT_MARK) : ''
     this.turn = this.turns
   }
 
@@ -1096,4 +1091,4 @@ class TranscriptStore {
   }
 }
 
-export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, declaredRows, producedRows, pageOf, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_SAID_EXCERPT, SAID_CUT_MARK, MAX_ASKED_CHARS, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames, excerptOf }
+export { Transcript, TranscriptStore, SHELL_TOOLS, REPORT_TOOLS, PRESENT_TOOLS, PRESENTED_EVENT, MUTATION_TOOLS, chooseRows, declaredRows, producedRows, pageOf, MAX_REPORTED_PATHS, MAX_CALLS_PER_TURN, MAX_SAID_BLOCKS, MAX_SAID_CHARS, MAX_SAID_EXCERPT, SAID_CUT_MARK, MAX_ASKED_CHARS, ASKED_CUT_MARK, readPathArgument, readPathListArgument, readPresentedEntries, readPresentedEvent, readCommandArgument, readToolCallBlock, readUserText, tallyNames, excerptOf }

@@ -29,7 +29,8 @@ import {
   tallyNames,
   excerptOf,
   MAX_SAID_EXCERPT,
-  SAID_CUT_MARK
+  SAID_CUT_MARK,
+  ASKED_CUT_MARK
 } from '../packages/ui-evolve/lib/transcript.js'
 import * as deliverable from '../packages/ui-evolve/lib/deliverable.js'
 
@@ -261,8 +262,26 @@ check(
   store.record('a', endTurn())
   const asked = store.view('a').previous?.asked ?? ''
   check('an astral character is never cut in half', /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(asked) === false, JSON.stringify(asked.slice(-6)))
-  check('the question still spends its whole budget', Array.from(asked).length === limit, String(Array.from(asked).length))
-  check('and it keeps the emoji whole rather than dropping it', asked.endsWith('😀'), JSON.stringify(asked.slice(-4)))
+  check('the question stays inside its budget', Array.from(asked).length <= limit, String(Array.from(asked).length))
+  // The mark costs its own length, so the question no longer fills the budget
+  // exactly -- it fills the budget minus what saying "this was cut" costs.
+  check('and says the question itself was cut', asked.endsWith(ASKED_CUT_MARK), JSON.stringify(asked.slice(-40)))
+  // An emoji inside the kept region survives whole: dropping it would be the
+  // same class of bug as splitting it.
+  // The same budget is spent on a second path: `beginTurn` is handed the
+  // question directly by callers that already have the text, and it must mark
+  // its cut too. Without this, only the block-reading path is covered and the
+  // direct one can go silent while every suite stays green.
+  const direct = new Transcript()
+  direct.beginTurn(1, 'q'.repeat(700))
+  check('a question handed straight to beginTurn says it was cut', direct.asked.endsWith(ASKED_CUT_MARK), JSON.stringify(direct.asked.slice(-40)))
+  check('and stays inside the same budget', Array.from(direct.asked).length <= 600, String(Array.from(direct.asked).length))
+
+  const inner = new TranscriptStore()
+  inner.record('a', human(`before 😀 after ${'b'.repeat(700)}`))
+  inner.record('a', endTurn())
+  const kept = inner.view('a').previous?.asked ?? ''
+  check('an emoji inside the kept part is kept whole', kept.includes('before 😀 after'), JSON.stringify(kept.slice(0, 40)))
 }
 
 {

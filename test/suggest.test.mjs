@@ -754,6 +754,33 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('the instruction forbids finishing an unfinished-looking excerpt', String(content[0]?.text).includes('Never propose'), 'no warning about the excerpt')
   check('and says the excerpt was cut, not interrupted', String(content[0]?.text).includes('EXCERPT') && String(content[0]?.text).includes('cut'), 'no statement that the turn is an excerpt')
   check('and still forbids questions', String(content[0]?.text).includes('questions'), 'the rest of the rules went missing')
+  // The reader said the offers do not read like something a person would type.
+  // The prompt is where that is decided, so the register has to be named in it.
+  check('the instruction asks for words a person would type', String(content[0]?.text).includes('would actually type'), 'no register in the prompt')
+  check('and names a length a person would type', String(content[0]?.text).includes('under 25 characters'), 'no target length in the prompt')
+  check('and forbids two actions in one suggestion', String(content[0]?.text).includes('ONE action per suggestion'), 'no one-action rule')
+}
+
+{
+  // Two actions wearing one coat: the second half is dropped, not shown.
+  // This is the shape the reader objected to on the live host.
+  check(
+    'a second action after a comma goes',
+    sanitiseSuggestion('补完被截断的第二部分回答，说明与 Qoder 在触发时机上的差异') === '补完被截断的第二部分回答',
+    sanitiseSuggestion('补完被截断的第二部分回答，说明与 Qoder 在触发时机上的差异'),
+  )
+  check('and after "then"', sanitiseSuggestion('Fix the cursor test, then explain the timing') === 'Fix the cursor test')
+  check('and after "and then"', sanitiseSuggestion('Update docs/27 and then commit') === 'Update docs/27')
+  check('and after a Chinese 然后', sanitiseSuggestion('跑一下失败的用例，然后更新文档') === '跑一下失败的用例')
+  // A comma that continues a clause is not a join: cutting there loses the part
+  // that says where to look.
+  const clause = 'Run the tests in packages/core, where the failure is'
+  check('a clause after a comma survives', sanitiseSuggestion(clause) === clause, sanitiseSuggestion(clause))
+  const single = '把 resolveRoute 的三级回退补一个单测'
+  check('a single action is untouched', sanitiseSuggestion(single) === single, sanitiseSuggestion(single))
+  // A join at the very start is a sentence opening with "then", not two actions.
+  const opens = 'Then run the suite again'
+  check('a sentence that opens with then is not split', sanitiseSuggestion(opens) === opens, sanitiseSuggestion(opens))
 }
 
 {

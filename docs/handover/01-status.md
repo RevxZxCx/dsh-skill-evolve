@@ -6396,3 +6396,27 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **一条等价突变，不是存活突变**：`(?=\s)` → `(?=\s|$)` 在切片窗口里只能多命中窗口的最后一个字符，而那里 `stop + 1` 恰好等于 `window.length`，与硬切兜底同解。已移入 `known` 并写下推导。**处理存活突变的第一件事是问「它真的不同吗」，而不是先造样本。**
 
 **没有的东西**：没有新增配置键、没有新增路由、没有新增事件处理器、没有改任何 `MAX_*` 预算值（1200/4000/6000 原样）。真机复验尚未做——`lib/*.js` 改了，需要重启宿主。
+
+## 2026-11-25（三）：建议的措辞改成像人打的字，用户那句话也开始自报截断
+
+用户看到真机上的第一条建议是「补完被截断的第二部分回答，说明与 Qoder 在触发时机上的完整差异」，说「并不像人类发出的指令」，并问能不能直接看 Qoder 的提示词。
+
+**先回答那个问题：拿不到。** `promptSuggestions` 在 Qoder 发布包里只有三处 UI 文案与一个布尔开关，生成逻辑在原生 CLI/SDK 的编译产物内（`gtd.js` 16 MB、`main.js` 21 MB 用五条特征正则搜散文，零命中）。只能自己把提示词写得更像人话。
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/suggest.js` | `INSTRUCTION` 把「一句话、90 字符内」换成口语标准（「一个人会真的打出来的字」、目标 25 字符、绝不超 60、举中英文靶子），并新增「一个建议只装一个动作，不许用逗号/`and then`/`，`/`并`/`然后` 粘第二个」；新增 `firstAction(text)` 与 `SECOND_ACTION`/`SECOND_ACTION_LATIN` 两张动词表，在 `sanitiseSuggestion` 里砍掉第二个动作 |
+| `packages/ui-evolve/lib/transcript.js` | 新增 `ASKED_CUT_MARK`；`readUserText` 两条路径与 `beginTurn` 全部改走 `excerptOf(text, MAX_ASKED_CHARS, ASKED_CUT_MARK)`；**删除 `clipCodePoints`**（改完后零调用方，留着会骗下一个读者）；导出 `ASKED_CUT_MARK` |
+| `test/suggest.test.mjs` | 221 → 231：三条锁提示词措辞、五条锁 `firstAction`（中英文顺承词各砍一条、从句保留、单动作原样、句首 `Then` 不切） |
+| `test/transcript.test.mjs` | 209 → 211：两条旧断言改对（预算不再被填满、emoji 样本移到保留区内），新增 `beginTurn` 直传路径的两条 |
+| `scripts/mutate-suggest.mjs` | 新增 2 条（用户侧两条裁剪路径），修 1 条说过头的 `why`，83 → 85 |
+| `test/mutations.test.mjs` | `['mutate-suggest.mjs', 83]` → `85` |
+| `docs/27-开发与集成手册.md` | §7 那行改「85 处：prompt 侧 18 / 答案侧 12 / 闸门 17 / 路由 5 / 客户端 33」 |
+
+**基线**：全量 `4409 passed / 0 failed`；`transcript` 211/0、`summarise` 237/0、`suggest` 231/0、`mutations` 55/0；`mutate-suggest` **85 killed / 0 survived / 0 not applied / 0 crashed**；`perf-budget` 六条 ok、退出 0（payload-real 15,984 B / ceiling 63,323 B / elapsed 3.9 ms / state 41,941 B）。
+
+**两张动词表而不是一张**：`说明\b` 在中文里永远不匹配——CJK 不是 `\w`，`\b` 无处可落。第一次写成一张带 `\b` 的表，中文分支是看起来活着、实际永不执行的死代码，实测原样通过。这条与 DEF-191 的五种失明方式同型。
+
+**`clipCodePoints` 删掉的理由**：改完之后它零调用方，而名字与文档注释都还在描述「用户那半是按码点裸切」——那正是刚修掉的缺陷。留着一个不再被调用的助手，比删掉它更容易让下一个人相信旧行为还在。
+
+**没有的东西**：没有新增配置键、没有新增路由、没有新增事件处理器、没有改任何 `MAX_*` 预算值。真机复验尚未做——`lib/*.js` 改了，需要重启宿主。

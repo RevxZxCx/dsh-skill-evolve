@@ -801,6 +801,22 @@ const mutations = [
   {
     file: transcript,
     suites: ['test/transcript.test.mjs'],
+    label: 'a question read from blocks is cut without saying so',
+    from: "  return excerptOf(parts.join('\\n\\n'), MAX_ASKED_CHARS, ASKED_CUT_MARK)",
+    to: "  return parts.join('\\n\\n').slice(0, MAX_ASKED_CHARS)",
+    why: 'the same clip exists on two paths -- a plain string and an array of text blocks -- and a fix applied to one of them leaves the other silent',
+  },
+  {
+    file: transcript,
+    suites: ['test/transcript.test.mjs'],
+    label: 'the question is cut without saying so',
+    from: "    this.asked = typeof asked === 'string' ? excerptOf(asked, MAX_ASKED_CHARS, ASKED_CUT_MARK) : ''",
+    to: "    this.asked = typeof asked === 'string' ? Array.from(asked).slice(0, MAX_ASKED_CHARS).join('') : ''",
+    why: 'the assistant half has carried a mark since DEF-206 and the user half did not, so a request over 600 characters reached both prompts ending mid-word with nothing to say so (DEF-209)',
+  },
+  {
+    file: transcript,
+    suites: ['test/transcript.test.mjs'],
     label: 'the cut lands mid-word instead of on a boundary',
     from: '  const at = para > budget / 2 ? para : stop > budget / 2 ? stop + 1 : window.length',
     to: '  const at = window.length',

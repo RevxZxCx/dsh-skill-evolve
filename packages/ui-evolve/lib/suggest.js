@@ -192,16 +192,22 @@ const CACHE_LIMIT = 64
  * cannot be shown at all.
  */
 const INSTRUCTION = [
-  'You propose what the person using this coding session could do next.',
+  'You propose what the person using this coding session could type next.',
   '',
   'Answer with JSON only, no prose, no code fence:',
   '{"suggestions":["...","...","..."]}',
   '',
   'Rules:',
   '- Between two and three suggestions.',
-  '- Each is ONE sentence, at most 90 characters, an imperative step the person',
-  '  can act on immediately ("Fix the failing cursor test", not "Consider",',
-  '  "You could", or "It might be worth").',
+  '- Write the words a person would actually type into the box: one short',
+  '  action, in their own register. Aim for under 25 characters, never over 60.',
+  '  "Fix the cursor test" and "跑一下失败的用例" are the target; anything that',
+  '  reads like a task ticket is wrong.',
+  '- ONE action per suggestion. Never join a second one with a comma, "and then",',
+  '  "，", "并", or "然后". "Fix the cursor test, then explain the timing" is two',
+  '  suggestions wearing one coat, and the reader cannot click half of it.',
+  '- Start with the verb. No "Consider", "You could", "It might be worth",',
+  '  "建议", "可以考虑".',
   '- Base each on the task in progress, not on the last thing that happened. If',
   '  the turn finished something, propose the next unfinished thing; if it found',
   '  a problem, propose the fix.',
@@ -311,6 +317,11 @@ export function sanitiseSuggestion(value) {
   // block is not a step, and JSON that reached here has its own reader.
   if (text.includes('```')) return ''
   if (text.length === 0) return ''
+  // Two actions wearing one coat. The instruction forbids it and the model still
+  // does it, so the first one is kept: the reader can click half of a suggestion,
+  // and half is what they wanted anyway (DEF-208).
+  text = firstAction(text)
+  if (text.length === 0) return ''
   // A URL or a scheme-qualified path is a location, not a step. The turn may
   // name a file; a suggestion that *is* a link has no verb to act on.
   if (/^(?:https?|file):\/\//i.test(text)) return ''
@@ -378,6 +389,73 @@ function sentenceEnd(text, window) {
     if (ASCII_MARK.test(window[last])) ends.push(last)
   }
   return ends.length === 0 ? -1 : Math.min(...ends)
+}
+
+/**
+ * A comma that starts a second deliverable rather than a subordinate clause.
+ *
+ * The tell is the opening word: a clause continues with "where", "which",
+ * "because", a name or a path, while a second action opens with its own verb.
+ * Only verbs, and only at the start of the tail — "Run the tests in
+ * packages/core, where the failure is" is one action and must survive intact.
+ *
+ * Two patterns, not one with `\b`: a CJK character is not a word character, so
+ * `说明\b` never matches after 说明 and the Chinese half of this rule would be
+ * dead code that still looks alive (DEF-208).
+ */
+const SECOND_ACTION = /^(?:说明|解释|补充|补完|添加|加上|更新|修改|修复|删除|去掉|提交|推送|检查|确认|整理|重构|列出|给出|回答|并|然后|接着|再)/i
+const SECOND_ACTION_LATIN = /^(?:explain|describe|update|add|write|run|check|verify|fix|commit|push|document|outline|list|answer|summarise|summarize)\b/i
+
+/**
+ * Keep only the first action when a suggestion carries two.
+ *
+ * The instruction says one action per suggestion and forbids joining with a
+ * comma; models do it anyway, and the result is the shape the reader complained
+ * about: "补完被截断的第二部分回答，说明与 Qoder 在触发时机上的完整差异". Nobody
+ * types that into a composer, and nobody can click half of it -- so the second
+ * half is dropped rather than shown.
+ *
+ * Only explicit *sequencing* connectors count. A bare comma is left alone,
+ * because "Run the tests in packages/core, where the failure is" is one action
+ * with a clause, and cutting it would lose the part that says where to look.
+ *
+ * @param {string} text - a suggestion that has already been unwrapped.
+ * @returns {string} the text up to the first sequencing connector, trimmed.
+ */
+function firstAction(text) {
+  const joints = [
+    /,\s*(?:and\s+)?then\s+/i,
+    /;\s*(?:and\s+)?then\s+/i,
+    /\s+and\s+then\s+/i,
+    /,\s*and\s+also\s+/i,
+    /，\s*(?:然后|接着|之后再|再|并|并且)/,
+  ]
+  let at = -1
+  for (const joint of joints) {
+    const found = text.search(joint)
+    if (found > 0 && (at === -1 || found < at)) at = found
+  }
+  // The connector is not always spelled out. "补完被截断的第二部分回答，说明与
+  // Qoder 在触发时机上的差异" joins two deliverables with nothing but a comma --
+  // the second half opens with its own verb. That is the exact shape the reader
+  // objected to, so a comma followed by a verb counts as a join too.
+  if (at === -1) {
+    for (let comma = text.indexOf('，'); comma > 0; comma = text.indexOf('，', comma + 1)) {
+      const tail = text.slice(comma + 1).trimStart()
+      if (SECOND_ACTION.test(tail) || SECOND_ACTION_LATIN.test(tail)) { at = comma; break }
+    }
+  }
+  if (at === -1) {
+    for (let comma = text.indexOf(', '); comma > 0; comma = text.indexOf(', ', comma + 2)) {
+      const tail = text.slice(comma + 2).trimStart()
+      if (SECOND_ACTION.test(tail) || SECOND_ACTION_LATIN.test(tail)) { at = comma; break }
+    }
+  }
+  if (at === -1) return text
+  const head = text.slice(0, at).trim()
+  // A connector at the very start of the text is not a join, it is a sentence
+  // that opens with "then" -- leave it for the reader to judge.
+  return head.length >= 6 ? head : text
 }
 
 /**
