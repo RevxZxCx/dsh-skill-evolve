@@ -642,6 +642,22 @@ const mutations = [
     to: '      return hook()',
     why: 'the host builds every provided use<Name> on useSyncExternalStoreWithSelector, so its first argument is a selector and calling it bare throws inside the slot error boundary, where nothing outside can see it: both surfaces go silently missing on a real host while a stub that ignores its argument keeps the suite green (DEF-197)',
   },
+  {
+    file: client,
+    suites: view,
+    label: 'an empty answer is never retried',
+    from: '        if (suggest.items.length === 0 && suggest.enabled === true && suggest.retried === false) {',
+    to: '        if (false) {',
+    why: 'the frame that arrives as a turn ends can be answered from a transcript that is still settling, and the route then reports nothing to go on; without the retry the row stays empty for the whole next turn and the feature looks broken (DEF-202)',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'an empty answer becomes a poll',
+    from: '          suggest.retried = true',
+    to: '          void 0',
+    why: 'one retry covers the settlement race; without the latch every empty answer arms another timer, and a session that genuinely has nothing to offer keeps buying calls past the server one-minute failure memory',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a

@@ -4596,6 +4596,17 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     const SUGGEST_REQUEST_MS = 25000
 
     /**
+     * How long to wait before asking again after an answer with nothing in it.
+     *
+     * Long enough that a settlement race is over, short enough that the reader
+     * who keeps the conversation open sees the offer appear on its own. The
+     * server remembers the empty answer for a minute, so the retries inside
+     * that window cost nothing; this number only decides how many of them we
+     * bother to make.
+     */
+    const SUGGEST_RETRY_MS = 15000
+
+    /**
      * How long an offer may still be drawn after the answer that produced it.
      *
      * The same fifteen minutes as the server's `SUGGEST_TTL_MS`, and for the
@@ -4628,6 +4639,15 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       reason: "",
       loaded: false,
       at: 0,
+      // An empty answer is not an answer. On the live host the frame that
+      // arrives as a turn ends can be answered from a transcript that is still
+      // settling, and the route then reports nothing to go on -- a second later
+      // the same session returns three good steps. One retry covers that race.
+      // It is deliberately one: a session that genuinely has nothing to offer
+      // must not become a poll, because every call past the server's one-minute
+      // failure memory is a call somebody pays for.
+      retry: null,
+      retried: false,
       // The texts this page has already acted on. A chip that was clicked has
       // been sent; without this the same sentence is offered again the moment
       // the input machine returns to rest, and clicking twice sends a prompt
@@ -4700,6 +4720,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       suggest.at = 0
       suggest.used.clear()
       suggest.again = false
+      if (suggest.retry !== null) {
+        clearTimeout(suggest.retry)
+        suggest.retry = null
+      }
+      suggest.retried = false
     }
 
     /**
@@ -4762,6 +4787,17 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         suggest.at = stamp
         armExpiry()
         suggest.loaded = true
+        if (suggest.retry !== null) {
+          clearTimeout(suggest.retry)
+          suggest.retry = null
+        }
+        if (suggest.items.length === 0 && suggest.enabled === true && suggest.retried === false) {
+          suggest.retried = true
+          suggest.retry = setTimeout(() => {
+            suggest.retry = null
+            void loadSuggest(sessionId)
+          }, SUGGEST_RETRY_MS)
+        }
       } catch (error) {
         // A failed read is not "there are none". Keep the last answer and draw
         // nothing new: an error line under the composer because an offer could

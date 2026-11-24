@@ -6292,3 +6292,20 @@ killed，0 survived。
 DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 token 调用 12.6 s，而截到 12 s；把截止值放宽到 20 s、客户端 25 s，并通过 `prepareCall` 的 `configure` 回调按模型自己的能力表挑最便宜的思考（`none` → `off` → `low`，实测 14.5 s → 8.7 s）。
 
 基线：全量 **4343/0**、`mutate-suggest` **66/66 全杀**、`perf-budget` 退出 0。
+
+### 第三次重启：真机通了，但空答案把行锁死了
+
+`session-3be5ebf5`（`test` 工作区）上的验收结果：
+
+| 检查项 | 结果 |
+| --- | --- |
+| 路由 | `{"enabled":true,"items":[三条],"at":…,"cached":true}` |
+| 底栏芯片 | `[data-dsse-suggest][data-shown="true"]`，三个 `.dsse-suggest-item` |
+| 输入栏幽灵 | `[data-dsse-ghost][data-shown="true"]`，文本 = 第一条 + `Tab` 键帽 |
+| 槽位错误 | 0 |
+| `Tab` | 草稿变成第一条；幽灵隐藏；**芯片仍在**（设计如此）；会话仍是 2 个回合 —— 只填不发 |
+| 点芯片 | 出现 `data-chat-turn="3"`，正文正是该条文案；被点那条从行上消失（`used` 退役） |
+
+然后发现 **DEF-202**：turn 3 结束后帧到得太早，路由按还在沉降的正文回了空答案，客户端把 `loaded` 置真，`ensureSuggest` 从此短路——行上一整轮什么都没有，而手动再查路由其实是新的三条。修法：空答案装一只 15 s 定时器重问一次（`retried` 闩住，只一次；服务端失败记忆一分钟内重问不花钱）。
+
+基线：全量 **4350/0**、`client` 1052/0、`mutate-suggest` 68 处、`perf-budget` 退出 0。

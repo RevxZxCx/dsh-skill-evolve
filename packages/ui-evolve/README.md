@@ -859,6 +859,14 @@ Both surfaces walk through the host's public action face
 the editor: the composer is Lexical, so assigning to a textarea's value is not a
 gesture that exists here.
 
+**An answer with nothing in it is not an answer.** The frame that announces the end
+of a turn can arrive while the transcript is still settling, and the route then
+reports nothing to go on — a second later the same session returns three good
+steps. So an empty answer arms **one** retry, fifteen seconds later. One, not a
+loop: the settlement race is over in seconds, and a session that genuinely has
+nothing more to say must not become a poll, because every ask past the server's
+one-minute failure memory is a call somebody pays for.
+
 **It costs one call, and only when someone is looking.** `/suggestions` is asked
 for by the composer, not by a turn-end handler, so a conversation nobody has open
 costs nothing. At most one call per identical transcript (`suggest.js` keys the

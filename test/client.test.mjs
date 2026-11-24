@@ -8590,5 +8590,80 @@ async function settledSeat(instance, name, props) {
   check('so the row carries the newer answer', textOf(after).includes('第三代答复'), textOf(after).slice(0, 60))
 }
 
+{
+  // An empty answer is not an answer: on the live host the frame that arrives as
+  // a turn ends was answered from a transcript that was still settling, so the
+  // route reported nothing to go on -- and because `loaded` means "we asked
+  // once", the row then stayed empty for the whole next turn. A second later the
+  // same session returned three good steps.
+  let served = 0
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        served += 1
+        if (served === 1) {
+          return { ok: true, data: { enabled: true, items: [], reason: 'the turn left nothing to go on', at: Date.now() } }
+        }
+        return { ok: true, data: { enabled: true, items: ['Retry the failing case.', 'Then commit the fix.'], at: Date.now() + 1 } }
+      },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
+
+  const empty = await settledSeat(instance, 'suggestions', props)
+  check('an empty answer draws no row', byClass(empty, 'dsse-suggest')[0]?.props?.['data-shown'] === 'false', 'a row was drawn')
+  check('and is asked for once', served === 1, String(served))
+
+  const armed = instance.timers.filter((row) => row.ms === 15000 && row.cleared === false)
+  check('an empty answer arms exactly one retry', armed.length === 1, JSON.stringify(instance.timers.map((row) => row.ms)))
+
+  const armedTotal = () => instance.timers.filter((row) => row.ms === 15000).length
+  const before = armedTotal()
+
+  armed[0].fn()
+  await settle(60)
+  check('the retry asks the route again', served === 2, String(served))
+  const after = await settledSeat(instance, 'suggestions', props)
+  check('and the row arrives without the reader doing anything', textOf(after).includes('Retry the failing case.'), textOf(after).slice(0, 80))
+  const drawn = byClass(after, 'dsse-suggest').some((node) => node.props?.['data-shown'] === 'true')
+  check('with the new steps drawn', drawn, 'no row is shown')
+
+  // One retry, not a poll: a session that genuinely has nothing to offer must
+  // not keep buying calls.
+  check('a settled answer arms no further retry', armedTotal() === before, String(armedTotal() - before))
+}
+
+{
+  // A session that genuinely has nothing to offer must not become a poll. The
+  // retry exists for the settlement race, which is over in seconds; a second
+  // empty answer is the server saying "this turn has nothing", and the server
+  // remembers that for a minute -- asking again past it is money.
+  let served = 0
+  const instance = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        served += 1
+        return { ok: true, data: { enabled: true, items: [], reason: 'the turn left nothing to go on', at: Date.now() + served } }
+      },
+    },
+  })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', useInput: inputHook(), inputActions: recordingActions() }
+
+  await settledSeat(instance, 'suggestions', props)
+  const armedTimers = () => instance.timers.filter((row) => row.ms === 15000)
+  check('the first empty answer arms one retry', armedTimers().length === 1, String(armedTimers().length))
+
+  armedTimers()[0].fn()
+  await settle(60)
+  check('the retry asks once more', served === 2, String(served))
+  check('and a second empty answer arms nothing', armedTimers().length === 1, String(armedTimers().length))
+
+  const settled = await settledSeat(instance, 'suggestions', props)
+  check('so the row stays away rather than flickering', byClass(settled, 'dsse-suggest').every((node) => node.props?.['data-shown'] === 'false'), 'a row appeared')
+}
+
+report()
 report()
 process.exit(failed === 0 ? 0 : 1)

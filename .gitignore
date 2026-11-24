@@ -17,3 +17,11 @@ scripts/tmp-*.py
 # snapshot of a diff that no longer exists in the next round.
 .review/
 
+# One-off probes written while chasing a live defect. They are worth running but
+# not worth keeping in the repository: each names a session id or a token from a
+# machine that will not exist tomorrow. The permanent versions live in `scripts/`
+# and have tests of their own.
+.probe-*.mjs
+# The pairing URL the live acceptance needs. It carries a single-use token, so it
+# must never be committed.
+.pair-url
