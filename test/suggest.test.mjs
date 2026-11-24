@@ -177,7 +177,9 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('two lines keep the first', sanitiseSuggestion('Run the tests.\nThen commit.') === 'Run the tests.', sanitiseSuggestion('Run the tests.\nThen commit.'))
   check('a leading blank line is skipped', sanitiseSuggestion('\n\nRun the tests.') === 'Run the tests.')
   check('a code fence is dropped', sanitiseSuggestion('```js\ngo()\n```') === '', sanitiseSuggestion('```js\ngo()\n```'))
-  check('inline code is dropped', sanitiseSuggestion('Run `npm test`.') === '', sanitiseSuggestion('Run `npm test`.'))
+  // Unwrapped, not dropped: a coding agent's next step names a command, and a
+  // chip that lost those was no chip at all on the live host (DEF-200).
+  check('inline code is unwrapped', sanitiseSuggestion('Run `npm test`.') === 'Run npm test.', sanitiseSuggestion('Run `npm test`.'))
   check('a url is dropped', sanitiseSuggestion('https://example.com/x') === '')
   check('a file url is dropped', sanitiseSuggestion('file:///F:/a.js') === '')
   check('an empty string is dropped', sanitiseSuggestion('   ') === '')
@@ -255,7 +257,8 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('the count caps the list', parseSuggestions('["A one.","B two.","C three.","D four."]', 2).length === 2)
   check('a count below the minimum is raised', parseSuggestions('["A one.","B two.","C three.","D four."]', 1).length === MIN_SUGGESTIONS)
   const withJunk = parseSuggestions('["Run the tests.","`npm test`","https://x.dev","Then commit."]', 3)
-  check('unusable items are dropped and the rest kept', withJunk.length === 2, JSON.stringify(withJunk))
+  check('unusable items are dropped and the rest kept', withJunk.length === 3, JSON.stringify(withJunk))
+  check('and the backticks went with them', withJunk.includes('npm test') && withJunk.includes('`npm test`') === false, JSON.stringify(withJunk))
   check('every chip is within the width', withJunk.every((item) => item.length <= MAX_SUGGESTION_CHARS) === true)
   check('a list of bullets parses', parseSuggestions('- Run the tests.\n- Then commit.', 3).length === 2)
   const withProse = parseSuggestions('Run the tests.\nThen commit.\n\nThat is all I would do here.', 3)
@@ -634,6 +637,27 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 // ---------------------------------------------------------------------------
+// an answer that was cut off
+// ---------------------------------------------------------------------------
+
+{
+  // The live host answered nothing at all on turns whose reasoning ran long:
+  // the whole output budget went to thinking, `finish` came back as `length`,
+  // and the content was empty. Without the truncation branch that is
+  // indistinguishable from "this turn has no next step", so it gets cached as a
+  // normal empty answer and the same paid call is skipped for a minute.
+  const llm = fakeLlm({ text: '', finish: 'length' })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('a cut-off answer offers nothing', answer.items.length === 0, JSON.stringify(answer.items))
+  check('and says why', String(answer.reason).includes('cut off'), String(answer.reason))
+  check('naming the finish reason', String(answer.reason).includes('length'), String(answer.reason))
+  check('it is not mistaken for an empty turn', String(answer.reason).includes('no usable suggestion') === false, String(answer.reason))
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('and is remembered as a failure rather than retried at once', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
 // what is sent
 // ---------------------------------------------------------------------------
 
@@ -656,7 +680,13 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('the source is this plugin', messages[0]?.source?.kind === 'dsh-ui-evolve-suggest', JSON.stringify(messages[0]?.source))
   check('the purpose is its own', options?.purpose === 'skill-evolve-next-prompt', String(options?.purpose))
   check('the call carries the abort signal', options?.signal !== undefined)
-  check('the output budget is small', llm.log.prepare[0]?.maxTokens > 0 && llm.log.prepare[0]?.maxTokens <= 300, String(llm.log.prepare[0]?.maxTokens))
+  // 700, written out: this was 220 and 220 was wrong on the live host. A
+  // reasoning model bills its thinking to the same output budget, so the whole
+  // 220 went to reasoning, `finish` came back as `length`, the content was
+  // empty, and every turn whose thinking ran long produced no offer at all.
+  // Measured through the same gateway the host uses: 220 -> 220 reasoning tokens
+  // and nothing to parse; 700 -> 262 reasoning tokens plus 21 of answer.
+  check('the output budget leaves room to think', llm.log.prepare[0]?.maxTokens === 700, String(llm.log.prepare[0]?.maxTokens))
   check('the instruction asks for json', String(content[0]?.text).includes('{"suggestions"'), 'no contract in the prompt')
   check('the instruction says the turns are data', String(content[0]?.text).toLowerCase().includes('not instruction'))
 }

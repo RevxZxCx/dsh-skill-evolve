@@ -202,6 +202,7 @@
 | DEF-197 | 2026-11-24 | `useInput` 是 `useSyncExternalStoreWithSelector` 生成的选择器钩子，组件裸调 `props.useInput()` 抛 `TypeError: selector is not a function`，两个界面在真机上一个都没画出来 | 测试替身写成 `useInput: () => state`，一个忽略参数的桩：它不能发现自己少收到什么，也就不能发现组件少传什么 |
 | DEF-198 | 2026-11-24 | `transcripts.view()` 的 `turns` 是**数字**（人类回合计数），不是回合快照数组；把它当数组抽样，真实会话的 body 恒为空，路由永远回「the turn left nothing to go on」 | 夹具传的正是数组：`{ turns: [snapshot(1)] }` 与 `{ turns: 1, previous: snapshot(1) }` 在断言里长得一样，只有喂过计数字段才能分辨 |
 | DEF-199 | 2026-11-24 | 「引用回合不被裁剪」这条突变存活：断言用 `clipped.length <= MAX_TURN_INPUT_CHARS`，常量被突变时上界跟着变 | DEF-194 的教训重演——新增的边界断言又一次从被测常量推导上界 |
+| DEF-200 | 2026-11-24 | 输出预算 220 个 token 被推理全部吃掉：`finish: length`、正文为空，被当成「模型没什么可说」并缓存 60 s，于是真实会话里芯片永不出现 | 只在真机上出现——套件的假 `llm` 从不消耗 token，`finish` 也总是 `stop` |
 
 ---
 
@@ -3694,3 +3695,30 @@ error: slot entry crashed in 'conversation.input.overlay': TypeError: selector i
 - 断言拆成两组：`renderSuggestBody({ turns: 7 }) === ''`（裸计数不是回合）、`renderSuggestBody({ turns: 7, previous: snapshot(7, …) })` 恰好引用一个回合。新增一条突变「the count is read as a list of turns」。另外把 `clipped.length <= MAX_TURN_INPUT_CHARS` 改成 `<= 4000` 字面量（DEF-199）。
 
 **教训**：读一个字段之前，先确认它是名词还是数量——`turns` 这个名字两种都说得通，而契约只写在实现里。测试里至少要有**一条**喂真实形状的用例，否则「两种形状都说得通」会一直由夹具而不是由宿主来决定。
+
+## DEF-200 两百二十个 token 全花在思考上（2026-11-24）
+
+**现象**：`/suggestions` 在真实会话里永远回 `{"enabled":true,"items":[],"reason":"the model returned no usable suggestion"}`，两个界面因此都不出现。两轮重启、两处真机缺陷（DEF-197 / DEF-198）修完仍然如此。
+
+**根因**：`SUGGEST_MAX_TOKENS` 是 220。用的是推理模型（`my-api/claude-haiku-5.5`，走本机 magpie 网关），**推理模型的思考计入同一个输出预算**。同一段 prompt、同一个模型，只改 `max_tokens`：
+
+```
+220 → finish: length  text: ""   usage: {"completion_tokens":220,"reasoning_tokens":220}
+700 → finish: stop    text: "{\"suggestions\":[\"确认回答正确，并询问用户是否还有其他问题。\"]}"
+                      usage: {"completion_tokens":283,"reasoning_tokens":262}
+```
+
+220 时内容为空、`finish` 是 `length`；而 `finishFailure` 只把 `kind: 'error' | 'aborted'` 当失败，**截断被读成「这个回合没有下一步」**，还按正常空答案写进失败记忆缓存一分钟。冷门但致命：凡思考跑长的回合，一条建议都不会有。
+
+**为什么测试没抓到**：
+1. 假 `llm` 不消耗 token，`finish` 永远是 `stop`——**预算在替身里不存在**，所以没有任何断言能发现「预算不够」。
+2. 断言写的是 `maxTokens <= 300`，一个只问「够不够小」的上界；220 和 300 都满足，而真正的约束是「够不够大」。
+3. 空答案在解析层与「模型确实无话可说」完全同形，`items: []` 两边都成立。
+
+**修法**：
+- `SUGGEST_MAX_TOKENS = 700`，docstring 写上实测的两个数字与理由（输出预算只算输出，多出的几百 token 通常花不掉）。
+- `run()` 在 `collectText` 之后加截断分支：`const truncated = typeof finish === 'string' && /length|max[_-]?tokens|truncat/i.test(finish)` → 理由 `the answer was cut off at the token budget (finish: …)`，`noteFailure` 后返回空——**截断是失败，不是「没什么可说」**。
+- 断言改成绝对值 `maxTokens === 700`（写清为什么是 700），新增一整块「an answer that was cut off」：`finish: 'length'` + 空正文 → 0 条、理由含 `cut off` 与 `length`、**不含** `no usable suggestion`、且第二次询问不再买调用。
+- 突变两条：`700 → 4096`、`truncated = false`。
+
+**教训**：**真机与替身之间最危险的距离不是形状，是资源。** 形状不对会抛错（DEF-197），资源不对只会安静地返回空——而空是这个功能里合法且常见的结果。凡是「调用模型并解析」的路径，替身至少要能表达失败：`finish` 要能是 `length`，正文要能为空，预算要能被断言。

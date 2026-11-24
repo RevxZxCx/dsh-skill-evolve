@@ -6276,3 +6276,13 @@ killed，0 survived。
 **基线**：全量 **4332 passed / 0 failed**；`suggest` 206/0；`client` 1044/0；`api` 429/0；`registration` 56/0；`docs` 45/0；`mutations` 55/0；`mutate-suggest` **61 处全杀**；`perf-budget` 六条 ok、退出 0。
 
 **这两条是全量 4338 条断言、61 处突变、两轮评审都没抓到的东西**，只有真机跑一次才现形。原因写在 DEF-197/198 里：替身比真实对象宽容（`useInput: () => state` 忽略参数），夹具比真实宿主宽容（传数组而宿主给数字）。
+
+#### 第三处：220 个 token 被推理吃掉（DEF-200）
+
+前两处修完、宿主重启后路由仍回 `no usable suggestion`。用本机 magpie 网关（`http://127.0.0.1:3425/v1`，模型 `my-api/claude-haiku-5.5`）离线复现，避开重启：真实 `Suggestor` + 假 `llm`（`prepareCall` 的 `stream()` 转发到网关），只改 `max_tokens`——220 时 `finish: length`、正文空、`reasoning_tokens: 220`；700 时 `finish: stop`、正文是合法 JSON。
+
+修法：`SUGGEST_MAX_TOKENS` 改 700；`run()` 加截断分支（`finish` 匹配 `length|max[_-]?tokens|truncat` → 记失败、不缓存成空答案）；断言改绝对值 `=== 700` 并补一整块截断用例；突变加「the output budget is a paragraph」重锚与「a cut-off answer looks like an empty turn」。
+
+顺带一处：`sanitiseSuggestion` 原来把带行内代码的候选整条丢弃，改为**解包**（反引号包住的内容取出来、去掉反引号），只保留整段围栏（三个反引号的代码块）丢弃——编码代理的下一步几乎总在点名命令或路径。失败理由也带上规模（`N lines, M characters`），因为「模型没说话」和「读取器把它全丢了」在真机上完全同形。
+
+基线：全量 **4339/0**（`suggest` 212）、`mutate-suggest` **63/63 全杀**、`perf-budget` 退出 0、`mutations` 55/0、`docs` 45/0。

@@ -132,8 +132,19 @@ export const SUGGEST_FAILURE_TTL_MS = 60000
  */
 export const SUGGEST_TTL_MS = 15 * 60 * 1000
 
-/** Output budget for one call. Three short sentences and their JSON. */
-export const SUGGEST_MAX_TOKENS = 220
+/**
+ * How many output tokens the answer may spend.
+ *
+ * Not 220, which is what this was: a reasoning model bills its thinking to the
+ * same budget, and at 220 the whole budget went to reasoning -- measured on the
+ * live host, `completion_tokens: 220, reasoning_tokens: 220, finish: length`,
+ * content empty. The route then cached "the model returned no usable
+ * suggestion" and no offer ever appeared, on every turn whose thinking ran long.
+ * At 700 the same prompt answers with 262 reasoning tokens and 21 of answer.
+ * This is output only, so the price of the headroom is a few hundred tokens
+ * that are usually not spent.
+ */
+export const SUGGEST_MAX_TOKENS = 700
 
 /**
  * How many cached answers are kept. The composer only ever asks about the last
@@ -259,8 +270,16 @@ export function sanitiseSuggestion(value) {
   // Collapse runs of whitespace: a chip with a double space looks like a bug.
   text = text.replace(/\s+/g, ' ').trim()
   if (text.length === 0) return ''
-  // Anything that would need markdown to read is not a chip.
-  if (/```|`[^`]+`/.test(text)) return ''
+  // Inline code is *unwrapped*, not dropped. A coding agent's next step almost
+  // always names a command or a path, and a chip that says "run node
+  // test/run.mjs" is exactly what the reader wants; dropping every candidate
+  // that mentioned one left real sessions with no offer at all (DEF-200). The
+  // backticks have to go because a chip is plain text.
+  text = text.replace(/`([^`]+)`/g, '$1').trim()
+  // A fence still means the reply was markdown for something else -- a code
+  // block is not a step, and JSON that reached here has its own reader.
+  if (text.includes('```')) return ''
+  if (text.length === 0) return ''
   // A URL or a scheme-qualified path is a location, not a step. The turn may
   // name a file; a suggestion that *is* a link has no verb to act on.
   if (/^(?:https?|file):\/\//i.test(text)) return ''
@@ -442,12 +461,11 @@ function readSuggestionLines(body, limit = MAX_SUGGESTIONS) {
     }
     // A line that still begins with a brace or a bracket is markup that
     // reached this reader, not a step: the JSON object itself became a line
-    // because the reply carried prose after it. A line carrying inline code is
-    // dropped for the same reason `sanitiseSuggestion` drops it -- and it is
-    // dropped *here*, before the paragraph is counted, so a paragraph that is
-    // half code does not look long enough to stop at.
+    // because the reply carried prose after it. Only a fence is dropped here;
+    // inline code is kept and unwrapped later, because a coding agent's next
+    // step usually names a command and dropping those lost whole answers.
     if (/^[{[]/.test(line)) continue
-    if (/```|`[^`]+`/.test(line)) continue
+    if (line.includes('```')) continue
     current.push(line)
   }
   if (current.length > 0) paragraphs.push(current)
@@ -722,6 +740,16 @@ export class Suggestor {
         signal: controller.signal,
       }
       const { text, finish } = await collectText(call.stream(options), controller.signal)
+      // A truncated answer is not "nothing to say". Without this branch a
+      // reasoning model that spent the whole budget thinking looks exactly like
+      // a turn with no next step, and the failure is remembered as a normal
+      // empty answer for a minute (DEF-200).
+      const truncated = typeof finish === 'string' && /length|max[_-]?tokens|truncat/i.test(finish)
+      if (truncated === true) {
+        const reason = `the answer was cut off at the token budget (finish: ${finish})`
+        this.noteFailure(key, reason)
+        return { enabled: true, items: [], reason }
+      }
       const failure = finishFailure(finish)
       if (failure !== undefined) {
         this.noteFailure(key, `the suggestion call failed: ${failure}`)
@@ -729,8 +757,15 @@ export class Suggestor {
       }
       const items = parseSuggestions(text, count)
       if (items.length === 0) {
-        this.noteFailure(key, 'the model returned no usable suggestion')
-        return { enabled: true, items: [], reason: 'the model returned no usable suggestion' }
+        // How much there was to read is the one number that separates "the
+        // model said nothing" from "our reader threw it all away", and on the
+        // live host those looked identical for a whole round of debugging
+        // (DEF-200). It travels in the reason, where whoever is asking can
+        // read it without a debugger.
+        const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0).length
+        const reason = `the model returned no usable suggestion (${lines} lines, ${text.length} characters)`
+        this.noteFailure(key, reason)
+        return { enabled: true, items: [], reason }
       }
       const at = this.now()
       this.cache.set(key, { items, at })

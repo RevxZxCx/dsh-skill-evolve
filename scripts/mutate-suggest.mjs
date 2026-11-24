@@ -133,9 +133,18 @@ const mutations = [
     file: suggest,
     suites: engine,
     label: 'the output budget is a paragraph',
-    from: 'export const SUGGEST_MAX_TOKENS = 220',
+    from: 'export const SUGGEST_MAX_TOKENS = 700',
     to: 'export const SUGGEST_MAX_TOKENS = 4096',
     why: 'three short sentences cost about sixty tokens; a four-thousand-token budget invites the prose this parser then has to throw away, and the caller pays for it',
+  },
+
+  {
+    file: suggest,
+    suites: engine,
+    label: 'a cut-off answer looks like an empty turn',
+    from: "      const truncated = typeof finish === 'string' && /length|max[_-]?tokens|truncat/i.test(finish)",
+    to: '      const truncated = false',
+    why: 'the whole output budget can go to the thinking of a reasoning model, and the answer then arrives empty with finish "length"; without this branch that is cached as a normal empty turn and the offer silently never appears (DEF-200)',
   },
 
   // ---------------------------------------------------------------------
@@ -184,10 +193,18 @@ const mutations = [
   {
     file: suggest,
     suites: engine,
-    label: 'a suggestion containing code is kept',
-    from: '  if (/```|`[^`]+`/.test(text)) return \'\'',
-    to: '  if (false) return \'\'',
-    why: 'a chip cannot render a code block; keeping one puts backticks on screen and, in the inline case, code the person cannot copy',
+    label: 'a fenced block is kept',
+    from: "  if (text.includes('```')) return ''",
+    to: "  if (false) return ''",
+    why: 'a chip cannot render a code block; a fence is the shape a model uses when it answered something other than a step',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'inline code is dropped instead of unwrapped',
+    from: "  text = text.replace(/`([^`]+)`/g, '$1').trim()",
+    to: "  if (/`[^`]+`/.test(text)) return ''",
+    why: 'a coding agent names a command or a path in nearly every next step, so dropping those candidates is how a real session ends up with no offer at all while the suite stays green on prose fixtures (DEF-200)',
   },
   {
     file: suggest,
