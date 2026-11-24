@@ -6377,3 +6377,22 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **自审抓到的第三层（P1）**：`renderSuggestBody` 原本在已带标记的装配体上再 `slice` 一次。摘要预算 6000、建议预算 4000，两者之间的每个回合都会把标记切掉，缺陷 100% 复现，而当时三套测试、82 条突变、全量 4387 条断言全绿。修法是预算下传。**这是本轮唯一一次「测试全绿但产品错」，也是唯一一次由逐行读 diff 而不是由测试或评审发现的。**
 
 **评审**：`send_message` 唤醒三名评审员，`reviewer-tests-server` 回来了并给出 3 条（2 P2 + 1 P3，全部成立、全部已修，记录见 `.review/u123-tests.md` 与 R-123），另外两名超时未回。
+
+## 2026-11-25（二）：第二轮评审之后的收口（DEF-207 + 一条等价突变）
+
+**改了什么**
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/transcript.js` | 三处 `lastIndexOf` 合并成 `SENTENCE_END = /[。！？]|[.!?](?=\s)/g` + `lastSentenceEnd(window)`（入口清 `lastIndex`），`?`/`!` 现在也算句末；`excerptOf` 的 docstring 从错位处移回函数上 |
+| `test/transcript.test.mjs` | 194 → 208：keep/cut 精确边界（1200/1201）、段落分支与句末分支的**互斥**样本、CJK 句号、`?`/`!` 样本、「路径里的句点不是句末」、标记两段自解释断言 |
+| `test/summarise.test.mjs` | 235 → 237：`INPUT_CUT_MARK` 两段自解释断言（为此在 `summarise.js` 导出它） |
+| `scripts/mutate-suggest.mjs` | 新增 1 条（`only a period ends a sentence...`），移走 1 条等价突变到 `known`，计数 84 → 83 |
+| `test/mutations.test.mjs` | `['mutate-suggest.mjs', 84]` → `83` |
+| `docs/27-开发与集成手册.md` | §7 那行改「83 处：prompt 侧 15 / 答案侧 12 / 闸门 17 / 路由 5 / 客户端 34」 |
+
+**基线**：全量 `4396 passed / 0 failed`；`transcript` 208/0、`summarise` 237/0、`suggest` 221/0、`mutations` 55/0；`mutate-suggest` **83 killed / 0 survived / 0 not applied / 0 crashed**；`perf-budget` 六条 ok、退出 0。
+
+**一条等价突变，不是存活突变**：`(?=\s)` → `(?=\s|$)` 在切片窗口里只能多命中窗口的最后一个字符，而那里 `stop + 1` 恰好等于 `window.length`，与硬切兜底同解。已移入 `known` 并写下推导。**处理存活突变的第一件事是问「它真的不同吗」，而不是先造样本。**
+
+**没有的东西**：没有新增配置键、没有新增路由、没有新增事件处理器、没有改任何 `MAX_*` 预算值（1200/4000/6000 原样）。真机复验尚未做——`lib/*.js` 改了，需要重启宿主。

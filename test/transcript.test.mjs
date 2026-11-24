@@ -609,6 +609,25 @@ const withoutMark = (out) => (out.endsWith('\n\n' + SAID_CUT_MARK) ? out.slice(0
   check('and the excerpt still reaches the last sentence end', body.endsWith('A finished sentence.'), JSON.stringify(body.slice(-24)))
 }
 {
+  // ASCII stops other than the period: a cut after `?` or `!` used to fall through
+  // to the raw budget and end mid-word, because only '. ' was recognised. The
+  // sibling rule in suggest.js already had this right; two copies of one rule is
+  // how they drift.
+  const asked = `${'x'.repeat(20)}${' Is it done? '.repeat(100)}TAIL-THAT-MUST-NOT-SURVIVE`
+  const body = withoutMark(excerptOf(asked, 1200, SAID_CUT_MARK))
+  check('a question mark ends a sentence too', body.endsWith('?'), JSON.stringify(body.slice(-16)))
+  check('so the cut does not land inside the next word', body.includes('TAIL-THAT') === false, JSON.stringify(body.slice(-16)))
+  const shouted = `${'x'.repeat(20)}${' Ship it now! '.repeat(100)}TAIL-THAT-MUST-NOT-SURVIVE`
+  check('an exclamation mark ends a sentence too', withoutMark(excerptOf(shouted, 1200, SAID_CUT_MARK)).endsWith('!'), JSON.stringify(withoutMark(excerptOf(shouted, 1200, SAID_CUT_MARK)).slice(-16)))
+  // A period that is part of a file name is not a sentence end.
+  const paths = 'Refine packages/ui-evolve/lib/suggest.js and then keep going '.repeat(40)
+  const pathBody = withoutMark(excerptOf(paths, 1200, SAID_CUT_MARK))
+  // Nothing in this window is a sentence end, so the excerpt falls back to the raw
+  // budget. What matters is that it did NOT stop after `suggest.` -- a bare period
+  // in a file name is not punctuation a reader would pause at.
+  check('a period inside a path is not a sentence end', pathBody.endsWith('suggest.') === false, JSON.stringify(pathBody.slice(-24)))
+}
+{
   // No spaces and no ASCII punctuation: only the CJK stops can end this body.
   const cjk = `x${'这是一句完整的话。'.repeat(200)}`
   const body = excerptOf(cjk, 1200, SAID_CUT_MARK).split('\n\n')[0]

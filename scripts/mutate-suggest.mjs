@@ -106,6 +106,7 @@ function writeWithRetry(file, content) {
 const engine = ['test/suggest.test.mjs']
 const wire = ['test/api.test.mjs']
 const view = ['test/client.test.mjs']
+const transcriptSuite = ['test/transcript.test.mjs']
 
 const mutations = [
   // ---------------------------------------------------------------------
@@ -806,6 +807,14 @@ const mutations = [
     why: 'the boundary preference is the difference between an excerpt and a truncation; without it the last thing the model reads is half a word, which reads as a broken stream rather than a long reply',
   },
   {
+    file: transcript,
+    suites: transcriptSuite,
+    label: 'only a period ends a sentence, not a question or an exclamation',
+    from: 'const SENTENCE_END = /[。！？]|[.!?](?=\\s)/g',
+    to: 'const SENTENCE_END = /[。！？]|\\. /g',
+    why: 'a reply that ends a sentence with ? or ! is ordinary; falling back to the raw budget cuts inside the next word, which is the reading this whole round exists to avoid',
+  },
+  {
     file: summarise,
     suites: ['test/summarise.test.mjs'],
     label: 'the prompt cuts the transcript without saying so',
@@ -852,6 +861,7 @@ const known = [
   'the two `order:` values on the slot registrations are not mutated: they decide which row sits nearest the composer, and `test/client.test.mjs` asserts the registration shape rather than the drawing order it feeds',
   'the CSS block is not mutated: `test/tokens.test.mjs` already fails on an invented token, and a colour is not a behaviour',
   '`suggestGates` is exercised through both surfaces rather than directly, so its three fields are mutated where they are read',
+  "`excerptOf`'s ASCII lookahead is not mutated to `(?=\\s|$)`: `$` can only add one match, at the very last character of the window, and there `stop + 1` is exactly `window.length` -- the same cut the hard fallback makes. The mutant is equivalent, not surviving. `suggest.js` carries the same rule and the same note.",
 ]
 
 try {

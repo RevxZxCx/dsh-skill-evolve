@@ -61,6 +61,29 @@ const MAX_SAID_EXCERPT = 1200
 const SAID_CUT_MARK = '[excerpt ends here: the reply was longer than this and was cut for length, so nothing in the turn was left unfinished]'
 
 /**
+ * Where the last sentence in a window ends, or -1 when it holds none.
+ *
+ * CJK full stops end a sentence on their own. An ASCII `.`, `?` or `!` only
+ * does when whitespace follows: the text being cut is full of file names and
+ * abbreviations (`suggest.js`, `e.g.`), so a bare period is far more often part
+ * of a word than the end of a sentence. Requiring the whitespace is what keeps
+ * a cut from landing after `.../lib/suggest.` and calling it a sentence.
+ *
+ * The trailing lookahead is not `$`: the window is a slice, so `$` would match
+ * the cut point itself and every window would end on a "sentence".
+ *
+ * @param {string} window - the characters the excerpt may use.
+ * @returns {number} the index of the punctuation, or -1.
+ */
+const SENTENCE_END = /[。！？]|[.!?](?=\s)/g
+function lastSentenceEnd(window) {
+  SENTENCE_END.lastIndex = 0
+  let at = -1
+  for (let hit = SENTENCE_END.exec(window); hit !== null; hit = SENTENCE_END.exec(window)) at = hit.index
+  return at
+}
+
+/**
  * Cut text to a budget and say so, preferring a boundary a reader would pause at.
  *
  * A cut that lands mid-word reads as a broken stream rather than a long one, so
@@ -78,7 +101,7 @@ function excerptOf(text, limit, mark) {
   const budget = Math.max(0, limit - Array.from(mark).length - 2)
   const window = chars.slice(0, budget).join('')
   const para = window.lastIndexOf('\n\n')
-  const stop = Math.max(window.lastIndexOf('。'), window.lastIndexOf('！'), window.lastIndexOf('？'), window.lastIndexOf('. '))
+  const stop = lastSentenceEnd(window)
   const at = para > budget / 2 ? para : stop > budget / 2 ? stop + 1 : window.length
   return `${window.slice(0, at).trimEnd()}\n\n${mark}`
 }
