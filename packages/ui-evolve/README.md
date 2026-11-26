@@ -52,8 +52,8 @@ Seven keys, all optional. They are the panel's own; the detection settings live 
 | Key | Default | Meaning |
 |---|---|---|
 | `panelSummary` | `true` | Summarise the previous turn in the cards. Turning this off stops the panel from spending any model call |
-| `summaryProvider` | `""` | Provider for the summary. Empty means borrow the session's own route — the one already proven to work for this account |
-| `summaryModel` | `""` | Model for that summary. Only read together with `summaryProvider`; setting one alone pins nothing |
+| `summaryProvider` | `""` | Provider for the model shared by the panel summary and the next-step offer. Empty means borrow the session's own route — the one already proven to work for this account |
+| `summaryModel` | `""` | Model for that shared call. Only read together with `summaryProvider`; setting one alone pins nothing |
 | `monitorColumn` | `true` | Draw the cards in the column. This is the only layout there is: turning it off leaves no panel, which is what the header switch does |
 | `monitorWidth` | `300` | Width of that column in px. The grip writes it back; the ends are clamped to 220–460 in `lib/gutter.js` |
 | `panelSuggestions` | `true` | Offer the next step after a turn ends: chips above the composer, and one line of ghost text inside an empty one. Default on because the offer only costs a call when a composer asks for it |
@@ -345,8 +345,10 @@ Three modules, top to bottom:
 
 1. **Last turn.** What the previous turn actually did: the tool calls, the
    commands, the files touched, and a summary in prose. The summary is generated
-   by a model call, so it is the one part of this plugin that costs money and the
-   only part that can be switched off entirely (`panelSummary: false`). By
+   by a model call, so it costs money and can be switched off entirely
+   (`panelSummary: false`); the next-step offer is the other paid call, and it
+   has its own switch (`panelSuggestions`). Both read the same
+   `summaryProvider`/`summaryModel` pair. By
    default it runs on **the route this session is already using**, read from the
    session's own folded `request/context` events. That route is known to be
    reachable and authorised for this account; a catalogue entry only proves some

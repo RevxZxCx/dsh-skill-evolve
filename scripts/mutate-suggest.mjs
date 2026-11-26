@@ -898,6 +898,22 @@ const mutations = [
     to: "  '- Read the turn below.',",
     why: 'the mark in the text says the excerpt was cut; this rule says what to do about it. A model that is told the text is short but not told to ignore that will still propose completing it, which is what the live host showed',
   },
+  {
+    file: client,
+    suites: view,
+    label: 'the model picker names only the summary again',
+    from: "                        jsx('span', { className: 'dsse-setting-label', children: '摘要与建议模型' }),",
+    to: "                        jsx('span', { className: 'dsse-setting-label', children: '总结模型' }),",
+    why: 'one pair of keys serves two paid calls, so a label naming only the summary tells the reader that changing it affects one feature when it changes two',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the note stops saying the two features share a model',
+    from: "                        jsx('span', { className: 'dsse-setting-desc', children: '两处共用一个模型：面板摘要与下一轮建议。默认沿用当前会话已验证的路由。' }),",
+    to: "                        jsx('span', { className: 'dsse-setting-desc', children: '默认沿用当前会话已验证的路由。' }),",
+    why: 'the label can only name two features in a few characters; the sentence under it is where a reader learns the picker changes both, and it is the only place that says so',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a

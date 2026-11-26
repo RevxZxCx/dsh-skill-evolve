@@ -33,10 +33,16 @@ export const Config = z.object({
   panelSummary: z.boolean().default(true),
 
   /**
-   * Provider for the summary call. Set together with `summaryModel`.
+   * Provider for the model both the panel summary and the next-step offer call.
+   * Set together with `summaryModel`.
    *
-   * Left empty, the summary borrows the route this session is already using,
-   * read from its own folded `request/context` events. That route is known to be
+   * One pair of keys for two features, because both want the same thing: a
+   * cheap model that answers fast, on a short prompt, out of band from the
+   * conversation. Splitting them would mean two settings nobody could tell
+   * apart, and two places to fix when the pinned pair stops working.
+   *
+   * Left empty, both borrow the route this session is already using, read from
+   * its own folded `request/context` events. That route is known to be
    * reachable and authorised for this account, while a catalogue entry only
    * proves some adapter advertised it. The catalogue is still consulted as a
    * last resort — a session that has not made its first request has no route to
@@ -48,7 +54,12 @@ export const Config = z.object({
    */
   summaryProvider: z.string().default(''),
 
-  /** Model for the summary call. Set together with `summaryProvider`. */
+  /**
+   * Model for that shared call. Set together with `summaryProvider`.
+   *
+   * Named after the summary because it came first; the next-step offer reads
+   * the same pair (`lib/suggest.js`, `resolveRoute`).
+   */
   summaryModel: z.string().default(''),
 
   /**

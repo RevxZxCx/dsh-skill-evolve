@@ -2625,6 +2625,16 @@ check(
   const tree = await instance.renderer.deepRender(cards)
   const select = firstByClass(tree, 'dsse-select')
   check('the model picker is offered in settings', select !== undefined, textOf(tree).slice(0, 200))
+  // One pair of keys serves two paid calls, so the label has to name both. It
+  // said "总结模型" while only the summary read it; the next-step offer reads the
+  // same pair, and a label naming one feature misstates what changing it does.
+  const labels = byClass(tree, 'dsse-setting-label').map((node) => textOf(node))
+  check(
+    'the picker names both features that share the pair',
+    labels.some((text) => text.includes('摘要') && text.includes('建议')),
+    JSON.stringify(labels),
+  )
+  check('and the note says they share one model', textOf(tree).includes('两处共用一个模型'), textOf(tree).slice(0, 200))
   const options = Array.isArray(select?.props?.children) ? select.props.children : [select?.props?.children]
   check('the picker has a default plus one real model', options.length === 2, String(options.length))
   check('the default follows the plugin default', String(options[0]?.props?.value) === '', String(options[0]?.props?.value))

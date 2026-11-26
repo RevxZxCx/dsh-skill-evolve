@@ -3640,8 +3640,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                     jsxs('span', {
                       className: 'dsse-setting-copy',
                       children: [
-                        jsx('span', { className: 'dsse-setting-label', children: '总结模型' }),
-                        jsx('span', { className: 'dsse-setting-desc', children: '默认沿用当前会话已验证的路由。' }),
+                        jsx('span', { className: 'dsse-setting-label', children: '摘要与建议模型' }),
+                        jsx('span', { className: 'dsse-setting-desc', children: '两处共用一个模型：面板摘要与下一轮建议。默认沿用当前会话已验证的路由。' }),
                       ],
                     }),
                     jsxs('select', {
