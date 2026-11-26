@@ -195,3 +195,15 @@ token 只是换 cookie 的一种入口，而 cookie 的签发密钥就在同一�
 1. **「怎么用」一节列的四个命令不是全部。** 2026-11-11 的更正段（上面「新增了十个变异命令」那节）已经补全过，**今天以 `docs/27` §3 的表为准**：它按「改了什么」决定跑哪几套，而不是给一条「全跑」的清单。`test/mutations.test.mjs:202-205` 的 `expected` 计数与「两个以上套件必须留 `// Measured:`」也写在那张表下面。
 2. **审查规矩那条有了可执行的形态。** 仍然是用户 m06781 的规矩（每次改代码后必须审查，修复后再审直到收敛），但「审多大一块」由 `bounded-diff-code-review` 技能按 diff 行数决定：≤200 行一次插件调用；200–600 串行两三次；>600 每单元一个 subagent 并行。**P3 本轮只记不修**，复核只跑一轮且只喂 delta——这两条是实测止住审查发散的原因（技能内记录的失败案例是 205 分钟、4 轮、最后两轮发现数 2 → 0 → 4）。
 3. **`:106-117` 的「测试与突变都必须带临时目录，否则 `EPERM ... -4048`」今天已不成立。** 2026-11-23 实测：`unset TMPDIR TMP TEMP && node test/run.mjs skillfile` → 24 passed / 0 failed，`node test/run.mjs usage` → 23 passed / 0 failed，全量不带临时目录也是 3910 / 0。带 `TMPDIR=$PWD/.tmp-test` 仍无害，可以继续带；但**不要把一次失败先归因成「没带临时目录」**，那个坑已经填了。
+
+
+---
+
+## 更正 2026-11-26：启用分片交接目录（`entries/`）与自动活跃视图
+
+`01-status.md`–`04-reviews.md` 累计已超过两万行，多 Agent 并行开发时在头部索引表与文件末尾极易发生合并冲突。依据 [`D-255`](./entries/2026-11-26-decision-multi-agent-docs.md)，自 2026-11-26 起：
+
+1. **旧的四份单文件台账原地冻结为只读历史**（不删改、不挪动，保留全部历史链接）。
+2. **新增状态、决策、缺陷、审查一律以独立文件写入 [`entries/`](./entries/README.md)**（`YYYY-MM-DD-<type>-<slug>.md`），继续严格遵守「只增不改」铁律。
+3. **写完条目后运行 `npm run handover:build`**，自动生成 [`ACTIVE-STATE.md`](./ACTIVE-STATE.md) 与 [`ACTIVE-DECISIONS.md`](./ACTIVE-DECISIONS.md)。新 Agent 冷启动只需读根 [`AGENTS.md`](../../AGENTS.md) 与 [`ACTIVE-STATE.md`](./ACTIVE-STATE.md)，不再需要手翻超长流水文件。
+4. 进行中的跨 Agent 任务上下文统一放在 [`docs/tasks/`](../tasks/README.md)。

@@ -188,6 +188,61 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
   }
 }
 
+// --- multi-agent entrypoints, task handoff, active views, and anti-drift ---
+
+{
+  const agents = read('AGENTS.md')
+  const agentsLines = agents.split(/\r?\n/).length
+  check('AGENTS.md exists at repo root', existsSync(join(root, 'AGENTS.md')), 'AGENTS.md')
+  check('AGENTS.md stays concise (<= 120 lines)', agentsLines <= 120, `${agentsLines} lines`)
+  check('AGENTS.md links the development manual', agents.includes('docs/27-开发与集成手册.md'), 'AGENTS.md')
+  check('AGENTS.md links ACTIVE-STATE.md', agents.includes('docs/handover/ACTIVE-STATE.md'), 'AGENTS.md')
+
+  check('docs/tasks/README.md exists', existsSync(join(root, 'docs/tasks/README.md')), 'docs/tasks/README.md')
+  check('docs/tasks/_template.md exists', existsSync(join(root, 'docs/tasks/_template.md')), 'docs/tasks/_template.md')
+
+  const activeState = read('docs/handover/ACTIVE-STATE.md')
+  const activeDecisions = read('docs/handover/ACTIVE-DECISIONS.md')
+  check('docs/handover/ACTIVE-STATE.md exists and is auto-generated', activeState.includes('AUTO-GENERATED'), 'ACTIVE-STATE.md')
+  check('docs/handover/ACTIVE-DECISIONS.md exists and is auto-generated', activeDecisions.includes('AUTO-GENERATED'), 'ACTIVE-DECISIONS.md')
+
+  const indexBytes = Buffer.byteLength(read(INDEX), 'utf8')
+  check('docs/00-文档索引.md stays lightweight (< 20 KB)', indexBytes < 20_000, `${indexBytes} bytes`)
+
+  const manual = read(MANUAL)
+  check(
+    'docs/27 Step 10 does not instruct blind `git add -A && git commit`',
+    !manual.includes('git add -A && git commit'),
+    MANUAL,
+  )
+
+  const sec3 = sectionAt(manual, /^## 3 · /m)
+  const sec3Suites = [...sec3.body.matchAll(/^[ \t]*\|[ \t]*`((?:scripts|test)\/mutate-[A-Za-z0-9_-]+\.mjs)`[ \t]*\|/gm)]
+    .map((m) => m[1])
+    .sort()
+  const regBlockMatch = manual.match(/<!-- registration:mutation-suites -->([\s\S]*?)<!-- \/registration:mutation-suites -->/)
+  const regSuites = regBlockMatch
+    ? [...regBlockMatch[1].matchAll(/^[ \t]*\|[ \t]*`((?:scripts|test)\/mutate-[A-Za-z0-9_-]+\.mjs)`[ \t]*\|/gm)]
+        .map((m) => m[1])
+        .sort()
+    : []
+  const routerText = read('scripts/gate-mutate.mjs')
+  const routerSuites = [...routerText.matchAll(/script:\s*'((?:scripts|test)\/mutate-[A-Za-z0-9_-]+\.mjs)'/g)]
+    .map((m) => m[1])
+    .sort()
+
+  check(
+    'docs/27 §3 mutation table matches §7 registration:mutation-suites',
+    sec3Suites.length === regSuites.length && sec3Suites.every((s, i) => s === regSuites[i]),
+    `§3=${sec3Suites.length} (${sec3Suites.join(', ')}) vs §7=${regSuites.length} (${regSuites.join(', ')})`,
+  )
+  check(
+    'scripts/gate-mutate.mjs covers every mutation suite in §7',
+    routerSuites.length === regSuites.length && routerSuites.every((s, i) => s === regSuites[i]),
+    `router=${routerSuites.length} vs §7=${regSuites.length}`,
+  )
+}
+
 if (failed > 0) {
   for (const failure of failures) console.log(`FAIL ${failure.label} -- ${failure.detail ?? ''}`)
 }

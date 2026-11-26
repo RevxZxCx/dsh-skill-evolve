@@ -122,18 +122,21 @@ separately.
 
 ## Working on it
 
-**Read [`docs/27-开发与集成手册.md`](docs/27-开发与集成手册.md) first.** It is the
+**AI agents start at [`AGENTS.md`](AGENTS.md); everyone reads [`docs/27-开发与集成手册.md`](docs/27-开发与集成手册.md) first.** It is the
 one entry point for a change: how the two plugins get into the host, the ten steps a
 change has to walk (tests, mutation, review, handover, push, restart, verify), the full
-list of mutation harnesses, and the fifteen numbers that are not negotiable.
+list of 11 mutation harnesses, and the fifteen numbers that are not negotiable.
 [`docs/28-性能审查手册.md`](docs/28-性能审查手册.md) holds the performance budgets
-and the command that enforces them.
+and the command that enforces them. Multi-agent in-flight tasks live in [`docs/tasks/`](docs/tasks/README.md),
+and the auto-generated handover snapshot is [`docs/handover/ACTIVE-STATE.md`](docs/handover/ACTIVE-STATE.md).
 
 ```bash
-npm install                    # required before anything imports core by name
-npm test                       # every suite
-node test/run.mjs signal       # one suite
-node scripts/perf-budget.mjs    # the panel's performance budget, judged
+npm install                       # required before anything imports core by name
+npm run gate:fast                 # full tests + doc/registration/view checks + perf budget
+npm run gate:mutate -- --changed  # run mutation suites affected by current git diff
+npm run handover:build            # rebuild ACTIVE-STATE.md & ACTIVE-DECISIONS.md
+npm run verify:live               # sign local cookie and probe running host
+node test/run.mjs signal          # one suite
 ```
 
 Two generators keep generated content honest, and both are safe to re-run:

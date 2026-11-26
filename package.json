@@ -14,6 +14,10 @@
   "scripts": {
     "test": "node test/run.mjs",
     "sync": "node scripts/sync-gutter.mjs",
-    "tokens": "node scripts/extract-host-tokens.mjs"
+    "tokens": "node scripts/extract-host-tokens.mjs",
+    "handover:build": "node scripts/build-handover-views.mjs",
+    "gate:fast": "node scripts/gate-fast.mjs",
+    "gate:mutate": "node scripts/gate-mutate.mjs",
+    "verify:live": "node scripts/verify-live.mjs"
   }
 }
