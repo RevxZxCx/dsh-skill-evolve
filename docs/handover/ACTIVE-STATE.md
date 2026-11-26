@@ -5,9 +5,9 @@
 
 ## 1. 最新基线
 
-- **最近状态条目**：[`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)（2026-11-26）
-- **摘要**：建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵
-- **记录基线**：4434 passed / 0 failed（client 1074/0、suggest 239/0、api 429/0、mutations 55/0、mutate-suggest 87/87 全杀、perf 退出 0）
+- **最近状态条目**：[`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)（2026-11-27）
+- **摘要**：建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考
+- **记录基线**：4477 passed / 0 failed（suggest 273/0、client 1081/0、api 429/0、mutations 55/0、mutate-suggest 104/104 全杀、perf 退出 0）
 
 ## 2. 进行中任务（`docs/tasks/`）
 
@@ -15,6 +15,9 @@
 
 ## 3. 待闭环真机验收 / 阻塞项
 
+- **2026-11-27** [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)：重启宿主后确认芯片不再以句号结尾、不再出现「我来…」「Done.」，且推理模型的建议在数秒内到达
+- **2026-11-27** [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md)：无
+- **2026-11-27** [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md)：需重启宿主后在 /pair-app 观察一次推理模型回合的建议耗时与 finish reason
 - **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现
 - **2026-11-26** [`2026-11-26-status-shared-model-label.md`](./entries/2026-11-26-status-shared-model-label.md)：重启宿主后打开面板齿轮，确认标签显示「摘要与建议模型」，说明行为「两处共用一个模型：面板摘要与下一轮建议。默认沿用当前会话已验证的路由。」
 - **2026-11-26** [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)：2026-11-25 提示词建议改动（7b9df8b）仍待重启宿主后跑 npm run verify:live 复验
@@ -24,6 +27,9 @@
 
 | 日期 | 类型 | 编号/状态 | 标题 | 文件 |
 | --- | --- | --- | --- | --- |
+| 2026-11-27 | status | S-20261127-shape / pending_live_verify | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
+| 2026-11-27 | review | R-20261127-codex / applied | R-126 建议形状规则的评审——8 条全部成立，其中 4 条是真缺陷 | [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md) |
+| 2026-11-27 | defect | D-20261127-efforts / fixed | 关思考的代码从未生效——宿主的 efforts 是数组，代码当对象查键 | [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md) |
 | 2026-11-26 | status | S-20261126-suggest / pending_live_verify | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
 | 2026-11-26 | status | S-20261126-label / done | 模型设置项改名为「摘要与建议模型」，并修掉两处「只有摘要花钱」的过时说法 | [`2026-11-26-status-shared-model-label.md`](./entries/2026-11-26-status-shared-model-label.md) |
 | 2026-11-26 | status | S-20261126 / active | 完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地 | [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md) |

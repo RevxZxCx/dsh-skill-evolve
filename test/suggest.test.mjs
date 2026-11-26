@@ -180,24 +180,24 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 // ---------------------------------------------------------------------------
 
 {
-  check('surrounding whitespace goes', sanitiseSuggestion('  Run the tests.  ') === 'Run the tests.')
-  check('a bullet goes', sanitiseSuggestion('- Run the tests.') === 'Run the tests.')
-  check('a star bullet goes', sanitiseSuggestion('* Run the tests.') === 'Run the tests.')
-  check('a dot number goes', sanitiseSuggestion('1. Run the tests.') === 'Run the tests.')
-  check('a paren number goes', sanitiseSuggestion('2) Run the tests.') === 'Run the tests.')
-  check('a "next step:" label goes', sanitiseSuggestion('Next step: Run the tests.') === 'Run the tests.')
-  check('a chinese label goes', sanitiseSuggestion('下一步：跑测试。') === '跑测试。', sanitiseSuggestion('下一步：跑测试。'))
-  check('a chinese suggestion label goes', sanitiseSuggestion('建议：跑测试。') === '跑测试。', sanitiseSuggestion('建议：跑测试。'))
-  check('surrounding double quotes go', sanitiseSuggestion('"Run the tests."') === 'Run the tests.')
-  check('surrounding curly quotes go', sanitiseSuggestion('“Run the tests.”') === 'Run the tests.', sanitiseSuggestion('“Run the tests.”'))
-  check('an inner apostrophe is untouched', sanitiseSuggestion("Fix the file's header.") === "Fix the file's header.")
-  check('double spaces collapse', sanitiseSuggestion('Run  the   tests.') === 'Run the tests.')
-  check('two lines keep the first', sanitiseSuggestion('Run the tests.\nThen commit.') === 'Run the tests.', sanitiseSuggestion('Run the tests.\nThen commit.'))
-  check('a leading blank line is skipped', sanitiseSuggestion('\n\nRun the tests.') === 'Run the tests.')
+  check('surrounding whitespace goes', sanitiseSuggestion('  Run the tests.  ') === 'Run the tests', sanitiseSuggestion('  Run the tests.  '))
+  check('a bullet goes', sanitiseSuggestion('- Run the tests.') === 'Run the tests', sanitiseSuggestion('- Run the tests.'))
+  check('a star bullet goes', sanitiseSuggestion('* Run the tests.') === 'Run the tests', sanitiseSuggestion('* Run the tests.'))
+  check('a dot number goes', sanitiseSuggestion('1. Run the tests.') === 'Run the tests', sanitiseSuggestion('1. Run the tests.'))
+  check('a paren number goes', sanitiseSuggestion('2) Run the tests.') === 'Run the tests', sanitiseSuggestion('2) Run the tests.'))
+  check('a "next step:" label goes', sanitiseSuggestion('Next step: Run the tests.') === 'Run the tests', sanitiseSuggestion('Next step: Run the tests.'))
+  check('a chinese label goes', sanitiseSuggestion('下一步：跑测试。') === '跑测试', sanitiseSuggestion('下一步：跑测试。'))
+  check('a chinese suggestion label goes', sanitiseSuggestion('建议：跑测试。') === '跑测试', sanitiseSuggestion('建议：跑测试。'))
+  check('surrounding double quotes go', sanitiseSuggestion('"Run the tests."') === 'Run the tests', sanitiseSuggestion('"Run the tests."'))
+  check('surrounding curly quotes go', sanitiseSuggestion('“Run the tests.”') === 'Run the tests', sanitiseSuggestion('“Run the tests.”'))
+  check('an inner apostrophe is untouched', sanitiseSuggestion("Fix the file's header.") === "Fix the file's header", sanitiseSuggestion("Fix the file's header."))
+  check('double spaces collapse', sanitiseSuggestion('Run  the   tests.') === 'Run the tests', sanitiseSuggestion('Run  the   tests.'))
+  check('two lines keep the first', sanitiseSuggestion('Run the tests.\nThen commit.') === 'Run the tests', sanitiseSuggestion('Run the tests.\nThen commit.'))
+  check('a leading blank line is skipped', sanitiseSuggestion('\n\nRun the tests.') === 'Run the tests', sanitiseSuggestion('\n\nRun the tests.'))
   check('a code fence is dropped', sanitiseSuggestion('```js\ngo()\n```') === '', sanitiseSuggestion('```js\ngo()\n```'))
   // Unwrapped, not dropped: a coding agent's next step names a command, and a
   // chip that lost those was no chip at all on the live host (DEF-200).
-  check('inline code is unwrapped', sanitiseSuggestion('Run `npm test`.') === 'Run npm test.', sanitiseSuggestion('Run `npm test`.'))
+  check('inline code is unwrapped', sanitiseSuggestion('Run `npm test`.') === 'Run npm test', sanitiseSuggestion('Run `npm test`.'))
   check('a url is dropped', sanitiseSuggestion('https://example.com/x') === '')
   check('a file url is dropped', sanitiseSuggestion('file:///F:/a.js') === '')
   check('an empty string is dropped', sanitiseSuggestion('   ') === '')
@@ -219,9 +219,57 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // has to be under the drop limit *and* over the chip width, or the assertion
   // is `''.length <= 120` -- true, and about nothing.
   check('a long line under the drop limit is cut to a chip', sanitiseSuggestion('x'.repeat(300)).length <= MAX_SUGGESTION_CHARS, String(sanitiseSuggestion('x'.repeat(300)).length))
-  check('a full sentence under the drop limit survives as its first sentence', sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`) === `${'a'.repeat(60)}.`, sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`))
+  // Two sentences used to be cut down to their first sentence. That stopped
+  // when the Codex shape rules arrived: the first sentence of prose is a remark
+  // about the past ("The bug is fixed.") far more often than it is a step, so
+  // the candidate is dropped instead of salvaged.
+  check('no first sentence is salvaged from prose', sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`) === '', sanitiseSuggestion(`${'a'.repeat(60)}. ${'b'.repeat(60)}.`))
   check('a long unpunctuated line ends with an ellipsis', sanitiseSuggestion(`${'a'.repeat(HARD_SUGGESTION_CHARS - 100)}`).endsWith('…') === true)
   check('the result is never longer than a chip', sanitiseSuggestion(`${'word '.repeat(60)}.`).length <= 120, String(sanitiseSuggestion(`${'word '.repeat(60)}.`).length))
+
+  // --- a chip is a step, not a sentence -------------------------------------
+  // The shape rules come from OpenAI Codex's `filter_next_prompt_suggestion`
+  // (openai/codex#24126, removed again in #48621). A person typing into the box
+  // does not close the sentence, and the closing period is the strongest
+  // available signal that the text was written as prose.
+  check('a trailing period is not part of the chip', sanitiseSuggestion('Run the tests.') === 'Run the tests', sanitiseSuggestion('Run the tests.'))
+  check('nor is a Chinese full stop', sanitiseSuggestion('跑一下失败的用例。') === '跑一下失败的用例', sanitiseSuggestion('跑一下失败的用例。'))
+  check('a question is not a step', sanitiseSuggestion('What about the other test?') === '', sanitiseSuggestion('What about the other test?'))
+  check('a Chinese question is not a step', sanitiseSuggestion('为什么测试失败？') === '', sanitiseSuggestion('为什么测试失败？'))
+  check('an exclamation is not a step', sanitiseSuggestion('Fix the build!') === '', sanitiseSuggestion('Fix the build!'))
+  check('two sentences are prose, not a step', sanitiseSuggestion('The tests pass. The next step is the docs.') === '', sanitiseSuggestion('The tests pass. The next step is the docs.'))
+  // A period inside a filename is not the end of a sentence. This is the whole
+  // reason the rule needs a lookahead for whitespace rather than a bare
+  // character class, which would reject every suggestion naming a file.
+  check('a filename period is not a sentence end', sanitiseSuggestion('打开 suggest.js 看看') === '打开 suggest.js 看看', sanitiseSuggestion('打开 suggest.js 看看'))
+  check('the assistant narrating itself is not a step', sanitiseSuggestion("I'll run the tests") === '', sanitiseSuggestion("I'll run the tests"))
+  check('nor "let me"', sanitiseSuggestion('Let me check the log') === '', sanitiseSuggestion('Let me check the log'))
+  check('nor "here is"', sanitiseSuggestion("Here's the summary you asked for") === '', sanitiseSuggestion("Here's the summary you asked for"))
+  check('nor the first person in Chinese', sanitiseSuggestion('我来修一下这个测试') === '', sanitiseSuggestion('我来修一下这个测试'))
+  check('nor an evaluative reply', sanitiseSuggestion('Looks good') === '', sanitiseSuggestion('Looks good'))
+  check('nor a model declining to answer', sanitiseSuggestion('No suggestion') === '', sanitiseSuggestion('No suggestion'))
+  check('a Chinese thank-you is not a step', sanitiseSuggestion('谢谢') === '', sanitiseSuggestion('谢谢'))
+  check('nor a bare "done"', sanitiseSuggestion('done') === '', sanitiseSuggestion('done'))
+  check('nor a bare "none"', sanitiseSuggestion('None') === '', sanitiseSuggestion('None'))
+  // The voice word has to open the line. A substring match would delete a
+  // person's own words, which is the failure mode this rule is closest to --
+  // and a sample that contains no voice phrase at all would pass with the `^`
+  // anchor removed, so each of these carries the phrase somewhere else.
+  check('a voice word in the middle is the reader speaking', sanitiseSuggestion('Then let me know the result') === 'Then let me know the result', sanitiseSuggestion('Then let me know the result'))
+  check('and so is "here is" in the middle', sanitiseSuggestion('Show here is what changed') === 'Show here is what changed', sanitiseSuggestion('Show here is what changed'))
+  check('a Chinese voice word in the middle is the reader speaking', sanitiseSuggestion('先跑测试，我来看看结果') === '先跑测试，我来看看结果', sanitiseSuggestion('先跑测试，我来看看结果'))
+  check('and a Chinese verb at the start is still rejected', sanitiseSuggestion('我来修一下这个测试') === '', sanitiseSuggestion('我来修一下这个测试'))
+  // A `!` inside an operator is not a shout: the rule has to look at whether the
+  // mark ends a sentence, or every chip naming `!=` or `!important` disappears.
+  check('a bang inside an operator is not a shout', sanitiseSuggestion('Replace != with !==') === 'Replace != with !==', sanitiseSuggestion('Replace != with !=='))
+  check('a question mark inside an operator is not a question', sanitiseSuggestion('Use ?. instead of the || chain') === 'Use ?. instead of the || chain', sanitiseSuggestion('Use ?. instead of the || chain'))
+  // The voice and refusal lists are anchored at the end of the string, so they
+  // have to be matched against the text without its terminator or a period
+  // defeats them: every one of these came back as a chip before.
+  check('a punctuated refusal is still a refusal', sanitiseSuggestion('No suggestion.') === '', sanitiseSuggestion('No suggestion.'))
+  check('a punctuated evaluation is still an evaluation', sanitiseSuggestion('Looks good.') === '', sanitiseSuggestion('Looks good.'))
+  check('a punctuated "done" is still done', sanitiseSuggestion('Done.') === '', sanitiseSuggestion('Done.'))
+  check('an ellipsis is not left as two dots', sanitiseSuggestion('Wait...') === 'Wait', sanitiseSuggestion('Wait...'))
 }
 
 // ---------------------------------------------------------------------------
@@ -259,7 +307,7 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 {
   const three = parseSuggestions(GOOD, 3)
   check('the contract parses to three chips', three.length === 3, JSON.stringify(three))
-  check('and keeps the model order', three[0] === 'Run the failing cursor test.', three[0])
+  check('and keeps the model order', three[0] === 'Run the failing cursor test', three[0])
   check('a fenced contract parses', parseSuggestions(`\`\`\`json\n${GOOD}\n\`\`\``, 3).length === 3)
   check('a bare array parses', parseSuggestions('["Run the tests.","Then commit.","Then push."]', 3).length === 3)
   check('a preamble before the object is tolerated', parseSuggestions(`Here you go:\n${GOOD}`, 3).length === 3)
@@ -283,7 +331,7 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('a trailing prose paragraph is not a suggestion list', withProse.length === 2, JSON.stringify(withProse))
   check('and the paragraph is not one of the chips', withProse.includes('That is all I would do here.') === false, JSON.stringify(withProse))
   const jsonThenProse = parseSuggestions('{"suggestions":["Fix the failing test.","Update the docs."]}\nHope that helps!', 3)
-  check('a JSON answer with a line after it yields exactly its two', JSON.stringify(jsonThenProse) === JSON.stringify(['Fix the failing test.', 'Update the docs.']), JSON.stringify(jsonThenProse))
+  check('a JSON answer with a line after it yields exactly its two', JSON.stringify(jsonThenProse) === JSON.stringify(['Fix the failing test', 'Update the docs']), JSON.stringify(jsonThenProse))
 }
 
 // ---------------------------------------------------------------------------
@@ -703,7 +751,7 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // measured on the host's gateway, the same prompt took 14.5 s with no effort
   // asked for and 8.7 s at `low`. The effort may only be asked for when the
   // prepared model lists it, because an unknown one is an error, not a hint.
-  const llm = fakeLlm({ efforts: { low: 'low', high: 'high' } })
+  const llm = fakeLlm({ efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('the call asks for the cheapest thinking', llm.log.prepare.length === 1 && llm.log.configure === 1, `${llm.log.prepare.length}/${llm.log.configure}`)
@@ -722,12 +770,45 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 {
   // "off" is spelled differently by different providers, and the cheapest one
   // that exists beats the one this code happened to try first.
-  const llm = fakeLlm({ efforts: { none: 'none', low: 'low' } })
+  const llm = fakeLlm({ efforts: [{ id: 'none', name: 'None' }, { id: 'low', name: 'Low' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('an off switch is preferred to a small effort', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
 }
 
+
+{
+  // "off" is spelled four ways across providers, and the id that goes on the
+  // wire has to be the model's own spelling: the host compares it exactly and
+  // throws INVALID_MODEL_REASONING for anything else. The old code read the
+  // menu as an object keyed by effort id, so none of these ever matched and
+  // every suggestion call ran at the model's default effort.
+  for (const spelling of ['off', 'Disabled', 'Minimal', 'disable']) {
+    const llm = fakeLlm({ efforts: [{ id: spelling, name: spelling }, { id: 'high', name: 'High' }] })
+    const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+    await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+    check(`the ${spelling} entry is what gets asked for`, llm.log.stream[0]?.reasoningEffort === spelling, String(llm.log.stream[0]?.reasoningEffort))
+  }
+}
+
+{
+  // A reasoning model that offers no way to stop thinking: the cheapest non-zero
+  // effort is the best available, and it is still much better than the default.
+  const llm = fakeLlm({ efforts: [{ id: 'medium', name: 'Medium' }, { id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('a menu with no off switch falls to the cheapest effort', llm.log.stream[0]?.reasoningEffort === 'low', String(llm.log.stream[0]?.reasoningEffort))
+
+{
+  // A menu that exists but offers none of the ids this code knows: asking for
+  // anything here would be rejected by the host with INVALID_MODEL_REASONING,
+  // because it checks the requested id against the list it just handed over.
+  const llm = fakeLlm({ efforts: [{ id: 'high', name: 'High' }, { id: 'max', name: 'Extra' }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('a menu with no entry this code knows is left alone', llm.log.stream[0] !== undefined && llm.log.stream[0].reasoningEffort === undefined, String(llm.log.stream[0]?.reasoningEffort))
+}
+}
 // ---------------------------------------------------------------------------
 // an answer that was cut off
 // ---------------------------------------------------------------------------
@@ -791,7 +872,17 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // The prompt is where that is decided, so the register has to be named in it.
   check('the instruction asks for words a person would type', String(content[0]?.text).includes('would actually type'), 'no register in the prompt')
   check('and names a length a person would type', String(content[0]?.text).includes('under 25 characters'), 'no target length in the prompt')
+  // Dropped by accident when the two neighbour lines were rewritten: without
+  // this, nothing in the suite or the mutation table notices the rule going
+  // away, and `firstAction` then cuts every two-action chip at its first verb.
   check('and forbids two actions in one suggestion', String(content[0]?.text).includes('ONE action per suggestion'), 'no one-action rule')
+  // A first reading of the three rules the reader asked for came from Codex's
+  // second-generation prompt: before proposing anything new, work on what the
+  // turn just produced. A chip that opens a fresh topic is the one that makes
+  // the feature feel like a stranger talking.
+  check('the instruction prefers work on what the turn just produced', String(content[0]?.text).includes('prefer working on what this turn just'), 'no preference for operating on the turn')
+  check('and ranks a fresh topic last', String(content[0]?.text).includes('last resort'), 'a new topic is not ranked last')
+
 }
 
 {

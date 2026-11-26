@@ -134,16 +134,30 @@ export const SUGGEST_FAILURE_TTL_MS = 60000
 export const SUGGEST_TTL_MS = 15 * 60 * 1000
 
 /**
- * Ask for the least thinking the model admits to, when it says what it admits.
+ * Turn thinking off when the model admits to being able to.
  *
  * Measured through the gateway the host uses, on the same prompt: no effort
  * asked for took 14.5 s and 187 reasoning tokens, `low` took 8.7 s and 96. A
  * chip that arrives twenty seconds after the turn is a chip nobody reads, so
  * the difference is the difference between shipping this and not.
  *
- * The effort is only offered when the prepared model lists it, because asking
- * for one the adapter does not know is an error, not a fallback. `none` is
- * tried first for providers that spell "off" that way.
+ * This function did nothing at all until now, and that is why the suggestions
+ * were slow and occasionally empty. `info.reasoning.efforts` is a *list* of
+ * `{id, name}` -- the host validates it as a list, rejects duplicates, and
+ * requires `defaultEffort` to be one of its ids (`dsh-llm` throws
+ * `INVALID_MODEL_REASONING` otherwise). Reading it as an object keyed by effort
+ * id meant `hasOwnProperty(efforts, 'none')` was always false, so no effort was
+ * ever requested and every call ran at the model's own default: a reasoning
+ * model then spent the whole output budget thinking (`completion_tokens: 220,
+ * reasoning_tokens: 220, finish: length`, content empty). Reading the ids out
+ * of the list is the fix.
+ *
+ * Off before low, and the order is the point: `none` / `off` / `disabled` are
+ * the entries that actually stop thinking, and only a model that offers no
+ * disable entry is worth asking for the cheapest non-zero effort. Every id is
+ * checked against the list first, because asking for one the adapter does not
+ * know is an error rather than a fallback -- and the id that goes on the wire
+ * is the model's own spelling, since the host compares it exactly.
  *
  * @param {any} controls - the sampling controls already resolved for this call.
  * @param {any} info - the prepared model's capabilities.
@@ -151,9 +165,14 @@ export const SUGGEST_TTL_MS = 15 * 60 * 1000
  */
 function withCheapestThinking(controls, info) {
   const efforts = info?.reasoning?.efforts
-  if (efforts === undefined || efforts === null || typeof efforts !== 'object') return controls
-  for (const wanted of ['none', 'off', 'low']) {
-    if (Object.prototype.hasOwnProperty.call(efforts, wanted)) return { ...controls, reasoningEffort: wanted }
+  if (!Array.isArray(efforts)) return controls
+  const byId = new Map()
+  for (const effort of efforts) {
+    if (typeof effort?.id === 'string' && effort.id.length > 0) byId.set(effort.id.toLowerCase(), effort.id)
+  }
+  for (const wanted of ['none', 'off', 'disabled', 'disable', 'minimal', 'low']) {
+    const exact = byId.get(wanted)
+    if (exact !== undefined) return { ...controls, reasoningEffort: exact }
   }
   return controls
 }
@@ -169,6 +188,10 @@ function withCheapestThinking(controls, info) {
  * At 700 the same prompt answers with 262 reasoning tokens and 21 of answer.
  * This is output only, so the price of the headroom is a few hundred tokens
  * that are usually not spent.
+ *
+ * The headroom stays now that thinking is switched off, because it is cheap and
+ * it is the difference between a model that does not offer a disable entry
+ * answering and answering with nothing.
  */
 export const SUGGEST_MAX_TOKENS = 700
 
@@ -211,6 +234,10 @@ const INSTRUCTION = [
   '- Base each on the task in progress, not on the last thing that happened. If',
   '  the turn finished something, propose the next unfinished thing; if it found',
   '  a problem, propose the fix.',
+  '- Before proposing anything new, prefer working on what this turn just',
+  '  produced: shorten it, reformat it, sort it, apply it, extend it, or change',
+  '  one named part of it. "Shorten that summary" and "把表格按时间排序" are the',
+  '  shape. A fresh topic is the last resort, not the first idea.',
   '- The turn below is an EXCERPT. A sentence that stops in the middle means the',
   '  excerpt was cut, not that the assistant was interrupted. Never propose',
   '  finishing, completing, continuing, or restating a previous answer -- that',
@@ -317,6 +344,10 @@ export function sanitiseSuggestion(value) {
   // block is not a step, and JSON that reached here has its own reader.
   if (text.includes('```')) return ''
   if (text.length === 0) return ''
+  // A sentence, a question, an exclamation, the assistant narrating itself, or
+  // the model declining to answer. Judged on what the model wrote, before
+  // `firstAction` trims anything off it, because the shape is the evidence.
+  if (isProseNotAStep(text)) return ''
   // Two actions wearing one coat. The instruction forbids it and the model still
   // does it, so the first one is kept: the reader can click half of a suggestion,
   // and half is what they wanted anyway (DEF-208).
@@ -326,7 +357,7 @@ export function sanitiseSuggestion(value) {
   // name a file; a suggestion that *is* a link has no verb to act on.
   if (/^(?:https?|file):\/\//i.test(text)) return ''
   if (text.length > HARD_SUGGESTION_CHARS) return ''
-  return clipSentence(text)
+  return stripTerminator(clipSentence(text))
 }
 
 /**
@@ -405,6 +436,96 @@ function sentenceEnd(text, window) {
  */
 const SECOND_ACTION = /^(?:说明|解释|补充|补完|添加|加上|更新|修改|修复|删除|去掉|提交|推送|检查|确认|整理|重构|列出|给出|回答|并|然后|接着|再)/i
 const SECOND_ACTION_LATIN = /^(?:explain|describe|update|add|write|run|check|verify|fix|commit|push|document|outline|list|answer|summarise|summarize)\b/i
+
+/**
+ * The shapes a chip must not have, taken from OpenAI Codex's suggestion filter.
+ *
+ * These are the rules from `filter_next_prompt_suggestion` in openai/codex
+ * #24126, the next-prompt engine that shipped in May 2026 and was removed again
+ * in #48621. The feature is gone but the filter is still the most concrete
+ * public statement of what a next-prompt candidate should look like, and its
+ * premise is the one that matters here: a chip is something a *person types
+ * into a box* -- an imperative phrase, not a sentence, never a question, and
+ * never the assistant talking about itself.
+ *
+ * One deliberate deviation. Codex drops a candidate that ends with a period;
+ * this one drops only the period (see `stripTerminator`). A chip reading `Run
+ * the tests` is the text a person would type, and throwing the whole candidate
+ * away would discard the good half of an answer that merely closed its sentence
+ * politely -- on this host most replies carry a closing terminator in both
+ * languages, so the literal rule would empty the feature. What is still
+ * rejected is a candidate that has *another* sentence end inside it once that
+ * trailing terminator is gone, because two sentences is prose, and prose is
+ * what the reader objected to.
+ */
+const QUESTION_OR_SHOUT = /[?？！!](?=\s|$)/
+// A run of stops, not one: a chip reading "Wait..." has to become "Wait", and
+// removing a single dot left "Wait.." behind.
+const TRAILING_TERMINATOR = /[.。]+$/
+// A period ends a sentence only when whitespace follows it, so `suggest.js` is
+// not the end of a thought -- the same distinction `excerptOf` in transcript.js
+// makes when it picks a cut point. Abbreviations get no exemption: `e.g. ` reads
+// as a sentence end here and the candidate is dropped. A per-language list of
+// The ASCII branch also refuses a stop that follows another punctuation
+// mark: `?.` and `!.` are operators in the language this plugin is often
+// asked about, and reading them as a sentence end dropped "Use `?.` instead"
+// on the live fixture.
+// abbreviations is not worth the maintenance for one missing chip.
+const INNER_SENTENCE_END = /[。！？]|(?<![?!.])[.!?](?=\s)/
+
+/**
+ * Openings that mean the model answered as the assistant, not as the reader.
+ *
+ * "Let me..." and "I'll..." are the model narrating its own next action; the
+ * person using the session would type "run the tests", not "I'll run the
+ * tests". Codex rejects the same English openings plus the evaluative "looks
+ * good" / "thanks". The Chinese list is the same idea in this codebase's other
+ * language: 我来 / 我会 / 让我 are the assistant speaking in first person, and
+ * 以下 / 这里 are it presenting a list. A negative lookahead rather than `\b`
+ * because `\b` is meaningless next to a CJK character.
+ */
+const ASSISTANT_VOICE = /^(?:let me|let's|i'll|i will|i'm|here's|here is|happy to)(?![a-z])/i
+const ASSISTANT_VOICE_CJK = /^(?:我来|我会|我将|让我|我先|以下|这里)/
+const EVALUATIVE = /^(?:looks good|looks great|sounds good|thanks|thank you)(?![a-z])|^(?:好的|谢谢|辛苦了)/i
+// A model that has nothing to say writes one of these instead of an empty
+// array, and a chip reading "no suggestion" is worse than no chip.
+const NOT_AN_ANSWER = /^(?:done|no suggestion|none|null|n\/a|stay silent|silence)$/i
+
+/**
+ * Whether this candidate is a sentence or a remark rather than a step.
+ *
+ * Every list is matched against the text *as the chip would read it*, with the
+ * trailing terminator already gone. Matching the raw candidate let "Done." and
+ * "No suggestion." through: both patterns are anchored at `$`, and a closing
+ * stop is part of the string, so two of the five rules were defeated by adding
+ * a period.
+ *
+ * @param {string} text - an already-cleaned candidate, before `firstAction`.
+ * @returns {boolean} true when it should not become a chip at all.
+ */
+function isProseNotAStep(text) {
+  const bare = stripTerminator(text)
+  if (QUESTION_OR_SHOUT.test(text)) return true
+  if (ASSISTANT_VOICE.test(bare) || ASSISTANT_VOICE_CJK.test(bare)) return true
+  if (EVALUATIVE.test(bare)) return true
+  if (NOT_AN_ANSWER.test(bare)) return true
+  return INNER_SENTENCE_END.test(bare)
+}
+
+/**
+ * Drop the punctuation that marks a sentence.
+ *
+ * The period carries no information a chip needs, and its presence is the
+ * strongest signal that the text came from prose rather than from a composer.
+ * Removed at the very end, after `clipSentence`, so that clipping can still use
+ * a sentence end as a cut point before the mark is taken away.
+ *
+ * @param {string} text - the final chip text.
+ * @returns {string} the same text without its trailing terminator run.
+ */
+function stripTerminator(text) {
+  return text.replace(TRAILING_TERMINATOR, '').trim()
+}
 
 /**
  * Keep only the first action when a suggestion carries two.
