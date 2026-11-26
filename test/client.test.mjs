@@ -7961,6 +7961,8 @@ function suggestRoute(texts, over) {
         // green against a server that sends plain strings.
         items: texts.slice(),
         reason: typeof settings.reason === 'string' ? settings.reason : '',
+        // The server says a turn is still running; the client cannot tell.
+        busy: settings.busy === true,
         // The turn the answer describes. The row is drawn at the tail of a turn
         // and refuses any other, so a stub without it draws nothing at all -- the
         // same shape of blindness that let a string-vs-object mismatch stay green.
@@ -8148,13 +8150,41 @@ async function settledSeat(instance, name, props) {
   // The mark in front is the whole difference between "here are three
   // sentences" and "here are three things Enter would send".
   const marks = items.map((row) => firstByClass(row, 'dsse-suggest-enter'))
+  // The mark is a drawn path, not the "↵" character. The glyph is laid out by
+  // whichever font the host resolves and was clipped at the top in a fixed-width
+  // box -- on the live host it showed as a hook with the shaft cut off -- and it
+  // points left, against the direction the row reads.
+  const arrowOf = (mark) => {
+    const svg = mark?.props?.children
+    const paths = Array.isArray(svg?.props?.children) ? svg.props.children : []
+    return { svg, paths }
+  }
   check(
     'each chip leads with a return mark',
     // "Leads" is about order: the mark has to be the first child, not merely
     // present somewhere in the button. Reading only the children for the glyph
     // passed when the mark was rendered after the text.
-    marks.every((mark, at) => mark !== undefined && textOf(mark) === '↵' && items[at].props.children[0] === mark),
-    JSON.stringify(marks.map((mark) => (mark === undefined ? 'absent' : textOf(mark)))),
+    marks.every((mark, at) => mark !== undefined && items[at].props.children[0] === mark),
+    JSON.stringify(marks.map((mark) => (mark === undefined ? 'absent' : 'present'))),
+  )
+  check(
+    'and the mark is drawn rather than typed',
+    marks.every((mark) => {
+      const { svg, paths } = arrowOf(mark)
+      return svg?.type === 'svg' && paths.length === 2 && textOf(mark) === ''
+    }),
+    JSON.stringify(marks.map((mark) => arrowOf(mark).paths.length)),
+  )
+  check(
+    'pointing right, the way the row reads',
+    marks.every((mark) => {
+      const { paths } = arrowOf(mark)
+      const [shaft, head] = paths
+      // A shaft from the left edge to the right one, and a head whose last
+      // segment travels right: `l4 4-4 4` ends at x+4, i.e. further right.
+      return shaft?.props?.d === 'M2.5 8h10' && head?.props?.d === 'M8.5 4l4 4-4 4'
+    }),
+    JSON.stringify(marks.map((mark) => arrowOf(mark).paths.map((path) => path?.props?.d))),
   )
   check(
     'which is decoration rather than part of the prompt',
@@ -8357,6 +8387,32 @@ async function openStream(instance) {
     'no offers means no panel',
     firstByClass(tree, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(tree, 'dsse-suggest-item').length === 0,
     'a panel was drawn',
+  )
+
+  // A turn that is still running draws neither interface, even when the server
+  // has offers to give. The client cannot see this from the input machine: it is
+  // `plain` for the whole turn.
+  const busy = boot({ routes: suggestRoute(SUGGEST_TEXTS, { busy: true }) })
+  busy.module.apply(busy.ctx)
+  const busyProps = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  const busyTree = await settledSeat(busy, 'suggestions', busyProps)
+  check(
+    'a running turn draws no row',
+    firstByClass(busyTree, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(busyTree, 'dsse-suggest-item').length === 0,
+    'a row was drawn over a running turn',
+  )
+  const busyGhost = await settledSeat(busy, 'ghost', busyProps)
+  check(
+    'and no ghost either',
+    firstByClass(busyGhost, 'dsse-ghost')?.props['data-shown'] === 'false',
+    'a ghost was drawn over a running turn',
+  )
+  // The one retry a session gets is not spent on a running turn: there is
+  // nothing settling yet, and the real race at the end of it still needs it.
+  check(
+    'and no retry is armed for it',
+    busy.timers.filter((row) => row.ms === 15000).length === 0,
+    JSON.stringify(busy.timers.map((row) => row.ms)),
   )
 
   const off = boot({ routes: suggestRoute(SUGGEST_TEXTS, { enabled: false }) })

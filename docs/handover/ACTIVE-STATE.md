@@ -5,9 +5,9 @@
 
 ## 1. 最新基线
 
-- **最近状态条目**：[`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)（2026-11-26）
-- **摘要**：完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地
-- **记录基线**：4391 passed / 0 failed（docs 57/0、registration 56/0、mutations 55/0、gate:fast 通过）
+- **最近状态条目**：[`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)（2026-11-26）
+- **摘要**：建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵
+- **记录基线**：4434 passed / 0 failed（client 1074/0、suggest 239/0、api 429/0、mutations 55/0、mutate-suggest 87/87 全杀、perf 退出 0）
 
 ## 2. 进行中任务（`docs/tasks/`）
 
@@ -15,12 +15,14 @@
 
 ## 3. 待闭环真机验收 / 阻塞项
 
+- **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现
 - **2026-11-26** [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)：2026-11-25 提示词建议改动（7b9df8b）仍待重启宿主后跑 npm run verify:live 复验
 
 ## 4. 最近分片记录（最多 15 条）
 
 | 日期 | 类型 | 编号/状态 | 标题 | 文件 |
 | --- | --- | --- | --- | --- |
+| 2026-11-26 | status | S-20261126-suggest / pending_live_verify | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
 | 2026-11-26 | status | S-20261126 / active | 完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地 | [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md) |
 | 2026-11-26 | decision | D-255 / active | 交接台账改用按文件分片追加 + 自动生成活跃视图，并引入根级 AGENTS.md 与任务交接单 | [`2026-11-26-decision-multi-agent-docs.md`](./entries/2026-11-26-decision-multi-agent-docs.md) |
 

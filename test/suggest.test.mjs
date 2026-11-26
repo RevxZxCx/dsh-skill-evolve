@@ -107,8 +107,16 @@ function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undef
 }
 
 /** A transcript view with the given finished turns. */
+// `current.turn` is `undefined` between turns: that is what `endTurn` leaves
+// behind, and it is the only signal the server has for "a turn is running".
+// A view whose `current.turn` is set means one is open right now.
 function viewWith(...turns) {
-  return { turns, current: { turn: turns.length + 1 }, previous: turns.length === 0 ? undefined : turns[turns.length - 1] }
+  return { turns, current: { turn: undefined }, previous: turns.length === 0 ? undefined : turns[turns.length - 1] }
+}
+
+function viewRunning(...turns) {
+  const view = viewWith(...turns)
+  return { ...view, current: { turn: turns.length === 0 ? 1 : turns[turns.length - 1].turn } }
 }
 
 const snapshot = (turn, said = 'The test fails because the fixture is stale.') => ({
@@ -362,9 +370,34 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('and says so', noTurn.reason === 'no completed turn yet', String(noTurn.reason))
   check('but the feature still reads as enabled', noTurn.enabled === true)
 
+  // A running turn offers nothing. The client cannot see this: the submit
+  // machine is `plain` for the whole turn, so an idle composer and a busy one
+  // are the same input state. `current.turn` is what `endTurn` clears.
+  const running = await suggestor.suggestions({ agentId: 'a', view: viewRunning(snapshot(1)) })
+  check('a turn still running offers nothing', running.items.length === 0, JSON.stringify(running))
+  check('and says why', running.reason === 'a turn is running', String(running.reason))
+  // The client reads `busy`, not the prose: an empty answer during a turn must
+  // not spend the one retry a session gets (DEF-202), because nothing is
+  // settling yet and the real race comes when the turn actually ends.
+  check('and marks it busy rather than empty', running.busy === true, JSON.stringify(running))
+  check('without spending a call', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+  check('but the feature still reads as enabled', running.enabled === true)
+
   const emptyBody = await suggestor.suggestions({ agentId: 'a', view: { turns: [{ turn: 1 }], previous: { turn: 1 } } })
   check('a turn with nothing to quote is not a suggestion', emptyBody.items.length === 0, JSON.stringify(emptyBody))
   check('none of those three called the model', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+}
+
+{
+  // The same view once the turn closes does offer: the gate is the open turn,
+  // not the shape of the view. Separate scope because it spends a call, and the
+  // block above asserts that none of its own four paths did.
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  const closed = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the same turn once it closes does offer', closed.items.length === 3, JSON.stringify(closed.items))
+  check('and it is no longer busy', closed.busy === undefined, JSON.stringify(closed.busy))
+  check('and it cost exactly one call', llm.log.prepare.length === 1, String(llm.log.prepare.length))
 }
 
 // ---------------------------------------------------------------------------

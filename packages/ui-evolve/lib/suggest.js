@@ -784,6 +784,27 @@ export class Suggestor {
     const previous = view?.previous
     if (previous === undefined) return { enabled: true, items: [], reason: 'no completed turn yet' }
 
+    // A turn is running. `view.current.turn` is set while a turn is open and
+    // cleared by `endTurn`, so this is the only place that can tell: the
+    // composer's submit machine returns to `plain` the moment the message is
+    // handed over, and stays there for the whole turn, so from the client a
+    // running turn and an idle one look identical.
+    //
+    // Nothing is offered while one runs, for two reasons. The offers describe
+    // what to do *after* the answer on screen, and during a turn that answer is
+    // still arriving -- the row would sit under a half-written reply, naming a
+    // next step for work that has not finished. And the ghost sits in the box
+    // the reader may be about to interrupt with; a prompt suggestion over a
+    // running turn reads as "type this now", which is the one moment it must
+    // not. The answer is not cached under the running turn's key, so this also
+    // avoids paying for a call that would be stale before it landed.
+    // `busy` is a field rather than something the client infers from `reason`:
+    // an empty answer during a turn must not be treated like the settling race
+    // that earns a retry (DEF-202), or the one retry a session gets would be
+    // spent on a turn that was merely still running, and the real race at the
+    // end of it would go unretried.
+    if (view?.current?.turn !== undefined) return { enabled: true, items: [], reason: 'a turn is running', busy: true }
+
     const body = renderSuggestBody(view)
     if (body.length === 0) return { enabled: true, items: [], reason: 'the turn left nothing to go on' }
 

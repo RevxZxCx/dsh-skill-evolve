@@ -1058,7 +1058,13 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
    host's layout moving. */
 .dsse-suggest{display:grid;gap:1px;margin:10px 0 2px;padding:8px 0 0;border-top:1px dashed var(--dsw-alias-border-l2,rgba(15,17,21,.1));box-sizing:border-box}
 .dsse-suggest[data-shown="false"]{display:none}
-.dsse-suggest-enter{flex:0 0 auto;width:1.1em;color:var(--dsw-alias-label-tertiary,#8b92a1);font-size:1em;line-height:1.45;text-align:center}
+/* A drawn arrow, not the "↵" character. The glyph is laid out by whichever font
+   the host resolves, and at a fixed width it is clipped at the top -- it showed
+   as a small hook with the shaft cut off. A path has no font to depend on, and
+   it can point right: the offers sit at the end of the answer and the reader's
+   eye arrives from the left, so a left-pointing return mark read backwards. */
+.dsse-suggest-enter{flex:0 0 auto;width:14px;height:14px;display:inline-flex;align-items:center;justify-content:center;color:var(--dsw-alias-label-tertiary,#8b92a1)}
+.dsse-suggest-enter>svg{width:14px;height:14px;display:block;overflow:visible}
 .dsse-suggest-item{display:flex;align-items:center;gap:8px;width:100%;min-height:30px;padding:4px 8px;border:0;border-radius:7px;background:transparent;color:var(--dsw-alias-label-secondary,#5b6270);font:inherit;font-size:.92em;line-height:1.45;text-align:left;cursor:pointer;transition:background-color 160ms ease,color 160ms ease}
 .dsse-suggest-item:hover{background:var(--dsw-alias-bg-layer-2,#f6f7f9);color:var(--dsw-alias-label-primary,#0f1115)}
 .dsse-suggest-item:focus-visible{outline:2px solid var(--dsw-alias-state-business-primary,#2f4bd8);outline-offset:-2px}
@@ -4670,6 +4676,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // the last one is not, because that is the frame that says the turn the
       // reader is looking at has ended.
       again: false,
+      // The turn on screen is still running, as the server reported it. Nothing
+      // is drawn while this is true -- neither the row nor the ghost. It cannot
+      // be inferred from the input machine: the submit machine returns to
+      // `plain` the moment the message is handed over and stays there for the
+      // whole turn, so from here a busy turn and an idle one look identical.
+      busy: false,
       listeners: new Set(),
       inflight: null,
     }
@@ -4732,6 +4744,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       suggest.turn = undefined
       suggest.used.clear()
       suggest.again = false
+      suggest.busy = false
       if (suggest.retry !== null) {
         clearTimeout(suggest.retry)
         suggest.retry = null
@@ -4787,6 +4800,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
               .map((text) => ({ text }))
           : []
         suggest.reason = typeof data?.reason === "string" ? data.reason : ""
+        // An empty answer because a turn is running is not the settling race
+        // that earns a retry: the turn has not finished, so there is nothing to
+        // settle yet. Spending the one retry here would leave the real race at
+        // the end of that turn unretried.
+        suggest.busy = data?.busy === true
         // A retired chip comes back only when the answer behind it is a *new*
         // answer. The server answers a frame during a turn from its cache with
         // the same `items` and the same `at`, so clearing on every successful
@@ -4804,7 +4822,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           clearTimeout(suggest.retry)
           suggest.retry = null
         }
-        if (suggest.items.length === 0 && suggest.enabled === true && suggest.retried === false) {
+        if (suggest.items.length === 0 && suggest.enabled === true && suggest.retried === false && suggest.busy === false) {
           suggest.retried = true
           suggest.retry = setTimeout(() => {
             suggest.retry = null
@@ -5042,6 +5060,9 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         suggest.sessionId === sessionId &&
         suggest.loaded === true &&
         suggest.enabled === true &&
+        // Nothing while a turn runs: the row names the step after the answer on
+        // screen, and during a turn that answer is still arriving.
+        suggest.busy === false &&
         fresh &&
         offer.length > 0 &&
         box !== null &&
@@ -5169,7 +5190,25 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
                 // key and the button renders empty. Caught by this feature's own
                 // suite, which is the only thing that looks inside the label.
                 children: [
-                  jsx("span", { className: "dsse-suggest-enter", "aria-hidden": "true", children: "↵" }),
+                  // Points right, in the direction the text runs and towards the
+                  // place the prompt would go. See the `.dsse-suggest-enter`
+                  // rule for why this is a path rather than the character.
+                  jsx("span", {
+                    className: "dsse-suggest-enter",
+                    "aria-hidden": "true",
+                    children: jsx("svg", {
+                      viewBox: "0 0 16 16",
+                      fill: "none",
+                      stroke: "currentColor",
+                      strokeWidth: "1.6",
+                      strokeLinecap: "round",
+                      strokeLinejoin: "round",
+                      children: [
+                        jsx("path", { d: "M2.5 8h10", key: "shaft" }),
+                        jsx("path", { d: "M8.5 4l4 4-4 4", key: "head" }),
+                      ],
+                    }),
+                  }),
                   jsx("span", { className: "dsse-suggest-text", children: item.text }),
                 ],
               }),
@@ -5239,6 +5278,9 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         suggest.sessionId === sessionId &&
         suggest.loaded === true &&
         suggest.enabled === true &&
+        // Nor the ghost: it sits in the box the reader may be about to interrupt,
+        // and a prompt suggestion over a running turn reads as "type this now".
+        suggest.busy === false &&
         fresh &&
         text !== "" &&
         gates.idle &&
