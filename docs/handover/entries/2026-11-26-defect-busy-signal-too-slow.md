@@ -2,11 +2,11 @@
 id: D-20261126-busy
 date: 2026-11-26
 type: defect
-status: fixed
+status: verified
 title: 服务端的 busy 到得太晚，回合运行中两个界面照样显示
 packages: [ui-evolve]
 baseline: 4441 passed / 0 failed（client 1081/0、suggest 239/0、api 429/0、mutations 55/0、mutate-suggest 90/90 全杀、perf 退出 0）
-pending_verify: 重启宿主后在回合运行中确认两个界面都不出现，且回合结束后自动回来
+pending_verify: 无（已于 2026-11-26 22:42 在 /pair-app 真机复验通过）
 ---
 
 # 2026-11-26 · 「回合在跑」不能靠一次网络往返判断
@@ -84,3 +84,29 @@ pending_verify: 重启宿主后在回合运行中确认两个界面都不出现�
    绿的方向失明。
 3. **修完之后先跑突变，不要先跑全量。** 第一版补的幽灵断言没有挂输入卡片，幽灵因为
    「没有 placeholder」而隐藏，断言恒真，突变 `UNCOVERED` 才把它逼出来。
+
+## 真机复验（2026-11-26 22:42，`/pair-app`，客户端 rev `69027385aeaa`）
+
+用 `Page.addScriptToEvaluateOnNewDocument` 在宿主自己的 fetch 拦截器**之前**装桩，让
+`/api/ui-evolve/suggestions` 返回三条固定建议（不花用户额度），然后发一条真消息，
+每 700 ms 采样：
+
+| `performance.now()` | `[data-dsh-claude-control="stop"]` | 芯片行 `data-shown` | 幽灵 |
+| --- | --- | --- | --- |
+| 54880–59154 | 1 | 0（0 项） | `false` |
+| 61053–65324 | 0 | **1（3 项）** | **`true`** |
+
+即：回合一开始（`stop` 出现）两个界面立刻消失，回合结束（`stop` 消失）立刻回来，
+**没有那 3–5 秒的窗口**。同一次会话里芯片几何为 `margin-left: -16px; width: 712px`
+（与输入卡片一致），行首三个记号均为 `viewBox="0 0 16 16"`、`overflow: visible`、
+两条 path 的 `getBBox()` 是 `{x:2.5,y:8,w:10,h:0}` 与 `{x:8.5,y:4,w:4,h:8}`
+—— 终点 x=12.5 朝右，全部在 viewBox 内。
+
+## 复验时踩到的两个工具坑
+
+1. **旧的 `/pair-app` 标签页会整页卡死**：`document.readyState` 与 `1+1` 都
+   `Runtime.evaluate timed out`，`Page.reload` 也救不回来，而宿主本身
+   `curl /api/pair/status` 只用了 3 ms。关掉该标签页、重开一个就正常。**遇到
+   evaluate 全超时，先分清是宿主卡还是标签页卡，不要继续在同一个 target 上重试。**
+2. **手工改 `data-dsh-claude-control` 验证不了门控**：该属性由 React 控制，`setAttribute`
+   之后立刻被渲染改回（改完读到 `stop:0, send:1`）。要验证只能跑一次真实回合。
