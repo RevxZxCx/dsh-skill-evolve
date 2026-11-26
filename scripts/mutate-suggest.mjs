@@ -521,6 +521,37 @@ const mutations = [
     why: 'a client deadline shorter than the server one cancels the request mid-flight, so the answer is bought and nobody reads it — and the abort is not a failure, so the next frame buys it again',
   },
   {
+    label: 'the row is drawn while the page says a turn is running',
+    file: client,
+    suites: view,
+    from: `        suggest.busy === false &&
+        // Two signals for one fact: this one is read off the page and arrives
+        // within half a second, where the server's answer takes seconds and
+        // lands after the reader has already seen the row it was meant to hide.
+        suggest.running === false &&`,
+    to: `        suggest.busy === false &&`,
+    why: 'the server cannot answer fast enough to be the only signal: measured on the live host the route took 3125 ms and 5017 ms during a turn, so the row stayed drawn for seconds after the reader had sent a message, and one of those answers carried no busy flag at all',
+  },
+  {
+    label: 'the ghost is drawn while the page says a turn is running',
+    file: client,
+    suites: view,
+    from: `        suggest.busy === false &&
+        suggest.running === false &&`,
+    to: `        suggest.busy === false &&`,
+    why: 'the ghost sits in the box the reader may be about to interrupt, so leaving it up over a running turn reads as an instruction to type the next prompt now',
+  },
+  {
+    label: 'the page is never watched for the control changing',
+    file: client,
+    suites: view,
+    from: `      runningWatch = new MutationObserver(read)
+      runningWatch.observe(document.documentElement, {`,
+    to: `      runningWatch = new MutationObserver(read)
+      void 0; void ({`,
+    why: 'without the observer the page signal is read once at mount and never again, which is the state the live host shipped in: the row hid only if the turn happened to be running when the slot first rendered',
+  },
+  {
     file: client,
     suites: view,
     label: 'the row is drawn under every turn in the conversation',
@@ -697,6 +728,7 @@ const mutations = [
     suites: view,
     label: 'every turn tail opens its own stream',
     from: `      React.useEffect(() => {
+        watchRunning()
         ensureSuggest(sessionId)
       }, [sessionId])`,
     to: "      React.useEffect(() => {\n        if (typeof EventSource === 'function') {\n          new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))\n        }\n        ensureSuggest(sessionId)\n      }, [sessionId])",

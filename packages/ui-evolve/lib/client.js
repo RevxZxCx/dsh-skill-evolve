@@ -4682,9 +4682,33 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // `plain` the moment the message is handed over and stays there for the
       // whole turn, so from here a busy turn and an idle one look identical.
       busy: false,
+      // The same fact, read from the page instead of from the server.
+      //
+      // `busy` arrives with an answer, and during a turn the host is busy
+      // enough that this route takes three to five seconds to answer: measured
+      // on the live host, the row and the ghost stayed drawn for the whole of
+      // that wait while the turn streamed behind them. The composer's own
+      // primary button knows immediately -- it swaps `data-dsh-claude-control`
+      // from `send` to `stop` within half a second of the message being sent --
+      // so the page is asked directly and the answer is not waited for.
+      //
+      // Two signals rather than one because they fail differently. This one is
+      // instant but only exists while a composer is mounted; the server's is
+      // slow but survives a reload that never showed a composer. Either being
+      // true is enough to stay quiet.
+      running: false,
       listeners: new Set(),
       inflight: null,
     }
+
+    /**
+     * The one observer that keeps `suggest.running` honest.
+     *
+     * Module scope, like the store: two slots mount two components, and a
+     * second observer would only duplicate the notifications the first already
+     * delivers.
+     */
+    let runningWatch = null
 
     function subscribeSuggest(listener) {
       suggest.listeners.add(listener)
@@ -4745,6 +4769,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       suggest.used.clear()
       suggest.again = false
       suggest.busy = false
+      // Not reset to `false` blindly: whether a turn is running belongs to the
+      // page, not to the session, so switching sessions must re-read it rather
+      // than assume the new one is idle.
+      suggest.running = turnRunning()
       if (suggest.retry !== null) {
         clearTimeout(suggest.retry)
         suggest.retry = null
@@ -4938,8 +4966,64 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * @param {object} input - the published input snapshot.
      * @returns {object} the gates, each named so a test can read them.
      */
-    function suggestGates(input) {
-      const draft = typeof input?.draft === "string" ? input.draft : ""
+    /**
+     * Keep `suggest.running` in step with the page.
+     *
+     * The value has to be re-read when it changes, and it changes without React
+     * knowing: the host swaps the composer's control attribute from `send` to
+     * `stop` in its own render. A `MutationObserver` on the attribute is the
+     * only way to hear it, and one observer for the page is enough -- both slots
+     * read the same store, so the second mount is a no-op.
+     *
+     * Only a change notifies. The observer fires for every mutation of that
+     * attribute anywhere in the page, including our own re-render churn, and
+     * waking both slots for each one would turn a turn's stream into a render
+     * storm.
+     *
+     * @returns {void}
+     */
+    function watchRunning() {
+      if (runningWatch !== null) return
+      if (typeof MutationObserver !== "function") return
+      if (typeof document === "undefined" || typeof document.querySelector !== "function") return
+      const read = () => {
+        const next = turnRunning()
+        if (next === suggest.running) return
+        suggest.running = next
+        notifySuggest()
+      }
+      suggest.running = turnRunning()
+      runningWatch = new MutationObserver(read)
+      runningWatch.observe(document.documentElement, {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-dsh-claude-control"],
+      })
+    }
+
+    /**
+     * Whether the host's own composer says a turn is running.
+     *
+     * The composer's primary button is the one control that changes at the
+     * moment a message is handed over: the host swaps its
+     * `data-dsh-claude-control` from `send` to `stop` (and its label to the
+     * localised "stop generating") within half a second, and back when the turn
+     * ends. Read from the DOM because there is no service for it -- `uiSession`
+     * exposes bindings and scopes, and the submit machine's phase returns to
+     * `plain` on handover, so nothing in the provide channel knows.
+     *
+     * Fails closed to `false`: a page without the control (an older host, a
+     * harness) must behave exactly as it did before this existed, and the
+     * server's `busy` is still there as the slow, authoritative signal.
+     *
+     * @returns {boolean} true while a turn is running.
+     */
+    function turnRunning() {
+      if (typeof document === "undefined" || typeof document.querySelector !== "function") return false
+      return document.querySelector('[data-dsh-claude-control="stop"]') !== null
+    }
+
+    function suggestGates(input) {      const draft = typeof input?.draft === "string" ? input.draft : ""
       const phase = typeof input?.phase === "string" ? input.phase : "inert"
       const attachments = Array.isArray(input?.attachmentIds) ? input.attachmentIds.length : 0
       return {
@@ -5035,6 +5119,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // single instance for the session, so it keeps the stream and this row
       // only reads the store it fills.
       React.useEffect(() => {
+        watchRunning()
         ensureSuggest(sessionId)
       }, [sessionId])
 
@@ -5063,6 +5148,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // Nothing while a turn runs: the row names the step after the answer on
         // screen, and during a turn that answer is still arriving.
         suggest.busy === false &&
+        // Two signals for one fact: this one is read off the page and arrives
+        // within half a second, where the server's answer takes seconds and
+        // lands after the reader has already seen the row it was meant to hide.
+        suggest.running === false &&
         fresh &&
         offer.length > 0 &&
         box !== null &&
@@ -5249,6 +5338,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // store before it spends anything.
       React.useEffect(() => {
         if (sessionId === "") return undefined
+        watchRunning()
         ensureSuggest(sessionId)
         // No `EventSource` (a test harness, an old renderer): the line still
         // loads on mount and on every session change. What is lost is the
@@ -5281,6 +5371,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // Nor the ghost: it sits in the box the reader may be about to interrupt,
         // and a prompt suggestion over a running turn reads as "type this now".
         suggest.busy === false &&
+        suggest.running === false &&
         fresh &&
         text !== "" &&
         gates.idle &&
@@ -5561,6 +5652,13 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           // nobody subscribes to any more.
           resetSuggest("")
           suggest.listeners.clear()
+          // The observer watches the host's own composer, so leaving it running
+          // after the plugin is unloaded keeps a callback alive that notifies
+          // listeners nobody subscribes to any more.
+          if (runningWatch !== null) {
+            runningWatch.disconnect()
+            runningWatch = null
+          }
           stopHostTypography()
           // The reservation is a modification of the host's own scroll container.
           // Leaving it behind keeps the conversation narrowed after the plugin is

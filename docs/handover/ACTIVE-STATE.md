@@ -17,6 +17,7 @@
 
 - **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现
 - **2026-11-26** [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)：2026-11-25 提示词建议改动（7b9df8b）仍待重启宿主后跑 npm run verify:live 复验
+- **2026-11-26** [`2026-11-26-defect-busy-signal-too-slow.md`](./entries/2026-11-26-defect-busy-signal-too-slow.md)：重启宿主后在回合运行中确认两个界面都不出现，且回合结束后自动回来
 
 ## 4. 最近分片记录（最多 15 条）
 
@@ -24,6 +25,7 @@
 | --- | --- | --- | --- | --- |
 | 2026-11-26 | status | S-20261126-suggest / pending_live_verify | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
 | 2026-11-26 | status | S-20261126 / active | 完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地 | [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md) |
+| 2026-11-26 | defect | D-20261126-busy / fixed | 服务端的 busy 到得太晚，回合运行中两个界面照样显示 | [`2026-11-26-defect-busy-signal-too-slow.md`](./entries/2026-11-26-defect-busy-signal-too-slow.md) |
 | 2026-11-26 | decision | D-255 / active | 交接台账改用按文件分片追加 + 自动生成活跃视图，并引入根级 AGENTS.md 与任务交接单 | [`2026-11-26-decision-multi-agent-docs.md`](./entries/2026-11-26-decision-multi-agent-docs.md) |
 
 ## 5. 历史台账（已冻结，只读）

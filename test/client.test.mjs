@@ -789,8 +789,12 @@ function boot(options) {
   // Opt-in through `settings.scrollWidth`: suites that do not care about the rail
   // keep the previous behaviour (no scrolling area), so nothing that already
   // passed is re-measured against a new number.
-  const scrollArea = settings.scrollWidth === undefined ? null : {
-    getBoundingClientRect: () => {
+  // The composer's stop button, present only when `settings.stop` says a turn is
+  // running. It has no other job in the harness: the plugin reads nothing else
+  // off it, and `document.querySelector` returning it is the whole signal.
+  const stopButton = { attributes: new Map() }
+
+  const scrollArea = settings.scrollWidth === undefined ? null : {    getBoundingClientRect: () => {
       const reserved = Number.parseFloat(hostStyle.get('--dsse-monitor-reserve') ?? '0') || 0
       const width = Math.max(0, settings.scrollWidth - reserved)
       return { left: rect.left, top: rect.top, right: rect.left + width, bottom: rect.bottom, width, height: rect.height }
@@ -878,6 +882,12 @@ function boot(options) {
       // element the host would use. A stub that answered `null` here would
       // silently make every suite fall back to the value under test.
       if (selector === '[data-conversation-session]') return conversation
+      // The composer's primary button is the only thing on the page that knows a
+      // turn is running: the host swaps this attribute from `send` to `stop`
+      // within half a second, while every route on our own API takes seconds to
+      // answer during a turn. A stub that never answered `stop` made the whole
+      // gate unreachable, which is how it shipped broken.
+      if (selector === '[data-dsh-claude-control="stop"]') return settings.stop === true ? stopButton : null
       return null
     },
     querySelectorAll: (selector) => {
@@ -1120,6 +1130,11 @@ function boot(options) {
   return {
     module,
     ctx,
+    // The switches this boot was built with, exposed so a suite can move a
+    // fact the page reports (a turn starting or ending) and re-render. Without
+    // it every gate that reads the page would be fixed for the whole boot and
+    // only its "on" or "off" half could ever be asserted.
+    settings,
     listeners,
     registrations,
     effects,
@@ -8422,6 +8437,75 @@ async function openStream(instance) {
     'a host that switched the feature off draws nothing',
     firstByClass(offTree, 'dsse-suggest')?.props['data-shown'] === 'false',
     'still drawn',
+  )
+
+  // The server's `busy` is too slow to be the only signal. Measured on the live
+  // host, `/suggestions` took 3125 ms and 5017 ms during a turn -- the answer
+  // arrived after the reader had already seen the row it was meant to hide, and
+  // one of those answers was a cached offer with no `busy` at all. The composer's
+  // primary button swaps to `stop` within half a second, so the page is asked
+  // directly. This block is what would have caught the gap: every other suggest
+  // suite runs with `settings.stop` undefined, so the gate was never reached.
+  const live = boot({ routes: suggestRoute(SUGGEST_TEXTS, { busy: false }), stop: true })
+  live.module.apply(live.ctx)
+  // The ghost needs a placeholder to measure against, and without one it is
+  // hidden for a different reason -- the first version of this block asserted
+  // "hidden" with no card at all, which passed no matter what the gate said.
+  live.renderer.setNodeForRef(composerCard().anchor)
+  const liveProps = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  const liveTree = await settledSeat(live, 'suggestions', liveProps)
+  check(
+    'a turn the page says is running hides the row even when the server has offers',
+    firstByClass(liveTree, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(liveTree, 'dsse-suggest-item').length === 0,
+    'the row was drawn while the composer said stop',
+  )
+  const liveGhost = await settledSeat(live, 'ghost', liveProps)
+  check(
+    'and hides the ghost too',
+    firstByClass(liveGhost, 'dsse-ghost')?.props['data-shown'] === 'false',
+    'the ghost was drawn while the composer said stop',
+  )
+  // The answer itself is still fetched and stored: the turn will end, and the
+  // offer that is already in hand is what appears then. Suppressing the fetch
+  // would make the row wait a full round trip after every turn.
+  check(
+    'but the answer is still fetched and kept for when the turn ends',
+    live.calls.filter((row) => row.url.includes('/suggestions?')).length === 1,
+    String(live.calls.filter((row) => row.url.includes('/suggestions?')).length),
+  )
+  const watches = () =>
+    live.mutationObservers.filter((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))
+  check(
+    'the page is watched for the control changing',
+    watches().length === 1 &&
+      watches()[0].targets.length === 1 &&
+      watches()[0].targets[0].target === live.document.documentElement,
+    JSON.stringify(watches().map((row) => row.targets.map((entry) => entry.options))),
+  )
+  // Both slots mount, and each calls `watchRunning`. One observer, not two: the
+  // attribute fires for every mutation anywhere in the page, and a second
+  // observer would only duplicate notifications the first already delivers.
+  await settledSeat(live, 'ghost', liveProps)
+  check(
+    'two slots still watch the page through one observer',
+    watches().length === 1,
+    String(watches().length),
+  )
+  // The gate has to come back off, or the row would never appear again after the
+  // first turn of the session.
+  live.settings.stop = false
+  watches()[0].trigger()
+  const after = await live.renderer.deepRender(live.seat('suggestions'), liveProps)
+  check(
+    'and the row comes back when the turn ends',
+    firstByClass(after, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'the row stayed hidden after the turn ended',
+  )
+  const ghostBack = await live.renderer.deepRender(live.seat('ghost'), liveProps)
+  check(
+    'so does the ghost',
+    firstByClass(ghostBack, 'dsse-ghost')?.props['data-shown'] === 'true',
+    'the ghost stayed hidden after the turn ended',
   )
 }
 
