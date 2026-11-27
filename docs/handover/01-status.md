@@ -6505,6 +6505,8 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 | 测试 | `test/transcript.test.mjs` / `test/suggest.test.mjs` | 228 → 231 / 313 → 318 |
 | 突变 | `scripts/mutate-suggest.mjs` | 126 → 130（含「完成时不复位」这条最容易漏的） |
 
+**另记**：命中率口径按人工评估（D-269）。
+
 **数字**：全量 4567 / 0；`transcript` 231 / 0；`suggest` 318 / 0；`mutate-suggest` 130 killed / 0 survived / 0 crashed；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
 
 **这一条为什么值得单独记**：两个事实（最近完成的回合 / 刚刚是不是被停下）原本挤在一个字段里，谁也推不出谁。以后 store 多回答一个问题，就在 view 上多一个字段，不要让调用方去猜。
