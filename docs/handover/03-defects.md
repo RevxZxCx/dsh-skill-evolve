@@ -4044,3 +4044,40 @@ function lastSentenceEnd(window) {
 **为什么测试没抓到**：既有用例各自只问一半——「中断不写 `previous`」在 transcript 侧有断言，「空答案不画」在 suggest 侧有断言。没有一条把两件事接起来问：「中断之后，路由拿到的是什么？」夹具里 `view.interrupted` 根本不存在，所以闸门加不加都能过。
 
 **教训**：一个 store 需要回答的问题增加了，就要在 view 上增加字段，而不是让调用方从既有字段里「推」。能推出来的只有已经存在的事实；`previous` 能推出「有没有完成过」，推不出「刚刚是不是被停下」。
+
+## DEF-215 两条守卫在真机上读的是一个永远不会出现的值（2026-11-27）
+
+回到「验证中断之后的回弹」，回弹本身成立（理由不再是 `the last turn was interrupted`），但建议仍然不出现。原因分成两条，各自都是「代码对，输入形状错」。
+
+### 一、`finish` 是对象，代码只认字符串
+
+`packages/ui-evolve/lib/suggest.js` 的截断分支原文：
+
+```js
+const truncated = typeof finish === 'string' && /length|max[_-]?tokens|truncat/i.test(finish)
+```
+
+而 `packages/ui-evolve/lib/summarise.js` 的 `collectText` 把流里的 `chunk.reason` **原样**交出来，宿主发的是一个对象（`{ kind: 'length' }`）。于是 `typeof finish === 'string'` 永远为假，这条分支在真机上从未执行过。
+
+后果：一次把 700 token 全花在思考上的调用，拿到的是「空正文 + finish length」，却被打成 `the model returned no usable suggestion (0 lines, 0 characters, first: "")`，并被 `noteFailure` 记成一分钟的「模型没话说」。同一份代码里 `finishFailure(finish)` 读的正是 `finish.kind`，两处对同一个值用了两种假设。
+
+测试为什么没抓到：用例写的是 `fakeLlm({ finish: 'length' })`——一个字符串，恰好是分支想要的形状。而 `fakeLlm` 的默认值 `finish = { kind: 'stop' }` 又是对象。**同一个假件里，默认路径用对象、被测路径用字符串**，于是「对象」这条路一次都没被走过。
+
+### 二、正的 effort 会活到请求体里
+
+`withCheapestThinking` 在 controls 回调里删 `reasoningEffort`，但宿主可能在回调**之后**才定下会话自己的 effort，并把它留在交回来的 config 里。`run` 里 `options = { ...call.config, … }` 于是把它带上了。
+
+对 `compat.thinkingFormat: deepseek` 来说，**任何真值 effort 都是「开思考」**，与拼写无关（`if (options?.reasoningEffort) params.thinking = { type: 'enabled' }` 那一支）。所以留下的 effort 让每次调用都先思考，700 token 的预算可能全被吃掉。
+
+修法：在 options 成形的最后一刻做一次判定——**只保留表示「关」的 id，其余删掉**。
+
+```js
+const chosen = options.reasoningEffort
+if (typeof chosen === 'string' && DISABLE_EFFORTS.includes(chosen.toLowerCase()) === false) {
+  delete options.reasoningEffort
+}
+```
+
+`DISABLE_EFFORTS = ['none', 'off', 'disabled', 'disable', 'minimal']` 与 `withCheapestThinking` 共用，因为「哪些 id 算关」不能有两个答案。
+
+**教训**：一个值有两种形状（字符串 / 对象）时，判别式必须写在**读到它的第一个地方**，而不是每个使用点各写一次；假件必须用它替的那个东西的形状，而不是被测代码想要的那个形状。

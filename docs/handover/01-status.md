@@ -6510,3 +6510,18 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **数字**：全量 4567 / 0；`transcript` 231 / 0；`suggest` 318 / 0；`mutate-suggest` 130 killed / 0 survived / 0 crashed；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
 
 **这一条为什么值得单独记**：两个事实（最近完成的回合 / 刚刚是不是被停下）原本挤在一个字段里，谁也推不出谁。以后 store 多回答一个问题，就在 view 上多一个字段，不要让调用方去猜。
+
+## 2026-11-27（九）· 两条守卫在真机上读的是永远不会出现的值
+
+| 改动 | 位置 | 内容 |
+|---|---|---|
+| 截断判定 | `packages/ui-evolve/lib/suggest.js` | `finish` 归一成 `finishKind`（字符串或 `{kind}`），截断分支在真机上第一次可达 |
+| 请求体申报 | 同上 | options 成形前只保留「关思考」的 id（`DISABLE_EFFORTS`），删掉一切正 effort；与 `withCheapestThinking` 共用一张名单 |
+| 测试 | `test/suggest.test.mjs` | 318 → 321：对象形状的 `finish`、回调交回的 config 里没有 effort、大写 `OFF` 用模型的拼写 |
+| 突变 | `scripts/mutate-suggest.mjs` | 130 → 132，实跑 132 killed / 0 survived |
+
+**观察**：真机连续两轮 `the model returned no usable suggestion (0 lines, 0 characters)`，而直连网关同一模型、同一提示词 0.7~1.2 秒就有三条。网关日志里对应的是 `499 after 19.99s: the agent canceled the request`——插件自己的 20 秒 deadline 在说话，说明调用在宿主里慢到超时，不是模型没话说。
+
+**数字**：全量 4570 / 0；`suggest` 321 / 0；`transcript` 231 / 0；`mutate-suggest` 132 / 132；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
+
+**下一步**：重启宿主后重跑一轮，看 `reason` 是否从「0 characters」变成「cut off at the token budget (finish: length)」——那说明这次修的是它，而且下一次再出现同样症状时理由会直接告诉我们预算被谁吃了。

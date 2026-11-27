@@ -69,13 +69,13 @@ const GOOD = JSON.stringify({ suggestions: ['Run the failing cursor test.', 'Fix
  * @param {object} [options] - behaviour switches.
  * @returns {object} the fake service plus its call log.
  */
-function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined, efforts = undefined, resolved = undefined } = {}) {
+function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined, efforts = undefined, resolved = undefined, lateEffort = undefined } = {}) {
   // `efforts` is the reasoning menu the prepared model reports, the way the
   // host's `prepareCall(config, signal, configure)` hands the adapter's
   // capabilities to the configure callback. Without it this fake cannot express
   // "a model that will not think on demand", which is the whole point of the
   // effort adapter.
-  const log = { prepare: [], stream: [], catalog: 0, configure: 0 }
+  const log = { prepare: [], stream: [], catalog: 0, configure: 0, configured: [] }
   const service = {
     log,
     async modelCatalog(signal) {
@@ -92,7 +92,9 @@ function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undef
       if (typeof configure === 'function') {
         log.configure += 1
         config = configure(config, { reasoning: efforts === undefined ? undefined : { efforts } })
+        log.configured.push({ ...config })
       }
+      if (lateEffort !== undefined) config.reasoningEffort = lateEffort
       return {
         config,
         async *stream(options) {
@@ -955,6 +957,11 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   const llm = fakeLlm({ efforts: [{ id: 'minimal', name: 'Minimal' }, { id: 'none', name: 'None' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  const upper = fakeLlm({ efforts: [{ id: 'OFF', name: 'Off' }] })
+  const upperSuggestor = new Suggestor({ config: config(), llm: upper, now: clock().now })
+  await upperSuggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('the id is asked for in the spelling the model offered', (upper.log.stream[0] ?? {}).reasoningEffort === 'OFF', JSON.stringify(upper.log.stream[0]?.reasoningEffort))
+
   check('none beats minimal when the menu offers both', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
 }
 
@@ -966,6 +973,16 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('an effort the host already resolved is taken back out', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
+  check('the callback itself hands back no effort', 'reasoningEffort' in (llm.log.configured[0] ?? {}) === false, JSON.stringify(llm.log.configured[0]?.reasoningEffort))
+
+  // A host that resolves the effort after the controls callback returns leaves
+  // it in the config it hands back. The options about to be sent are the last
+  // place to take it out -- and a truthy effort means thinking stays on, which
+  // is how a 700-token call ends up spending all of it thinking.
+  const late = fakeLlm({ lateEffort: 'high' })
+  const lateSuggestor = new Suggestor({ config: config(), llm: late, now: clock().now })
+  await lateSuggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('an effort added after the callback is also taken out', 'reasoningEffort' in (late.log.stream[0] ?? {}) === false, JSON.stringify(late.log.stream[0]?.reasoningEffort))
 }
 
 // ---------------------------------------------------------------------------
@@ -978,7 +995,10 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // and the content was empty. Without the truncation branch that is
   // indistinguishable from "this turn has no next step", so it gets cached as a
   // normal empty answer and the same paid call is skipped for a minute.
-  const llm = fakeLlm({ text: '', finish: 'length' })
+  // Both shapes: the suite's own fake streams `{ kind }`, and the first version
+  // of this block passed the bare string. The live host sends the object, so a
+  // detector that only read strings was unreachable there.
+  const llm = fakeLlm({ text: '', finish: { kind: 'length' } })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('a cut-off answer offers nothing', answer.items.length === 0, JSON.stringify(answer.items))

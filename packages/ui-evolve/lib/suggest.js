@@ -186,6 +186,13 @@ export const SUGGEST_TTL_MS = 15 * 60 * 1000
  * @param {any} info - the prepared model's capabilities.
  * @returns {any} the controls to dispatch with.
  */
+/**
+ * The spellings that mean "do not think" across the providers this plugin
+ * meets. Shared by {@link withCheapestThinking} and the last-chance strip in
+ * `run`: one list, because "which ids count as off" cannot have two answers.
+ */
+const DISABLE_EFFORTS = ['none', 'off', 'disabled', 'disable', 'minimal']
+
 function withCheapestThinking(controls, info) {
   const relaxed = { ...controls }
   delete relaxed.reasoningEffort
@@ -195,7 +202,7 @@ function withCheapestThinking(controls, info) {
   for (const effort of efforts) {
     if (typeof effort?.id === 'string' && effort.id.length > 0) byId.set(effort.id.toLowerCase(), effort.id)
   }
-  for (const wanted of ['none', 'off', 'disabled', 'disable', 'minimal']) {
+  for (const wanted of DISABLE_EFFORTS) {
     const exact = byId.get(wanted)
     if (exact !== undefined) return { ...relaxed, reasoningEffort: exact }
   }
@@ -1201,14 +1208,33 @@ export class Suggestor {
         purpose: 'skill-evolve-next-prompt',
         signal: controller.signal,
       }
+      // Defence in depth for {@link withCheapestThinking}: a host may resolve the
+      // session's own effort *after* the controls callback returns, and a truthy
+      // effort means thinking stays on (see the deepseek branch in pi-ai). The
+      // config about to be sent is the last place to take it out — and it is the
+      // only one that sees what the host settled on.
+      // Only a *positive* effort is stripped: an id that means "off" is the one
+      // thing worth asking for, and the adapter below turns a truthy effort into
+      // `thinking: { type: "enabled" }` whatever the spelling. Keeping the off
+      // ids and dropping the rest is the only rule that is right for both.
+      const chosen = options.reasoningEffort
+      if (typeof chosen === 'string' && DISABLE_EFFORTS.includes(chosen.toLowerCase()) === false) {
+        delete options.reasoningEffort
+      }
       const { text, finish } = await collectText(call.stream(options), controller.signal)
+      // The host streams `finish` as an object (`{ kind: 'length' }`), not as the
+      // string the first version of this test fed in. Reading only strings made
+      // the truncation branch unreachable on the live host: a call that spent
+      // its whole budget thinking arrived here as "0 lines, 0 characters" and was
+      // remembered as a normal empty answer (DEF-200 again, from the other side).
+      const finishKind = typeof finish === 'string' ? finish : (finish?.kind ?? '')
       // A truncated answer is not "nothing to say". Without this branch a
       // reasoning model that spent the whole budget thinking looks exactly like
       // a turn with no next step, and the failure is remembered as a normal
       // empty answer for a minute (DEF-200).
-      const truncated = typeof finish === 'string' && /length|max[_-]?tokens|truncat/i.test(finish)
+      const truncated = finishKind !== '' && /length|max[_-]?tokens|truncat/i.test(finishKind)
       if (truncated === true) {
-        const reason = `the answer was cut off at the token budget (finish: ${finish})`
+        const reason = `the answer was cut off at the token budget (finish: ${finishKind})`
         this.noteFailure(key, reason)
         return { enabled: true, items: [], reason }
       }
