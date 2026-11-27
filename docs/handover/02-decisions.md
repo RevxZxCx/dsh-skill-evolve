@@ -5056,3 +5056,14 @@ overlay 锚点 `z-index:auto`，宿主输入框的 scroll 层 `position:relative
 `DISABLE_EFFORTS` 是唯一的名单，`withCheapestThinking` 与 `run` 里「请求体成形前的最后一次判定」共用它。理由：适配层把任何真值 effort 读成「开思考」，所以「拼写对不对」不重要，「是不是关」才重要。保留 off 类 id 而不是一律删除，是为了让那些靠 `reasoningEffort: 'none'` 才关思考的 provider 仍然能关。
 
 代价：名单之外的任何新拼写都会被当成「开」删掉，可能让某个 provider 的显式「关」变成「不发」——对 deepseek 方言这等价，对其他方言待观察。
+
+## D-271 · 关思考的关键在 profile 声明的方言，插件只负责「什么都不说」
+
+插件永远不传 `reasoningEffort`。理由：所有 pi-ai 思考方言都把「开」写成真值 effort，唯一共同的「关」是**不出现该字段**。而「不出现」被翻译成什么，取决于 profile 的 `compat.thinkingFormat`：
+
+- `qwen-chat-template`：无条件发 `chat_template_kwargs.enable_thinking = !!effort` → 没有 effort 就是显式的 false；
+- `deepseek`：只在模型声明了 `off` 档时才发 `thinking: {type:"disabled"}`；没声明就什么都不发，服务端按默认（往往就是思考）。
+
+选择把方言写在 `cordis.patch.yml` 而不是 `settings.yaml`：后者是宿主启动时根据 profile 重新生成的产物，改动会在下次启动时消失（DEF-216）。
+
+代价：这条链路依赖用户机器上的 profile 配置，插件自己无法保证；换一台机器要重新声明一次，否则退回「服务端默认」，即思考开着。

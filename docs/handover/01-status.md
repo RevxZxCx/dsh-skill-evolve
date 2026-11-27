@@ -6525,3 +6525,18 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **数字**：全量 4570 / 0；`suggest` 321 / 0；`transcript` 231 / 0；`mutate-suggest` 132 / 132；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
 
 **下一步**：重启宿主后重跑一轮，看 `reason` 是否从「0 characters」变成「cut off at the token budget (finish: length)」——那说明这次修的是它，而且下一次再出现同样症状时理由会直接告诉我们预算被谁吃了。
+
+## 2026-11-28（十）· 关思考的开关其实在 profile 里
+
+| 改动 | 位置 | 内容 |
+|---|---|---|
+| 方言 | `~/.dsh/profiles/desktop/cordis.patch.yml` | magpie 的 compat 改成 `thinkingFormat: qwen-chat-template`（无条件发 `enable_thinking`），备份 `.bak-compat` |
+| 插件 | `packages/ui-evolve/lib/suggest.js` | 永不传 effort：删 `DISABLE_EFFORTS`，`withCheapestThinking` 只 `delete`，兜底也无条件 `delete` |
+| 测试 | `test/suggest.test.mjs` | 断言改为「连读作 off 的 id 也不传」，仍 321 / 0 |
+| 突变 | `scripts/mutate-suggest.mjs` | 132 → 129（删掉围绕「挑 off id」的三条），实跑 129 killed / 0 survived |
+
+**真机证据**：修复前的同一轮 `reason` 是 `the answer was cut off at the token budget (finish: max-tokens)`、21 秒、0 条——预算被思考吃光。网关直测 `enable_thinking: false` → 294 ms、0 思考 token。
+
+**数字**：全量 4570 / 0；`suggest` 321 / 0；`mutate-suggest` 129 / 129；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
+
+**下一步**：重启宿主后再跑一轮，看芯片是否在回合结束后约一秒出现。

@@ -1030,30 +1030,6 @@ const mutations = [
   {
     file: suggest,
     suites: engine,
-    label: 'the effort id is looked up with a key that never matches',
-    from: '    const exact = byId.get(wanted)',
-    to: "    const exact = byId.get('nothing')",
-    why: 'this is the shape of the original defect: a lookup that quietly returns undefined leaves every suggestion call at the model default effort, which is how a reasoning model came to spend its whole output budget thinking',
-  },
-  {
-    file: suggest,
-    suites: engine,
-    label: 'a small effort is preferred to an off switch',
-    from: '  for (const wanted of DISABLE_EFFORTS) {',
-    to: "  for (const wanted of ['minimal', 'disable', 'disabled', 'off', 'none']) {",
-    why: 'the order is the requirement: any truthy effort is what the adapter reads as thinking ON, so asking for a small one instead of none is the difference between 221 ms and 12.6 s',
-  },
-  {
-    file: suggest,
-    suites: engine,
-    label: "the model's own spelling of the effort is not used",
-    from: '    if (exact !== undefined) return { ...relaxed, reasoningEffort: exact }',
-    to: '    if (exact !== undefined) return { ...relaxed, reasoningEffort: wanted }',
-    why: 'the host compares the requested id against the menu exactly and throws INVALID_MODEL_REASONING otherwise, so a list spelled "Disabled" has to be asked for as "Disabled"',
-  },
-  {
-    file: suggest,
-    suites: engine,
     label: 'the instruction lets one chip carry two actions',
     from: `  '- ONE action per suggestion. Never join a second one with a comma, "and then",',
   '  "，", "并" or "然后". "Fix the cursor test, then explain the timing" is two',
@@ -1075,7 +1051,7 @@ const mutations = [
         label: 'an effort id the model never offered is invented',
     from: '  return relaxed\n}',
     to: "  return { ...relaxed, reasoningEffort: 'low' }\n}",
-    why: 'the host validates the requested id against the menu it handed over and throws INVALID_MODEL_REASONING otherwise, so the fallback has to leave the request alone rather than guess',
+    why: 'nothing may be named: the host validates a requested id against the menu it handed over, and every dialect reads a truthy effort as thinking on, so guessing a small one restores both the validation error and the 12-31 s',
   },
 
   // ---------------------------------------------------------------------
@@ -1149,8 +1125,8 @@ const mutations = [
     file: suggest,
     suites: engine,
     label: 'a positive effort survives into the call',
-    from: "      if (typeof chosen === 'string' && DISABLE_EFFORTS.includes(chosen.toLowerCase()) === false) {",
-    to: '      if (false) {',
+    from: '      delete options.reasoningEffort',
+    to: '      void options.reasoningEffort',
     why: 'a truthy effort is thinking on, whatever it is called, and the host may settle on one after the controls callback -- leaving it here means every suggestion call thinks first, which on a 700 token budget can leave nothing at all',
   },
   {

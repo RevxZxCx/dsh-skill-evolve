@@ -156,56 +156,31 @@ export const SUGGEST_FAILURE_TTL_MS = 60000
 export const SUGGEST_TTL_MS = 15 * 60 * 1000
 
 /**
- * Turn thinking off when the model admits to being able to.
+ * Turn thinking off: don't ask for any effort.
  *
- * Measured through the gateway the host uses, on the same prompt: leaving the
- * effort out entirely took 221 ms and zero reasoning tokens, `low` took 12.6 s
- * and 1657. A chip that arrives twenty seconds after the turn is a chip nobody
- * reads, so the difference is the difference between shipping this and not.
+ * Measured through the gateway the host uses, on the same prompt: no effort at
+ * all took 221 ms with zero reasoning tokens; `low` took 12.6 s and 1657. A chip
+ * that arrives twenty seconds after the turn is a chip nobody reads.
  *
- * Leaving it out is the whole trick, and it is not obvious from this side. The
- * host only sends a thinking parameter when the provider declares a
- * `compat.thinkingFormat`; for `"deepseek"` the branch is
- * `if (options?.reasoningEffort) params.thinking = { type: "enabled" } else
- * params.thinking = { type: "disabled" }` (pi-ai, openai-completions.js). So a
- * truthy effort turns thinking ON, and the way to turn it OFF is to ask for
- * nothing at all. Asking for `low` -- which is what this used to do when the
- * model listed no disable entry -- is exactly how a request that meant "be
- * cheap" arrived as "think hard": the gateway then ran its own default and
- * spent 1000-1700 reasoning tokens, 12-31 s, and sometimes the entire output
- * budget (`finish: length`, no answer) on every single turn.
+ * Asking for nothing is the only spelling of "off" that every pi-ai thinking
+ * dialect agrees on, because all of them write the on-switch as *truthy*:
+ * `qwen-chat-template` sends `enable_thinking: !!options?.reasoningEffort`, and
+ * the `deepseek` branch sends `thinking: { type: "enabled" }` for any effort and
+ * `thinking: { type: "disabled" }` for none. Passing an id -- even one that
+ * reads as "off" -- turns thinking back on, so nothing is passed.
  *
- * The ids are read out of `info.reasoning.efforts`, a *list* of `{id, name}`
- * -- the host validates it as a list and requires `defaultEffort` to be one of
- * its ids (`dsh-llm` throws `INVALID_MODEL_REASONING` otherwise). Reading it
- * as an object keyed by effort id meant `hasOwnProperty(efforts, 'none')` was
- * always false, so nothing was ever asked for here; the id that goes on the
- * wire is the model's own spelling, since the host compares it exactly.
+ * What "nothing" turns into is the profile's business, not this file's: a
+ * provider that declares `compat.thinkingFormat` gets an explicit off
+ * (`chat_template_kwargs.enable_thinking: false`, `thinking: {type:"disabled"}`),
+ * and one that declares none gets no parameter and the server's own default.
+ * See D-271 in the handover for why the profile, not this plugin, owns that.
  *
  * @param {any} controls - the sampling controls already resolved for this call.
- * @param {any} info - the prepared model's capabilities.
- * @returns {any} the controls to dispatch with.
+ * @returns {any} the controls to dispatch with, with no effort named.
  */
-/**
- * The spellings that mean "do not think" across the providers this plugin
- * meets. Shared by {@link withCheapestThinking} and the last-chance strip in
- * `run`: one list, because "which ids count as off" cannot have two answers.
- */
-const DISABLE_EFFORTS = ['none', 'off', 'disabled', 'disable', 'minimal']
-
-function withCheapestThinking(controls, info) {
+function withCheapestThinking(controls) {
   const relaxed = { ...controls }
   delete relaxed.reasoningEffort
-  const efforts = info?.reasoning?.efforts
-  if (!Array.isArray(efforts)) return relaxed
-  const byId = new Map()
-  for (const effort of efforts) {
-    if (typeof effort?.id === 'string' && effort.id.length > 0) byId.set(effort.id.toLowerCase(), effort.id)
-  }
-  for (const wanted of DISABLE_EFFORTS) {
-    const exact = byId.get(wanted)
-    if (exact !== undefined) return { ...relaxed, reasoningEffort: exact }
-  }
   return relaxed
 }
 
@@ -1193,7 +1168,7 @@ export class Suggestor {
       const call = await llm.prepareCall(
         { provider: route.provider, model: route.model, maxTokens: SUGGEST_MAX_TOKENS },
         controller.signal,
-        (controls, info) => withCheapestThinking(controls, info),
+        (controls) => withCheapestThinking(controls),
       )
       const options = {
         ...call.config,
@@ -1209,18 +1184,17 @@ export class Suggestor {
         signal: controller.signal,
       }
       // Defence in depth for {@link withCheapestThinking}: a host may resolve the
-      // session's own effort *after* the controls callback returns, and a truthy
-      // effort means thinking stays on (see the deepseek branch in pi-ai). The
-      // config about to be sent is the last place to take it out — and it is the
-      // only one that sees what the host settled on.
-      // Only a *positive* effort is stripped: an id that means "off" is the one
-      // thing worth asking for, and the adapter below turns a truthy effort into
-      // `thinking: { type: "enabled" }` whatever the spelling. Keeping the off
-      // ids and dropping the rest is the only rule that is right for both.
-      const chosen = options.reasoningEffort
-      if (typeof chosen === 'string' && DISABLE_EFFORTS.includes(chosen.toLowerCase()) === false) {
-        delete options.reasoningEffort
-      }
+      // session's own effort *after* the controls callback returns, and the config
+      // about to be sent is the only place that sees what it settled on.
+      //
+      // Nothing is kept, not even an id that means "off": every thinking dialect
+      // pi-ai can speak writes its on-switch as `truthy effort`, so *any* effort
+      // we pass turns thinking back on -- `qwen-chat-template` sends
+      // `enable_thinking: !!options?.reasoningEffort`, and the deepseek branch
+      // sends `thinking: { type: "enabled" }`. Asking for nothing is the only
+      // spelling of "off" that every dialect agrees on, and the profile is what
+      // makes "nothing" mean disabled (see D-271 in the handover).
+      delete options.reasoningEffort
       const { text, finish } = await collectText(call.stream(options), controller.signal)
       // The host streams `finish` as an object (`{ kind: 'length' }`), not as the
       // string the first version of this test fed in. Reading only strings made

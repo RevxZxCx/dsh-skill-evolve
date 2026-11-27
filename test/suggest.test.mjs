@@ -908,38 +908,26 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 {
-  // "off" is spelled differently by different providers, and the cheapest one
-  // that exists beats the one this code happened to try first.
-  const llm = fakeLlm({ efforts: [{ id: 'none', name: 'None' }, { id: 'low', name: 'Low' }] })
-  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
-  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-  check('an off switch is preferred to a small effort', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
-}
-
-
-{
-  // "off" is spelled four ways across providers, and the id that goes on the
-  // wire has to be the model's own spelling: the host compares it exactly and
-  // throws INVALID_MODEL_REASONING for anything else. The old code read the
-  // menu as an object keyed by effort id, so none of these ever matched and
-  // every suggestion call ran at the model's default effort.
-  for (const spelling of ['off', 'Disabled', 'Minimal', 'disable']) {
+  // "off" is spelled five ways across providers, and none of them is asked for:
+  // in every pi-ai dialect a truthy effort is the *on* switch, so an id reading
+  // "off" would turn thinking back on. The menu is read and deliberately unused.
+  for (const spelling of ['off', 'none', 'Disabled', 'Minimal', 'disable']) {
     const llm = fakeLlm({ efforts: [{ id: spelling, name: spelling }, { id: 'high', name: 'High' }] })
     const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
     await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-    check(`the ${spelling} entry is what gets asked for`, llm.log.stream[0]?.reasoningEffort === spelling, String(llm.log.stream[0]?.reasoningEffort))
+    check(`the ${spelling} entry is not asked for either`, 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
   }
 }
 
 {
-  // This is the live host's menu: `low / high / max`, no disable entry. An
-  // effort here is read by the adapter as `thinking: { type: "enabled" }`, so
-  // asking for the cheapest one is what turned thinking on and cost 12-31 s a
-  // turn. Asking for nothing is what reads as disabled.
+  // This is the live host's menu: `low / high / max`, no disable entry. Any
+  // effort here is read by the adapter as "thinking on", so asking for nothing
+  // is what reads as disabled -- provided the profile names a dialect (D-271).
   const llm = fakeLlm({ efforts: [{ id: 'medium', name: 'Medium' }, { id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('a menu of only positive efforts is also asked for nothing', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
+}
 
 {
   // A menu that exists but offers none of the ids this code knows: asking for
@@ -950,19 +938,16 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
   check('a menu with no entry this code knows is left alone', llm.log.stream[0] !== undefined && llm.log.stream[0].reasoningEffort === undefined, String(llm.log.stream[0]?.reasoningEffort))
 }
-}
-{
-  // Two disable spellings at once: the order decides, and "none" is the one
-  // that means "no thinking" rather than "a little".
-  const llm = fakeLlm({ efforts: [{ id: 'minimal', name: 'Minimal' }, { id: 'none', name: 'None' }] })
-  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
-  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-  const upper = fakeLlm({ efforts: [{ id: 'OFF', name: 'Off' }] })
-  const upperSuggestor = new Suggestor({ config: config(), llm: upper, now: clock().now })
-  await upperSuggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-  check('the id is asked for in the spelling the model offered', (upper.log.stream[0] ?? {}).reasoningEffort === 'OFF', JSON.stringify(upper.log.stream[0]?.reasoningEffort))
 
-  check('none beats minimal when the menu offers both', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
+{
+  // A menu that offers an id reading "off" is still not asked for it: in every
+  // pi-ai dialect a truthy effort is the *on* switch, so the off id would turn
+  // thinking back on. The menu is read for nothing at all.
+  const upper = fakeLlm({ efforts: [{ id: 'OFF', name: 'Off' }, { id: 'low', name: 'Low' }] })
+  const suggestor = new Suggestor({ config: config(), llm: upper, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('an off-looking id is not asked for either', 'reasoningEffort' in (upper.log.stream[0] ?? {}) === false, JSON.stringify(upper.log.stream[0]?.reasoningEffort))
+  check('and the call still produces suggestions', (upper.log.stream[0] ?? {}) !== undefined, 'no call')
 }
 
 {

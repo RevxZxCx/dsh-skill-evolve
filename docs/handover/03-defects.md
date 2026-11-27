@@ -4081,3 +4081,51 @@ if (typeof chosen === 'string' && DISABLE_EFFORTS.includes(chosen.toLowerCase())
 `DISABLE_EFFORTS = ['none', 'off', 'disabled', 'disable', 'minimal']` 与 `withCheapestThinking` 共用，因为「哪些 id 算关」不能有两个答案。
 
 **教训**：一个值有两种形状（字符串 / 对象）时，判别式必须写在**读到它的第一个地方**，而不是每个使用点各写一次；假件必须用它替的那个东西的形状，而不是被测代码想要的那个形状。
+
+## DEF-216 关思考改了配置文件，但宿主每次启动都重写它（2026-11-28）
+
+重启后照约定去验「回弹」，芯片仍不出现。这次 `reason` 变了：
+
+```
+the answer was cut off at the token budget (finish: max-tokens)
+```
+
+比上一次的 `0 lines, 0 characters` 有用得多——说明 DEF-215 里 `finish` 那条判定修对了，沿着理由就能看到问题：**预算被思考吃光**，而不是模型没话说。
+
+### 为什么之前的 compat 没生效
+
+上一轮我把 `compat.thinkingFormat: deepseek` 加进了 `~/.dsh/settings.yaml`。重启后一切照旧，文件里 `thinkingFormat` 却不见了。
+
+原因：宿主启动时用 `~/.dsh/profiles/desktop/cordis.patch.yml` 重新生成 `settings.yaml`，旧文件先被改成 `settings.yaml.imported`，被当前组合拒绝或不被组合认识的字段不会回到新文件里。**`settings.yaml` 是产物，不是源。**
+
+### 为什么 deepseek 方言在真机上一句话都没说
+
+pi-ai 的 deepseek 分支（`openai-completions.js`）：
+
+```js
+if (options?.reasoningEffort) params.thinking = { type: "enabled" };
+else if (model.thinkingLevelMap?.off !== null) params.thinking = { type: "disabled" };
+```
+
+`thinkingLevelMap` 由声明式 `reasoningEfforts` 展开：**没声明的档位一律被钉成 `null`**。这份配置只声明了 `low/high/max`，于是 `off === null` → 第二个分支不成立 → **一个思考参数都不发**，网关按自己的默认跑（它就是默认思考）。所以 effort 传什么无关紧要，问题在「没有可用于关的那个字段」。
+
+### 修法：换成每次都会说话的方言
+
+`qwen-chat-template` 的分支是无条件的：
+
+```js
+params.chat_template_kwargs = { enable_thinking: !!options?.reasoningEffort, preserve_thinking: true };
+```
+
+改 `~/.dsh/profiles/desktop/cordis.patch.yml`（备份 `cordis.patch.yml.bak-compat`）里 magpie 的 compat：
+
+```yaml
+        compat:
+          thinkingFormat: qwen-chat-template
+```
+
+网关实测接受这个字段：`enable_thinking: false` + `preserve_thinking: true` → 294 ms、0 思考 token、`finish: stop`。
+
+同时把插件简化成「永不传 effort」：在每种 pi-ai 方言里，真值 effort 都是「开」（deepseek 分支发 `thinking: {type:"enabled"}`，qwen-chat-template 发 `enable_thinking: true`），**连读作 off 的 id 也不例外**。于是 `withCheapestThinking` 只剩 `delete`，`run` 里那次兜底也改成无条件 `delete`，`DISABLE_EFFORTS` 名单整个删掉——「选一个最便宜的 off id」这个思路本身就是错的。
+
+**教训**：**改配置前先问这份配置是谁写的。** 一个看着像配置文件的东西，可能只是另一个文件的渲染产物；改产物等于给下一次启动准备一个干净的撤销。
