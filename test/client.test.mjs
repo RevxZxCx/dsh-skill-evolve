@@ -7988,6 +7988,11 @@ function suggestRoute(texts, over) {
         reason: typeof settings.reason === 'string' ? settings.reason : '',
         // The server says a turn is still running; the client cannot tell.
         busy: settings.busy === true,
+        // The server refuses to buy a second reading of a turn it already
+        // answered; past the freshness window it marks the answer `stale`
+        // instead. A stub that could not say so made the whole downgrade
+        // unreachable, which is how a gate that never fires stays green.
+        stale: settings.stale === true,
         // The turn the answer describes. The row is drawn at the tail of a turn
         // and refuses any other, so a stub without it draws nothing at all -- the
         // same shape of blindness that let a string-vs-object mismatch stay green.
@@ -8502,13 +8507,26 @@ async function openStream(instance) {
     String(watches().length),
   )
   // The gate has to come back off, or the row would never appear again after the
-  // first turn of the session.
+  // first turn of the session. Coming off also *ends* the offer in hand: it
+  // describes the turn before the one that just finished, so it is no longer the
+  // step after the answer on screen. The answer for the turn that ended arrives
+  // on the stream a moment later, and that is what puts the row back -- which is
+  // why this asserts a frame, not just the control changing.
   live.settings.stop = false
   watches()[0].trigger()
   const after = await live.renderer.deepRender(live.seat('suggestions'), liveProps)
   check(
-    'and the row comes back when the turn ends',
-    firstByClass(after, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'a turn ending drops the answer bought for the turn before it',
+    firstByClass(after, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'the row kept an answer whose turn had been superseded',
+  )
+  const stream = live.streamFor('session-a')
+  stream.emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  const refilled = await live.renderer.deepRender(live.seat('suggestions'), liveProps)
+  check(
+    'and the answer for the turn that ended puts the row back',
+    firstByClass(refilled, 'dsse-suggest')?.props['data-shown'] === 'true',
     'the row stayed hidden after the turn ended',
   )
   const ghostBack = await live.renderer.deepRender(live.seat('ghost'), liveProps)
@@ -8516,6 +8534,88 @@ async function openStream(instance) {
     'so does the ghost',
     firstByClass(ghostBack, 'dsse-ghost')?.props['data-shown'] === 'true',
     'the ghost stayed hidden after the turn ended',
+  )
+}
+
+{
+  // The page can spend a whole turn in the background: the host keeps working,
+  // frames can be missed, and `useEffect([sessionId])` never runs again for a
+  // session that is already open. Without a repair the only way to see the offer
+  // was to switch sessions and come back -- which is exactly what the reader
+  // reported doing.
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  instance.module.apply(instance.ctx)
+  const props = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  const first = await settledSeat(instance, 'suggestions', props)
+  check(
+    'the row is drawn before the page leaves',
+    firstByClass(first, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'no row to begin with',
+  )
+
+  const askedCount = () => instance.calls.filter((row) => row.url.includes('/suggestions?')).length
+  const before = askedCount()
+  check('the first mount asked once', before === 1, String(before))
+
+  // Going away is not a moment to spend a call: nothing can have changed for the
+  // reader while they are not looking at it.
+  instance.document.hidden = true
+  for (const handler of [...instance.document.visibilityListeners]) handler()
+  await settle()
+  check('going to the background buys nothing', askedCount() === before, String(askedCount() - before))
+
+  // Coming back is. The store has no other way to learn that the turn ended
+  // while the page was hidden.
+  instance.document.hidden = false
+  for (const handler of [...instance.document.visibilityListeners]) handler()
+  await settle()
+  check('coming back asks again', askedCount() === before + 1, String(askedCount() - before))
+  const back = await instance.renderer.deepRender(instance.seat('suggestions'), props)
+  check(
+    'and the row survives the trip',
+    firstByClass(back, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'the row was lost on the way back',
+  )
+  // One listener for the whole module, not one per slot: the second slot mounting
+  // would otherwise double every request on the way back.
+  await settledSeat(instance, 'ghost', props)
+  check(
+    'two slots share one visibility listener',
+    instance.document.visibilityListeners.length === 1,
+    String(instance.document.visibilityListeners.length),
+  )
+}
+
+{
+  // A turn answered long ago is not thrown away and re-bought: the server marks
+  // it `stale` and answers from what it already has. The reader's dowry is the
+  // ghost -- one suggestion in the composer is still an offer -- while the row
+  // goes, because three chips under an answer read as a claim about that answer.
+  const old = suggestRoute(SUGGEST_TEXTS, { stale: true })
+  const instance = boot({ routes: old })
+  instance.module.apply(instance.ctx)
+  const fixture = composerCard()
+  instance.renderer.setNodeForRef(fixture.anchor)
+  const props = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  const chips = await settledSeat(instance, 'suggestions', props)
+  check(
+    'a stale answer draws no row',
+    firstByClass(chips, 'dsse-suggest')?.props['data-shown'] === 'false' && byClass(chips, 'dsse-suggest-item').length === 0,
+    'stale chips drawn',
+  )
+  const ghost = await settledSeat(instance, 'ghost', props)
+  check(
+    'but the ghost still offers the first one',
+    firstByClass(ghost, 'dsse-ghost')?.props['data-shown'] === 'true',
+    'the ghost dropped an answer that was only stale',
+  )
+  check('and the host placeholder is hidden behind it', fixture.ghosted() === 'true', fixture.ghosted())
+  // Nothing about that state is worth retrying: the server will answer `stale`
+  // again, so a retry would be a request per mount that can never succeed.
+  check(
+    'and nothing is retried',
+    instance.timers.filter((row) => row.ms === 15000 && row.cleared === false).length === 0,
+    String(instance.timers.length),
   )
 }
 
@@ -8925,24 +9025,56 @@ async function openStream(instance) {
 }
 
 {
-  // An answer older than the server's own lifetime is one the server would no
-  // longer stand behind, so it is not drawn. This matters because a failed
-  // refresh deliberately keeps the last answer: "kept" must not mean "kept
-  // forever".
-  const stale = suggestRoute(SUGGEST_TEXTS, { at: Date.now() - 16 * 60 * 1000 })
-  const instance = boot({ routes: stale })
+  // The lifetime of an offer is a turn boundary, not a clock. A time-based rule
+  // was tried first and was wrong in both directions: it took away an offer
+  // that was still the next step, and it kept drawing one whose turn had been
+  // superseded. What the row promises is the step after the answer on screen,
+  // so it lasts exactly as long as that answer is the last thing said.
+  const old = suggestRoute(SUGGEST_TEXTS, { at: Date.now() - 16 * 60 * 1000 })
+  const instance = boot({ routes: old })
   instance.module.apply(instance.ctx)
   const props = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
   const chips = await settledSeat(instance, 'suggestions', props)
-  check('an answer past its lifetime draws no chips', firstByClass(chips, 'dsse-suggest')?.props['data-shown'] === 'false', 'stale chips drawn')
+  check(
+    'an answer bought long ago is still the step after the answer on screen',
+    firstByClass(chips, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'the age of the answer was read as an end of life',
+  )
 
+  // A turn beginning is what ends it: the answer on screen stops being the last
+  // thing said the moment the next question goes out.
+  instance.settings.stop = true
+  const watch = instance.mutationObservers.find((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))
+  watch.trigger()
+  const cleared = await instance.renderer.deepRender(instance.seat('suggestions'), props)
+  check(
+    'a turn beginning takes the row away',
+    firstByClass(cleared, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'the row outlived its turn',
+  )
+  check(
+    'and leaves nothing to draw',
+    byClass(cleared, 'dsse-suggest-item').length === 0,
+    String(byClass(cleared, 'dsse-suggest-item').length),
+  )
+
+  // The ghost is the same promise, so it ends at the same moment. Keeping it was
+  // the failure the reader reported as "上一轮的建议还显示在新一轮里".
   const fixture = composerCard()
-  const ghostInstance = boot({ routes: stale })
+  const ghostInstance = boot({ routes: old })
   ghostInstance.module.apply(ghostInstance.ctx)
   ghostInstance.renderer.setNodeForRef(fixture.anchor)
   const ghost = await settledSeat(ghostInstance, 'ghost', props)
-  check('and no ghost either', firstByClass(ghost, 'dsse-ghost')?.props['data-shown'] === 'false', 'stale ghost drawn')
-  check('and the host placeholder is left alone', fixture.ghosted() === 'false', fixture.ghosted())
+  check(
+    'the ghost follows the same rule as the row',
+    firstByClass(ghost, 'dsse-ghost')?.props['data-shown'] === 'true',
+    'the ghost dropped an answer the row kept',
+  )
+  ghostInstance.settings.stop = true
+  const ghostWatch = ghostInstance.mutationObservers.find((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))
+  ghostWatch.trigger()
+  await ghostInstance.renderer.deepRender(ghostInstance.seat('ghost'), props)
+  check('and the ghost goes when the next turn begins', fixture.ghosted() === 'false', fixture.ghosted())
 }
 
 {

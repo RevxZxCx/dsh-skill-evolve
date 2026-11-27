@@ -174,7 +174,7 @@ function readState(stored) {
     paths.clear()
     for (const [file, entry] of newest) paths.set(file, entry)
   }
-  return { skills, tools, servers, paths, summary: readSummary(stored.summary), sequence }
+  return { skills, tools, servers, paths, summary: readSummary(stored.summary), offer: readOffer(stored.offer), sequence }
 }
 
 /**
@@ -234,6 +234,31 @@ function readSummary(raw) {
   if (typeof raw.text !== 'string' || raw.text.length === 0) return undefined
   if (typeof raw.at !== 'number' || Number.isFinite(raw.at) === false) return undefined
   return normaliseSummary(raw)
+}
+
+/**
+ * One persisted next-step offer: the text the composer draws as ghost text.
+ *
+ * One, not three, and on purpose. The chips describe a turn and are only worth
+ * drawing under the turn they describe; the ghost is a single line waiting in
+ * the composer, and a stored list of three would either come back as a list the
+ * reader never asked for again or need a rule for "which of the three is the
+ * ghost now". Neither is a question this module should be able to answer, so it
+ * stores the shape the one caller needs.
+ *
+ * `turn` is part of the value because the offer is only usable for the turn it
+ * describes: a restart that restores a sentence about turn 4 while the
+ * conversation sits at turn 9 has restored a lie.
+ *
+ * @param {any} raw - the stored value.
+ * @returns {{ text: string, at: number, turn: number } | undefined} the offer, or undefined when unusable.
+ */
+function readOffer(raw) {
+  if (isRecord(raw) === false) return undefined
+  if (typeof raw.text !== 'string' || raw.text.length === 0) return undefined
+  if (typeof raw.at !== 'number' || Number.isFinite(raw.at) === false) return undefined
+  if (typeof raw.turn !== 'number' || Number.isFinite(raw.turn) === false) return undefined
+  return { text: raw.text, at: raw.at, turn: raw.turn }
 }
 
 /**
@@ -299,6 +324,16 @@ function blankRecord() {
      */
     paths: new Map(),
     summary: undefined,
+    /**
+     * The one next-step sentence to restore into the composer.
+     *
+     * Counted by `keepsDocument` like every other fact. The first version of this
+     * field reasoned that an offer can only exist after a finished turn, so
+     * `previous` already kept the file -- and the suite produced the case that
+     * reasoning said could not happen (a record holding an offer and nothing
+     * else), which is how a "cannot be reached" argument usually ends.
+     */
+    offer: undefined,
     sequence: 0,
     snapshot: undefined,
     timer: undefined,
@@ -351,6 +386,12 @@ function keepsDocument(facts) {
   // the three readers of this test must agree even in the case that never
   // happens, or the one time it does the file is judged an orphan and deleted.
   if (facts.summary !== undefined && facts.summary !== null) return true
+  // The sentence in the composer is a card the person can still read, and it is
+  // reachable without a summary or a finished turn in memory -- a restart that
+  // opens a conversation and asks before any event arrives is the ordinary
+  // shape of it. Leaving it out of this answer would let a sweep delete the file
+  // that holds the only copy.
+  if (facts.offer !== undefined && facts.offer !== null) return true
   if (facts.previous !== undefined && facts.previous !== null) return true
   // A count on its own is still something the panel prints, and the one field
   // that cannot be rebuilt from live events after a restart. Leaving it out of
@@ -379,6 +420,7 @@ function hasFacts(entry) {
     tools: entry.tools,
     paths: entry.paths,
     summary: entry.summary,
+    offer: entry.offer,
     previous: entry.snapshot?.previous,
     turns: entry.snapshot?.turns,
   })
@@ -727,6 +769,11 @@ class SessionState {
       // memory has nothing, which is the ordinary "events arrived before the
       // panel's first read" order that `flush` exists to handle.
       if (current.summary === undefined) current.summary = state.summary
+      // Same rule, same reason: the file's offer is what the conversation knew
+      // before this process started, and memory's offer -- if it has one -- was
+      // bought since. Memory wins because it describes the turn the reader is
+      // actually looking at.
+      if (current.offer === undefined) current.offer = state.offer
       current.empty = false
       current.loaded = true
     }
@@ -970,6 +1017,48 @@ class SessionState {
   }
 
   /**
+   * The next-step sentence remembered for a session, if any.
+   *
+   * @param {string} sessionId - the session.
+   * @returns {{ text: string, at: number, turn: number } | undefined} the offer, or undefined when none was stored.
+   */
+  offerSeen(sessionId) {
+    const entry = this.bySession.get(sessionId)
+    return entry === undefined ? undefined : entry.offer
+  }
+
+  /**
+   * Remember the one sentence the composer can offer next.
+   *
+   * Replaces rather than accumulates, for the reason `readOffer` gives: there is
+   * exactly one ghost, so there is exactly one thing to remember.
+   *
+   * A write that lands after the host has disposed the session is dropped rather
+   * than resurrecting the file -- the same trap `rememberSummary` documents. The
+   * model call it follows can take twenty seconds, which is long enough for the
+   * session to end and a sweep to delete the document underneath it.
+   *
+   * @param {string} sessionId - the session.
+   * @param {{ text: string, at: number, turn: number }} offer - what to store.
+   * @returns {void}
+   */
+  rememberOffer(sessionId, offer) {
+    const clean = readOffer(offer)
+    if (clean === undefined) return
+    // `entry()`, not `bySession.get`: the sentence arrives *after* the model
+    // call that produced it, and the session's record may not exist in this
+    // process yet -- a restart that opens a conversation and asks for a
+    // suggestion before any event has been recorded is the ordinary case, not
+    // an edge one. `entry()` also refuses a condemned id, which is the question
+    // every writer has to ask; asking it twice here would be a second copy of a
+    // rule that already has one home.
+    const entry = this.entry(sessionId)
+    if (entry === undefined) return
+    entry.offer = clean
+    this.schedule(sessionId)
+  }
+
+  /**
    * Record the summary a turn was given.
    *
    * Replaces rather than accumulates: the panel describes the newest turn and a
@@ -1112,6 +1201,7 @@ class SessionState {
       // invariant is worth stating instead of re-checking: nothing else assigns
       // this field.
       summary: entry.summary,
+      offer: entry.offer,
       sequence: entry.sequence,
     }
   }

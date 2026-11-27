@@ -4620,19 +4620,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     const SUGGEST_RETRY_MS = 15000
 
     /**
-     * How long an offer may still be drawn after the answer that produced it.
-     *
-     * The same fifteen minutes as the server's `SUGGEST_TTL_MS`, and for the
-     * same reason: past it the server would not serve this answer any more, so
-     * a page still holding it is showing something the machine has already
-     * disowned. It matters because a failed refresh deliberately keeps the last
-     * answer on screen (an error line under the composer is worse than an
-     * offer that is a few minutes old), and "keeps it" must not mean "keeps it
-     * forever".
-     */
-    const SUGGEST_MAX_AGE_MS = 15 * 60 * 1000
-
-    /**
      * What the page currently knows about the suggestions for one session.
      *
      * Module scope rather than component state because the chips and the ghost
@@ -4670,7 +4657,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // the input machine returns to rest, and clicking twice sends a prompt
       // twice.
       used: new Set(),
-      expiry: null,
       // A frame that arrived while a request was out. Coalescing the requests
       // is right (a burst of frames must not buy a burst of calls); dropping
       // the last one is not, because that is the frame that says the turn the
@@ -4682,6 +4668,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // `plain` the moment the message is handed over and stays there for the
       // whole turn, so from here a busy turn and an idle one look identical.
       busy: false,
+      // The answer is past its freshness window. Not the same as empty, and not
+      // the same as expired-to-be-refetched: the server will not buy another
+      // reading of a turn it has already answered, so this is a terminal state
+      // for the chips and an ordinary one for the ghost.
+      stale: false,
       // The same fact, read from the page instead of from the server.
       //
       // `busy` arrives with an answer, and during a turn the host is busy
@@ -4710,6 +4701,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      */
     let runningWatch = null
 
+    /**
+     * The page's one listener for coming back to the foreground.
+     */
+    let visibilityWatch = false
+
     function subscribeSuggest(listener) {
       suggest.listeners.add(listener)
       return () => {
@@ -4719,30 +4715,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
 
     function notifySuggest() {
       for (const listener of [...suggest.listeners]) listener()
-    }
-
-    /**
-     * Wake the row when its answer gets too old to show.
-     *
-     * `fresh` is computed during render, and nothing renders at the fifteen
-     * minute mark on its own: with the stream closed or a quiet transcript, a
-     * chip from an hour ago stays drawn and the promise that "keeps it" does
-     * not mean "keeps it forever" quietly stops being true. One timer per
-     * answer, reconfigured on every successful read, is the smallest thing that
-     * makes the boundary real. It only notifies -- the render then finds `at`
-     * too old and draws nothing.
-     */
-    function armExpiry() {
-      if (suggest.expiry !== null) {
-        clearTimeout(suggest.expiry)
-        suggest.expiry = null
-      }
-      if (suggest.at <= 0) return
-      const left = suggest.at + SUGGEST_MAX_AGE_MS - Date.now()
-      suggest.expiry = setTimeout(() => {
-        suggest.expiry = null
-        notifySuggest()
-      }, left > 0 ? left : 0)
     }
 
     /**
@@ -4758,7 +4730,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         suggest.inflight.abort()
         suggest.inflight = null
       }
-      armExpiry()
       suggest.sessionId = sessionId
       suggest.items = []
       suggest.enabled = true
@@ -4769,6 +4740,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       suggest.used.clear()
       suggest.again = false
       suggest.busy = false
+      suggest.stale = false
       // Not reset to `false` blindly: whether a turn is running belongs to the
       // page, not to the session, so switching sessions must re-read it rather
       // than assume the new one is idle.
@@ -4833,6 +4805,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // settle yet. Spending the one retry here would leave the real race at
         // the end of that turn unretried.
         suggest.busy = data?.busy === true
+        // Past its freshness window the answer is still *an* answer, but not one
+        // about the turn in front of the reader. It keeps the ghost -- a
+        // suggestion waiting in the composer is an offer the reader can ignore --
+        // and loses the chips, which under an answer read as "here is what to do
+        // next" about a turn that has since moved on.
+        suggest.stale = data?.stale === true
         // A retired chip comes back only when the answer behind it is a *new*
         // answer. The server answers a frame during a turn from its cache with
         // the same `items` and the same `at`, so clearing on every successful
@@ -4844,7 +4822,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         const stamp = Number.isFinite(data?.at) ? data.at : 0
         if (stamp !== suggest.at) suggest.used.clear()
         suggest.at = stamp
-        armExpiry()
         suggest.loaded = true
         if (suggest.retry !== null) {
           clearTimeout(suggest.retry)
@@ -4967,6 +4944,40 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * @returns {object} the gates, each named so a test can read them.
      */
     /**
+     * End the life of the offer on screen.
+     *
+     * The promise the row makes is "the step after the answer you are reading",
+     * so it lasts exactly as long as that answer is the last thing said. A turn
+     * boundary is what ends it -- not a clock: an offer that was still the next
+     * step an hour after the turn finished is still the next step, while one
+     * whose turn has been superseded is worth nothing however recently it was
+     * bought. A time-based rule was tried first and was wrong in both
+     * directions.
+     *
+     * Clearing on that edge is what stops the previous turn's chips being drawn
+     * under the new answer for the few seconds the new one takes to arrive --
+     * the reader's report was "the old suggestions stay until the new ones show
+     * up". `loaded` goes back to false with them so that `ensureSuggest` cannot
+     * answer a later mount out of an answer whose turn is over.
+     *
+     * @returns {void}
+     */
+    function forgetOffer() {
+      suggest.items = []
+      suggest.used.clear()
+      suggest.at = 0
+      suggest.turn = undefined
+      suggest.stale = false
+      suggest.loaded = false
+      suggest.again = false
+      suggest.retried = false
+      if (suggest.retry !== null) {
+        clearTimeout(suggest.retry)
+        suggest.retry = null
+      }
+    }
+
+    /**
      * Keep `suggest.running` in step with the page.
      *
      * The value has to be re-read when it changes, and it changes without React
@@ -4990,6 +5001,13 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         const next = turnRunning()
         if (next === suggest.running) return
         suggest.running = next
+        // Either edge ends the offer, for the same reason. The row promises the
+        // step after the answer on screen, and a turn beginning *or* ending
+        // means that answer is no longer the newest thing said -- the ending
+        // turn's own answer is about to arrive on the stream. Until it does,
+        // drawing the previous one is exactly the "old suggestions under the
+        // new answer" the reader reported.
+        forgetOffer()
         notifySuggest()
       }
       suggest.running = turnRunning()
@@ -4998,6 +5016,44 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         subtree: true,
         attributes: true,
         attributeFilter: ["data-dsh-claude-control"],
+      })
+    }
+
+    /**
+     * Ask again when the page comes back to the foreground.
+     *
+     * A backgrounded window is the one place a frame can be lost without anyone
+     * noticing: the turn ends while the page is frozen, the frame that
+     * announces it never lands (or lands on a connection that had to be
+     * re-made), and nothing else here re-reads the store -- `ensureSuggest`
+     * answers out of `loaded` and only runs when the session changes. That is
+     * exactly the shape of "the offer is missing until you switch away and
+     * back". One listener for the page, and the read it costs is served from
+     * the server's own cache.
+     *
+     * `document.hidden` rather than `visibilityState`: it is the field the card
+     * column already reads, so both halves of the plugin agree on what "the
+     * page is back" means.
+     *
+     * @returns {void}
+     */
+    function watchVisibility() {
+      if (visibilityWatch === true) return
+      if (typeof document === "undefined" || typeof document.addEventListener !== "function") return
+      visibilityWatch = true
+      document.addEventListener("visibilitychange", () => {
+        if (document.hidden === true) return
+        // The observer was frozen along with the page, so the busy flag is
+        // re-read rather than trusted -- and a turn that began and ended while
+        // the page was away has still ended the offer that was on screen.
+        const next = turnRunning()
+        if (next !== suggest.running) {
+          suggest.running = next
+          forgetOffer()
+          notifySuggest()
+        }
+        if (suggest.sessionId === "") return
+        void loadSuggest(suggest.sessionId)
       })
     }
 
@@ -5084,9 +5140,13 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * the same seat its delivered-file card uses. Three things follow from that
      * seat and none of them are true of the composer dock this started in:
      *
-     * 1. The row belongs to a *turn*, so it is drawn only for the turn the answer
-     *    describes (`suggest.turn`). Otherwise the offers for the last turn stay
-     *    under the turn before it as the conversation grows.
+     * 1. The row belongs to a *turn*, so it is drawn only under the newest tail.
+     *    Otherwise the offers for the last turn stay under the turn before it as
+     *    the conversation grows. "Newest" is asked of the DOM rather than by
+     *    comparing numbers: the answer carries `previous.turn`, which
+     *    `transcript.js` numbers locally on purpose while the host numbers from
+     *    the start of the session, so the two agree only for a conversation this
+     *    plugin watched from host turn one.
      * 2. Nudge chips off the composer's own strip, where the todo panel and the
      *    queue panel already live and where they were mistaken for a toolbar.
      * 3. The transcript column is inset from the composer: measured on this host
@@ -5120,11 +5180,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // only reads the store it fills.
       React.useEffect(() => {
         watchRunning()
+        watchVisibility()
         ensureSuggest(sessionId)
       }, [sessionId])
 
       const offer = suggest.items.filter((item) => suggest.used.has(item.text) === false)
-      const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS
       // A turn tail only exists for a turn the host knows about, so the input
       // machine's phase says nothing about this one: the reader may well be
       // typing the next prompt while these three sit under the last answer, and
@@ -5152,7 +5212,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // within half a second, where the server's answer takes seconds and
         // lands after the reader has already seen the row it was meant to hide.
         suggest.running === false &&
-        fresh &&
+        // Past its freshness window the answer no longer speaks for the turn in
+        // front of the reader, so the row goes. The ghost stays: one suggestion
+        // waiting in the composer is an offer, three chips under an answer are a
+        // reading of that answer.
+        suggest.stale === false &&
         offer.length > 0 &&
         box !== null &&
         box.last === true
@@ -5339,6 +5403,7 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       React.useEffect(() => {
         if (sessionId === "") return undefined
         watchRunning()
+        watchVisibility()
         ensureSuggest(sessionId)
         // No `EventSource` (a test harness, an old renderer): the line still
         // loads on mount and on every session change. What is lost is the
@@ -5357,12 +5422,12 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       }, [sessionId])
 
       // The ghost offers the first item still on offer -- the same list the
-      // chips draw, minus whatever has been sent, and under the same age rule.
+      // chips draw, minus whatever has been sent, and only while its turn is
+      // still the last one said.
       // A ghost that keeps proposing a prompt already spent is worse than no
       // ghost: it is the one line the reader sees while deciding what to type.
       const lead = suggest.items.find((item) => suggest.used.has(item.text) === false)
       const text = lead?.text ?? ""
-      const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS
       const shown =
         sessionId !== "" &&
         suggest.sessionId === sessionId &&
@@ -5372,7 +5437,6 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // and a prompt suggestion over a running turn reads as "type this now".
         suggest.busy === false &&
         suggest.running === false &&
-        fresh &&
         text !== "" &&
         gates.idle &&
         gates.empty &&

@@ -670,6 +670,11 @@ export function apply(ctx, config, options) {
     config: () => liveConfig(),
     // Same reason as the summariser's: read through `service()`, never held.
     llm: () => service('llm'),
+    // The two ends of the persisted ghost. Same shape as the summariser's pair
+    // directly below, and for the same reason: the store owns the disk and this
+    // file owns the decision, so neither has to know the other's rules.
+    stored: (agentId) => sessionState.offerSeen(agentId),
+    persist: (agentId, offer) => sessionState.rememberOffer(agentId, offer),
     log
   })
 

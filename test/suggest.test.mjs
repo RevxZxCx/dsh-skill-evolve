@@ -449,6 +449,63 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 // ---------------------------------------------------------------------------
+// the sentence that survives a restart
+// ---------------------------------------------------------------------------
+
+{
+  // The ghost is the one part of this feature that is worth keeping across a
+  // restart: a chip is a reading of a turn and the turn is gone, but a sentence
+  // waiting in the composer is still a sentence. Storing it is also what stops
+  // the new process from buying the same answer again for the same turn.
+  const time = clock()
+  const written = []
+  const llm = fakeLlm()
+  const suggestor = new Suggestor({
+    config: config(),
+    llm,
+    now: time.now,
+    persist: (agent, offer) => written.push({ agent, offer }),
+  })
+  const first = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a successful call records one sentence', written.length === 1, JSON.stringify(written))
+  check('and it is the first of the three', written[0]?.offer?.text === first.items[0], JSON.stringify([written[0]?.offer?.text, first.items[0]]))
+  check('with the turn it is about', written[0]?.offer?.turn === 1, JSON.stringify(written[0]?.offer))
+  check('and the time it was bought', written[0]?.offer?.at === first.at, JSON.stringify([written[0]?.offer?.at, first.at]))
+
+  // A second process, with the file it wrote and an empty cache.
+  const next = fakeLlm()
+  const restored = new Suggestor({
+    config: config(),
+    llm: next,
+    now: time.now,
+    stored: () => written[0]?.offer,
+  })
+  const answer = await restored.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('the restored sentence is offered again', answer.items.length === 1 && answer.items[0] === first.items[0], JSON.stringify(answer.items))
+  check('and it is flagged as a restore', answer.restored === true, JSON.stringify(answer.restored))
+  check('and nothing was paid for it', next.log.prepare.length === 0, String(next.log.prepare.length))
+  check('and it still names its turn', answer.turn === 1, String(answer.turn))
+
+  // Past the freshness window the restore is still better than a second bill:
+  // it comes back marked stale, and the composer keeps only the ghost.
+  time.advance(SUGGEST_TTL_MS)
+  const staleRestore = await restored.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
+  check('a restore past its window is marked stale', staleRestore.stale === true, JSON.stringify(staleRestore.stale))
+  check('and is still free', next.log.prepare.length === 0, String(next.log.prepare.length))
+
+  // A stored sentence about a turn the reader has left behind is not offered.
+  const moved = new Suggestor({
+    config: config(),
+    llm: next,
+    now: time.now,
+    stored: () => ({ text: '收尾', at: time.now(), turn: 1 }),
+  })
+  const onSecond = await moved.suggestions({ agentId: 'a', view: viewWith(snapshot(1), snapshot(2)) })
+  check('a restore about an older turn is not offered', onSecond.restored === undefined, JSON.stringify(onSecond.restored))
+  check('and the new turn is bought', next.log.prepare.length === 1, String(next.log.prepare.length))
+}
+
+// ---------------------------------------------------------------------------
 // one turn, one call — cache, concurrency, and the clock
 // ---------------------------------------------------------------------------
 
@@ -472,15 +529,21 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 
   time.advance(2)
   const stale = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
-  check('past it the answer is bought again', llm.log.prepare.length === 2, String(llm.log.prepare.length))
-  check('and comes back uncached', stale.cached === undefined, JSON.stringify(stale.cached))
+  // Past the window the answer is *not* re-bought. A closed turn does not
+  // improve by being asked for twice, and the reader has already paid for this
+  // one; the route says so with a flag instead, so the composer can drop the
+  // chips while keeping the ghost.
+  check('past it the answer is not bought again', llm.log.prepare.length === 1, String(llm.log.prepare.length))
+  check('and it is still the same answer', stale.cached === true && JSON.stringify(stale.items) === JSON.stringify(first.items), JSON.stringify(stale))
+  check('but it is marked stale', stale.stale === true, JSON.stringify(stale.stale))
+  check('and still says which turn it is about', stale.turn === 1, String(stale.turn))
 
   const nextTurn = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1), snapshot(2)) })
-  check('a new turn is a new question', llm.log.prepare.length === 3, String(llm.log.prepare.length))
+  check('a new turn is a new question', llm.log.prepare.length === 2, String(llm.log.prepare.length))
   check('and answers for the new turn', nextTurn.items.length === 3)
 
   const otherSession = await suggestor.suggestions({ agentId: 'b', view: viewWith(snapshot(1)) })
-  check('another session is another question', llm.log.prepare.length === 4, String(llm.log.prepare.length))
+  check('another session is another question', llm.log.prepare.length === 3, String(llm.log.prepare.length))
   check('and also answers', otherSession.items.length === 3)
 }
 

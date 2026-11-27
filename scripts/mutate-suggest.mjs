@@ -342,10 +342,18 @@ const mutations = [
   {
     file: suggest,
     suites: engine,
-    label: 'the cache never expires',
-    from: '    if (cached !== undefined && now - cached.at < SUGGEST_TTL_MS) {',
-    to: '    if (cached !== undefined) {',
-    why: 'a session resumed the next morning would open with three chips about work that has moved on; the turn number catches the common case, this catches the clock',
+    label: 'a cached answer is bought again',
+    from: '    if (cached !== undefined) {',
+    to: '    if (false) {',
+    why: 'a closed turn does not improve by being asked for twice, and asking again bills the reader for a second reading of an answer they already own; the turn is in the key, so a genuinely new turn still gets its own call',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'an old answer is never marked stale',
+    from: '      const stale = now - cached.at >= SUGGEST_TTL_MS',
+    to: '      const stale = false',
+    why: 'without the flag the composer draws three chips under a turn the reader has moved past; the chips are a claim about the answer on screen, and a stale answer is no longer about it',
   },
   {
     file: suggest,
@@ -713,6 +721,7 @@ const mutations = [
     label: 'every turn tail opens its own stream',
     from: `      React.useEffect(() => {
         watchRunning()
+        watchVisibility()
         ensureSuggest(sessionId)
       }, [sessionId])`,
     to: "      React.useEffect(() => {\n        if (typeof EventSource === 'function') {\n          new EventSource(resolveUrl(`/api/ui-evolve/events?agent=${encodeURIComponent(sessionId)}`))\n        }\n        ensureSuggest(sessionId)\n      }, [sessionId])",
@@ -741,12 +750,50 @@ const mutations = [
   {
     file: client,
     suites: view,
-    label: 'an answer past its lifetime is still drawn',
-    from: `      const offer = suggest.items.filter((item) => suggest.used.has(item.text) === false)
-      const fresh = suggest.at === 0 || Date.now() - suggest.at < SUGGEST_MAX_AGE_MS`,
-    to: `      const offer = suggest.items.filter((item) => suggest.used.has(item.text) === false)
-      const fresh = true`,
-    why: 'a failed refresh keeps the last answer on purpose; without the age rule the offer for turn N is still on screen an hour and ten turns later, describing work that is finished',
+    label: 'a stale answer is drawn as the next step anyway',
+    from: '        suggest.stale === false &&',
+    to: '        true &&',
+    why: 'past its window the answer no longer speaks for the turn in front of the reader; without this the row is a claim about work that is finished, which is the shape the reader reported as "old suggestions under the new answer"',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'a turn boundary leaves the old answer on screen',
+    from: '    function forgetOffer() {',
+    to: '    function forgetOffer() {\n      return',
+    why: 'the answer describes the turn before the one that just finished, so keeping it draws the previous turn chips under the new answer -- the reader saw this as the suggestions still being the last turn until the new ones arrive',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'coming back to the page does not ask again',
+    from: '        if (suggest.sessionId === "") return\n        void loadSuggest(suggest.sessionId)',
+    to: '        void 0',
+    why: 'a turn spent in the background leaves the store holding whatever the last frame said; without this the only way to see the offer was to switch sessions and come back, which is exactly the workaround the reader described',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the persisted sentence is never offered again',
+    from: '    if (remembered !== undefined && remembered.turn === turn) {',
+    to: '    if (false) {',
+    why: 'the stored sentence is the whole point of persisting it: without reading it back, a restart opens with an empty composer and buys the same answer a second time for the same turn',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'a restore about an older turn is offered anyway',
+    from: '    if (remembered !== undefined && remembered.turn === turn) {',
+    to: '    if (remembered !== undefined) {',
+    why: 'a sentence about turn four drawn at turn nine is a claim about work that is finished; the turn check is what makes the restored line safe to show at all',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the sentence is never written down',
+    from: "      if (typeof this.persist === 'function') this.persist(agent, { text: items[0], at, turn })",
+    to: "      if (false) this.persist(agent, { text: items[0], at, turn })",
+    why: 'an offer that only exists in the memory of the process that paid for it is not persisted at all: the ghost arrives in the composer only if a later process can read it back',
   },
   {
     file: client,

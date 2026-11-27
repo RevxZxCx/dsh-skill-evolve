@@ -1985,6 +1985,49 @@ for (const reason of ['gone', 'archived']) {
 }
 
 {
+  // One sentence, and it has to survive the round trip: the whole point of
+  // storing it is the process that did *not* buy it. A ghost that only exists in
+  // the memory of the process that paid for it is not persisted at all.
+  const { state, store, root } = await fixture()
+  state.rememberOffer('offer', { text: '把失败的用例跑一遍', at: 1234, turn: 9 })
+  const seen = state.offerSeen('offer')
+  check('the sentence is remembered', seen?.text === '把失败的用例跑一遍', JSON.stringify(seen))
+  check('with the turn it describes', seen?.turn === 9, JSON.stringify(seen))
+
+  await state.flush('offer')
+  const stored = await store.read('offer')
+  check('and written down', stored?.offer?.text === '把失败的用例跑一遍', JSON.stringify(stored?.offer))
+
+  const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
+  await second.load('offer')
+  const reloaded = second.offerSeen('offer')
+  check('the sentence survives a restart', reloaded?.text === '把失败的用例跑一遍', JSON.stringify(reloaded))
+  // Equal to the bytes on disk, not merely numeric: a reader that re-stamped
+  // either would satisfy a type check while destroying the fact the field
+  // exists for -- the turn is how the composer knows the sentence is still
+  // about the answer on screen.
+  check('and so do its turn and time', reloaded?.turn === 9 && reloaded?.at === 1234, JSON.stringify(reloaded))
+  await done(root)
+}
+
+{
+  // A record with nothing usable in it is not a record. Written as three
+  // separate invalid shapes because each one is a different way for a file to
+  // be wrong, and a reader that only checked the first would carry the other two
+  // into the composer.
+  const { state, root } = await fixture()
+  state.rememberOffer('bad', { text: '', at: 1, turn: 1 })
+  check('a sentence with no text is not stored', state.offerSeen('bad') === undefined, JSON.stringify(state.offerSeen('bad')))
+  state.rememberOffer('bad', { text: '跑测试', at: Number.NaN, turn: 1 })
+  check('nor one with no time', state.offerSeen('bad') === undefined, JSON.stringify(state.offerSeen('bad')))
+  state.rememberOffer('bad', { text: '跑测试', at: 1, turn: '9' })
+  check('nor one whose turn is not a number', state.offerSeen('bad') === undefined, JSON.stringify(state.offerSeen('bad')))
+  state.rememberOffer('bad', { text: '跑测试' })
+  check('nor one with no turn at all', state.offerSeen('bad') === undefined, JSON.stringify(state.offerSeen('bad')))
+  await done(root)
+}
+
+{
   // The turn number is what lets the card say "this turn" after a restart. The
   // only other source is the previous turn's snapshot, which is gone once the
   // next turn ends — so a number that is not written down is a number the card

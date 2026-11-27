@@ -590,7 +590,7 @@ const mutations = [
     file: state,
     label: 'a summary with a field this build cannot use is kept anyway',
     suites: ['test/session-state.test.mjs'],
-    from: '  if (typeof raw.at !== \'number\' || Number.isFinite(raw.at) === false) return undefined\n',
+    from: '  if (typeof raw.at !== \'number\' || Number.isFinite(raw.at) === false) return undefined\n  return normaliseSummary(raw)\n',
     to: '',
     why: 'The at field is what the panel renders as a relative time. A non-finite at reaches the renderer and the card states that the turn finished at a time that never was, on every repaint, from a file nobody audits.',
   },

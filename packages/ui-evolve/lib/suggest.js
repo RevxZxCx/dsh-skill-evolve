@@ -124,12 +124,18 @@ export const SUGGEST_TIMEOUT_MS = 20000
 export const SUGGEST_FAILURE_TTL_MS = 60000
 
 /**
- * How long an answer stays usable.
+ * How long an answer counts as fresh.
+ *
+ * This is no longer a lifetime -- nothing is regenerated when it passes, because
+ * a closed turn's answer does not improve by being asked for twice. It is the
+ * line between "this describes the turn you just finished" and "this describes
+ * work you have since moved past": past it the chips stop being drawn and only
+ * the ghost stays, since a suggestion in the composer is an offer while three
+ * chips under an answer read as a claim about what to do next.
  *
  * Fifteen minutes is longer than a person takes to read one answer and decide
  * what to do next, and short enough that a session resumed tomorrow does not
- * open with three chips about work that has moved on. The turn number in the
- * cache key already catches the common case; this catches the clock.
+ * open with a ghost about work that has moved on.
  */
 export const SUGGEST_TTL_MS = 15 * 60 * 1000
 
@@ -864,12 +870,20 @@ export class Suggestor {
    * @param {(message: string) => void} [dependencies.log] - diagnostics.
    * @param {() => number} [dependencies.now] - the clock, for tests.
    */
-  constructor({ config, llm, log, now }) {
+  constructor({ config, llm, log, now, stored, persist }) {
     this.config = config
     this.llm = llm
     this.log = typeof log === 'function' ? log : () => {}
     this.now = typeof now === 'function' ? now : () => Date.now()
     /** @type {Map<string, { items: string[], at: number }>} */
+    // The session document's memory of the one sentence to offer, used in both
+    // directions: read before a call (so a restart does not buy the same answer
+    // twice) and written after one (so the ghost survives the restart at all).
+    // Injected rather than imported so this file stays free of the disk: the
+    // store lives in `session-state.js`, and every test of the prompt side can
+    // answer `undefined` without pretending to have a filesystem.
+    this.stored = stored
+    this.persist = persist
     this.cache = new Map()
     /** @type {Map<string, { reason: string, at: number }>} */
     this.failed = new Map()
@@ -939,10 +953,41 @@ export class Suggestor {
     const turn = previous.turn
     const cached = this.cache.get(key)
     const now = this.now()
-    if (cached !== undefined && now - cached.at < SUGGEST_TTL_MS) {
-      return { enabled: true, items: cached.items, at: cached.at, cached: true, turn }
+    if (cached !== undefined) {
+      // A cached answer is never thrown away to buy a fresh one. Once a finished
+      // turn has been paid for, that turn's answer *is* the answer: asking again
+      // would spend the reader's budget to produce another reading of the same
+      // closed turn, and the key already contains the turn, so a genuinely new
+      // turn still gets its own call. An answer past its lifetime is marked
+      // `stale` rather than regenerated -- the composer keeps the ghost (a
+      // suggestion is still a suggestion) and stops drawing chips.
+      const stale = now - cached.at >= SUGGEST_TTL_MS
+      return {
+        enabled: true,
+        items: cached.items,
+        at: cached.at,
+        cached: true,
+        turn,
+        ...(stale === true ? { stale: true } : {}),
+      }
     }
-    if (cached !== undefined) this.cache.delete(key)
+
+    // What the previous process paid for. Same rule as the cache: the turn in
+    // the file has to be the turn in front of the reader, or the restored
+    // sentence is about work that has moved on.
+    const remembered = typeof this.stored === 'function' ? this.stored(agentId) : undefined
+    if (remembered !== undefined && remembered.turn === turn) {
+      const stale = now - remembered.at >= SUGGEST_TTL_MS
+      return {
+        enabled: true,
+        items: [remembered.text],
+        at: remembered.at,
+        cached: true,
+        restored: true,
+        turn,
+        ...(stale === true ? { stale: true } : {}),
+      }
+    }
 
     const failed = this.failed.get(key)
     if (failed !== undefined && now - failed.at < SUGGEST_FAILURE_TTL_MS) {
@@ -956,7 +1001,7 @@ export class Suggestor {
     // flight gets the same `turn` as the caller that started it. The key
     // contains the turn, so the two cannot disagree -- but a caller that read
     // the field off only one of the two answers could.
-    const task = this.run({ key, body, count, sessionRoute, signal }).then((answer) => ({ ...answer, turn }))
+    const task = this.run({ key, agent: agentId, body, count, sessionRoute, signal, turn }).then((answer) => ({ ...answer, turn }))
     this.inflight.set(key, task)
     return task.finally(() => this.inflight.delete(key))
   }
@@ -973,7 +1018,7 @@ export class Suggestor {
    * @param {AbortSignal} [input.signal] - cancellation.
    * @returns {Promise<object>} the answer.
    */
-  async run({ key, body, count, sessionRoute, signal }) {
+  async run({ key, agent, body, count, sessionRoute, signal, turn }) {
     if (signal?.aborted === true) return { enabled: true, items: [], reason: 'the suggestion call was cancelled' }
     const llm = valueOf(this.llm)
     if (llm === undefined || typeof llm.prepareCall !== 'function') {
@@ -1035,6 +1080,11 @@ export class Suggestor {
       }
       const at = this.now()
       this.cache.set(key, { items, at })
+      // One sentence, and only the first: the chips are a reading of a turn and
+      // are not worth restoring, while the ghost is a line waiting in the
+      // composer. `rememberOffer` validates its own input, so nothing here has
+      // to reason about the store's shape.
+      if (typeof this.persist === 'function') this.persist(agent, { text: items[0], at, turn })
       this.failed.delete(key)
       if (this.cache.size > CACHE_LIMIT) {
         const oldest = [...this.cache.entries()].sort((a, b) => a[1].at - b[1].at)[0]
