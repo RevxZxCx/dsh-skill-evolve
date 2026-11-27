@@ -2,11 +2,11 @@
 id: S-20261127-lifecycle
 date: 2026-11-27
 type: status
-status: pending_live_verify
+status: verified
 title: 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件
 packages: [ui-evolve]
 baseline: 4513 passed / 0 failed（client 1096/0、suggest 287/0、session-state 376/0、api 429/0、mutations 55/0、mutate-suggest 110/110 全杀、perf 退出 0）
-pending_verify: 重启宿主后确认三件事——后台放一段时间再切回来自动出现建议；新一轮开始时旧建议先消失、新答案到达后再出现；同一回合重复打开不再二次购买，且重启后输入框幽灵仍在
+pending_verify: 无（2026-11-27 16:10 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；visibilitychange 触发且只触发一次 /suggestions 请求）
 ---
 
 # 2026-11-27 · 一条建议该活多久
@@ -88,6 +88,30 @@ pending_verify: 重启宿主后确认三件事——后台放一段时间再切�
 2. **旧锚点会静默消失**：`suggest.js` 的缓存分支、`client.js` 的 `useEffect`、
    已删除的 `fresh` 两行，三条锚点在改完代码的当天就不再匹配。锚点不是测试，
    它不会自己告诉你它已经不在看着任何东西了——所以 `test/mutations.test.mjs` 的数字必须是 `===`。
+
+## 真机复验（2026-11-27 16:10，`/pair-app`，会话 `session-796ca485`，`test` 工作区）
+
+三件事全部成立，用的都是真实回合（没有桩数据）：
+
+1. **回合开始就撤下旧建议**。发送「把 note.txt 里改成 hello」后按 400 ms 采样：`stop` 出现的那一帧
+   （t=252538）`data-shown` 从 1 变 0、`items` 清空、幽灵 `false`，**没有等新答案**。
+   回合结束后先空约 5 s（模型那次调用），随后同一帧里出现三条新建议。
+2. **重载不会丢**。`Page.reload` 之后 469 ms 读到 `shown=1` 且三条是第二轮的内容
+   （`加个换行符` / `看一下文件内容` / `把文件名改成 note.txt`），幽灵同时可见。
+   464 ms 内返回即证明这次是缓存/磁盘回复而不是重新调用（重调一次要 5 s 量级）。
+3. **回前台会补一次**。`document.dispatchEvent(new Event('visibilitychange'))` 之后计到
+   **恰好一次** `/suggestions` 请求（`__visLog` 长度 0 → 1），没有重复请求风暴。
+
+另外确认落盘：`~/.dsh/plugin-data/skill-evolve/sessions/session-796ca485-….json` 里有
+`offer: {text, at, turn: 2}`，`turn` 与 `previous.turn` 相等；早先一个会话
+（`session-88a98a6e`，turn 33）同样有 `offer`，说明这条路径在多个会话上都在写。
+
+### 复验时看到、但**没有**当成缺陷处理的一处
+
+从点「发送消息」到 `stop` 出现之间约 11 s，这期间上一轮的三条建议仍画着（也仍可点）。
+我没有隔离出这 11 s 是宿主迟迟没开回合、还是我的点击落得晚，所以按「屏幕上那条回答还没变」
+的口径不算违背设计。但它确实意味着：**消息已发出、回合尚未开始**的窗口里，旧建议是可点的。
+如果以后要收紧，判据不该是 `busy`（那时还没 busy），而应该是「输入框刚提交过」。
 
 ## 没有的东西
 

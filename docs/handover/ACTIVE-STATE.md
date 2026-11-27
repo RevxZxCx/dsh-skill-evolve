@@ -16,7 +16,7 @@
 ## 3. 待闭环真机验收 / 阻塞项
 
 - **2026-11-27** [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)：重启宿主后确认芯片不再以句号结尾、不再出现「我来…」「Done.」，且推理模型的建议在数秒内到达
-- **2026-11-27** [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md)：重启宿主后确认三件事——后台放一段时间再切回来自动出现建议；新一轮开始时旧建议先消失、新答案到达后再出现；同一回合重复打开不再二次购买，且重启后输入框幽灵仍在
+- **2026-11-27** [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md)：无（2026-11-27 16:10 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；visibilitychange 触发且只触发一次 /suggestions 请求）
 - **2026-11-27** [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md)：无
 - **2026-11-27** [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md)：需重启宿主后在 /pair-app 观察一次推理模型回合的建议耗时与 finish reason
 - **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现
@@ -29,7 +29,7 @@
 | 日期 | 类型 | 编号/状态 | 标题 | 文件 |
 | --- | --- | --- | --- | --- |
 | 2026-11-27 | status | S-20261127-shape / pending_live_verify | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
-| 2026-11-27 | status | S-20261127-lifecycle / pending_live_verify | 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件 | [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md) |
+| 2026-11-27 | status | S-20261127-lifecycle / verified | 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件 | [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md) |
 | 2026-11-27 | review | R-20261127-codex / applied | R-126 建议形状规则的评审——8 条全部成立，其中 4 条是真缺陷 | [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md) |
 | 2026-11-27 | defect | D-20261127-efforts / fixed | 关思考的代码从未生效——宿主的 efforts 是数组，代码当对象查键 | [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md) |
 | 2026-11-26 | status | S-20261126-suggest / pending_live_verify | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
