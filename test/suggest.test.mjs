@@ -489,6 +489,16 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('without spending a call', llm.log.prepare.length === 0, String(llm.log.prepare.length))
   check('but the feature still reads as enabled', running.enabled === true)
 
+  // The turn that just closed was interrupted. `previous` still points at the
+  // last turn that finished, so an offer here would describe work that had moved
+  // on, drawn under a reply the reader stopped. Silence, and no call.
+  const stopped = await suggestor.suggestions({ agentId: 'a', view: { ...viewWith(snapshot(1)), interrupted: true } })
+  check('an interrupted turn offers nothing', stopped.items.length === 0, JSON.stringify(stopped))
+  check('and says which turn it was', stopped.reason === 'the last turn was interrupted', String(stopped.reason))
+  check('and keeps the turn it is about', stopped.turn === 1, String(stopped.turn))
+  check('and pays for nothing', llm.log.prepare.length === 0, String(llm.log.prepare.length))
+  check('and is not busy, so no retry is spent', stopped.busy === undefined, JSON.stringify(stopped.busy))
+
   const emptyBody = await suggestor.suggestions({ agentId: 'a', view: { turns: [{ turn: 1 }], previous: { turn: 1 } } })
   check('a turn with nothing to quote is not a suggestion', emptyBody.items.length === 0, JSON.stringify(emptyBody))
   check('none of those three called the model', llm.log.prepare.length === 0, String(llm.log.prepare.length))

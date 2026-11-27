@@ -344,6 +344,22 @@ check(
   check('an abandoned turn does not replace the last good one', view.previous.calls === 1, String(view.previous.calls))
   check('the abandoned turn leaves no open turn', view.current.turn === undefined)
   check('the abandoned turn is not reported at all', view.previous.commands.includes('aborted') === false, JSON.stringify(view.previous.commands))
+  // The offer route cannot tell "the turn before the one on screen" from "the
+  // turn that just stopped" by looking at `previous` alone: an abandoned turn
+  // writes none. This flag is how it tells them apart.
+  check('the store knows the last turn was interrupted', view.interrupted === true, String(view.interrupted))
+
+  store.record('a', human('three'))
+  store.record('a', said('Done.'))
+  store.record('a', endTurn('completed'))
+  check('a later finished turn clears the flag', store.view('a').interrupted === false, String(store.view('a').interrupted))
+}
+
+{
+  // A store that has never closed a turn has nothing interrupted.
+  const fresh = new TranscriptStore()
+  fresh.record('a', human('one'))
+  check('an open turn is not an interrupted one', fresh.view('a').interrupted === false, String(fresh.view('a').interrupted))
 }
 
 {

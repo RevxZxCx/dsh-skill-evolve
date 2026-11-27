@@ -586,6 +586,15 @@ class Transcript {
     this.turn = undefined
     /** One-line record of the turn that ended most recently. */
     this.previous = undefined
+    /**
+     * Whether the turn that closed most recently was abandoned by the host.
+     *
+     * An abandoned turn produces no `previous`, so a reader that only asks
+     * "what was the last finished turn" gets one that ended *before* the thing
+     * on screen. That is worse than having no offer: the row would sit under a
+     * stopped reply and name a next step for work that had already moved on.
+     */
+    this.interrupted = false
     /** How many human turns this transcript has seen. */
     this.turns = 0
     /**
@@ -671,6 +680,9 @@ class Transcript {
       // left here would ride along on whichever turn is folded next.
       this.asked = ''
       this.turn = undefined
+      // Remember that the thing on screen never finished: the offer route reads
+      // this and answers with nothing rather than with the turn before it.
+      this.interrupted = true
       return
     }
     // Remember the request that opened this turn before the turn is folded
@@ -678,6 +690,7 @@ class Transcript {
     // that is never folded (abandoned) must not contribute to it -- the branch
     // above already cleared `asked` for exactly that reason.
     rememberEarlierAsk(this.asks, this.asked)
+    this.interrupted = false
     this.previous = this.snapshot()
     this.turn = undefined
   }
@@ -1108,6 +1121,7 @@ class TranscriptStore {
       turns: transcript.turns,
       current: transcript.snapshot(),
       previous: transcript.previous,
+      interrupted: transcript.interrupted,
     }
   }
 

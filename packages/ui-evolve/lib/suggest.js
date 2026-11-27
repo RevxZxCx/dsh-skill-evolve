@@ -1082,6 +1082,15 @@ export class Suggestor {
     // end of it would go unretried.
     if (view?.current?.turn !== undefined) return { enabled: true, items: [], reason: 'a turn is running', busy: true }
 
+    // The turn that just closed was interrupted. `previous` is still the last
+    // turn that *completed*, so drawing anything here would name a next step
+    // for work that had moved on -- the row would sit under a stopped reply and
+    // read as advice about it. Nothing is shown, and nothing is paid for: the
+    // reader stopped this turn, and the honest answer is silence.
+    if (view?.interrupted === true) {
+      return { enabled: true, items: [], reason: 'the last turn was interrupted', turn: previous.turn }
+    }
+
     const body = renderSuggestBody(view)
     if (body.length === 0) return { enabled: true, items: [], reason: 'the turn left nothing to go on' }
 

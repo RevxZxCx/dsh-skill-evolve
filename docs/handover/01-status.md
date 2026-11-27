@@ -6495,3 +6495,16 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **数字**：全量 4557 / 0；`suggest` 313 / 0；`mutate-suggest` 126 killed / 0 survived / 0 crashed；`perf-budget` 退出 0。
 
 **尚未验证的一点**：`settings.yaml` 的 `compat` 是否要宿主重启才生效，只能在重启后用一条真实回合测——预期建议在 1~3 秒内出现，而不是 12~31 秒。
+
+## 2026-11-27（八）· 中断的回合：直接不显示
+
+| 改动 | 位置 | 内容 |
+|---|---|---|
+| store | `packages/ui-evolve/lib/transcript.js` | 新增 `this.interrupted`：丢弃分支置 `true`、完成分支置 `false`；`view()` 返回该字段 |
+| 路由 | `packages/ui-evolve/lib/suggest.js` | 在 `renderSuggestBody` 与缓存查询之前加闸门：`interrupted === true` → `items: []` + `reason: 'the last turn was interrupted'`，零调用 |
+| 测试 | `test/transcript.test.mjs` / `test/suggest.test.mjs` | 228 → 231 / 313 → 318 |
+| 突变 | `scripts/mutate-suggest.mjs` | 126 → 130（含「完成时不复位」这条最容易漏的） |
+
+**数字**：全量 4567 / 0；`transcript` 231 / 0；`suggest` 318 / 0；`mutate-suggest` 130 killed / 0 survived / 0 crashed；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
+
+**这一条为什么值得单独记**：两个事实（最近完成的回合 / 刚刚是不是被停下）原本挤在一个字段里，谁也推不出谁。以后 store 多回答一个问题，就在 view 上多一个字段，不要让调用方去猜。

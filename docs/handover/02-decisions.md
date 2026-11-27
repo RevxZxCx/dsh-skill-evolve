@@ -5038,3 +5038,9 @@ overlay 锚点 `z-index:auto`，宿主输入框的 scroll 层 `position:relative
 宿主的 `"deepseek"` 兼容分支把 `reasoningEffort` 的**真假**翻译成 `thinking: { type: "enabled" | "disabled" }`，所以 `low` 与 `high` 都是「开」，只有「不发」才是「关」。这解释了两件事：为什么 `low` / `high` 在线上毫无区别（provider 没声明 compat，宿主什么都没发），以及为什么曾经「修复了关闭思考」还是 12~31 秒（修复只是从默认档降到 `low`，仍然是开）。
 
 代价两条：① 这条路径依赖 provider 声明 `compat.thinkingFormat`，没声明的 provider 上「不发」等于「网关默认」，可能仍在思考；② 有些模型确实要思考才答得好，关掉后建议质量会降——建议只有 40 字符、只需读一段汇报，这个代价换 221 ms 是值得的。
+
+## D-268 · 中断的回合直接不显示建议，并且不花钱
+
+`/suggestions` 在「最近关闭的回合被丢弃」时返回空列表与理由 `the last turn was interrupted`，位置在所有缓存与模型调用之前。理由：那一行会画在被停止的回答底下，而它描述的是更早那轮的下一步；与其解释，不如安静。代价是读者中断后看不到任何建议，直到下一个完成的回合——这正是他按下停止时表达的意思。
+
+实现上用 store 的一个布尔 `interrupted`（丢弃置真、完成置假）而不是从 `previous` 反推，因为 `previous` 只记录「最近完成的回合」，推不出「刚刚发生了什么」。
