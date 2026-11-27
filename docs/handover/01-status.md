@@ -6420,3 +6420,22 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **`clipCodePoints` 删掉的理由**：改完之后它零调用方，而名字与文档注释都还在描述「用户那半是按码点裸切」——那正是刚修掉的缺陷。留着一个不再被调用的助手，比删掉它更容易让下一个人相信旧行为还在。
 
 **没有的东西**：没有新增配置键、没有新增路由、没有新增事件处理器、没有改任何 `MAX_*` 预算值。真机复验尚未做——`lib/*.js` 改了，需要重启宿主。
+
+## 2026-11-27（四）：建议的提示词改成分区预算，口径改成预测，上限按实测定为 40
+
+**做了什么**
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/transcript.js` | 新增 `this.asks` 环形缓冲（单条 200 / 合计 600 / 最多 24 条，整条淘汰最旧）与 `report`（该轮最后一条助手正文）；`MAX_EARLIER_ASKS_CHARS`、`MAX_EARLIER_ASK_CHARS` 导出 |
+| `packages/ui-evolve/lib/suggest.js` | `INSTRUCTION` 重写为 12 条预测口径；规则区与数据区用 `---` 分隔；数据改成 `<requests>` / `<latest_request>` / `<report>` 三块各自限量；`MIN_SUGGESTIONS = 1`；`MAX_SUGGESTION_CHARS = 40`；新增 `REFUSAL`；`ASSISTANT_VOICE` 扩容；`readSuggestionLines` 的跨空行判据改字面量 2 |
+| `test/transcript.test.mjs` | 211 → 228（历史保留、report 只取最后一块、放弃的回合不入历史、单条裁剪、两道淘汰、24 条上限） |
+| `test/suggest.test.mjs` | 296 → 298（三区结构、工具调用与路径不再出现、huge report 两次自报只一次、`<session>` 标记、40 基准的 `clipSentence`、弃权两种形态） |
+| `scripts/mutate-suggest.mjs` | 112 → 120 条；`known` 增一条等价突变推导 |
+| `test/mutations.test.mjs`、`docs/27` | 期望 121 → 120，分项同步 |
+
+**数字**：全量 4544 / 0；`suggest` 298 / 0；`transcript` 228 / 0；`mutations`（静态）55 / 0；`mutate-suggest` 120 killed / 0 survived / 0 crashed（共 120）；`perf-budget` 六条全 ok、退出 0（payload-real 18075 B）。
+
+**为什么这么改**：上一版请求 2194 字符里规则占 1979、数据占 215，命中率低是结构问题不是措辞问题。按用户 m08783 的五条裁决改成「规则不计入 + 分区预算 + 多轮请求标为参考 + 只喂上一轮汇报 + 丢掉工具与文件编辑 + 预测口径 + 允许弃权」。
+
+**没有的东西**：没有对「命中率」做量化评测 —— 判断标准仍是「读起来像不像自己会打的字」，需要真机看几条。芯片仍不换行（`nowrap` + 省略号），40 字符是按这个物理事实定的，不是按美学定的。

@@ -49,6 +49,59 @@ const MAX_SAID_CHARS = 2000
 const MAX_SAID_EXCERPT = 1200
 
 /**
+ * How much of the requests that came before the newest one is kept, in total.
+ *
+ * A next-step offer is about the turn that just finished, but a session that has
+ * been running for an hour is not the same as one that just started: knowing the
+ * last few things the person asked is what separates "carry on with the file we
+ * have been editing" from a suggestion about a file that was finished long ago.
+ * The requests are kept as their own budget rather than folded into the turn
+ * snapshot, because they outlive the turn they opened.
+ */
+export const MAX_EARLIER_ASKS_CHARS = 600
+
+/**
+ * Longest single earlier request that is kept, in characters.
+ *
+ * A person can paste a page into the box. Three of those would fill the whole
+ * budget and bury the newer requests, so each one is cut before it is stored.
+ */
+export const MAX_EARLIER_ASK_CHARS = 200
+
+/** Says a request in the history was shortened, for the same reason as the others. */
+const EARLIER_CUT_MARK = '[request cut for length]'
+
+/**
+ * How many earlier requests are kept at most.
+ *
+ * The character budget above is the rule; this is the second bound, because a
+ * session full of one-word requests ("继续", "好") would otherwise keep hundreds
+ * of them and every snapshot would copy the whole list.
+ */
+const MAX_EARLIER_ASKS = 24
+
+/**
+ * Keep one finished request in the history, dropping the oldest to stay in budget.
+ *
+ * Written as a free function rather than a method so the two bounds -- count and
+ * characters -- are enforced in one place, the one place that pushes.
+ *
+ * @param {string[]} list - the history, oldest first; modified in place.
+ * @param {string} text - the request to remember.
+ */
+function rememberEarlierAsk(list, text) {
+  const trimmed = typeof text === 'string' ? text.trim() : ''
+  if (trimmed.length === 0) return
+  list.push(excerptOf(trimmed, MAX_EARLIER_ASK_CHARS, EARLIER_CUT_MARK))
+  while (list.length > MAX_EARLIER_ASKS) list.shift()
+  let total = list.reduce((sum, entry) => sum + entry.length, 0)
+  while (list.length > 1 && total > MAX_EARLIER_ASKS_CHARS) {
+    total -= list[0].length
+    list.shift()
+  }
+}
+
+/**
  * What a cut excerpt ends with.
  *
  * The cut used to be a bare `slice`, which is a lie by omission: the reader sees
@@ -557,6 +610,17 @@ class Transcript {
      * conversation's language cannot be followed from machine output alone.
      */
     this.asked = ''
+    /**
+     * What earlier turns asked, oldest first, each already cut to its budget.
+     *
+     * Lives outside `previous` because it outlives the turn it opened: the
+     * next-step offer reads it as background so a suggestion can continue the
+     * work of the last half hour instead of only the last two minutes. Bounded
+     * by {@link MAX_EARLIER_ASKS} and {@link MAX_EARLIER_ASKS_CHARS}.
+     *
+     * @type {string[]}
+     */
+    this.asks = []
   }
 
   /**
@@ -609,6 +673,11 @@ class Transcript {
       this.turn = undefined
       return
     }
+    // Remember the request that opened this turn before the turn is folded
+    // away: the history is what a later offer reads as background, and a turn
+    // that is never folded (abandoned) must not contribute to it -- the branch
+    // above already cleared `asked` for exactly that reason.
+    rememberEarlierAsk(this.asks, this.asked)
     this.previous = this.snapshot()
     this.turn = undefined
   }
@@ -641,8 +710,17 @@ class Transcript {
       delivered: rows,
       commands: this.commands.slice(-8),
       said: excerptOf(this.said.join('\n\n'), MAX_SAID_EXCERPT, SAID_CUT_MARK),
+      // The block this turn finished on, on its own.
+      //
+      // `said` is everything the turn narrated, joined in order; the last block
+      // is the part that reports the work back -- "the file now says hello", not
+      // "I am about to read it". A next-step offer is built on that conclusion
+      // rather than on the narration that led to it.
+      report: this.said.length === 0 ? '' : this.said[this.said.length - 1],
       tools: tallyNames(calls),
       asked: this.asked,
+      // Background, not the subject: what the session has been asked before.
+      asks: this.asks.slice(),
     }
   }
 

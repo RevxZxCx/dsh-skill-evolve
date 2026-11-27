@@ -30,6 +30,8 @@ import {
   excerptOf,
   MAX_SAID_EXCERPT,
   SAID_CUT_MARK,
+  MAX_EARLIER_ASKS_CHARS,
+  MAX_EARLIER_ASK_CHARS,
   ASKED_CUT_MARK
 } from '../packages/ui-evolve/lib/transcript.js'
 import * as deliverable from '../packages/ui-evolve/lib/deliverable.js'
@@ -1479,6 +1481,93 @@ const wrote = (id, path, extra) => ({
   check('a missing list has no document in it', deliverable.hasDeliverable(undefined) === false, String(deliverable.hasDeliverable(undefined)))
   check('a list of source files has no document in it', deliverable.hasDeliverable(['F:/w/a.py']) === false, String(deliverable.hasDeliverable(['F:/w/a.py'])))
   check('one document is enough', deliverable.hasDeliverable(['F:/w/a.py', 'F:/w/b.pdf']) === true, String(deliverable.hasDeliverable(['F:/w/a.py', 'F:/w/b.pdf'])))
+}
+
+// ---------------------------------------------------------------------------
+// what the session has been asked, and what the last turn reported
+//
+// The offer reads two things the earlier prompt never had: the requests that
+// led here (background, so a follow-up like "good, now the other one" makes
+// sense) and the report of the turn that just finished. Both are bounded -- a
+// long session would otherwise send its whole history for one chip.
+// ---------------------------------------------------------------------------
+
+{
+  const store = new Transcript()
+  store.beginTurn(1, 'look at the README first')
+  store.noteText([{ type: 'text', text: 'Read it.' }])
+  store.endTurn({ reason: { kind: 'completed' } })
+  store.beginTurn(2, 'now change the title')
+  check('a finished turn leaves its request in the history', store.asks.length === 1, JSON.stringify(store.asks))
+  check('and the request is the one that was asked', store.asks[0] === 'look at the README first', JSON.stringify(store.asks))
+  const live = store.snapshot()
+  check('the snapshot carries the history', Array.isArray(live.asks) && live.asks.length === 1, JSON.stringify(live.asks))
+  check('the history does not include the request in progress', live.asks.includes('now change the title') === false, JSON.stringify(live.asks))
+  check('the report is what the last turn said', store.previous.report === 'Read it.', JSON.stringify(store.previous.report))
+  check('and the joined narration is unchanged beside it', store.previous.said === 'Read it.', JSON.stringify(store.previous.said))
+}
+
+{
+  // The report is the block the turn *finished* on, not everything it said: a
+  // long narration ends with the summary, and the summary is the part that says
+  // what now stands.
+  const store = new Transcript()
+  store.beginTurn(1, 'do the thing')
+  store.noteText([{ type: 'text', text: 'first paragraph' }])
+  store.noteText([{ type: 'text', text: 'second paragraph' }])
+  store.endTurn({ reason: { kind: 'completed' } })
+  check('the report is the last block, not the joined narration', store.previous.report === 'second paragraph', JSON.stringify(store.previous.report))
+  check('while the narration still holds both', store.previous.said.includes('first paragraph') && store.previous.said.includes('second paragraph'), JSON.stringify(store.previous.said))
+}
+
+{
+  // A turn the host abandoned never finished, so it is neither history nor a
+  // report -- otherwise a cancelled question would be offered as background.
+  const store = new Transcript()
+  store.beginTurn(1, 'nobody answered this')
+  store.endTurn({ reason: { kind: 'abandoned' } })
+  check('an abandoned turn adds no history', store.asks.length === 0, JSON.stringify(store.asks))
+  check('and leaves no report behind', store.previous === undefined, JSON.stringify(store.previous))
+}
+
+{
+  const store = new Transcript()
+  store.beginTurn(1, 'x'.repeat(MAX_EARLIER_ASK_CHARS * 3))
+  store.endTurn({ reason: { kind: 'completed' } })
+  // Guarded, like the reads below: with no history at all these indexes throw, and a
+  // mutation that keeps nothing would then be reported as CRASHED instead of KILLED.
+  const only = store.asks[0] ?? ''
+  check('a long past request is cut when it is stored', only.length > 0 && only.length <= MAX_EARLIER_ASK_CHARS, String(only.length))
+  check('and says it was cut', only.endsWith('[request cut for length]'), JSON.stringify(only.slice(-30)))
+}
+
+{
+  const store = new Transcript()
+  for (let index = 1; index <= 8; index += 1) {
+    store.beginTurn(index, 'request ' + index + ' ' + 'z'.repeat(150))
+    store.endTurn({ reason: { kind: 'completed' } })
+  }
+  const total = store.asks.reduce((sum, entry) => sum + entry.length, 0)
+  check('the history stays inside its character budget', total <= MAX_EARLIER_ASKS_CHARS, String(total))
+  // Read it once and tolerate an empty history: a mutation that keeps no history at
+  // all leaves `asks` empty, and reaching into `[length - 1]` there throws instead of
+  // failing --  the suite then dies before printing a tally and the mutation counts as
+  // CRASHED rather than KILLED, which hides whether the assertion works at all.
+  const newest = store.asks[store.asks.length - 1] ?? ''
+  check('the newest request is kept', newest.startsWith('request 8'), JSON.stringify(newest.slice(0, 12)))
+  check('and the oldest have been dropped whole', store.asks.some((entry) => entry.startsWith('request 1 ')) === false, JSON.stringify(store.asks.map((entry) => entry.slice(0, 10))))
+}
+
+{
+  // A second bound, on count: "ok", "continue", "go on" are cheap in characters
+  // and would otherwise fill the budget with turns that say nothing.
+  const store = new Transcript()
+  for (let index = 1; index <= 30; index += 1) {
+    store.beginTurn(index, 'go ' + index)
+    store.endTurn({ reason: { kind: 'completed' } })
+  }
+  check('the history is also bounded by how many entries it holds', store.asks.length <= 24, String(store.asks.length))
+  check('and it keeps the newest of them', (store.asks[store.asks.length - 1] ?? '') === 'go 30', JSON.stringify(store.asks.slice(-1)))
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)
