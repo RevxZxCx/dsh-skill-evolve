@@ -269,6 +269,8 @@ const INSTRUCTION = [
   '  {"suggestions":[]}. Silence beats a guess they will not click.',
   '- Write in the language the person writes in — the language of what they',
   '  asked, not the language of the file paths or commands.',
+  '- Reply with that JSON object and nothing else: no sentence before it, no',
+  '  code fence, no explanation after it.',
 ].join('\n')
 
 /**
@@ -558,6 +560,14 @@ const NOT_AN_ANSWER = /^(?:done|no suggestion|none|null|n\/a|stay silent|silence
 // two-chip minimum, which is a quota doing a filter's job.
 const REFUSAL = /^(?:i cannot|i can't|i can not|i won't|i'm unable|i am unable|unable to|sorry|i don't|i do not|我不会|我不能|我无法|抱歉|对不起|不提供|无法提供)/i
 
+// A model that answers in prose instead of the contract narrates the turn it
+// just read. A real sample: "已将 notetxt 的内容改为 hello world。" -- and it
+// came back as a chip. A chip that says what was already done is not a next
+// step: the reader clicks it and the assistant has nothing to do. The Chinese
+// side is deliberately just the 已/内容已/现已 prefixes -- no imperative a person would
+// type opens with 已, and listing the verbs one by one missed 已写入 on the first try.
+const NARRATED_DONE = /^(?:已|内容已|现已|done|updated|created|wrote|written|fixed|changed|renamed|moved|added|removed)(?![a-z])/i
+
 /**
  * Whether this candidate is a sentence or a remark rather than a step.
  *
@@ -577,6 +587,7 @@ function isProseNotAStep(text) {
   if (EVALUATIVE.test(bare)) return true
   if (NOT_AN_ANSWER.test(bare)) return true
   if (REFUSAL.test(bare)) return true
+  if (NARRATED_DONE.test(bare)) return true
   return INNER_SENTENCE_END.test(bare)
 }
 
@@ -1161,7 +1172,11 @@ export class Suggestor {
         // (DEF-200). It travels in the reason, where whoever is asking can
         // read it without a debugger.
         const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0).length
-        const reason = `the model returned no usable suggestion (${lines} lines, ${text.length} characters)`
+        // The first line travels too: "no usable suggestion" on its own says nothing
+        // about whether the model wrote prose, a refusal, or an empty object, and the
+        // three need different fixes.
+        const sample = text.replace(/\s+/g, ' ').trim().slice(0, 80)
+        const reason = `the model returned no usable suggestion (${lines} lines, ${text.length} characters, first: ${JSON.stringify(sample)})`
         this.noteFailure(key, reason)
         return { enabled: true, items: [], reason }
       }

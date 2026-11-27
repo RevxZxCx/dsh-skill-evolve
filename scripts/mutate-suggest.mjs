@@ -1146,6 +1146,30 @@ const mutations = [
     why: 'a turn the host abandoned never reached a conclusion, so its question and its half-finished narration describe a plan that was not carried out; folded anyway, the offer is built on work that does not exist',
   },
 
+  {
+    file: suggest,
+    suites: engine,
+    label: 'a sentence about what was just done becomes a chip',
+    from: '  if (NARRATED_DONE.test(bare)) return true',
+    to: '  if (false) return true',
+    why: 'the sampler came back with a narration of the turn it had just read and that narration rendered as the next step',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the Chinese past tense is not recognised',
+    from: 'const NARRATED_DONE = /^(?:已|内容已|现已|',
+    to: 'const NARRATED_DONE = /^(?:',
+    why: 'every narration in the live sample was Chinese, so dropping the Chinese side leaves the English side passing its own tests',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the rejected line is not reported',
+    from: '${text.length} characters, first: ${JSON.stringify(sample)}',
+    to: '${text.length} characters',
+    why: 'a live miss has to be readable without a debugger; without the sample the reason cannot tell prose from a refusal',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a

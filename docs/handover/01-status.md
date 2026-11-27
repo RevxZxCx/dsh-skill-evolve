@@ -6439,3 +6439,20 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **为什么这么改**：上一版请求 2194 字符里规则占 1979、数据占 215，命中率低是结构问题不是措辞问题。按用户 m08783 的五条裁决改成「规则不计入 + 分区预算 + 多轮请求标为参考 + 只喂上一轮汇报 + 丢掉工具与文件编辑 + 预测口径 + 允许弃权」。
 
 **没有的东西**：没有对「命中率」做量化评测 —— 判断标准仍是「读起来像不像自己会打的字」，需要真机看几条。芯片仍不换行（`nowrap` + 省略号），40 字符是按这个物理事实定的，不是按美学定的。
+
+## 2026-11-27（五）：真机采样四次，叙述类回答被当成下一步（DEF-211）
+
+**做了什么**
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/suggest.js` | 新增 `NARRATED_DONE` 表与 `isProseNotAStep` 里的丢弃；理由补 `first: "..."`；规则区补 `Reply with that JSON object and nothing else` |
+| `test/suggest.test.mjs` | 298 → 306（7 条叙述/祈使句对照 + 1 条理由带原文） |
+| `scripts/mutate-suggest.mjs` | 120 → 123 条 |
+| `test/mutations.test.mjs`、`docs/27` | 期望与分项同步到 123 |
+
+**采样**（本地网关 `127.0.0.1:3425/v1`，模型 `my-api/claude-haiku-5.5`，同一会话第 3 轮）：四次里两次给出契约 JSON（三条中文建议，7–11 字，读起来像自己会打的字），一次给了「已将 notetxt 的内容改为 hello world。」，一次空。真机那次路由回 `no usable suggestion (1 lines, 18 characters)`。
+
+**数字**：全量 4552 / 0；`suggest` 306 / 0；`mutate-suggest` 123 killed / 0 survived / 0 crashed；`perf-budget` 退出 0。
+
+**没有的东西**：命中率仍然没有量化口径。现在能说的是「采样里有一半服从契约，服从的那一半措辞是人话」，不是「命中率 60%」。要量化需要人逐条打分，这轮没做。

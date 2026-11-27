@@ -275,6 +275,26 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 // ---------------------------------------------------------------------------
+// a sentence about what was just done
+// ---------------------------------------------------------------------------
+
+{
+  // Round 1 of a live sampler: the model ignored the contract and answered with a
+  // narration of the turn it had just read -- 已将 notetxt 的内容改为 hello world。 -- and
+  // that came back as a chip. Clicking it sends the past tense of the work that
+  // just finished; the assistant has nothing to do and the reader learns the
+  // offer is noise.
+  check('a narration of the turn is not a next step', sanitiseSuggestion('已将 notetxt 的内容改为 hello world。') === '', sanitiseSuggestion('已将 notetxt 的内容改为 hello world。'))
+  check('nor is a note that something was written', sanitiseSuggestion('已写入 notetxt') === '', sanitiseSuggestion('已写入 notetxt'))
+  check('nor the past tense of a file edit', sanitiseSuggestion('Updated the file with hello world') === '', sanitiseSuggestion('Updated the file with hello world'))
+  check('nor a sentence about a file that now holds something', sanitiseSuggestion('changed notetxt to hello world') === '', sanitiseSuggestion('changed notetxt to hello world'))
+  // The imperative that names the same change is exactly what a person types.
+  check('the imperative form is still a suggestion', sanitiseSuggestion('改为 hello world') === '改为 hello world', sanitiseSuggestion('改为 hello world'))
+  check('and so is the English imperative', sanitiseSuggestion('Change it to hello world') === 'Change it to hello world', sanitiseSuggestion('Change it to hello world'))
+  check('and an instruction that merely mentions done', sanitiseSuggestion('Mark the todo done') === 'Mark the todo done', sanitiseSuggestion('Mark the todo done'))
+}
+
+// ---------------------------------------------------------------------------
 // clipSentence
 // ---------------------------------------------------------------------------
 
@@ -613,6 +633,11 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   const answer = await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
   check('an unusable answer yields no chips', answer.items.length === 0, JSON.stringify(answer))
+  // The reason carries the first line the model wrote. On the live host the old
+  // reason said only how many lines and characters came back, which is the same
+  // sentence for prose, a refusal and an empty object -- three problems that need
+  // three different fixes, and no way to tell them apart without a debugger.
+  check('and the reason quotes what the model said', String(answer.reason).includes('cannot help'), String(answer.reason))
   check('and is remembered as a failure', suggestor.failed.size === 1, String(suggestor.failed.size))
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
   check('so the repaint does not pay again', llm.log.prepare.length === 1, String(llm.log.prepare.length))
