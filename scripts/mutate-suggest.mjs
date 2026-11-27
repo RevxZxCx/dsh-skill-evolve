@@ -1170,6 +1170,22 @@ const mutations = [
     to: '${text.length} characters',
     why: 'a live miss has to be readable without a debugger; without the sample the reason cannot tell prose from a refusal',
   },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'the same rename is offered twice',
+    from: '    if (items.some((kept) => sameOffer(kept, text))) continue',
+    to: '    if (false) continue',
+    why: 'the reader gets two chips for one decision and cannot tell which to press',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'a rename of another file is folded into the first',
+    from: '  if (target.length === 0 || target !== trailingTarget(b)) return false',
+    to: '  if (target.length === 0) return false',
+    why: 'two files, two renames, one chip: the target is the only thing telling them apart',
+  },
 ]
 
 // Baseline first: a workspace that already fails turns every mutation into a

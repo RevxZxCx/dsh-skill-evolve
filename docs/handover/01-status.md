@@ -6456,3 +6456,25 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **数字**：全量 4552 / 0；`suggest` 306 / 0；`mutate-suggest` 123 killed / 0 survived / 0 crashed；`perf-budget` 退出 0。
 
 **没有的东西**：命中率仍然没有量化口径。现在能说的是「采样里有一半服从契约，服从的那一半措辞是人话」，不是「命中率 60%」。要量化需要人逐条打分，这轮没做。
+
+## 2026-11-27（六）：真机第一次给出芯片，同义重复暴露（DEF-212）
+
+**真机三次回合**（`test` 工作区，会话 `session-796ca485`，模型切到 `deepseek-account:DeepSeek V4.1 Flash`）：
+
+| 回合 | 路由回答 | 判断 |
+| --- | --- | --- |
+| 任务「加一行 finished」 | `items: [], reason: ... first: "{\"suggestions\":[]}"` | 模型**主动弃权**，规则被服从，诊断字段把原文带出来了 |
+| 任务「新建 add.js」 | 三条芯片：`重命名为 add.js` / `把它改名成 add.js` / `再加一个 subtract 函数` | 判断正确（实际文件名是 `addjs`），但前两条同义重复 |
+
+**改动**
+
+| 文件 | 改动 |
+| --- | --- |
+| `packages/ui-evolve/lib/suggest.js` | 规则区加 `Never offer the same action twice`；新增 `trailingTarget` / `sameOffer` 并在 `collectSuggestions` 里折叠重命名族 |
+| `test/suggest.test.mjs` | 306 → 311（同义重命名折叠、两个文件的重命名都保留、不同操作都保留） |
+| `scripts/mutate-suggest.mjs` | 123 → 125 |
+| `test/mutations.test.mjs`、`docs/27` | 计数同步到 125 |
+
+**数字**：全量 4557 / 0；`suggest` 311 / 0；`mutate-suggest` 125 killed / 0 survived / 0 crashed；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
+
+**仍然没有的东西**：命中率没有量化口径。现在能说的是「模型会弃权、会看懂报告里的错文件名、会把同一动作说两遍」，这三件事都是真机观察，不是评分。

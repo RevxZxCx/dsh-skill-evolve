@@ -346,6 +346,20 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('junk after a brace is refused', parseSuggestions('{not json at all}', 3).length === 0)
   const deduped = parseSuggestions('["Run the tests.","Run the tests.","Run  the tests.","Then commit."]', 3)
   check('duplicates are dropped case- and space-insensitively', deduped.length === 2, JSON.stringify(deduped))
+  // The live host answered one row with two renames: `重命名为 add.js` and
+  // `把它改名成 add.js`. One decision, two chips, and the reader cannot tell
+  // which to press. Only same-target renames are folded -- two different
+  // operations on one file are the ordinary shape of a good row.
+  const rows = (list) => parseSuggestions(JSON.stringify({ suggestions: list }))
+  const doubled = rows(['重命名为 add.js', '把它改名成 add.js', '再加一个 subtract 函数'])
+  check('a rename worded twice is offered once', doubled.length === 2, JSON.stringify(doubled))
+  check('and the first wording is the one kept', doubled[0] === '重命名为 add.js', JSON.stringify(doubled))
+  const both = rows(['运行 add.js', '检查 add.js'])
+  check('two different operations on one file both survive', both.length === 2, JSON.stringify(both))
+  const apart = rows(['给 add.js 加测试', '重命名为 main.js'])
+  check('a rename of another file is a different offer', apart.length === 2, JSON.stringify(apart))
+  const twoFiles = rows(['重命名为 add.js', '重命名为 main.js'])
+  check('two renames of two files are two offers', twoFiles.length === 2, JSON.stringify(twoFiles))
   check('the count caps the list', parseSuggestions('["A one.","B two.","C three.","D four."]', 2).length === 2)
   check('a count below the minimum is raised', parseSuggestions('["A one.","B two.","C three.","D four."]', 1).length === MIN_SUGGESTIONS)
   const withJunk = parseSuggestions('["Run the tests.","`npm test`","https://x.dev","Then commit."]', 3)

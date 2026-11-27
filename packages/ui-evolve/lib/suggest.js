@@ -254,6 +254,7 @@ const INSTRUCTION = [
   '- ONE action per suggestion. Never join a second one with a comma, "and then",',
   '  "，", "并" or "然后". "Fix the cursor test, then explain the timing" is two',
   '  suggestions wearing one coat, and the reader cannot click half of it.',
+  '- Never offer the same action twice, even worded differently.',
   '- Start with the verb. No "Consider", "You could", "It might be worth",',
   '  "建议", "可以考虑".',
   '- Build on the latest request and on the report of the last turn. The earlier',
@@ -854,6 +855,45 @@ export function parseSuggestions(raw, count = MAX_SUGGESTIONS) {
  * @param {number} limit - how many to keep.
  * @returns {string[]} the suggestions, in order.
  */
+/**
+ * The file or path an offer ends with, lowercased, or an empty string.
+ *
+ * Only trailing tokens: a suggestion that names its target in the middle
+ * ("把 add.js 的测试补上") is a different sentence with a different subject, and
+ * comparing those is guesswork. The end of the line is where the object sits in
+ * both Chinese and English imperatives.
+ *
+ * @param {string} text - one sanitised suggestion.
+ * @returns {string} the trailing latin token, or ''.
+ */
+function trailingTarget(text) {
+  const hit = /([A-Za-z0-9_][A-Za-z0-9_.\/-]*)\s*$/.exec(text)
+  return hit === null ? '' : hit[1].toLowerCase()
+}
+
+const RENAME_WORD = /(?:重命名|改名|命名为|命名|rename)/i
+
+/**
+ * Whether two offers are the same action, worded twice.
+ *
+ * Deliberately narrow. On the live host the model answered `重命名为 add.js` and
+ * `把它改名成 add.js` in one row: two chips, one decision, and the reader cannot
+ * tell which one to press. Only same-target *renames* are folded here, because
+ * that is the pair a file created under the wrong name produces and because the
+ * general case cannot be judged without meaning. Two different operations on one
+ * file (`运行 add.js` / `检查 add.js`) must both survive: they are the ordinary
+ * shape of a good row.
+ *
+ * @param {string} a - an offer already kept.
+ * @param {string} b - the offer being considered.
+ * @returns {boolean} true when `b` says what `a` already said.
+ */
+function sameOffer(a, b) {
+  const target = trailingTarget(a)
+  if (target.length === 0 || target !== trailingTarget(b)) return false
+  return RENAME_WORD.test(a) && RENAME_WORD.test(b)
+}
+
 function collectSuggestions(values, limit) {
   const seen = new Set()
   const items = []
@@ -862,6 +902,7 @@ function collectSuggestions(values, limit) {
     if (text.length === 0) continue
     const identity = text.toLowerCase()
     if (seen.has(identity)) continue
+    if (items.some((kept) => sameOffer(kept, text))) continue
     seen.add(identity)
     items.push(text)
     if (items.length >= limit) break
