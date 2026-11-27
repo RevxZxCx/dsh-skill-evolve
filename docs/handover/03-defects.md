@@ -3997,3 +3997,34 @@ function lastSentenceEnd(window) {
 - 后处理加 `sameOffer(a, b)`：两条都含重命名族词、且**结尾文件名相同**时只留第一条。范围刻意窄 —— `运行 add.js` 与 `检查 add.js` 同样以同一文件名结尾，但它们是两个操作，必须都留下。
 
 **教训**：去重有两层，「同一串字符」和「同一件事」。第一层是字符串比较，第二层需要意义。能做的只有：把第二层的常见族（这里是重命名）用词表钉住，其余的交给模型自查，并明确写下「这条规则是止血不是治本」。
+
+## DEF-213 建议调用一直在「最便宜的思考」里打转，而真正的开关是「不要这一档」（2026-11-27）
+
+**现象**：每条建议要 12~31 秒才出现。`my-api/deepseek-flash` 上 `low` 一档实测 981~1657 思考 token，700 的预算经常被思考吃光（`finish: length`、零条建议、白等 31 秒）。
+
+**根因三层**，前两层在宿主，第三层在我的代码：
+
+1. 宿主 `@earendil-works/pi-ai/dist/api/openai-completions.js` 只在 provider 声明了 `compat.thinkingFormat` 时才发思考参数。`"deepseek"` 分支的原文是
+   `if (options?.reasoningEffort) params.thinking = { type: "enabled" } else params.thinking = { type: "disabled" }`。
+   **truthy 的 effort 是「开」，falsy 才是「关」。**
+2. `~/.dsh/settings.yaml` 的 magpie provider 没有 `compat`，宿主一个思考参数都没发；网关按自己的默认跑（实测「什么都不发」仍有 16 个思考 token），于是 `low` / `high` 在线上毫无区别。
+3. `withCheapestThinking` 在菜单里没有 disable 档时**退到 `low`** —— 一个 truthy 值。就算第 1、2 层修好，这一步仍会把「想便宜点」发成「认真想」。
+
+**网关上验证的六种写法**（同一句 prompt、同一模型、`max_tokens: 200`）：
+
+| 写法 | 思考 tokens | 耗时 |
+|---|---|---|
+| 什么都不发 | 16 | 541 ms |
+| `reasoning_effort: "none"` | 12 | 319 ms |
+| `enable_thinking: false` | 12 | 341 ms |
+| `reasoning: { effort: "none" }` | 10 | 255 ms |
+| `thinking: { type: "disabled" }` | **0** | **221 ms** |
+| `chat_template_kwargs: { enable_thinking: false }` | **0** | **215 ms** |
+
+**修法**：
+- `packages/ui-evolve/lib/suggest.js` 的 `withCheapestThinking` 先 `delete relaxed.reasoningEffort`，再只在菜单真的列出 `none/off/disabled/disable/minimal` 时加回去；**没有 disable 档就返回不带 effort 的 controls**。
+- `~/.dsh/settings.yaml` 的 magpie provider 加 `compat: { thinkingFormat: deepseek }`，让「不带 effort」真的落成 `thinking: { type: "disabled" }`。
+
+**为什么测试没抓到**：所有断言都在问「有没有按菜单里的 id 请求」——`reasoningEffort === 'low'` 这种。没有一条问「请求里**不该**有什么」。这类缺陷的形状是「多了东西」，而断言只检查「少了东西」。这次补的反向断言是 `'reasoningEffort' in stream === false`。
+
+**教训**：一个能力有三档（开 / 便宜 / 关）时，「选最便宜的」与「关掉」是两件不同的事，中间那一档经常贵得看不出来。设计开关前先问「关」在这个协议里长什么样——这里它长得像「什么都没有」。

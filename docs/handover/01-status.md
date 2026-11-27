@@ -6478,3 +6478,20 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 **数字**：全量 4557 / 0；`suggest` 311 / 0；`mutate-suggest` 125 killed / 0 survived / 0 crashed；`perf-budget` 退出 0；`docs` 57 / 0；`registration` 56 / 0。
 
 **仍然没有的东西**：命中率没有量化口径。现在能说的是「模型会弃权、会看懂报告里的错文件名、会把同一动作说两遍」，这三件事都是真机观察，不是评分。
+
+## 2026-11-27（七）· 关掉思考：从「最便宜的档」改成「不要这一档」
+
+**这一节解决的是速度，不是文案。** 真机上每条建议 12~31 秒才出现，`low` 一档实测 981~1657 思考 token，700 的预算经常被思考吃光（`finish: length`、零条建议）。
+
+| 改动 | 位置 | 内容 |
+|---|---|---|
+| 插件 | `packages/ui-evolve/lib/suggest.js` | `withCheapestThinking` 先 `delete relaxed.reasoningEffort`，只有菜单真的列出 `none/off/disabled/disable/minimal` 才加回去；去掉 `low` 兜底 |
+| 配置 | `~/.dsh/settings.yaml` | magpie provider 加 `compat: { thinkingFormat: deepseek }`（备份 `settings.yaml.bak-thinking`），让「不发 effort」落成 `thinking: {type:"disabled"}` |
+| 测试 | `test/suggest.test.mjs` | 311 → 313：反向断言 `'reasoningEffort' in stream === false`（含「宿主已解析出 high 也要拿掉」）、菜单同时有 `minimal`/`none` 时选 `none` |
+| 突变 | `scripts/mutate-suggest.mjs` | 125 → 126：新增「resolver 已选的 effort 被留下」；重锚列表顺序与拼写两条 |
+
+**实测依据**（网关、同 prompt、`max_tokens: 200`）：什么都不发 16 思考 token / 541 ms；`thinking: {type:"disabled"}` **0 / 221 ms**；`chat_template_kwargs.enable_thinking:false` **0 / 215 ms**；`reasoning_effort:"none"` 被忽略（12 / 319 ms）。
+
+**数字**：全量 4557 / 0；`suggest` 313 / 0；`mutate-suggest` 126 killed / 0 survived / 0 crashed；`perf-budget` 退出 0。
+
+**尚未验证的一点**：`settings.yaml` 的 `compat` 是否要宿主重启才生效，只能在重启后用一条真实回合测——预期建议在 1~3 秒内出现，而不是 12~31 秒。

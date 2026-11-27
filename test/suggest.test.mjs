@@ -69,7 +69,7 @@ const GOOD = JSON.stringify({ suggestions: ['Run the failing cursor test.', 'Fix
  * @param {object} [options] - behaviour switches.
  * @returns {object} the fake service plus its call log.
  */
-function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined, efforts = undefined } = {}) {
+function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undefined, streamThrows = undefined, catalog = [{ id: 'cat', models: [{ id: 'model-c' }] }], delay = undefined, efforts = undefined, resolved = undefined } = {}) {
   // `efforts` is the reasoning menu the prepared model reports, the way the
   // host's `prepareCall(config, signal, configure)` hands the adapter's
   // capabilities to the configure callback. Without it this fake cannot express
@@ -86,6 +86,9 @@ function fakeLlm({ text = GOOD, finish = { kind: 'stop' }, prepareThrows = undef
       log.prepare.push(route)
       if (prepareThrows !== undefined) throw prepareThrows
       let config = { provider: route.provider, model: route.model, maxTokens: route.maxTokens }
+      // The real host resolves an effort before handing the controls over, so a
+      // fake that starts empty cannot see code that fails to remove one.
+      if (resolved !== undefined) config.reasoningEffort = resolved
       if (typeof configure === 'function') {
         log.configure += 1
         config = configure(config, { reasoning: efforts === undefined ? undefined : { efforts } })
@@ -871,14 +874,16 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 
 {
   // A chip that arrives twenty seconds after the turn is a chip nobody reads:
-  // measured on the host's gateway, the same prompt took 14.5 s with no effort
-  // asked for and 8.7 s at `low`. The effort may only be asked for when the
-  // prepared model lists it, because an unknown one is an error, not a hint.
+  // measured on the host's gateway, the same prompt took 221 ms and zero
+  // reasoning tokens with no effort asked for, and 12.6 s with 1657 at `low`.
+  // Asking for nothing is how thinking gets switched off: the `"deepseek"`
+  // compat branch sends `{ type: "disabled" }` for a falsy effort and
+  // `{ type: "enabled" }` for any truthy one.
   const llm = fakeLlm({ efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-  check('the call asks for the cheapest thinking', llm.log.prepare.length === 1 && llm.log.configure === 1, `${llm.log.prepare.length}/${llm.log.configure}`)
-  check('which is the low effort', llm.log.stream[0]?.reasoningEffort === 'low', String(llm.log.stream[0]?.reasoningEffort))
+  check('the call is prepared and dispatched once', llm.log.prepare.length === 1 && llm.log.configure === 1, `${llm.log.prepare.length}/${llm.log.configure}`)
+  check('and asks for no effort at all', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
 }
 
 {
@@ -915,12 +920,14 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
 }
 
 {
-  // A reasoning model that offers no way to stop thinking: the cheapest non-zero
-  // effort is the best available, and it is still much better than the default.
+  // This is the live host's menu: `low / high / max`, no disable entry. An
+  // effort here is read by the adapter as `thinking: { type: "enabled" }`, so
+  // asking for the cheapest one is what turned thinking on and cost 12-31 s a
+  // turn. Asking for nothing is what reads as disabled.
   const llm = fakeLlm({ efforts: [{ id: 'medium', name: 'Medium' }, { id: 'low', name: 'Low' }, { id: 'high', name: 'High' }] })
   const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
   await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
-  check('a menu with no off switch falls to the cheapest effort', llm.log.stream[0]?.reasoningEffort === 'low', String(llm.log.stream[0]?.reasoningEffort))
+  check('a menu of only positive efforts is also asked for nothing', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
 
 {
   // A menu that exists but offers none of the ids this code knows: asking for
@@ -932,6 +939,25 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   check('a menu with no entry this code knows is left alone', llm.log.stream[0] !== undefined && llm.log.stream[0].reasoningEffort === undefined, String(llm.log.stream[0]?.reasoningEffort))
 }
 }
+{
+  // Two disable spellings at once: the order decides, and "none" is the one
+  // that means "no thinking" rather than "a little".
+  const llm = fakeLlm({ efforts: [{ id: 'minimal', name: 'Minimal' }, { id: 'none', name: 'None' }] })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('none beats minimal when the menu offers both', llm.log.stream[0]?.reasoningEffort === 'none', String(llm.log.stream[0]?.reasoningEffort))
+}
+
+{
+  // The host resolves an effort before the configure callback runs. A menu with
+  // no disable entry has to end up with no effort at all -- keeping the
+  // resolved one is what leaves thinking switched on.
+  const llm = fakeLlm({ efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }], resolved: 'high' })
+  const suggestor = new Suggestor({ config: config(), llm, now: clock().now })
+  await suggestor.suggestions({ agentId: 'a', view: viewWith(snapshot(1, 'The fixture is stale.')) })
+  check('an effort the host already resolved is taken back out', 'reasoningEffort' in (llm.log.stream[0] ?? {}) === false, JSON.stringify(llm.log.stream[0]?.reasoningEffort))
+}
+
 // ---------------------------------------------------------------------------
 // an answer that was cut off
 // ---------------------------------------------------------------------------

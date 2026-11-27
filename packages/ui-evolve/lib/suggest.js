@@ -158,45 +158,48 @@ export const SUGGEST_TTL_MS = 15 * 60 * 1000
 /**
  * Turn thinking off when the model admits to being able to.
  *
- * Measured through the gateway the host uses, on the same prompt: no effort
- * asked for took 14.5 s and 187 reasoning tokens, `low` took 8.7 s and 96. A
- * chip that arrives twenty seconds after the turn is a chip nobody reads, so
- * the difference is the difference between shipping this and not.
+ * Measured through the gateway the host uses, on the same prompt: leaving the
+ * effort out entirely took 221 ms and zero reasoning tokens, `low` took 12.6 s
+ * and 1657. A chip that arrives twenty seconds after the turn is a chip nobody
+ * reads, so the difference is the difference between shipping this and not.
  *
- * This function did nothing at all until now, and that is why the suggestions
- * were slow and occasionally empty. `info.reasoning.efforts` is a *list* of
- * `{id, name}` -- the host validates it as a list, rejects duplicates, and
- * requires `defaultEffort` to be one of its ids (`dsh-llm` throws
- * `INVALID_MODEL_REASONING` otherwise). Reading it as an object keyed by effort
- * id meant `hasOwnProperty(efforts, 'none')` was always false, so no effort was
- * ever requested and every call ran at the model's own default: a reasoning
- * model then spent the whole output budget thinking (`completion_tokens: 220,
- * reasoning_tokens: 220, finish: length`, content empty). Reading the ids out
- * of the list is the fix.
+ * Leaving it out is the whole trick, and it is not obvious from this side. The
+ * host only sends a thinking parameter when the provider declares a
+ * `compat.thinkingFormat`; for `"deepseek"` the branch is
+ * `if (options?.reasoningEffort) params.thinking = { type: "enabled" } else
+ * params.thinking = { type: "disabled" }` (pi-ai, openai-completions.js). So a
+ * truthy effort turns thinking ON, and the way to turn it OFF is to ask for
+ * nothing at all. Asking for `low` -- which is what this used to do when the
+ * model listed no disable entry -- is exactly how a request that meant "be
+ * cheap" arrived as "think hard": the gateway then ran its own default and
+ * spent 1000-1700 reasoning tokens, 12-31 s, and sometimes the entire output
+ * budget (`finish: length`, no answer) on every single turn.
  *
- * Off before low, and the order is the point: `none` / `off` / `disabled` are
- * the entries that actually stop thinking, and only a model that offers no
- * disable entry is worth asking for the cheapest non-zero effort. Every id is
- * checked against the list first, because asking for one the adapter does not
- * know is an error rather than a fallback -- and the id that goes on the wire
- * is the model's own spelling, since the host compares it exactly.
+ * The ids are read out of `info.reasoning.efforts`, a *list* of `{id, name}`
+ * -- the host validates it as a list and requires `defaultEffort` to be one of
+ * its ids (`dsh-llm` throws `INVALID_MODEL_REASONING` otherwise). Reading it
+ * as an object keyed by effort id meant `hasOwnProperty(efforts, 'none')` was
+ * always false, so nothing was ever asked for here; the id that goes on the
+ * wire is the model's own spelling, since the host compares it exactly.
  *
  * @param {any} controls - the sampling controls already resolved for this call.
  * @param {any} info - the prepared model's capabilities.
  * @returns {any} the controls to dispatch with.
  */
 function withCheapestThinking(controls, info) {
+  const relaxed = { ...controls }
+  delete relaxed.reasoningEffort
   const efforts = info?.reasoning?.efforts
-  if (!Array.isArray(efforts)) return controls
+  if (!Array.isArray(efforts)) return relaxed
   const byId = new Map()
   for (const effort of efforts) {
     if (typeof effort?.id === 'string' && effort.id.length > 0) byId.set(effort.id.toLowerCase(), effort.id)
   }
-  for (const wanted of ['none', 'off', 'disabled', 'disable', 'minimal', 'low']) {
+  for (const wanted of ['none', 'off', 'disabled', 'disable', 'minimal']) {
     const exact = byId.get(wanted)
-    if (exact !== undefined) return { ...controls, reasoningEffort: exact }
+    if (exact !== undefined) return { ...relaxed, reasoningEffort: exact }
   }
-  return controls
+  return relaxed
 }
 
 /**
