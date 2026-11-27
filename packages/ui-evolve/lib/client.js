@@ -4705,6 +4705,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * The page's one listener for coming back to the foreground.
      */
     let visibilityWatch = false
+    // Two listeners can report the same return; this is how long the second one
+    // is treated as the echo of the first rather than a new return.
+    const RETURN_QUIET_MS = 500
+    let lastReturn = 0
 
     function subscribeSuggest(listener) {
       suggest.listeners.add(listener)
@@ -5041,8 +5045,20 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       if (visibilityWatch === true) return
       if (typeof document === "undefined" || typeof document.addEventListener !== "function") return
       visibilityWatch = true
-      document.addEventListener("visibilitychange", () => {
-        if (document.hidden === true) return
+      // Two events for one return, because they answer different questions.
+      // `visibilitychange` is the page being hidden (minimised, another tab,
+      // the OS putting the app away); `focus` is the window being handed back
+      // while it never stopped being visible, which is what switching to
+      // another application and back looks like in a desktop shell. Only one of
+      // them may fire, and which one is the shell's business, not ours.
+      const refreshOnReturn = () => {
+        if (typeof document.hidden === "boolean" && document.hidden === true) return
+        // A return is one event in the reader's head; the two listeners can both
+        // fire for it, and a second identical request a millisecond later is
+        // noise in the host's log.
+        const at = Date.now()
+        if (at - lastReturn < RETURN_QUIET_MS) return
+        lastReturn = at
         // The observer was frozen along with the page, so the busy flag is
         // re-read rather than trusted -- and a turn that began and ended while
         // the page was away has still ended the offer that was on screen.
@@ -5054,7 +5070,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         }
         if (suggest.sessionId === "") return
         void loadSuggest(suggest.sessionId)
-      })
+      }
+      document.addEventListener("visibilitychange", refreshOnReturn)
+      if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+        window.addEventListener("focus", refreshOnReturn)
+      }
     }
 
     /**

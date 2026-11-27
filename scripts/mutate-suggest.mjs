@@ -766,6 +766,22 @@ const mutations = [
   {
     file: client,
     suites: view,
+    label: 'an unfocused window coming back is never noticed',
+    from: '        window.addEventListener("focus", refreshOnReturn)',
+    to: '        void 0',
+    why: 'a desktop window covered by another application may never report `document.hidden`, so `visibilitychange` alone watches for a return that is never announced; the reader whose offer only appeared after switching sessions was in exactly that window',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'one return is reported twice and buys twice',
+    from: '        if (at - lastReturn < RETURN_QUIET_MS) return',
+    to: '        if (false) return',
+    why: 'the page and the window both report the same return, so without the echo window every return spends two identical requests on an answer that cannot have changed between them',
+  },
+  {
+    file: client,
+    suites: view,
     label: 'coming back to the page does not ask again',
     from: '        if (suggest.sessionId === "") return\n        void loadSuggest(suggest.sessionId)',
     to: '        void 0',

@@ -6,7 +6,7 @@ status: verified
 title: 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件
 packages: [ui-evolve]
 baseline: 4513 passed / 0 failed（client 1096/0、suggest 287/0、session-state 376/0、api 429/0、mutations 55/0、mutate-suggest 110/110 全杀、perf 退出 0）
-pending_verify: 无（2026-11-27 16:10 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；visibilitychange 触发且只触发一次 /suggestions 请求）
+pending_verify: 无（2026-11-27 16:10/16:40 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；`focus` 与 `visibilitychange` 各触发一次、同一秒内的第二次报告不重复请求；过期答案返回 `stale:true, restored:true` 且界面只剩幽灵）
 ---
 
 # 2026-11-27 · 一条建议该活多久
@@ -99,12 +99,30 @@ pending_verify: 无（2026-11-27 16:10 在 /pair-app 真机验证：回合开始
 2. **重载不会丢**。`Page.reload` 之后 469 ms 读到 `shown=1` 且三条是第二轮的内容
    （`加个换行符` / `看一下文件内容` / `把文件名改成 note.txt`），幽灵同时可见。
    464 ms 内返回即证明这次是缓存/磁盘回复而不是重新调用（重调一次要 5 s 量级）。
-3. **回前台会补一次**。`document.dispatchEvent(new Event('visibilitychange'))` 之后计到
-   **恰好一次** `/suggestions` 请求（`__visLog` 长度 0 → 1），没有重复请求风暴。
+3. **回前台会补一次**，而且两路通知都认。`document.dispatchEvent(new Event('visibilitychange'))`
+   与 `window.dispatchEvent(new Event('focus'))` 各自计到**恰好一次** `/suggestions` 请求；
+   同一秒内的第二次派发不再发请求（回声窗口 500 ms）。
+   这一条是复验时才发现漏的：桌面壳里「切到别的应用再切回来」往往**不会**让页面变成 hidden，
+   只有 `focus` 会响。只监听 `visibilitychange` 等于只监听一种可能根本不发生的返回。
 
 另外确认落盘：`~/.dsh/plugin-data/skill-evolve/sessions/session-796ca485-….json` 里有
 `offer: {text, at, turn: 2}`，`turn` 与 `previous.turn` 相等；早先一个会话
 （`session-88a98a6e`，turn 33）同样有 `offer`，说明这条路径在多个会话上都在写。
+
+### 复验第二轮（16:40）：过期的答案确实只留幽灵，而且是从磁盘读回来的
+
+隔了半个多小时再问同一个会话，路由返回：
+
+```json
+{"enabled":true,"items":["加个换行符"],"at":1795767213162,"cached":true,"restored":true,"turn":2,"stale":true}
+```
+
+`restored: true` 说明这一句是从**状态文件**读回来的（内存里那份已经不在了），`stale: true` 说明它过了窗口，
+而界面同一时刻是 `data-shown=0`、`.dsse-suggest-item` 计数 0、幽灵 `data-shown=true` ——
+**三条芯片撤下、输入框那一句留着，且没有为这个回合再付一次钱**。这就是裁决里要的降级。
+
+同一轮还验了「回来的通知有两路」：`window.dispatchEvent(new Event('focus'))` 之后恰好一次
+`/suggestions` 请求；紧接着在同一秒里再派发一次，**没有再发请求**（回声窗口生效）。
 
 ### 复验时看到、但**没有**当成缺陷处理的一处
 

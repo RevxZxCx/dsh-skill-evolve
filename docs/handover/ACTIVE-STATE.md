@@ -16,7 +16,7 @@
 ## 3. 待闭环真机验收 / 阻塞项
 
 - **2026-11-27** [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)：重启宿主后确认芯片不再以句号结尾、不再出现「我来…」「Done.」，且推理模型的建议在数秒内到达
-- **2026-11-27** [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md)：无（2026-11-27 16:10 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；visibilitychange 触发且只触发一次 /suggestions 请求）
+- **2026-11-27** [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md)：无（2026-11-27 16:10/16:40 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；`focus` 与 `visibilitychange` 各触发一次、同一秒内的第二次报告不重复请求；过期答案返回 `stale:true, restored:true` 且界面只剩幽灵）
 - **2026-11-27** [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md)：无
 - **2026-11-27** [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md)：需重启宿主后在 /pair-app 观察一次推理模型回合的建议耗时与 finish reason
 - **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现

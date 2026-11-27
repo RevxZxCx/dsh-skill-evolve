@@ -8543,7 +8543,10 @@ async function openStream(instance) {
   // session that is already open. Without a repair the only way to see the offer
   // was to switch sessions and come back -- which is exactly what the reader
   // reported doing.
-  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS) })
+  // A frozen clock so the echo window is a fact of the fixture rather than a
+  // race: the two return events arrive in the same millisecond in a real page
+  // and in this one alike.
+  const instance = boot({ routes: suggestRoute(SUGGEST_TEXTS), now: 1000 })
   instance.module.apply(instance.ctx)
   const props = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
   const first = await settledSeat(instance, 'suggestions', props)
@@ -8583,6 +8586,36 @@ async function openStream(instance) {
     'two slots share one visibility listener',
     instance.document.visibilityListeners.length === 1,
     String(instance.document.visibilityListeners.length),
+  )
+
+  // `visibilitychange` is not the only way a reader comes back. A desktop window
+  // that was covered by another application, or merely unfocused, may never
+  // report `document.hidden` at all -- only `focus` fires. Watching one event is
+  // therefore watching for a return that may never be announced; the reader's
+  // report ("I had to switch sessions to make it appear") is what that looks
+  // like from their side.
+  const focusHandlers = instance.listeners.filter((row) => row.type === 'focus').map((row) => row.handler)
+  check('the return is watched on the window too', focusHandlers.length === 1, String(focusHandlers.length))
+
+  // The same return can arrive twice (the page hidden *and* the window focused).
+  // One return is one request: the second report is an echo, not news.
+  const settledCount = askedCount()
+  for (const handler of focusHandlers) handler()
+  await settle()
+  check(
+    'the second report of one return buys nothing',
+    askedCount() === settledCount,
+    `${askedCount() - settledCount} extra request(s)`,
+  )
+
+  // A return that is genuinely later than the echo window is news again.
+  instance.clock.at += 1000
+  for (const handler of focusHandlers) handler()
+  await settle()
+  check(
+    'a later return from an unfocused window asks again',
+    askedCount() === settledCount + 1,
+    `${askedCount() - settledCount} request(s)`,
   )
 }
 
