@@ -508,7 +508,9 @@ const SECOND_ACTION_LATIN = /^(?:explain|describe|update|add|write|run|check|ver
  * trailing terminator is gone, because two sentences is prose, and prose is
  * what the reader objected to.
  */
-const QUESTION_OR_SHOUT = /[?？！!](?=\s|$)/
+// Anchored to the end: a `?` in the middle is usually code (`a ? b : c`) or a
+// placeholder, and rejecting those took real steps out of the row.
+const QUESTION_OR_SHOUT = /[?？！!]\s*$/
 // A run of stops, not one: a chip reading "Wait..." has to become "Wait", and
 // removing a single dot left "Wait.." behind.
 const TRAILING_TERMINATOR = /[.。]+$/
@@ -521,7 +523,10 @@ const TRAILING_TERMINATOR = /[.。]+$/
 // asked about, and reading them as a sentence end dropped "Use `?.` instead"
 // on the live fixture.
 // abbreviations is not worth the maintenance for one missing chip.
-const INNER_SENTENCE_END = /[。！？]|(?<![?!.])[.!?](?=\s)/
+// A `?` or `!` only ends a sentence when a word precedes it. In a step it is
+// usually an operator with spaces around it (`a ? b : c`), and the earlier rule
+// read that as two sentences and dropped the whole candidate.
+const INNER_SENTENCE_END = /[。！？]|(?<=[A-Za-z0-9)\]])[.!?](?=\s)/
 
 /**
  * Openings that mean the model answered as the assistant, not as the reader.
@@ -822,9 +827,9 @@ export function parseSuggestions(raw, count = MAX_SUGGESTIONS) {
     const rescued = collectSuggestions(readSuggestionLines(body), limit)
     if (rescued.length > items.length) items = rescued
   }
-  // One chip is a button, not a choice. Below the minimum the row is not drawn,
-  // and returning a single item would put the composer in the position of
-  // deciding whether to draw a row it was given one thing for.
+  // The floor is one, so this is a passthrough: a single chip is drawn, and an
+  // empty list is the model declining. Kept as an explicit return rather than
+  // folded into the caller so the floor stays one named place to change.
   return items.length >= MIN_SUGGESTIONS ? items : []
 }
 

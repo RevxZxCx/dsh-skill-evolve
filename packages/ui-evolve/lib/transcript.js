@@ -689,9 +689,13 @@ class Transcript {
     // away: the history is what a later offer reads as background, and a turn
     // that is never folded (abandoned) must not contribute to it -- the branch
     // above already cleared `asked` for exactly that reason.
-    rememberEarlierAsk(this.asks, this.asked)
     this.interrupted = false
     this.previous = this.snapshot()
+    // Pushed *after* the snapshot. `previous.asked` already carries this request
+    // as <latest_request>, so pushing first put the same sentence in <requests>
+    // too, under a note that says the earlier requests are background and not
+    // the thing to answer. The history is for the turns before this one.
+    rememberEarlierAsk(this.asks, this.asked)
     this.turn = undefined
   }
 

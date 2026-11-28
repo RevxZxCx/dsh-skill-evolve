@@ -1519,6 +1519,15 @@ const wrote = (id, path, extra) => ({
   const live = store.snapshot()
   check('the snapshot carries the history', Array.isArray(live.asks) && live.asks.length === 1, JSON.stringify(live.asks))
   check('the history does not include the request in progress', live.asks.includes('now change the title') === false, JSON.stringify(live.asks))
+  // The folded turn's own request must not be in its history: `previous.asked`
+  // already carries it as the latest request, and a copy in <requests> would be
+  // sent twice, the first time under a note calling it background.
+  check(
+    'a folded turn does not call its own request background',
+    store.previous.asks.includes('look at the README first') === false,
+    JSON.stringify(store.previous.asks),
+  )
+  check('and it is still the latest request', store.previous.asked === 'look at the README first', JSON.stringify(store.previous.asked))
   check('the report is what the last turn said', store.previous.report === 'Read it.', JSON.stringify(store.previous.report))
   check('and the joined narration is unchanged beside it', store.previous.said === 'Read it.', JSON.stringify(store.previous.said))
 }

@@ -5067,3 +5067,13 @@ overlay 锚点 `z-index:auto`，宿主输入框的 scroll 层 `position:relative
 选择把方言写在 `cordis.patch.yml` 而不是 `settings.yaml`：后者是宿主启动时根据 profile 重新生成的产物，改动会在下次启动时消失（DEF-216）。
 
 代价：这条链路依赖用户机器上的 profile 配置，插件自己无法保证；换一台机器要重新声明一次，否则退回「服务端默认」，即思考开着。
+
+## D-272 · 测试替身必须执行它替的那条生命周期（2026-11-28）
+
+**背景**：R-126 发现 `watchVisibility` 的两个监听器从不移除，而 `test/client.test.mjs` 的 `ctx.effect` 桩丢弃了 `register()` 返回的 cleanup，使插件 teardown 在所有测试里都是死代码。
+
+**决定**：客户端测试桩收集 `ctx.effect` 的返回值并提供 `instance.disposePlugin()`；凡是有 teardown 的产品路径，测试必须至少有一条断言在「跑完 teardown 之后」取值。
+
+**理由**：替身只提供参数、不执行生命周期，等于把整个清理路径从测试里删掉，而它看起来仍是绿的——这比缺一条断言更糟，因为它伪装成覆盖。
+
+**代价**：teardown 里的副作用（清样式、取消观察）现在会在这些测试里真的发生，个别断言要按「卸载后」的世界改写。

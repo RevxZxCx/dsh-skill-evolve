@@ -6549,3 +6549,19 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 ```
 
 幽灵同步显示第一条，键帽是 `Tab`；`[data-slot-error]` 0。修复前同一轮是 21 秒、0 条、`finish: max-tokens`。即「关思考」这条链在真机上闭合：217 ms 的网关调用 + 0.3 秒的宿主侧开销。
+
+## 2026-11-28（十一）· 18 个提交的补审
+
+**范围**：`7b9df8b..HEAD`，18 个提交、48 文件（生产 13 文件 +1895/−200）。
+
+**评审方式**：队友与子代理连续失败两轮（7 名队友报「后台子代理失败、无收尾消息」，`workflow` 返回 `null`，`spawn_teammate` 撞成员上限 8），先自审 + 机械验证，再重派一名子代理成功补审引擎侧。
+
+**修掉五条**：
+- `client.js` `watchVisibility` 的两个监听器从不移除（DEF-217），并把测试替身改成真的执行 `ctx.effect` 的 teardown（新 `instance.disposePlugin()`）——正是它让上一条隐身。
+- `transcript.js` `endTurn` 先推历史再取快照，导致本回合请求被当成背景又发一遍（DEF-218）。
+- `suggest.js` 两处把代码里的 `?` 当成问句/句末，杀掉整行建议（DEF-219）。
+- `suggest.js` `MIN_SUGGESTIONS = 1` 之后仍在论证「单条不画」的死注释。
+
+**缓一条**：`interrupted` 不落盘，中断后重启会绕过闸门（窗口窄，代价是一次 schema 扩展，记在 R-126）。
+
+**数字**：全量 **4575 / 0**；`suggest` 323/0、`transcript` 233/0、`client` 1100/0；`mutate-suggest` **133 / 133**；`perf-budget` 退出 0；`docs` 57/0；`registration` 56/0。

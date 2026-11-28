@@ -4129,3 +4129,43 @@ params.chat_template_kwargs = { enable_thinking: !!options?.reasoningEffort, pre
 同时把插件简化成「永不传 effort」：在每种 pi-ai 方言里，真值 effort 都是「开」（deepseek 分支发 `thinking: {type:"enabled"}`，qwen-chat-template 发 `enable_thinking: true`），**连读作 off 的 id 也不例外**。于是 `withCheapestThinking` 只剩 `delete`，`run` 里那次兜底也改成无条件 `delete`，`DISABLE_EFFORTS` 名单整个删掉——「选一个最便宜的 off id」这个思路本身就是错的。
 
 **教训**：**改配置前先问这份配置是谁写的。** 一个看着像配置文件的东西，可能只是另一个文件的渲染产物；改产物等于给下一次启动准备一个干净的撤销。
+
+## DEF-217 切回前台的两个监听器从来没有被移除
+
+**现象**：插件重载（客户端 bundle 重新加载）之后，「切回前台自动刷新建议」失效，页面不报错。重载前的实例仍在页面上，只是 `bridge.open` 已被 teardown 置为 `false`。
+
+**根因一（产品）**：`packages/ui-evolve/lib/client.js` 的 `watchVisibility()` 注册了两个闭包——`document.addEventListener("visibilitychange", refreshOnReturn)` 与 `window.addEventListener("focus", refreshOnReturn)`——却不保存句柄；`let visibilityWatch = false` 只记住「装过」。同一个 teardown 里 `runningWatch.disconnect()` 是做了的，两者待遇不同只因为一个是对象、一个是布尔。
+
+**根因二（测试替身）**：`test/client.test.mjs` 的 `ctx.effect` 桩写成 `return register()`，把 `register()` 返回的 cleanup 丢掉。于是 `instance.renderer.unmount()` 只跑 React effect 的清理，插件的 `ctx.effect` teardown 在**所有**测试里从未执行——那份清理代码是死代码，我写什么断言都看不见它。
+
+**修法**：`visibilityWatch` 改为「卸载函数或 `null`」，teardown 里 `visibilityWatch()` 然后置 `null`；测试桩新增 `ctxCleanups` 与 `instance.disposePlugin()`，并断言「teardown 之后 visibility 监听器 0 个、focus 监听器 0 个」。
+
+**为什么测试没抓到**：清理代码根本没被执行。这不是断言写弱了，是断言没有对象——`unmount()` 跑完什么都没发生，测试自然是绿的。
+
+**教训**：①替身要执行它替的那条生命周期，不只是提供它要的参数；②「注册了」和「能撤销」是两件事，注册时没留句柄，撤销就无从写起。
+
+## DEF-218 本回合的请求被当成「更早的请求」又发了一遍
+
+**现象**：每个完成回合的提示词里，刚刚那句请求出现两次——一次在 `<requests note="earlier requests … background, not the thing to answer">`，一次在 `<latest_request>`。前者明确告诉模型「这不是要回答的东西」，而它正是要回答的东西。
+
+**根因**：`packages/ui-evolve/lib/transcript.js` 的 `endTurn` 先 `rememberEarlierAsk(this.asks, this.asked)`、再 `this.previous = this.snapshot()`，而 `snapshot()` 会 `asks: this.asks.slice()`。于是折叠下来的那份快照把本回合请求写进了历史。
+
+**修法**：快照先取、历史后推。`previous.asked` 已经是 `<latest_request>`，历史只该有它之前的那些。
+
+**为什么测试没抓到**：历史相关断言问的是 `store.asks`（对象自己），不是 `previous.asks`（发出去的那份），而两者在旧顺序下恰好都不为空——断言看起来在测同一件事，其实测的是另一个字段。
+
+**教训**：一个字段被「取快照」和「继续累加」同时引用时，两行的先后就是一个语义决定，不是排版问题。
+
+## DEF-219 一个带空格的问号把整行建议杀掉了
+
+**现象**：唯一候选取 `Fix the a ? b : c ternary` 时，`sanitiseSuggestion` 返回空 → `parseSuggestions` 返回 `[]` → 整行消失，并且这次失败被记进 60 秒的失败记忆。
+
+**根因（两处）**：
+1. `QUESTION_OR_SHOUT = /[?？！!](?=\s|$)/` 把「问号后有空白」当成问句，而代码里的三目运算符正是两旁带空格。
+2. 更早的一道闸门 `INNER_SENTENCE_END` 也把 `?`/`!` 当句末，因此即使修好第 1 条，候选仍会被判成「两句话」。
+
+**修法**：`QUESTION_OR_SHOUT` 锚定到文本末尾（`/[?？！!]\s*$/`）；`INNER_SENTENCE_END` 的 ASCII 分支要求句点前是词字符（`(?<=[A-Za-z0-9)\]])[.!?](?=\s)`），于是 `a ? b` 不再算句末，而 `Really? Then…` 仍然算。
+
+**为什么测试没抓到**：上一轮修过 `Use ?. instead of the || chain`，看起来覆盖了「代码里的问号」，但那一条的问号前是反引号、且后面紧跟 `.`，走的是另一条分支。**同一个字符的不同位置，是不同的问题。**
+
+**教训**：修一条「误杀」时，要把这个字符可能出现的位置列一遍（词首、词尾、孤立的、带空格的），只修报告者给的那一处等于等下一次报告。

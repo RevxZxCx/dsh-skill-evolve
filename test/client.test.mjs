@@ -544,6 +544,9 @@ function boot(options) {
   const settings = options ?? {}
   const registrations = []
   const effects = []
+  // What `ctx.effect` handed back. Nothing ran these before, so the plugin's own
+  // teardown was dead code in every test.
+  const ctxCleanups = []
   const injectedNames = []
   // Which optional service groups `apply` asked for. Recorded even when the
   // service is missing, so "the plugin asks and copes" can be told apart from
@@ -909,7 +912,12 @@ function boot(options) {
   const ctx = {
     effect(register, label) {
       effects.push(label)
-      return register()
+      const cleanup = register()
+      // Kept, so `disposePlugin()` really runs the plugin's teardown. Discarding
+      // it left the whole teardown path unexecuted by every test in this file --
+      // which is how a listener that is never removed stayed invisible.
+      if (typeof cleanup === 'function') ctxCleanups.push(cleanup)
+      return cleanup
     },
     // Optional services only. A child context exists when the service does, and
     // its absence is what a Host without a right sidebar looks like — the plugin
@@ -1183,6 +1191,21 @@ function boot(options) {
     },
     captured,
     renderer,
+    /**
+     * Run the plugin's own effect cleanup, as unloading it would.
+     *
+     * @returns {void}
+     */
+    disposePlugin() {
+      while (ctxCleanups.length > 0) {
+        const cleanup = ctxCleanups.pop()
+        try {
+          cleanup()
+        } catch {
+          // The host reports a failing cleanup; here it must not mask the assertion.
+        }
+      }
+    },
     seat(name) {
       return registrations.find((row) => row.spec.id.endsWith(`:${name}`)).Component
     },
@@ -8616,6 +8639,16 @@ async function openStream(instance) {
     'a later return from an unfocused window asks again',
     askedCount() === settledCount + 1,
     `${askedCount() - settledCount} request(s)`,
+  )
+  // A plugin reload keeps the page alive, so a listener left behind belongs to
+  // an instance whose bridge is closed: it either leaks (new module) or shadows
+  // the new one (same module, guard still true). Teardown has to take it back.
+  instance.disposePlugin()
+  const focusLeft = instance.listeners.filter((row) => row.type === 'focus').length
+  check(
+    'teardown takes the return listeners back',
+    instance.document.visibilityListeners.length === 0 && focusLeft === 0,
+    `${instance.document.visibilityListeners.length} visibility, ${focusLeft} focus`,
   )
 }
 

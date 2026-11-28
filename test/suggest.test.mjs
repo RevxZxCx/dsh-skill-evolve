@@ -270,6 +270,15 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   // mark ends a sentence, or every chip naming `!=` or `!important` disappears.
   check('a bang inside an operator is not a shout', sanitiseSuggestion('Replace != with !==') === 'Replace != with !==', sanitiseSuggestion('Replace != with !=='))
   check('a question mark inside an operator is not a question', sanitiseSuggestion('Use ?. instead of the || chain') === 'Use ?. instead of the || chain', sanitiseSuggestion('Use ?. instead of the || chain'))
+  // Anchored to the end, so only a step that *is* a question is dropped. The
+  // earlier lookahead read any `?` followed by a space as one, which took this
+  // whole row away and remembered the call as failed for a minute.
+  check(
+    'a ternary in the middle is not a question',
+    sanitiseSuggestion('Fix the a ? b : c ternary') === 'Fix the a ? b : c ternary',
+    sanitiseSuggestion('Fix the a ? b : c ternary'),
+  )
+  check('but a step that ends in a shout is still not a step', sanitiseSuggestion('Run the suite now!') === '', sanitiseSuggestion('Run the suite now!'))
   // The voice and refusal lists are anchored at the end of the string, so they
   // have to be matched against the text without its terminator or a period
   // defeats them: every one of these came back as a chip before.

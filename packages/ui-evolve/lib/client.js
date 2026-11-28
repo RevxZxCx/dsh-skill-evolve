@@ -4704,7 +4704,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
     /**
      * The page's one listener for coming back to the foreground.
      */
-    let visibilityWatch = false
+    /** Unregisters the two return listeners, or null when they are not installed. */
+    let visibilityWatch = null
     // Two listeners can report the same return; this is how long the second one
     // is treated as the echo of the first rather than a new return.
     const RETURN_QUIET_MS = 500
@@ -5042,9 +5043,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      * @returns {void}
      */
     function watchVisibility() {
-      if (visibilityWatch === true) return
+      if (visibilityWatch !== null) return
       if (typeof document === "undefined" || typeof document.addEventListener !== "function") return
-      visibilityWatch = true
       // Two events for one return, because they answer different questions.
       // `visibilitychange` is the page being hidden (minimised, another tab,
       // the OS putting the app away); `focus` is the window being handed back
@@ -5074,6 +5074,15 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       document.addEventListener("visibilitychange", refreshOnReturn)
       if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
         window.addEventListener("focus", refreshOnReturn)
+      }
+      // Kept so teardown can take them back. A plugin reload keeps the page
+      // alive: leaving the listeners behind leaves the old instance's closure
+      // refreshing against a bridge that `bridge.open = false` already closed.
+      visibilityWatch = () => {
+        document.removeEventListener("visibilitychange", refreshOnReturn)
+        if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+          window.removeEventListener("focus", refreshOnReturn)
+        }
       }
     }
 
@@ -5742,6 +5751,11 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
           if (runningWatch !== null) {
             runningWatch.disconnect()
             runningWatch = null
+          }
+          // Same reason as the observer: the page outlives the plugin.
+          if (visibilityWatch !== null) {
+            visibilityWatch()
+            visibilityWatch = null
           }
           stopHostTypography()
           // The reservation is a modification of the host's own scroll container.
