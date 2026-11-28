@@ -93,7 +93,7 @@ const tasks = loadMarkdownDir(tasksDir, new Set(['README.md', '_template.md']))
   .filter((t) => t.meta.status !== 'done')
   .sort((a, b) => String(b.meta.updated ?? '').localeCompare(String(a.meta.updated ?? '')))
 
-const latestStatus = entries.find((e) => e.meta.type === 'status')
+
 // A pending line is a promise about the future, so only entries that are still
 // open can make one. `entries/README.md` also lets a later entry name what it
 // replaces in `supersedes`; those older promises are settled, so listing them
@@ -109,6 +109,12 @@ for (const e of entries) {
   }
 }
 const isSuperseded = (e) => supersededRefs.has(e.file) || supersededRefs.has(String(e.meta.id ?? ''))
+// The newest live status entry. A status entry is a snapshot of where the work
+// stands, so an entry that a later one supersedes has stopped being the answer:
+// with four status entries written on one day, the tie-break by file name picked
+// the *first* of them and the view kept announcing a state that had moved on.
+const latestStatus = entries.find((e) => e.meta.type === 'status' && isSuperseded(e) === false)
+
 const pendingVerifications = entries.filter((e) => {
   if (isSuperseded(e)) return false
   const state = String(e.meta.status ?? '')

@@ -5,9 +5,9 @@
 
 ## 1. 最新基线
 
-- **最近状态条目**：[`2026-11-28-status-region-budgets.md`](./entries/2026-11-28-status-region-budgets.md)（2026-11-28）
-- **摘要**：建议的提示词改成分区预算：规则不计入、数据三区、预测口径、允许弃权
-- **记录基线**：4590 passed / 0 failed
+- **最近状态条目**：[`2026-11-28-status-session-closed.md`](./entries/2026-11-28-status-session-closed.md)（2026-11-28）
+- **摘要**：下一轮建议这一阶段收尾：三项延期修复真机通过，文档审计修完，基线 4590/0
+- **记录基线**：4590 passed / 0 failed；mutate-suggest 141 killed / 0 survived / 0 crashed；docs 57/0；registration 56/0；gate:fast PASS
 
 ## 2. 进行中任务（`docs/tasks/`）
 
@@ -21,11 +21,12 @@
 
 | 日期 | 类型 | 编号/状态 | 标题 | 文件 |
 | --- | --- | --- | --- | --- |
-| 2026-11-28 | status | S-20261128-budgets / done | 建议的提示词改成分区预算：规则不计入、数据三区、预测口径、允许弃权 | [`2026-11-28-status-region-budgets.md`](./entries/2026-11-28-status-region-budgets.md) |
-| 2026-11-28 | status | S-20261128-lifecycle / done | 建议的生存期 = 回合边界；过期只留幽灵；中断的回合什么都不画 | [`2026-11-28-status-lifecycle-and-gates.md`](./entries/2026-11-28-status-lifecycle-and-gates.md) |
+| 2026-11-28 | status | S-20261128-closed / done | 下一轮建议这一阶段收尾：三项延期修复真机通过，文档审计修完，基线 4590/0 | [`2026-11-28-status-session-closed.md`](./entries/2026-11-28-status-session-closed.md) |
+| 2026-11-28 | status | S-20261128-budgets / superseded | 建议的提示词改成分区预算：规则不计入、数据三区、预测口径、允许弃权 | [`2026-11-28-status-region-budgets.md`](./entries/2026-11-28-status-region-budgets.md) |
+| 2026-11-28 | status | S-20261128-lifecycle / superseded | 建议的生存期 = 回合边界；过期只留幽灵；中断的回合什么都不画 | [`2026-11-28-status-lifecycle-and-gates.md`](./entries/2026-11-28-status-lifecycle-and-gates.md) |
 | 2026-11-28 | status | S-20261128-correction / active | 更正：11-27 之后的新记录被误追加进已冻结的 01–04，且 D-263/264/265 与 R-126 各被用了两次 | [`2026-11-28-status-ledger-correction.md`](./entries/2026-11-28-status-ledger-correction.md) |
-| 2026-11-28 | status | S-20261128-close-verified / done | 关闭三条已被后续真机验证取代的待闭环项 | [`2026-11-28-status-close-verified-pendings.md`](./entries/2026-11-28-status-close-verified-pendings.md) |
-| 2026-11-28 | status | S-20261128-close-open / done | 结清最后两条待验证条目：verify:live 能跑通，面板标签与说明行在真机上是新文案 | [`2026-11-28-status-close-the-two-open-entries.md`](./entries/2026-11-28-status-close-the-two-open-entries.md) |
+| 2026-11-28 | status | S-20261128-close-verified / superseded | 关闭三条已被后续真机验证取代的待闭环项 | [`2026-11-28-status-close-verified-pendings.md`](./entries/2026-11-28-status-close-verified-pendings.md) |
+| 2026-11-28 | status | S-20261128-close-open / superseded | 结清最后两条待验证条目：verify:live 能跑通，面板标签与说明行在真机上是新文案 | [`2026-11-28-status-close-the-two-open-entries.md`](./entries/2026-11-28-status-close-the-two-open-entries.md) |
 | 2026-11-28 | review | R-20261128-catchup / applied | 18 个未评审提交的补审——派发全线失效，自审加一名独立评审共 8 条成立 | [`2026-11-28-review-catchup-18-commits.md`](./entries/2026-11-28-review-catchup-18-commits.md) |
 | 2026-11-28 | defect | DEF-20261128-thinking / fixed | 关思考的三层真相：efforts 是数组、方言缺 off 档时说关等于没说、settings.yaml 是产物 | [`2026-11-28-defect-thinking-off-chain.md`](./entries/2026-11-28-defect-thinking-off-chain.md) |
 | 2026-11-28 | decision | D-20261128-thinking / active | 关思考 = 一个 effort 都不传；方言由 profile 的 compat 决定，而 settings.yaml 是产物 | [`2026-11-28-decision-thinking-off.md`](./entries/2026-11-28-decision-thinking-off.md) |
@@ -35,7 +36,6 @@
 | 2026-11-27 | status | S-20261127-lifecycle / verified | 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件 | [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md) |
 | 2026-11-27 | review | R-20261127-codex / applied | R-126 建议形状规则的评审——8 条全部成立，其中 4 条是真缺陷 | [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md) |
 | 2026-11-27 | defect | D-20261127-efforts / superseded | 关思考的代码从未生效——宿主的 efforts 是数组，代码当对象查键 | [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md) |
-| 2026-11-26 | status | S-20261126-suggest / superseded | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
 
 ## 5. 历史台账（已冻结，只读）
 
