@@ -1988,7 +1988,7 @@ for (const reason of ['gone', 'archived']) {
   // One sentence, and it has to survive the round trip: the whole point of
   // storing it is the process that did *not* buy it. A ghost that only exists in
   // the memory of the process that paid for it is not persisted at all.
-  const { state, store, root } = await fixture()
+  const { state, store, root, transcripts, restored } = await fixture()
   state.rememberOffer('offer', { text: '把失败的用例跑一遍', at: 1234, turn: 9 })
   const seen = state.offerSeen('offer')
   check('the sentence is remembered', seen?.text === '把失败的用例跑一遍', JSON.stringify(seen))
@@ -1997,6 +1997,28 @@ for (const reason of ['gone', 'archived']) {
   await state.flush('offer')
   const stored = await store.read('offer')
   check('and written down', stored?.offer?.text === '把失败的用例跑一遍', JSON.stringify(stored?.offer))
+  // The stopped-turn flag: the second process cannot rebuild it from events, and a
+  // file holding only this still has the one fact that explains the silence.
+  // Nothing else: no turns, no finished turn, no paths. If the flag is not one of
+  // the facts that keeps a document, this session writes no file at all.
+  transcripts.set('halted', { turns: 0, previous: undefined, interrupted: true })
+  state.rememberTurn('halted')
+  await state.flush('halted')
+  const haltedFile = await store.read('halted')
+  check('a stopped turn is written down', haltedFile?.interrupted === true, JSON.stringify(haltedFile?.interrupted))
+  const haltedSecond = new SessionState({
+    store,
+    log: () => {},
+    snapshotOf: () => undefined,
+    restore: (sessionId, snapshot) => restored.push({ sessionId, snapshot }),
+    delayMs: 0,
+  })
+  await haltedSecond.load('halted')
+  check('and read back by the next process', haltedSecond.document('halted')?.interrupted === true, JSON.stringify(haltedSecond.document('halted')?.interrupted))
+  // Handed to the transcript, not just kept in the document: the route asks the
+  // transcript, so a value that never leaves the file is the same as no value.
+  const handed = restored.filter((row) => row.sessionId === 'halted').at(-1)
+  check('and handed to the transcript that answers the route', handed?.snapshot?.interrupted === true, JSON.stringify(handed?.snapshot?.interrupted))
 
   const second = new SessionState({ store, snapshotOf: () => undefined, restore: () => {}, delayMs: 0 })
   await second.load('offer')

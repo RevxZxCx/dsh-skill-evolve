@@ -35,6 +35,7 @@ const api = path.join(repo, 'packages', 'ui-evolve', 'lib', 'api.js')
 const client = path.join(repo, 'packages', 'ui-evolve', 'lib', 'client.js')
 const transcript = path.join(repo, 'packages', 'ui-evolve', 'lib', 'transcript.js')
 const summarise = path.join(repo, 'packages', 'ui-evolve', 'lib', 'summarise.js')
+const sessionState = path.join(repo, 'packages', 'ui-evolve', 'lib', 'session-state.js')
 
 /**
  * Failures reported by a suite, or -1 when it printed no tally at all.
@@ -107,6 +108,7 @@ const engine = ['test/suggest.test.mjs']
 const wire = ['test/api.test.mjs']
 const view = ['test/client.test.mjs']
 const transcriptSuite = ['test/transcript.test.mjs']
+const stateSuite = ['test/session-state.test.mjs']
 
 const mutations = [
   // ---------------------------------------------------------------------
@@ -1109,8 +1111,8 @@ const mutations = [
     file: transcript,
     suites: transcriptSuite,
     label: 'a finished turn leaves the interrupted flag standing',
-    from: '    this.interrupted = false\n    this.previous = this.snapshot()',
-    to: '    this.previous = this.snapshot()',
+    from: '    this.interrupted = false\n    this.ended = true\n    this.previous = this.snapshot()',
+    to: '    this.ended = true\n    this.previous = this.snapshot()',
     why: 'one interruption would silence every later offer in the session, because nothing else clears it -- the flag describes the last close, not the session',
   },
   {
@@ -1249,6 +1251,70 @@ const mutations = [
     from: 'const INNER_SENTENCE_END = /[。！？]|(?<=[A-Za-z0-9)\\]])[.!?](?=\\s)/',
     to: 'const INNER_SENTENCE_END = /[。！？]|(?<![?!.])[.!?](?=\\s)/',
     why: 'an operator written with spaces around it is not a sentence break; reading it as one drops the candidate as prose when it is the only step on offer',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the closing edge forgets which turn it just closed',
+    from: '      suggest.closedAt = suggest.turn',
+    to: '      suggest.closedAt = undefined',
+    why: 'without the mark the row for the turn before the one on screen is drawn the moment the control changes, and a frame arriving a moment later cannot tell it apart from the new one',
+  },
+  {
+    file: client,
+    suites: view,
+    label: 'the closing mark never lets go',
+    from: '        suggest.closedAt = undefined\n        notifySuggest()',
+    to: '        void notifySuggest()',
+    why: 'the mark is a guess about which of two events came first; when it guesses wrong there is no second frame to correct it, so a mark that never releases hides the row for the rest of the turn',
+  },
+  {
+    file: suggest,
+    suites: engine,
+    label: 'a restored sentence is drawn as a chip after the restart',
+    from: '        stale: true,\n        turn,',
+    to: '        turn,',
+    why: 'the persisted sentence is the composer ghost; drawing it as a chip claims a decision about a turn the reader did not just watch end (m08055)',
+  },
+  {
+    file: sessionState,
+    suites: stateSuite,
+    label: 'the stopped turn is not written down',
+    from: '      interrupted: snapshot?.interrupted === true ? true : undefined,',
+    to: '      interrupted: undefined,',
+    why: 'no later event says the last thing that happened was a stop, so a restart that does not write it down answers with a next step under a stopped reply',
+  },
+  {
+    file: sessionState,
+    suites: stateSuite,
+    label: 'a file holding only a stopped turn is judged an orphan',
+    from: '  if (facts.interrupted === true) return true',
+    to: '  if (false) return true',
+    why: 'the flag is the only fact an interrupted turn leaves behind; a sweep that does not count it deletes the one file that explains the silence',
+  },
+  {
+    file: sessionState,
+    suites: stateSuite,
+    label: 'the stopped turn is not handed back to the transcript',
+    from: '      this.restore(sessionId, { turns: stored.turns, previous: restorable, interrupted: stored.interrupted === true })',
+    to: '      this.restore(sessionId, { turns: stored.turns, previous: restorable, interrupted: false })',
+    why: 'reading it back without handing it over is the same as not persisting it',
+  },
+  {
+    file: transcript,
+    suites: transcriptSuite,
+    label: 'the restored stopped turn is forgotten on the way in',
+    from: '      transcript.interrupted = state?.interrupted === true',
+    to: '      transcript.interrupted = false',
+    why: 'the route asks the transcript, not the file; a hydrate that drops the flag leaves the gate reading false',
+  },
+  {
+    file: transcript,
+    suites: transcriptSuite,
+    label: 'a live end is overruled by the file it is newer than',
+    from: '    if (existing.ended !== true) existing.interrupted = state?.interrupted === true',
+    to: '    existing.interrupted = state?.interrupted === true',
+    why: 'a turn that finished in this process is newer than the file; letting the file overwrite it silences every later offer in the session',
   },
 ]
 

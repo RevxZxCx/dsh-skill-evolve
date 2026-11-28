@@ -237,7 +237,7 @@ export function apply(ctx, config, options) {
     snapshotOf(sessionId) {
       const view = transcripts.view(sessionId)
       if (view === undefined) return undefined
-      return { turns: view.turns, previous: view.previous }
+      return { turns: view.turns, previous: view.previous, interrupted: view.interrupted === true }
     },
     restore(sessionId, state) {
       // Installs the finished turn this process never saw, and the count of turns

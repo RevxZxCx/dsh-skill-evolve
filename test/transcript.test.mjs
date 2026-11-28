@@ -891,6 +891,42 @@ const withoutMark = (out) => (out.endsWith('\n\n' + SAID_CUT_MARK) ? out.slice(0
 }
 
 {
+  // The flag that says the thing on screen was stopped. It is not derivable from
+  // anything else the file holds -- no event in a later process says "the last
+  // thing you did was stop me" -- so a restart that forgets it draws the row under
+  // a stopped reply, naming the next step for work the reader had already dropped.
+  const store = new TranscriptStore()
+  store.hydrate('a', { turns: 4, previous: { turn: 4, calls: 1, paths: [], commands: [], tools: [], said: 'x' }, interrupted: true })
+  check('a stopped turn is remembered across the restart', store.view('a').interrupted === true, JSON.stringify(store.view('a')?.interrupted))
+
+  // A live turn that ends here is newer than anything the file could say. Without
+  // this the flag would outlive the turn it described, and every later turn would
+  // be answered with silence.
+  const live = new TranscriptStore()
+  live.hydrate('b', { turns: 1, interrupted: true })
+  live.for('b').beginTurn(2, 'go on')
+  live.for('b').endTurn({ reason: { kind: 'completed' } })
+  check('and a turn that finishes clears it', live.view('b').interrupted === false, JSON.stringify(live.view('b')?.interrupted))
+
+  const after = new TranscriptStore()
+  after.hydrate('c', { turns: 2, previous: { turn: 2, calls: 0, paths: [], commands: [], tools: [], said: 'y' } })
+  check('a file with no flag reads as not stopped', after.view('c').interrupted === false, JSON.stringify(after.view('c')?.interrupted))
+
+  // The merge branch, which the three reads above never enter: the transcript is
+  // already in memory because a turn ran before the file was read. That turn is
+  // newer than the file, so the file's "stopped" must not overwrite a live finish.
+  const merging = new TranscriptStore()
+  merging.for('d').beginTurn(1, 'first')
+  merging.for('d').endTurn({ reason: { kind: 'completed' } })
+  merging.hydrate('d', { turns: 1, interrupted: true })
+  check(
+    'a turn that finished here outranks the file that says it stopped',
+    merging.view('d').interrupted === false,
+    JSON.stringify(merging.view('d')?.interrupted),
+  )
+}
+
+{
   // A restart lands here with the file unread and a sentence already typed: the
   // host delivers `user/message` before the store's async read comes back, so the
   // open turn is numbered from zero while the file says the conversation had

@@ -1115,15 +1115,18 @@ export class Suggestor {
     // sentence is about work that has moved on.
     const remembered = typeof this.stored === 'function' ? this.stored(agentId) : undefined
     if (remembered !== undefined && remembered.turn === turn) {
-      const stale = now - remembered.at >= SUGGEST_TTL_MS
+      // Always stale, however young it is. The persisted sentence exists for the
+      // composer's ghost: a chip row is a decision about the turn the reader just
+      // had, and a turn from before the restart is not one of those (m08055).
+      // Restoring it without this flag drew it as a chip after every restart.
       return {
         enabled: true,
         items: [remembered.text],
         at: remembered.at,
         cached: true,
         restored: true,
+        stale: true,
         turn,
-        ...(stale === true ? { stale: true } : {}),
       }
     }
 

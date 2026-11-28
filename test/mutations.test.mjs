@@ -203,7 +203,7 @@ for (const [name, expected] of [
   ["mutate-language-and-files.mjs", 187],
   ['mutate-speed.mjs', 69],
   ['mutate-persistence.mjs', 70],
-  ['mutate-suggest.mjs', 133],
+  ['mutate-suggest.mjs', 141],
 ]) {
   const script = readFileSync(join(repo, 'scripts', name), 'utf8')
   const anchors = parseAnchors(script)
@@ -386,14 +386,13 @@ for (const [name, expected] of [
       found = owner.exec(script)
     }
   }
-  // One number, spelled once. The floor and the sentence that reports it drift
-  // apart the moment the mutation table grows, and a failure message naming a
-  // lower floor than the assertion uses sends the next reader after the wrong gap.
-  // 127 rather than 128 because the refused-side-change entry went with the
-  // side setting itself: there is one panel layout now, so a refused write has
-  // no side to return to.
-  const minimum = 127
-  check(`${name} declares the anchors it is supposed to`, anchors.length >= minimum, `found ${anchors.length}, expected at least ${minimum}`)
+  // Exactly, not at least. A floor leaves the same gap the table above was
+  // written to close: paired deletions of a `from:` and its `file:` line keep the
+  // per-anchor checks quiet, and a table entry with a number below the truth reads
+  // as a passing suite. The number is the count this script has today; adding an
+  // entry means editing this line, which is the smallest possible reminder.
+  const expected = 141
+  check(`${name} declares the anchors it is supposed to`, anchors.length === expected, `found ${anchors.length}, expected ${expected}`)
   const contents = new Map()
   const text = (file) => {
     if (!contents.has(file)) contents.set(file, readFileSync(join(repo, file), 'utf8'))

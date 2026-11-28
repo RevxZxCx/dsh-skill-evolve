@@ -8484,7 +8484,20 @@ async function openStream(instance) {
   // primary button swaps to `stop` within half a second, so the page is asked
   // directly. This block is what would have caught the gap: every other suggest
   // suite runs with `settings.stop` undefined, so the gate was never reached.
-  const live = boot({ routes: suggestRoute(SUGGEST_TEXTS, { busy: false }), stop: true })
+  // Each answer says which turn it describes, and the number moves with every
+  // request: a stub that kept answering `turn: 1` made the row for the turn that
+  // had just ended indistinguishable from the row for the one before it, which is
+  // the one thing the real host never does.
+  let answered = 0
+  const live = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        answered += 1
+        return suggestRoute(SUGGEST_TEXTS, { busy: false, turn: answered })['/api/ui-evolve/suggestions']
+      },
+    },
+    stop: true,
+  })
   live.module.apply(live.ctx)
   // The ghost needs a placeholder to measure against, and without one it is
   // hidden for a different reason -- the first version of this block asserted
@@ -8557,6 +8570,101 @@ async function openStream(instance) {
     'so does the ghost',
     firstByClass(ghostBack, 'dsse-ghost')?.props['data-shown'] === 'true',
     'the ghost stayed hidden after the turn ended',
+  )
+  // The opening edge, which is a different line of code and has no mark to lean
+  // on: a turn beginning takes the row away at once, because the answer it
+  // describes is no longer the last thing that was said. `forgetOffer` is the only
+  // thing that does it; leaving the old row for the frame to replace is exactly
+  // the "previous turn's suggestions still on screen" the reader reported.
+  live.settings.stop = true
+  watches()[0].trigger()
+  const started = await live.renderer.deepRender(live.seat('suggestions'), liveProps)
+  check(
+    'a turn starting drops the row at once',
+    firstByClass(started, 'dsse-suggest')?.props['data-shown'] === 'false' &&
+      byClass(started, 'dsse-suggest-item').length === 0,
+    'the row for the previous turn was still drawn once work began',
+  )
+}
+
+{
+  // The other order of the same two events, which no check above can reach: the
+  // frame carrying the new turn's answer arrives *before* the stop control
+  // disappears. Then the closing mark names the turn the row is already about, so
+  // the row would be hidden with nothing left to bring it back. The mark is
+  // therefore an expiring one: four seconds after the boundary it lets go, and the
+  // row speaks for whatever is on screen.
+  let answered = 0
+  const late = boot({
+    routes: {
+      '/api/ui-evolve/suggestions': () => {
+        answered += 1
+        return suggestRoute(SUGGEST_TEXTS, { busy: false, turn: answered })['/api/ui-evolve/suggestions']
+      },
+    },
+    stop: true,
+  })
+  late.module.apply(late.ctx)
+  late.renderer.setNodeForRef(composerCard().anchor)
+  const props = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  await settledSeat(late, 'suggestions', props)
+  // The ghost is what owns the event stream, so it has to be mounted for a frame
+  // to arrive at all -- the row would otherwise be refreshed by nothing.
+  await settledSeat(late, 'ghost', props)
+  // The answer for the turn that is still running lands first.
+  late.streamFor('session-a').emit({ agent: 'session-a', revision: 2 })
+  await settle()
+  late.settings.stop = false
+  late.mutationObservers
+    .filter((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))[0]
+    .trigger()
+  const marked = await late.renderer.deepRender(late.seat('suggestions'), props)
+  check(
+    'a boundary that arrives after its answer hides the row it cannot tell apart',
+    firstByClass(marked, 'dsse-suggest')?.props['data-shown'] === 'false',
+    'the row was drawn while the mark still named its own turn',
+  )
+  // What the opening edge is for. A turn that begins and ends without producing an
+  // answer leaves the mark naming the only answer there is, and when the mark lets
+  // go the row would speak for a turn that has already been left behind -- unless
+  // the opening edge took that answer away, which is the one job `forgetOffer` has.
+  const stale = boot({ routes: suggestRoute(SUGGEST_TEXTS, { busy: false }), stop: false })
+  stale.module.apply(stale.ctx)
+  stale.renderer.setNodeForRef(composerCard().anchor)
+  const staleProps = { sessionId: 'session-a', turn: 1, useInput: inputHook(), inputActions: recordingActions() }
+  const drawn = await settledSeat(stale, 'suggestions', staleProps)
+  check('a row is drawn to begin with', firstByClass(drawn, 'dsse-suggest')?.props['data-shown'] === 'true', 'nothing drawn')
+  stale.settings.stop = true
+  stale.mutationObservers
+    .filter((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))[0]
+    .trigger()
+  await settle()
+  stale.settings.stop = false
+  stale.mutationObservers
+    .filter((row) => row.targets.some((entry) => entry.options?.attributeFilter?.includes('data-dsh-claude-control') === true))[0]
+    .trigger()
+  await settle()
+  const held = stale.timers.filter((row) => row.ms === 4000 && row.cleared === false)
+  check('the empty turn still arms the mark', held.length === 1, JSON.stringify(stale.timers.map((row) => row.ms)))
+  held[0].fn()
+  await settle()
+  const empties = await stale.renderer.deepRender(stale.seat('suggestions'), staleProps)
+  check(
+    'and when it lets go there is nothing left to draw',
+    firstByClass(empties, 'dsse-suggest')?.props['data-shown'] === 'false' &&
+      byClass(empties, 'dsse-suggest-item').length === 0,
+    'an answer bought for a turn that never finished was drawn under the next one',
+  )
+
+  const release = late.timers.filter((row) => row.ms === 4000 && row.cleared === false)
+  check('the mark is armed to let go', release.length === 1, JSON.stringify(late.timers.map((row) => row.ms)))
+  release[0].fn()
+  await settle()
+  const freed = await late.renderer.deepRender(late.seat('suggestions'), props)
+  check(
+    'and after it lets go the row is drawn again',
+    firstByClass(freed, 'dsse-suggest')?.props['data-shown'] === 'true',
+    'the row stayed hidden for the rest of the turn',
   )
 }
 

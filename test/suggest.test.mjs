@@ -562,6 +562,10 @@ const config = (over = {}) => () => ({ panelSuggestions: true, suggestionCount: 
   const answer = await restored.suggestions({ agentId: 'a', view: viewWith(snapshot(1)) })
   check('the restored sentence is offered again', answer.items.length === 1 && answer.items[0] === first.items[0], JSON.stringify(answer.items))
   check('and it is flagged as a restore', answer.restored === true, JSON.stringify(answer.restored))
+  // Stale even though it is young. A restart did not watch this turn end, so the
+  // sentence is an offer for the composer's ghost and not a chip row under an
+  // answer the reader just read (m08055) -- restoring it fresh drew the chip.
+  check('and a restore is always stale, however young', answer.stale === true, JSON.stringify(answer.stale))
   check('and nothing was paid for it', next.log.prepare.length === 0, String(next.log.prepare.length))
   check('and it still names its turn', answer.turn === 1, String(answer.turn))
 

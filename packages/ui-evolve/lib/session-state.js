@@ -392,6 +392,11 @@ function keepsDocument(facts) {
   // shape of it. Leaving it out of this answer would let a sweep delete the file
   // that holds the only copy.
   if (facts.offer !== undefined && facts.offer !== null) return true
+  // A turn that was stopped is the fact that explains why the panel says
+  // nothing about the next step. It cannot be rebuilt from live events after a
+  // restart -- no event says "the last thing you did was stop me" -- so a file
+  // holding only this is a file with something to say.
+  if (facts.interrupted === true) return true
   if (facts.previous !== undefined && facts.previous !== null) return true
   // A count on its own is still something the panel prints, and the one field
   // that cannot be rebuilt from live events after a restart. Leaving it out of
@@ -423,6 +428,7 @@ function hasFacts(entry) {
     offer: entry.offer,
     previous: entry.snapshot?.previous,
     turns: entry.snapshot?.turns,
+    interrupted: entry.snapshot?.interrupted,
   })
 }
 
@@ -694,8 +700,8 @@ class SessionState {
     const restorable = isRecord(stored.previous) && stored.state !== STATE_VERSION
       ? { ...stored.previous, paths: [] }
       : stored.previous
-    const snapshot = Number.isFinite(stored.turns) || isRecord(stored.previous)
-      ? { turns: stored.turns, previous: restorable }
+    const snapshot = Number.isFinite(stored.turns) || isRecord(stored.previous) || stored.interrupted === true
+      ? { turns: stored.turns, previous: restorable, interrupted: stored.interrupted === true ? true : undefined }
       : undefined
 
     if (current === undefined) {
@@ -784,7 +790,7 @@ class SessionState {
     // handing its turn to the transcript would install the conversation the
     // sweep just dismissed.
     if ((isRecord(stored.previous) || Number.isFinite(stored.turns)) && typeof this.restore === 'function' && this.bySession.has(sessionId) === true) {
-      this.restore(sessionId, { turns: stored.turns, previous: restorable })
+      this.restore(sessionId, { turns: stored.turns, previous: restorable, interrupted: stored.interrupted === true })
     }
     // Now that the transcript has taken the stored count, its answer is the
     // whole conversation — what this process saw plus what the file remembered,
@@ -1188,6 +1194,7 @@ class SessionState {
       state: STATE_VERSION,
       turns: snapshot?.turns,
       previous: snapshot?.previous,
+      interrupted: snapshot?.interrupted === true ? true : undefined,
       skills,
       tools: [...entry.tools],
       servers,

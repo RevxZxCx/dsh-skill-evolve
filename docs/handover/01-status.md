@@ -6526,6 +6526,17 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 
 **下一步**：重启宿主后重跑一轮，看 `reason` 是否从「0 characters」变成「cut off at the token budget (finish: length)」——那说明这次修的是它，而且下一次再出现同样症状时理由会直接告诉我们预算被谁吃了。
 
+## 2026-11-28（十二）· 补审留下的三处全部修掉
+
+用户的裁决是「有问题就修，不要只写文档」，于是 R-126 里标「缓」的一条与 `docs/29` §8.12 的两条观察在这一轮全部落地：
+
+- **DEF-220**：`interrupted` 穿过进程边界。`snapshotOf` → `session-state.document/keepsDocument/load` → `transcript.hydrate`（合并分支只在 `existing.ended !== true` 时接收）。
+- **DEF-221**：恢复的那句无条件 `stale: true`，只做输入栏幽灵。
+- **DEF-222**：回合边界改成「记住第几轮」并在四秒后放手，两个顺序都有用例；`forgetOffer` 留给新一轮开始。
+- `test/mutations.test.mjs` 里 `mutate-checklist-panel.mjs` 的 `>= 127` 改成精确 `141`（这正是我在 m10674 里列为「有意未做」的那一条）。
+
+数字：全量 **4590 / 0**；`client` 1107、`suggest` 324、`transcript` 237、`session-state` 379；突变 **141 / 141**；perf 退出 0；docs 57 / 0；registration 56 / 0。
+
 ## 2026-11-28（十）· 关思考的开关其实在 profile 里
 
 | 改动 | 位置 | 内容 |

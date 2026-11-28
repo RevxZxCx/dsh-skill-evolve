@@ -4673,6 +4673,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
       // reading of a turn it has already answered, so this is a terminal state
       // for the chips and an ordinary one for the ghost.
       stale: false,
+      closedAt: undefined,
+      closeTimer: null,
       // The same fact, read from the page instead of from the server.
       //
       // `busy` arrives with an answer, and during a turn the host is busy
@@ -4967,12 +4969,49 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
      *
      * @returns {void}
      */
+    /**
+     * A turn just ended.
+     *
+     * The row no longer speaks for the answer on screen, but that answer has not
+     * arrived yet: the frame that carries it and the stop control disappearing are
+     * two different events, and either can be first. Clearing here loses the row
+     * when the frame wins (the reader sees the new answer with no chips and has to
+     * wait for the next stream message); keeping it loses nothing but leaves the
+     * old row under the new answer for a moment. So the row is not cleared -- the
+     * turn it describes is remembered, and `shown` hides the row exactly while the
+     * screen still shows that turn.
+     *
+     * @returns {void}
+     */
+    function closeOffer() {
+      suggest.closedAt = suggest.turn
+      suggest.used.clear()
+      // The mark is only a guess about which turning point came first, and one of
+      // the two orders leaves nothing to correct it: a frame that arrived just
+      // before the control changed already carries the new turn, so the mark
+      // names the row it is supposed to hide and no later frame comes to undo it.
+      // Four seconds is longer than the observed gap (523 ms) and short enough
+      // that a row cannot be lost for the rest of the turn; when it fires, the
+      // row is drawn again and speaks for whatever is on screen.
+      if (suggest.closeTimer !== null) clearTimeout(suggest.closeTimer)
+      suggest.closeTimer = setTimeout(() => {
+        suggest.closeTimer = null
+        suggest.closedAt = undefined
+        notifySuggest()
+      }, 4000)
+    }
+
     function forgetOffer() {
       suggest.items = []
       suggest.used.clear()
       suggest.at = 0
       suggest.turn = undefined
       suggest.stale = false
+      suggest.closedAt = undefined
+      if (suggest.closeTimer !== null) {
+        clearTimeout(suggest.closeTimer)
+        suggest.closeTimer = null
+      }
       suggest.loaded = false
       suggest.again = false
       suggest.retried = false
@@ -5012,7 +5051,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // turn's own answer is about to arrive on the stream. Until it does,
         // drawing the previous one is exactly the "old suggestions under the
         // new answer" the reader reported.
-        forgetOffer()
+        if (next === false) closeOffer()
+        else forgetOffer()
         notifySuggest()
       }
       suggest.running = turnRunning()
@@ -5065,7 +5105,8 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         const next = turnRunning()
         if (next !== suggest.running) {
           suggest.running = next
-          forgetOffer()
+          if (next === false) closeOffer()
+          else forgetOffer()
           notifySuggest()
         }
         if (suggest.sessionId === "") return
@@ -5246,6 +5287,10 @@ html[data-dsse-turn-rail="1"] [data-conversation-scroll] nav{display:block !impo
         // waiting in the composer is an offer, three chips under an answer are a
         // reading of that answer.
         suggest.stale === false &&
+        // The turn this row describes is still the one on screen: a boundary that
+        // arrived before its answer must hide the old row, and one that arrived
+        // after it must not hide the new one. See `closeOffer`.
+        (suggest.closedAt === undefined || suggest.turn !== suggest.closedAt) &&
         offer.length > 0 &&
         box !== null &&
         box.last === true

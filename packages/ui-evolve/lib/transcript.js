@@ -595,6 +595,10 @@ class Transcript {
      * stopped reply and name a next step for work that had already moved on.
      */
     this.interrupted = false
+    // Whether a turn has ended since this process started. `hydrate` uses it to
+    // decide whether the flag on disk still describes what is on screen: a turn
+    // that finished a minute ago is newer than the file that says "stopped".
+    this.ended = false
     /** How many human turns this transcript has seen. */
     this.turns = 0
     /**
@@ -683,6 +687,7 @@ class Transcript {
       // Remember that the thing on screen never finished: the offer route reads
       // this and answers with nothing rather than with the turn before it.
       this.interrupted = true
+      this.ended = true
       return
     }
     // Remember the request that opened this turn before the turn is folded
@@ -690,6 +695,7 @@ class Transcript {
     // that is never folded (abandoned) must not contribute to it -- the branch
     // above already cleared `asked` for exactly that reason.
     this.interrupted = false
+    this.ended = true
     this.previous = this.snapshot()
     // Pushed *after* the snapshot. `previous.asked` already carries this request
     // as <latest_request>, so pushing first put the same sentence in <requests>
@@ -1090,6 +1096,7 @@ class TranscriptStore {
       const transcript = new Transcript()
       transcript.previous = previous
       transcript.turns = turns
+      transcript.interrupted = state?.interrupted === true
       transcript.hydrated = true
       this.byAgent.set(agentId, transcript)
       return true
@@ -1101,6 +1108,9 @@ class TranscriptStore {
     if (existing.hydrated === true) return false
     existing.hydrated = true
     existing.turns += turns
+    // Only when this process has not ended a turn of its own: a live turn/end
+    // is newer than the file, and the file cannot tell which came last.
+    if (existing.ended !== true) existing.interrupted = state?.interrupted === true
     // The turn that opened before this read was numbered from zero, because the
     // file had not been read yet. Now that it has, the open turn's real number
     // is the whole count. Renumbering it here is what keeps `turn/end` honest:
