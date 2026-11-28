@@ -15,7 +15,7 @@
 
 ## 3. 待闭环真机验收 / 阻塞项
 
-- **2026-11-26** [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)：2026-11-25 提示词建议改动（7b9df8b）仍待重启宿主后跑 npm run verify:live 复验
+当前无登记的待闭环真机验收项。
 
 ## 4. 最近分片记录（最多 15 条）
 
@@ -25,6 +25,7 @@
 | 2026-11-28 | status | S-20261128-lifecycle / done | 建议的生存期 = 回合边界；过期只留幽灵；中断的回合什么都不画 | [`2026-11-28-status-lifecycle-and-gates.md`](./entries/2026-11-28-status-lifecycle-and-gates.md) |
 | 2026-11-28 | status | S-20261128-correction / active | 更正：11-27 之后的新记录被误追加进已冻结的 01–04，且 D-263/264/265 与 R-126 各被用了两次 | [`2026-11-28-status-ledger-correction.md`](./entries/2026-11-28-status-ledger-correction.md) |
 | 2026-11-28 | status | S-20261128-close-verified / done | 关闭三条已被后续真机验证取代的待闭环项 | [`2026-11-28-status-close-verified-pendings.md`](./entries/2026-11-28-status-close-verified-pendings.md) |
+| 2026-11-28 | status | S-20261128-close-open / done | 结清最后两条待验证条目：verify:live 能跑通，面板标签与说明行在真机上是新文案 | [`2026-11-28-status-close-the-two-open-entries.md`](./entries/2026-11-28-status-close-the-two-open-entries.md) |
 | 2026-11-28 | review | R-20261128-catchup / applied | 18 个未评审提交的补审——派发全线失效，自审加一名独立评审共 8 条成立 | [`2026-11-28-review-catchup-18-commits.md`](./entries/2026-11-28-review-catchup-18-commits.md) |
 | 2026-11-28 | defect | DEF-20261128-thinking / fixed | 关思考的三层真相：efforts 是数组、方言缺 off 档时说关等于没说、settings.yaml 是产物 | [`2026-11-28-defect-thinking-off-chain.md`](./entries/2026-11-28-defect-thinking-off-chain.md) |
 | 2026-11-27 | status | S-20261127-shape / pending_live_verify | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
@@ -35,7 +36,6 @@
 | 2026-11-26 | status | S-20261126-label / done | 模型设置项改名为「摘要与建议模型」，并修掉两处「只有摘要花钱」的过时说法 | [`2026-11-26-status-shared-model-label.md`](./entries/2026-11-26-status-shared-model-label.md) |
 | 2026-11-26 | status | S-20261126 / active | 完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地 | [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md) |
 | 2026-11-26 | defect | D-20261126-busy / verified | 服务端的 busy 到得太晚，回合运行中两个界面照样显示 | [`2026-11-26-defect-busy-signal-too-slow.md`](./entries/2026-11-26-defect-busy-signal-too-slow.md) |
-| 2026-11-26 | decision | D-255 / active | 交接台账改用按文件分片追加 + 自动生成活跃视图，并引入根级 AGENTS.md 与任务交接单 | [`2026-11-26-decision-multi-agent-docs.md`](./entries/2026-11-26-decision-multi-agent-docs.md) |
 
 ## 5. 历史台账（已冻结，只读）
 
