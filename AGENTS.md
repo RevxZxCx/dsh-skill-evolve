@@ -19,6 +19,7 @@ npm run gate:fast                       # 建立当前基线（单测 + 契约 +
 | 你的任务 | 先读什么 |
 | --- | --- |
 | 新建功能（非修 bug） | `docs/27-开发与集成手册.md` §7（先答 Q1–Q4 与注册点表） |
+| 修 Bug（复现、定因、防回归） | `docs/27-开发与集成手册.md` §8（先走 B1–B5，再走 §2 十步） |
 | 改 `/panel`、状态文件、SSE、轮询、摘要或 `MAX_*` | `docs/28-性能审查手册.md` + `node scripts/perf-budget.mjs` |
 | 改 `skill-evolve` / `ui-evolve` / `core` | 对应包的 `packages/<pkg>/README.md` |
 | 查当前生效的架构决策 | `docs/handover/ACTIVE-DECISIONS.md`（历史见 `02-decisions.md`） |

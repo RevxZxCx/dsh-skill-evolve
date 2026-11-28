@@ -241,6 +241,21 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
     routerSuites.length === regSuites.length && routerSuites.every((s, i) => s === regSuites[i]),
     `router=${routerSuites.length} vs §7=${regSuites.length}`,
   )
+
+  const sec8 = sectionAt(manual, /^## 8 · /m)
+  check('docs/27 has §8 Bug Fix SOP section', sec8.found, MANUAL)
+  check(
+    'docs/27 §8 covers B1–B5 steps',
+    ['### B1 · ', '### B2 · ', '### B3 · ', '### B4 · ', '### B5 · '].every((m) => sec8.body.includes(m)),
+    MANUAL,
+  )
+  const firstStepIdx = manual.indexOf('### 第 1 步')
+  const beforeStep1 = firstStepIdx > 0 ? manual.slice(0, firstStepIdx) : ''
+  check(
+    'docs/27 §2 intro routes bug fixes to §8',
+    /Bug[^。]*§8/u.test(beforeStep1),
+    MANUAL,
+  )
 }
 
 if (failed > 0) {
