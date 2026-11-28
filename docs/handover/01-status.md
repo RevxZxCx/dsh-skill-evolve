@@ -6526,6 +6526,16 @@ DEF-200 之后理由变成 `the suggestion call timed out`。实测一次 700 to
 
 **下一步**：重启宿主后重跑一轮，看 `reason` 是否从「0 characters」变成「cut off at the token budget (finish: length)」——那说明这次修的是它，而且下一次再出现同样症状时理由会直接告诉我们预算被谁吃了。
 
+## 2026-11-28（十三）· 三处补修的真机验收
+
+宿主重启三次之后，三项都在真机上成立了（会话 `session-796ca485-79b4-47f7-8ce1-3c530cac4613`，`test` 工作区）：
+
+- **DEF-221**：重启后打开那个有 9 行回答的会话，输入框幽灵显示的是重启前存下的「验证一下第6行现在是 rebound5」，而 9 条芯片全部 `data-shown="false"`、0 项。旧句子只当幽灵，不再长成一行芯片。
+- **DEF-222**：正常一轮（写 `probe4`/`probe5`）在 23.2 s 结束，芯片在 **967 ms** 后出现在最后一行里，三条全部 `armed`、幽灵同步第一条；再过 4.6 s（标记已放手）那一行仍在 —— 四秒的标记只挡住「答案先到」那一种顺序，没有误伤正常顺序。
+- **DEF-220**：把一轮长任务点停之后，`~/.dsh/plugin-data/skill-evolve/sessions/session-796ca485-….json` 里第一次出现 `interrupted: true`（`turns: 17`、`offer.turn: 16`）。重启后第 18 行（插件第 17 个回合）没有芯片、没有幽灵，`GET /api/ui-evolve/suggestions` 回 `{"items":[],"reason":"the last turn was interrupted","turn":16}`。
+
+一条执行层面的观察：`element.click()` 对那个 stop 控件不生效，真实鼠标点击才停得住；以后写真机脚本别用 DOM 的 click 去停回合。
+
 ## 2026-11-28（十二）· 补审留下的三处全部修掉
 
 用户的裁决是「有问题就修，不要只写文档」，于是 R-126 里标「缓」的一条与 `docs/29` §8.12 的两条观察在这一轮全部落地：
