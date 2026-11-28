@@ -20,12 +20,15 @@ supersedes:
 
 它签一个宿主浏览器会话 cookie，去探运行中的 `/api/ui-evolve/*`。实测：
 
+按承诺原文用的 npm 形式（`package.json` 里 `"verify:live": "node scripts/verify-live.mjs"`，
+两者等价）：
+
 ```
-$ node scripts/verify-live.mjs
+$ npm run verify:live
 GET http://127.0.0.1:19387/api/ui-evolve/config -> HTTP 200
 Top-level keys: ok, data
 
-$ node scripts/verify-live.mjs --session session-796ca485-79b4-47f7-8ce1-3c530cac4613
+$ npm run verify:live -- --session session-796ca485-79b4-47f7-8ce1-3c530cac4613
 GET http://127.0.0.1:19387/api/ui-evolve/panel?agent=session-796ca485-… -> HTTP 200
 Top-level keys: ok, data
 ```
