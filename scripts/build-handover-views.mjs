@@ -166,7 +166,12 @@ if (entries.length === 0) {
   stateLines.push('| 日期 | 类型 | 编号/状态 | 标题 | 文件 |')
   stateLines.push('| --- | --- | --- | --- | --- |')
   for (const e of entries.slice(0, 15)) {
-    const badge = [e.meta.id, e.meta.status].filter(Boolean).join(' / ')
+    // An entry keeps its own `status` in frontmatter (entries are append-only), so a
+    // superseded one has to say so here: otherwise §3 is empty while §4 still shows
+    // `pending_live_verify` and the reader believes a promise is still open.
+    const badge = isSuperseded(e)
+      ? [e.meta.id, 'superseded'].filter(Boolean).join(' / ')
+      : [e.meta.id, e.meta.status].filter(Boolean).join(' / ')
     stateLines.push(
       `| ${escapeCell(e.meta.date)} | ${escapeCell(e.meta.type)} | ${escapeCell(badge)} | ${escapeCell(e.meta.title)} | [\`${e.file}\`](./entries/${e.file}) |`,
     )
@@ -176,8 +181,8 @@ if (entries.length === 0) {
 stateLines.push('', '## 5. 历史台账（已冻结，只读）', '')
 stateLines.push('- [`01-status.md`](./01-status.md)（2026-10-30 – 2026-11-25）')
 stateLines.push('- [`02-decisions.md`](./02-decisions.md)（D-01 – D-254+）')
-stateLines.push('- [`03-defects.md`](./03-defects.md)（DEF-01 – DEF-209）')
-stateLines.push('- [`04-reviews.md`](./04-reviews.md)（R-01 – R-123+）')
+stateLines.push('- [`03-defects.md`](./03-defects.md)（DEF-01 – DEF-209；11-27/28 误加的 DEF-210–222 见更正条目）')
+stateLines.push('- [`04-reviews.md`](./04-reviews.md)（R-01 – R-123；11-27/28 误加的 R-124–126 见更正条目）')
 stateLines.push('')
 
 const decisions = entries.filter((e) => e.meta.type === 'decision')

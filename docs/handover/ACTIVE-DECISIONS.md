@@ -7,4 +7,7 @@
 
 | 编号 | 日期 | 影响范围 | 决策 | 文件 |
 | --- | --- | --- | --- | --- |
+| D-20261128-thinking | 2026-11-28 | ui-evolve, docs | 关思考 = 一个 effort 都不传；方言由 profile 的 compat 决定，而 settings.yaml 是产物 | [`2026-11-28-decision-thinking-off.md`](./entries/2026-11-28-decision-thinking-off.md) |
+| D-20261128-rules | 2026-11-28 | ui-evolve | 建议的口径改成「预测他们会打什么」，提示词按区域分预算且规则不计入，单条上限 40 字符 | [`2026-11-28-decision-suggestion-rules.md`](./entries/2026-11-28-decision-suggestion-rules.md) |
+| D-20261128-lifecycle | 2026-11-28 | ui-evolve, test | 建议的生存期是回合边界：只持久化一句、过期只留幽灵、中断的回合什么都不画、发现了缺陷就修 | [`2026-11-28-decision-offer-lifecycle.md`](./entries/2026-11-28-decision-offer-lifecycle.md) |
 | D-255 | 2026-11-26 | docs, scripts, test | 交接台账改用按文件分片追加 + 自动生成活跃视图，并引入根级 AGENTS.md 与任务交接单 | [`2026-11-26-decision-multi-agent-docs.md`](./entries/2026-11-26-decision-multi-agent-docs.md) |

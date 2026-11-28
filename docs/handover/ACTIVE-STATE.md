@@ -28,18 +28,18 @@
 | 2026-11-28 | status | S-20261128-close-open / done | 结清最后两条待验证条目：verify:live 能跑通，面板标签与说明行在真机上是新文案 | [`2026-11-28-status-close-the-two-open-entries.md`](./entries/2026-11-28-status-close-the-two-open-entries.md) |
 | 2026-11-28 | review | R-20261128-catchup / applied | 18 个未评审提交的补审——派发全线失效，自审加一名独立评审共 8 条成立 | [`2026-11-28-review-catchup-18-commits.md`](./entries/2026-11-28-review-catchup-18-commits.md) |
 | 2026-11-28 | defect | DEF-20261128-thinking / fixed | 关思考的三层真相：efforts 是数组、方言缺 off 档时说关等于没说、settings.yaml 是产物 | [`2026-11-28-defect-thinking-off-chain.md`](./entries/2026-11-28-defect-thinking-off-chain.md) |
-| 2026-11-27 | status | S-20261127-shape / pending_live_verify | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
+| 2026-11-28 | decision | D-20261128-thinking / active | 关思考 = 一个 effort 都不传；方言由 profile 的 compat 决定，而 settings.yaml 是产物 | [`2026-11-28-decision-thinking-off.md`](./entries/2026-11-28-decision-thinking-off.md) |
+| 2026-11-28 | decision | D-20261128-rules / active | 建议的口径改成「预测他们会打什么」，提示词按区域分预算且规则不计入，单条上限 40 字符 | [`2026-11-28-decision-suggestion-rules.md`](./entries/2026-11-28-decision-suggestion-rules.md) |
+| 2026-11-28 | decision | D-20261128-lifecycle / active | 建议的生存期是回合边界：只持久化一句、过期只留幽灵、中断的回合什么都不画、发现了缺陷就修 | [`2026-11-28-decision-offer-lifecycle.md`](./entries/2026-11-28-decision-offer-lifecycle.md) |
+| 2026-11-27 | status | S-20261127-shape / superseded | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
 | 2026-11-27 | status | S-20261127-lifecycle / verified | 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件 | [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md) |
 | 2026-11-27 | review | R-20261127-codex / applied | R-126 建议形状规则的评审——8 条全部成立，其中 4 条是真缺陷 | [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md) |
-| 2026-11-27 | defect | D-20261127-efforts / fixed | 关思考的代码从未生效——宿主的 efforts 是数组，代码当对象查键 | [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md) |
-| 2026-11-26 | status | S-20261126-suggest / pending_live_verify | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
-| 2026-11-26 | status | S-20261126-label / done | 模型设置项改名为「摘要与建议模型」，并修掉两处「只有摘要花钱」的过时说法 | [`2026-11-26-status-shared-model-label.md`](./entries/2026-11-26-status-shared-model-label.md) |
-| 2026-11-26 | status | S-20261126 / active | 完成面向多 Agent 协作的文档体系优化与自动化门禁脚本落地 | [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md) |
-| 2026-11-26 | defect | D-20261126-busy / verified | 服务端的 busy 到得太晚，回合运行中两个界面照样显示 | [`2026-11-26-defect-busy-signal-too-slow.md`](./entries/2026-11-26-defect-busy-signal-too-slow.md) |
+| 2026-11-27 | defect | D-20261127-efforts / superseded | 关思考的代码从未生效——宿主的 efforts 是数组，代码当对象查键 | [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md) |
+| 2026-11-26 | status | S-20261126-suggest / superseded | 建议行首记号改为朝右绘制箭头，回合运行中不再显示建议与幽灵 | [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md) |
 
 ## 5. 历史台账（已冻结，只读）
 
 - [`01-status.md`](./01-status.md)（2026-10-30 – 2026-11-25）
 - [`02-decisions.md`](./02-decisions.md)（D-01 – D-254+）
-- [`03-defects.md`](./03-defects.md)（DEF-01 – DEF-209）
-- [`04-reviews.md`](./04-reviews.md)（R-01 – R-123+）
+- [`03-defects.md`](./03-defects.md)（DEF-01 – DEF-209；11-27/28 误加的 DEF-210–222 见更正条目）
+- [`04-reviews.md`](./04-reviews.md)（R-01 – R-123；11-27/28 误加的 R-124–126 见更正条目）
