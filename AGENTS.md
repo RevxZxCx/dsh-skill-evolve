@@ -31,7 +31,7 @@ npm run gate:fast                       # 建立当前基线（单测 + 契约 +
 2. **禁止修改既有历史记录**：`docs/01`–`26` 与 `docs/handover/01`–`04` 历史台账只读/只增不改；新交接记录一律在 `docs/handover/entries/` 新建分片文件，再运行 `npm run handover:build`。
 3. **禁止盲目 `git add -A`**：提交前用 `git status` 核对并显式 `git add <文件列表>`，严禁提交 `.tmp-*`、`.review/`、`.research/`、`.pair-url` 等临时产物。
 4. **改任何 `lib/*.js` 必须重启宿主才能真机验收**：主进程 ESM 缓存不会热更新；重启后用 `npm run verify:live` 验证 `/panel` 返回 200 且含新字段。
-5. **每次代码修改必须经受影响变异套件与代码审查**：用 `npm run gate:mutate -- --changed` 跑变异，审查遵循 `bounded-diff-code-review`（P3 只记不修，复核只喂 delta）。
+5. **每次代码修改必须经受影响变异套件与独立代码审查**：用 `npm run gate:mutate -- --changed` 跑变异；审查遵循 `bounded-diff-code-review`（P3 只记不修，复核只喂 delta），**凡派发审查子代理必须使用一次性子代理（严禁复用旧子代理）**；若审查工具或子代理超时/不可用，**必须阻塞进度待用户处理，严禁降级为自审**。
 
 ## 4. 多 Agent 协作与交接协议
 

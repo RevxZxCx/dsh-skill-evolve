@@ -13,6 +13,7 @@
  * budget still explains it correctly -- that is what the review step is for.
  */
 
+import { createHash } from 'node:crypto'
 import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -197,6 +198,11 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
   check('AGENTS.md stays concise (<= 120 lines)', agentsLines <= 120, `${agentsLines} lines`)
   check('AGENTS.md links the development manual', agents.includes('docs/27-开发与集成手册.md'), 'AGENTS.md')
   check('AGENTS.md links ACTIVE-STATE.md', agents.includes('docs/handover/ACTIVE-STATE.md'), 'AGENTS.md')
+  check(
+    'AGENTS.md enforces one-shot review subagents and blocks on failure',
+    agents.includes('一次性子代理') && agents.includes('严禁复用') && agents.includes('严禁降级为自审') && agents.includes('阻塞'),
+    'AGENTS.md',
+  )
 
   check('docs/tasks/README.md exists', existsSync(join(root, 'docs/tasks/README.md')), 'docs/tasks/README.md')
   check('docs/tasks/_template.md exists', existsSync(join(root, 'docs/tasks/_template.md')), 'docs/tasks/_template.md')
@@ -256,6 +262,47 @@ for (const path of [README, 'docs/handover/index.md', 'packages/skill-evolve/REA
     /Bug[^。]*§8/u.test(beforeStep1),
     MANUAL,
   )
+
+  const sec1 = sectionAt(manual, /^## 1 · /m)
+  check(
+    'docs/27 §1 documents host environment prerequisites',
+    sec1.found && sec1.body.includes('### 宿主机外部依赖与环境前置'),
+    MANUAL,
+  )
+  const sec2 = sectionAt(manual, /^## 2 · /m)
+  const step6Start = sec2.body.indexOf('### 第 6 步')
+  const step7Start = sec2.body.indexOf('### 第 7 步')
+  const step6Body =
+    sec2.found && step6Start !== -1 && step7Start > step6Start
+      ? sec2.body.slice(step6Start, step7Start)
+      : ''
+  check(
+    'docs/27 §2 Step 6 requires ephemeral one-shot review subagents',
+    step6Body.includes('一次性子代理') && step6Body.includes('严禁复用'),
+    MANUAL,
+  )
+  check(
+    'docs/27 §2 Step 6 blocks on review subagent failure instead of self-review',
+    step6Body.includes('严禁降级为自审') && step6Body.includes('阻塞'),
+    MANUAL,
+  )
+
+  // Frozen legacy handover ledgers: append new records under docs/handover/entries/ instead.
+  const FROZEN_LEDGERS = {
+    'docs/handover/01-status.md': 'e5c3fb7eb487e6c0942afb31178cc2825582334d0fe0b11a866bb3ae5f89453d',
+    'docs/handover/02-decisions.md': '737ab008167a64029ea9fe31e1133a1c5de34c4b78bade8ea9a15cbf03e36d78',
+    'docs/handover/03-defects.md': '638c6aa639eaae286303e2c5c0db6952f8b20f7f1c9f98d7756017abeee2481b',
+    'docs/handover/04-reviews.md': '3322f287d731a3969e6137dbdac2e283fac404bea9f287a2c59f81e9339055fb',
+  }
+  for (const [relPath, expectedHash] of Object.entries(FROZEN_LEDGERS)) {
+    const normalized = read(relPath).replace(/\r\n/g, '\n')
+    const actualHash = createHash('sha256').update(normalized, 'utf8').digest('hex')
+    check(
+      `${relPath} remains frozen (append new records to docs/handover/entries/)`,
+      actualHash === expectedHash,
+      actualHash === expectedHash ? undefined : `expected ${expectedHash}, got ${actualHash}`,
+    )
+  }
 }
 
 if (failed > 0) {

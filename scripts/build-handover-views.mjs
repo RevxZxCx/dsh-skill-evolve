@@ -89,6 +89,34 @@ const entries = loadMarkdownDir(entriesDir, new Set(['README.md']))
     return b.file.localeCompare(a.file)
   })
 
+const VALID_TYPES = new Set(['status', 'decision', 'defect', 'review'])
+const REQUIRED_FIELDS = ['id', 'date', 'type', 'status', 'title']
+const validationErrors = []
+const seenIds = new Map()
+for (const e of entries) {
+  const missing = REQUIRED_FIELDS.filter(
+    (k) => typeof e.meta[k] !== 'string' || e.meta[k].trim() === '',
+  )
+  if (missing.length > 0) {
+    validationErrors.push(`${e.file}: missing or non-scalar required frontmatter fields: ${missing.join(', ')}`)
+  }
+  if (typeof e.meta.type === 'string' && e.meta.type.trim() !== '' && !VALID_TYPES.has(e.meta.type.trim())) {
+    validationErrors.push(`${e.file}: invalid type "${e.meta.type}" (expected status|decision|defect|review)`)
+  }
+  const id = typeof e.meta.id === 'string' ? e.meta.id.trim() : ''
+  if (id) {
+    if (seenIds.has(id)) {
+      validationErrors.push(`duplicate entry id "${id}" in ${seenIds.get(id)} and ${e.file}`)
+    } else {
+      seenIds.set(id, e.file)
+    }
+  }
+}
+if (validationErrors.length > 0) {
+  for (const err of validationErrors) console.error(`INVALID ${err}`)
+  process.exit(1)
+}
+
 const tasks = loadMarkdownDir(tasksDir, new Set(['README.md', '_template.md']))
   .filter((t) => t.meta.status !== 'done')
   .sort((a, b) => String(b.meta.updated ?? '').localeCompare(String(a.meta.updated ?? '')))
