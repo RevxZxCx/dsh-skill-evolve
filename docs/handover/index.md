@@ -207,3 +207,4 @@ token 只是换 cookie 的一种入口，而 cookie 的签发密钥就在同一�
 2. **新增状态、决策、缺陷、审查一律以独立文件写入 [`entries/`](./entries/README.md)**（`YYYY-MM-DD-<type>-<slug>.md`），继续严格遵守「只增不改」铁律。
 3. **写完条目后运行 `npm run handover:build`**，自动生成 [`ACTIVE-STATE.md`](./ACTIVE-STATE.md) 与 [`ACTIVE-DECISIONS.md`](./ACTIVE-DECISIONS.md)。新 Agent 冷启动只需读根 [`AGENTS.md`](../../AGENTS.md) 与 [`ACTIVE-STATE.md`](./ACTIVE-STATE.md)，不再需要手翻超长流水文件。
 4. 进行中的跨 Agent 任务上下文统一放在 [`docs/tasks/`](../tasks/README.md)。
+5. **冻结台账不再追加。** 2026-11-27 至 11-28 的一批状态/决策/缺陷/审查曾误写进 `01-status.md`–`04-reviews.md`，其中 `D-263`–`D-265`、`R-126` 各被用过两次。以 [`entries/2026-11-28-status-ledger-correction.md`](./entries/2026-11-28-status-ledger-correction.md) 为准，那段追加只当线索读，编号归属按该条目里的对照表。

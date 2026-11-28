@@ -5,9 +5,9 @@
 
 ## 1. 最新基线
 
-- **最近状态条目**：[`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)（2026-11-27）
-- **摘要**：建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考
-- **记录基线**：4477 passed / 0 failed（suggest 273/0、client 1081/0、api 429/0、mutations 55/0、mutate-suggest 104/104 全杀、perf 退出 0）
+- **最近状态条目**：[`2026-11-28-status-region-budgets.md`](./entries/2026-11-28-status-region-budgets.md)（2026-11-28）
+- **摘要**：建议的提示词改成分区预算：规则不计入、数据三区、预测口径、允许弃权
+- **记录基线**：4590 passed / 0 failed
 
 ## 2. 进行中任务（`docs/tasks/`）
 
@@ -15,19 +15,18 @@
 
 ## 3. 待闭环真机验收 / 阻塞项
 
-- **2026-11-27** [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md)：重启宿主后确认芯片不再以句号结尾、不再出现「我来…」「Done.」，且推理模型的建议在数秒内到达
-- **2026-11-27** [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md)：无（2026-11-27 16:10/16:40 在 /pair-app 真机验证：回合开始 400 ms 内旧建议撤下、回合结束后新建议到达；重载页面 469 ms 内建议与幽灵回来且无模型延迟；`focus` 与 `visibilitychange` 各触发一次、同一秒内的第二次报告不重复请求；过期答案返回 `stale:true, restored:true` 且界面只剩幽灵）
-- **2026-11-27** [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md)：无
-- **2026-11-27** [`2026-11-27-defect-reasoning-efforts-dead-code.md`](./entries/2026-11-27-defect-reasoning-efforts-dead-code.md)：需重启宿主后在 /pair-app 观察一次推理模型回合的建议耗时与 finish reason
-- **2026-11-26** [`2026-11-26-status-suggest-mark-and-busy.md`](./entries/2026-11-26-status-suggest-mark-and-busy.md)：重启宿主后确认箭头完整朝右、回合运行中两个界面都不出现
-- **2026-11-26** [`2026-11-26-status-shared-model-label.md`](./entries/2026-11-26-status-shared-model-label.md)：重启宿主后打开面板齿轮，确认标签显示「摘要与建议模型」，说明行为「两处共用一个模型：面板摘要与下一轮建议。默认沿用当前会话已验证的路由。」
 - **2026-11-26** [`2026-11-26-status-docs-optimization.md`](./entries/2026-11-26-status-docs-optimization.md)：2026-11-25 提示词建议改动（7b9df8b）仍待重启宿主后跑 npm run verify:live 复验
-- **2026-11-26** [`2026-11-26-defect-busy-signal-too-slow.md`](./entries/2026-11-26-defect-busy-signal-too-slow.md)：无（已于 2026-11-26 22:42 在 /pair-app 真机复验通过）
 
 ## 4. 最近分片记录（最多 15 条）
 
 | 日期 | 类型 | 编号/状态 | 标题 | 文件 |
 | --- | --- | --- | --- | --- |
+| 2026-11-28 | status | S-20261128-budgets / done | 建议的提示词改成分区预算：规则不计入、数据三区、预测口径、允许弃权 | [`2026-11-28-status-region-budgets.md`](./entries/2026-11-28-status-region-budgets.md) |
+| 2026-11-28 | status | S-20261128-lifecycle / done | 建议的生存期 = 回合边界；过期只留幽灵；中断的回合什么都不画 | [`2026-11-28-status-lifecycle-and-gates.md`](./entries/2026-11-28-status-lifecycle-and-gates.md) |
+| 2026-11-28 | status | S-20261128-correction / active | 更正：11-27 之后的新记录被误追加进已冻结的 01–04，且 D-263/264/265 与 R-126 各被用了两次 | [`2026-11-28-status-ledger-correction.md`](./entries/2026-11-28-status-ledger-correction.md) |
+| 2026-11-28 | status | S-20261128-close-verified / done | 关闭三条已被后续真机验证取代的待闭环项 | [`2026-11-28-status-close-verified-pendings.md`](./entries/2026-11-28-status-close-verified-pendings.md) |
+| 2026-11-28 | review | R-20261128-catchup / applied | 18 个未评审提交的补审——派发全线失效，自审加一名独立评审共 8 条成立 | [`2026-11-28-review-catchup-18-commits.md`](./entries/2026-11-28-review-catchup-18-commits.md) |
+| 2026-11-28 | defect | DEF-20261128-thinking / fixed | 关思考的三层真相：efforts 是数组、方言缺 off 档时说关等于没说、settings.yaml 是产物 | [`2026-11-28-defect-thinking-off-chain.md`](./entries/2026-11-28-defect-thinking-off-chain.md) |
 | 2026-11-27 | status | S-20261127-shape / pending_live_verify | 建议的措辞改成「一个人会打进输入框的形状」，并关掉推理模型的思考 | [`2026-11-27-status-suggestion-shape-rules.md`](./entries/2026-11-27-status-suggestion-shape-rules.md) |
 | 2026-11-27 | status | S-20261127-lifecycle / verified | 建议的生存期改成回合边界，过期只留幽灵，并把那一句话写进状态文件 | [`2026-11-27-status-offer-lifecycle.md`](./entries/2026-11-27-status-offer-lifecycle.md) |
 | 2026-11-27 | review | R-20261127-codex / applied | R-126 建议形状规则的评审——8 条全部成立，其中 4 条是真缺陷 | [`2026-11-27-review-126-suggestion-shape.md`](./entries/2026-11-27-review-126-suggestion-shape.md) |
